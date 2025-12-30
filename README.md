@@ -32,7 +32,7 @@ Data will be exported in the format found in vulnerabilities.json
 A PowerShell script will ingest the data and produce an HTML report to render charts and tables
 ```
 
-The script below is used to get the data from the API, and I will provide more detailed instructions later.
+The script below is used to get the data from the API. You will need to create an app registration in Entra, then grant it Vulnerability.Read.All on the WindowsDefenderATP API. For more details, see the docs: https://learn.microsoft.com/en-us/defender-endpoint/api/exposed-apis-create-app-webapp?tabs=PowerShell
 
 ```powershell
 ## Service Principal Info
@@ -64,3 +64,5 @@ $files | ForEach-Object {
     Invoke-WebRequest -Uri $_ -OutFile "./VulnExport_$groupId`_$date.json.gz"
 }
 ```
+
+For more details on this API, see the docs: https://learn.microsoft.com/en-us/defender-endpoint/api/get-assessment-software-vulnerabilities
