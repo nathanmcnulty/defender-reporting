@@ -32,7 +32,65 @@ Data will be exported in the format found in vulnerabilities.json
 A PowerShell script will ingest the data and produce an HTML report to render charts and tables
 ```
 
-The script below is used to get the data from the API. You will need to create an app registration in Entra, then grant it Vulnerability.Read.All on the WindowsDefenderATP API. For more details, see the docs: https://learn.microsoft.com/en-us/defender-endpoint/api/exposed-apis-create-app-webapp?tabs=PowerShell
+This script helps set the API permissions for your Managed Identity or Service Principal (set $MI to the objectId of your MI/SP). 
+
+For Azure automation tools, you need to enable the Managed Identity. For other scenarios, you need to create an app registration in Entra and either set up a certificate (preferred) or secret for authentication. For more details, see the docs: https://learn.microsoft.com/en-us/defender-endpoint/api/exposed-apis-create-app-webapp?tabs=PowerShell
+
+```powershell
+$MI = "34634404-8c0b-4141-a9dd-195fa6e6a51f"
+
+# Connect to Graph with scope to grant API permissions to Managed Identity
+Connect-MgGraph -Scopes "AppRoleAssignment.ReadWrite.All"
+
+# Get SP for WindowsDefenderATP API
+$MdeSp = (Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq 'fc780465-2017-40d4-a0c5-307022471b92'").value
+if ($null -eq $MdeSp) { Write-Output "The MDE workspace has not been provisionged. Please go to https://security.microsoft.com/securitysettings/endpoints/integration to provision"; exit }
+
+# Get each permission App Role ID and assign the App Role to the Managed Identity
+"Vulnerability.Read.All" | ForEach-Object {
+   $permission = $_
+   $AppRole = $MdeSp.AppRoles | Where-Object {$_.Value -eq $permission -and $_.AllowedMemberTypes -contains "Application"}
+   $body = @{
+    "principalId" = $MI
+    "resourceId" = $MdeSp.Id
+    "appRoleId" = $AppRole.Id
+   }
+   Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$MI/appRoleAssignments" -Body ($body | ConvertTo-Json) -ContentType "application/json"
+}
+```
+
+The script below is for Managed Identities:
+
+```powershell
+# Authenticate
+Disable-AzContextAutosave -Scope Process
+Connect-AzAccount -Identity
+
+# Get token
+$secureAccessToken = (Get-AzAccessToken -ResourceUri 'https://api.securitycenter.microsoft.com/.default' -AsSecureString).token
+$ssPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureAccessToken)
+try {
+    $accessToken = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ssPtr)
+}
+finally {
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ssPtr)
+}
+
+$headers = @{
+    'Content-Type' = 'application/json'
+    Accept         = 'application/json'
+    Authorization  = "Bearer $accessToken"
+}
+
+$files = (Invoke-RestMethod -Uri "https://api-us.securitycenter.microsoft.com/api/machines/SoftwareVulnerabilitiesExport" -Headers $headers).exportFiles
+$files | ForEach-Object {
+    $date = $_.split('/')[6]
+    $groupId = $_.Split('/')[9].Split('%3D')[-1]
+    Invoke-WebRequest -Uri $_ -OutFile "./VulnExport_$groupId`_$date.json.gz"
+}
+```
+
+The script below is for Service Principals with a secret:
 
 ```powershell
 ## Service Principal Info
@@ -49,12 +107,12 @@ $authBody = [Ordered] @{
     client_secret = "$appSecret"
     grant_type    = 'client_credentials'
 }
-$token = (Invoke-RestMethod -Method Post -Uri $oAuthUri -Body $authBody -ErrorAction Stop).access_token
+$accessToken = (Invoke-RestMethod -Method Post -Uri $oAuthUri -Body $authBody -ErrorAction Stop).access_token
 
 $headers = @{
     'Content-Type' = 'application/json'
     Accept         = 'application/json'
-    Authorization  = "Bearer $token"
+    Authorization  = "Bearer $accessToken"
 }
 
 $files = (Invoke-RestMethod -Uri "https://api-us.securitycenter.microsoft.com/api/machines/SoftwareVulnerabilitiesExport" -Headers $headers).exportFiles
