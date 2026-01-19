@@ -32,6 +32,8 @@ Data will be exported in the format found in vulnerabilities.json
 A PowerShell script will ingest the data and produce an HTML report to render charts and tables
 ```
 
+## API Permissions
+
 This script helps set the API permissions for your Managed Identity or Service Principal (set $MI to the objectId of your MI/SP). 
 
 For Azure automation tools, you need to enable the Managed Identity. For other scenarios, you need to create an app registration in Entra and either set up a certificate (preferred) or secret for authentication. For more details, see the docs: https://learn.microsoft.com/en-us/defender-endpoint/api/exposed-apis-create-app-webapp?tabs=PowerShell
@@ -59,7 +61,9 @@ if ($null -eq $MdeSp) { Write-Output "The MDE workspace has not been provisionge
 }
 ```
 
-The script below is for Managed Identities:
+## Obtaining Vulnerability Mangaement data using Managed Identities
+
+The script below uses a Managed Identity to connect to Azure, requests a token for the WindowsDefenderATP API, and saves the *.json.gz files to the current directory.
 
 ```powershell
 # Authenticate
@@ -90,7 +94,9 @@ $files | ForEach-Object {
 }
 ```
 
-The script below is for Service Principals with a secret:
+## Obtaining Vulnerability Mangaement data using Service Principals with a secret
+
+The script below uses a Service Principal to request a token for the WindowsDefenderATP API and saves the *.json.gz files to the current directory.
 
 ```powershell
 ## Service Principal Info
@@ -124,3 +130,9 @@ $files | ForEach-Object {
 ```
 
 For more details on this API, see the docs: https://learn.microsoft.com/en-us/defender-endpoint/api/get-assessment-software-vulnerabilities
+
+## Generating the report
+
+You will need to extract the JSON files from the gzip files, and how you do this will likely depend on your environment (I'm open to clean, simple PowerShell methods that are cross-platform too!).
+
+I recommend placing these in the /exports folder as this is the default path the Generate-VulnerabilityDashboard.ps1 uses. Running that script should output an updated VulnerabilityDashboard.html file.
