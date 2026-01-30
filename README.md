@@ -49,7 +49,7 @@ $MdeSp = (Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1
 if ($null -eq $MdeSp) { Write-Output "The MDE workspace has not been provisionged. Please go to https://security.microsoft.com/securitysettings/endpoints/integration to provision"; exit }
 
 # Get each permission App Role ID and assign the App Role to the Managed Identity
-"Vulnerability.Read.All" | ForEach-Object {
+"Vulnerability.Read.All","Machine.Read.All" | ForEach-Object {
    $permission = $_
    $AppRole = $MdeSp.AppRoles | Where-Object {$_.Value -eq $permission -and $_.AllowedMemberTypes -contains "Application"}
    $body = @{

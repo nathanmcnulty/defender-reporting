@@ -1,0 +1,252 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vulnerability Dashboard</title>
+    <style>
+__CSS_CONTENT__
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>
+            <span>🛡️ Vulnerability Dashboard</span>
+            <div class="report-selector-container">
+                <label for="reportSelector">Report:</label>
+                <select id="reportSelector" onchange="handleReportChange()">
+                    <option value="active-vulnerabilities">Active Vulnerabilities</option>
+                    <option value="remediation-activity">Remediation Activity</option>
+                    <option value="impact-analysis">Impact Analysis</option>
+                </select>
+                <button class="export-pdf-btn" onclick="exportToPDF()">📄 Export to PDF</button>
+            </div>
+        </h1>
+
+        <!-- Stats Summary -->
+        <div class="stats-summary" id="statsSummary">
+            <div class="stat-card critical">
+                <div class="stat-value" id="criticalCount">0</div>
+                <div class="stat-label">Critical</div>
+            </div>
+            <div class="stat-card high">
+                <div class="stat-value" id="highCount">0</div>
+                <div class="stat-label">High</div>
+            </div>
+            <div class="stat-card medium">
+                <div class="stat-value" id="mediumCount">0</div>
+                <div class="stat-label">Medium</div>
+            </div>
+            <div class="stat-card low">
+                <div class="stat-value" id="lowCount">0</div>
+                <div class="stat-label">Low</div>
+            </div>
+        </div>
+
+        <!-- Filters -->
+        <div class="filters">
+            <div class="filter-group filter-group-date">
+                <div class="date-inputs" id="dateInputs">
+                    <div class="date-input-group">
+                        <label for="filterStartDate">Start Date</label>
+                        <input type="date" id="filterStartDate">
+                    </div>
+                    <div class="date-input-group">
+                        <label for="filterEndDate">End Date</label>
+                        <input type="date" id="filterEndDate">
+                    </div>
+                </div>
+                <div class="checkbox-container" id="filterDateRange">
+                    <table class="date-range-table">
+                        <tbody>
+                            <tr data-range="1m" class="selected">
+                                <td>1 Month</td>
+                            </tr>
+                            <tr data-range="3m">
+                                <td>3 Months</td>
+                            </tr>
+                            <tr data-range="6m">
+                                <td>6 Months</td>
+                            </tr>
+                            <tr data-range="12m">
+                                <td>12 Months</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="filter-group filter-group-dynamic">
+                <label for="filterRbacGroup">Device Group</label>
+                <div class="checkbox-container" id="filterRbacGroup">
+                </div>
+            </div>
+            <div class="filter-group filter-group-dynamic" id="filterDeviceTagsGroup">
+                <label for="filterDeviceTags">Device Tags</label>
+                <div class="checkbox-container" id="filterDeviceTags">
+                </div>
+            </div>
+            <div class="filter-group filter-group-dynamic">
+                <label for="filterDeviceName">Device Name</label>
+                <div class="checkbox-container" id="filterDeviceName">
+                </div>
+            </div>
+            <div class="filter-group filter-group-dynamic">
+                <label for="filterOSPlatform">OS Platform</label>
+                <div class="checkbox-container" id="filterOSPlatform">
+                </div>
+            </div>
+            <div class="filter-group filter-group-fixed">
+                <label for="filterSeverity">Severity</label>
+                <div class="checkbox-container" id="filterSeverity">
+                </div>
+            </div>
+        </div>
+
+        <!-- Active Vulnerabilities Report Section -->
+        <div id="active-vulnerabilities-section" class="report-section active">
+            <!-- Chart -->
+            <div class="chart-container">
+                <canvas id="vulnerabilityChart"></canvas>
+            </div>
+
+            <!-- Remediation Table -->
+            <div class="table-container">
+                <table id="remediationTable">
+                    <thead>
+                        <tr>
+                            <th onclick="sortTable(0)">Software</th>
+                            <th onclick="sortTable(1)">Remediation</th>
+                            <th onclick="sortTable(2)">Assets</th>
+                            <th onclick="sortTable(3)">Vulnerabilities</th>
+                            <th onclick="sortTable(4)">Exploits</th>
+                            <th onclick="sortTable(5)">Kits</th>
+                        </tr>
+                    </thead>
+                    <tbody id="remediationTableBody">
+                        <tr>
+                            <td colspan="6" class="loading">Loading data...</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="scroll-controls" id="remediationScrollControls">
+                    <span id="remediationScrollInfo">Showing 0 of 0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Remediation Activity Report Section -->
+        <div id="remediation-activity-section" class="report-section">
+            <!-- Remediation Chart -->
+            <div class="chart-container">
+                <canvas id="remediationChart"></canvas>
+            </div>
+
+            <!-- Remediation Details Table -->
+            <div class="table-container">
+                <table id="remediationDetailsTable">
+                    <thead>
+                        <tr>
+                            <th onclick="sortRemediationDetailsTable(0)">Date</th>
+                            <th onclick="sortRemediationDetailsTable(1)">Remediation</th>
+                            <th onclick="sortRemediationDetailsTable(2)">Assets Remediated</th>
+                            <th onclick="sortRemediationDetailsTable(3)">Vulnerabilities Remediated</th>
+                            <th onclick="sortRemediationDetailsTable(4)">Total Vulnerabilities Remediated</th>
+                        </tr>
+                    </thead>
+                    <tbody id="remediationDetailsTableBody">
+                        <tr>
+                            <td colspan="5" class="loading">Loading data...</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="scroll-controls" id="remediationDetailsScrollControls">
+                    <span id="remediationDetailsScrollInfo">Showing 0 of 0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Impact Analysis Report Section -->
+        <div id="impact-analysis-section" class="report-section">
+            <!-- Impact Analysis Chart -->
+            <div class="chart-container">
+                <canvas id="impactChart"></canvas>
+            </div>
+
+            <!-- Impact Analysis Table -->
+            <div class="table-container">
+                <table id="impactAnalysisTable">
+                    <thead>
+                        <tr>
+                            <th onclick="sortImpactAnalysisTable(0)">Rank</th>
+                            <th onclick="sortImpactAnalysisTable(1)">Remediation</th>
+                            <th onclick="sortImpactAnalysisTable(2)">Devices</th>
+                            <th onclick="sortImpactAnalysisTable(3)">CVE IDs</th>
+                            <th onclick="sortImpactAnalysisTable(4)">Impact Score</th>
+                        </tr>
+                    </thead>
+                    <tbody id="impactAnalysisTableBody">
+                        <tr>
+                            <td colspan="5" class="loading">Loading data...</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="scroll-controls" id="impactAnalysisScrollControls">
+                    <span id="impactAnalysisScrollInfo">Showing 0 of 0</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal -->
+    <div id="detailModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="modalTitle">Vulnerability Details</h2>
+                <button class="close-btn" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <!-- Details will be populated here -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Pako library for decompression (only included if data is compressed) -->
+    __PAKO_CONTENT__
+
+    <!-- Data format marker -->
+    <script id="dataFormat" type="text/plain">__DATA_FORMAT__</script>
+
+    <!-- Lookups data (normalized reference tables) -->
+    <script id="lookupsData" type="application/json">
+__LOOKUPS_DATA__
+    </script>
+
+    <!-- Vulnerability records (normalized, may be compressed) -->
+    <script id="vulnsData" type="application/json">
+__VULNS_DATA__
+    </script>
+
+    <!-- Chart.js embedded directly to avoid tracking prevention -->
+    <script>
+__CHARTJS_CONTENT__
+    </script>
+
+    <!-- PDF libraries - stored as text/plain to defer loading until Export PDF is clicked -->
+    <script id="pdfmakeLib" type="text/plain">
+__PDFMAKE_CONTENT__
+    </script>
+    <script id="vfsfontsLib" type="text/plain">
+__VFSFONTS_CONTENT__
+    </script>
+    <script id="html2pdfLib" type="text/plain">
+__HTML2PDF_CONTENT__
+    </script>
+    <script id="html2canvasLib" type="text/plain">
+__HTML2CANVAS_CONTENT__
+    </script>
+
+    <script>
+__JS_CONTENT__
+    </script>
+</body>
+</html>
