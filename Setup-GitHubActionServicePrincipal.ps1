@@ -158,23 +158,30 @@ catch {
 # Add Microsoft Defender API permissions
 Write-Host "`nConfiguring API permissions..." -ForegroundColor Cyan
 $defenderApiId = "fc780465-2017-40d4-a0c5-307022471b92" # Microsoft Threat Protection API
-$permissionId = "41269fc5-d04d-4bfd-bce7-43a51cea049a"  # Vulnerability.Read.All
+$vulnerabilityPermissionId = "41269fc5-d04d-4bfd-bce7-43a51cea049a"  # Vulnerability.Read.All
+$machinePermissionId = "ea8291d3-4b9a-44b5-bc3a-6cea3026dc79"        # Machine.Read.All
+
+$requiredPermissions = @($vulnerabilityPermissionId, $machinePermissionId)
 
 try {
     # Get current app details
     $currentApp = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)"
     
-    # Check if permission already exists
-    $hasPermission = $currentApp.requiredResourceAccess | Where-Object { 
-        $_.resourceAppId -eq $defenderApiId -and 
-        ($_.resourceAccess.id -contains $permissionId)
-    }
+    # Check if all permissions already exist
+    $defenderResource = $currentApp.requiredResourceAccess | Where-Object { $_.resourceAppId -eq $defenderApiId }
+    $existingPermissionIds = if ($defenderResource) { $defenderResource.resourceAccess.id } else { @() }
+    $missingPermissions = $requiredPermissions | Where-Object { $_ -notin $existingPermissionIds }
+    $hasPermission = $missingPermissions.Count -eq 0
     
     if ($hasPermission) {
         Write-Host "✓ API permissions already configured" -ForegroundColor Yellow
+        Write-Host "  - Vulnerability.Read.All" -ForegroundColor Gray
+        Write-Host "  - Machine.Read.All" -ForegroundColor Gray
     }
     else {
-        Write-Host "Adding Vulnerability.Read.All permission..." -ForegroundColor Cyan
+        Write-Host "Adding API permissions..." -ForegroundColor Cyan
+        Write-Host "  - Vulnerability.Read.All" -ForegroundColor Gray
+        Write-Host "  - Machine.Read.All" -ForegroundColor Gray
         
         # Build the required resource access
         $existingPermissions = $currentApp.requiredResourceAccess
@@ -182,28 +189,19 @@ try {
             $existingPermissions = @()
         }
         
-        # Check if we already have permissions for this resource
-        $defenderResource = $existingPermissions | Where-Object { $_.resourceAppId -eq $defenderApiId }
-        
-        if ($defenderResource) {
-            # Add to existing permissions
-            $defenderResource.resourceAccess += @{
-                id   = $permissionId
+        # Build the complete list of permissions for Defender API
+        $defenderResourceAccess = $requiredPermissions | ForEach-Object {
+            @{
+                id   = $_
                 type = "Role"
             }
-            $newPermissions = $existingPermissions
         }
-        else {
-            # Create new permission entry
-            $newPermissions = $existingPermissions + @{
-                resourceAppId  = $defenderApiId
-                resourceAccess = @(
-                    @{
-                        id   = $permissionId
-                        type = "Role"
-                    }
-                )
-            }
+        
+        # Remove existing Defender resource if present, then add complete one
+        $newPermissions = @($existingPermissions | Where-Object { $_.resourceAppId -ne $defenderApiId })
+        $newPermissions += @{
+            resourceAppId  = $defenderApiId
+            resourceAccess = $defenderResourceAccess
         }
         
         $permissionBody = @{
@@ -212,7 +210,7 @@ try {
         
         Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)" -Body $permissionBody -ContentType "application/json"
         
-        Write-Host "✓ API permission added" -ForegroundColor Green
+        Write-Host "✓ API permissions added" -ForegroundColor Green
         Write-Host "`n⚠️  IMPORTANT: Admin consent is required!" -ForegroundColor Yellow
         Write-Host "   Please grant admin consent in the Azure Portal:" -ForegroundColor Yellow
         Write-Host "   1. Go to: https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/~/CallAnAPI/appId/$($app.appId)" -ForegroundColor Gray
