@@ -1,0 +1,610 @@
+﻿/* =============================================================================
+   VULNERABILITY DASHBOARD STYLES
+   =============================================================================
+   CSS Custom Properties (variables) are used for maintainability.
+   To change colors, spacing, or other values, modify the :root section.
+   ============================================================================= */
+
+:root {
+    /* Brand Colors */
+    --color-primary: #0078d4;
+    --color-primary-dark: #005a9e;
+    --color-primary-light: #f0f8ff;
+    
+    /* Severity Colors */
+    --color-critical: #d13438;
+    --color-critical-gradient-start: #ff6b6b;
+    --color-critical-gradient-end: #c92a2a;
+    
+    --color-high: #ff6b35;
+    --color-high-gradient-start: #ffa94d;
+    --color-high-gradient-end: #fd7e14;
+    
+    --color-medium: #ffa500;
+    --color-medium-gradient-start: #ffe066;
+    --color-medium-gradient-end: #fcc419;
+    
+    --color-low: #4caf50;
+    --color-low-gradient-start: #8ce99a;
+    --color-low-gradient-end: #51cf66;
+    
+    /* Neutral Colors */
+    --color-background: #f5f5f5;
+    --color-surface: #ffffff;
+    --color-surface-alt: #f9f9f9;
+    --color-border: #ddd;
+    --color-border-light: #eee;
+    --color-text: #333;
+    --color-text-muted: #666;
+    
+    /* Spacing */
+    --spacing-xs: 4px;
+    --spacing-sm: 8px;
+    --spacing-md: 15px;
+    --spacing-lg: 20px;
+    --spacing-xl: 30px;
+    
+    /* Border Radius */
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --radius-lg: 8px;
+    
+    /* Typography */
+    --font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    --font-size-sm: 12px;
+    --font-size-base: 14px;
+    --font-size-md: 15px;
+    --font-size-lg: 20px;
+    --font-size-xl: 28px;
+    --font-size-stat: 32px;
+    
+    /* Shadows */
+    --shadow-card: 0 2px 8px rgba(0, 0, 0, 0.1);
+    --shadow-modal: 0 4px 20px rgba(0, 0, 0, 0.3);
+    
+    /* Transitions */
+    --transition-fast: 0.2s;
+    --transition-normal: 0.3s;
+    
+    /* Layout */
+    --container-max-width: 1600px;
+    --chart-height: 400px;
+    --checkbox-container-height: 260px;
+    --date-range-container-height: 168px;
+}
+
+/* Reset */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+/* Base */
+body {
+    font-family: var(--font-family);
+    background: var(--color-background);
+    color: var(--color-text);
+    padding: var(--spacing-lg);
+}
+
+/* Layout */
+.container {
+    max-width: var(--container-max-width);
+    margin: 0 auto;
+    background: var(--color-surface);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-card);
+    padding: var(--spacing-xl);
+}
+
+/* Header */
+h1 {
+    color: var(--color-primary);
+    margin-bottom: var(--spacing-xl);
+    font-size: var(--font-size-xl);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+/* Stats Summary */
+.stats-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: var(--spacing-md);
+    margin-bottom: var(--spacing-xl);
+}
+
+.stat-card {
+    padding: var(--spacing-lg);
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: var(--color-surface);
+    border-radius: var(--radius-md);
+    text-align: center;
+}
+
+.stat-card.critical {
+    background: linear-gradient(135deg, var(--color-critical-gradient-start) 0%, var(--color-critical-gradient-end) 100%);
+}
+
+.stat-card.high {
+    background: linear-gradient(135deg, var(--color-high-gradient-start) 0%, var(--color-high-gradient-end) 100%);
+}
+
+.stat-card.medium {
+    background: linear-gradient(135deg, var(--color-medium-gradient-start) 0%, var(--color-medium-gradient-end) 100%);
+}
+
+.stat-card.low {
+    background: linear-gradient(135deg, var(--color-low-gradient-start) 0%, var(--color-low-gradient-end) 100%);
+}
+
+.stat-value {
+    font-size: var(--font-size-stat);
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+
+.stat-label {
+    font-size: var(--font-size-base);
+    opacity: 0.9;
+}
+
+/* Filters */
+.filters {
+    display: grid;
+    grid-template-columns: minmax(180px, 0.8fr) repeat(4, minmax(140px, 1fr)) minmax(100px, 0.6fr);
+    gap: var(--spacing-md);
+    margin-bottom: var(--spacing-xl);
+    padding: var(--spacing-lg);
+    background: var(--color-surface-alt);
+    border-radius: var(--radius-md);
+}
+
+.filter-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.filter-group label {
+    font-weight: 600;
+    margin-bottom: 5px;
+    font-size: 13px;
+    color: var(--color-text-muted);
+}
+
+.filter-group select,
+.filter-group input {
+    padding: var(--spacing-sm);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-base);
+}
+
+.filter-group select:focus,
+.filter-group input:focus {
+    outline: none;
+    border-color: var(--color-primary);
+}
+
+/* Date range filter - compact stacked layout */
+.filter-group-date {
+    grid-column: span 1;
+}
+
+.filter-group-dynamic,
+.filter-group-fixed {
+    min-width: 0;
+}
+
+.filter-group-fixed {
+    max-width: 140px;
+}
+
+/* Adjust checkbox container height when search is present */
+.filter-group-dynamic .checkbox-container,
+.filter-group-fixed .checkbox-container {
+    height: calc(var(--checkbox-container-height) - 38px);
+}
+
+.filter-group.hidden {
+    display: none;
+}
+
+/* Date Inputs - stacked vertically for compact layout */
+.date-inputs {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.date-inputs.hidden {
+    display: none;
+}
+
+.date-inputs .date-input-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.date-inputs .date-input-group label {
+    font-weight: 600;
+    margin-bottom: 3px;
+    font-size: 12px;
+    color: var(--color-text-muted);
+}
+
+.date-inputs .date-input-group input {
+    padding: 6px;
+    font-size: 13px;
+}
+
+/* Checkbox Container */
+.checkbox-container {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    padding: var(--spacing-sm);
+    height: var(--checkbox-container-height);
+    overflow-y: auto;
+    background: var(--color-surface);
+}
+
+.filter-group-date .checkbox-container {
+    height: var(--date-range-container-height);
+}
+
+.checkbox-item {
+    display: flex;
+    align-items: center;
+    padding: 6px 0;
+    font-size: var(--font-size-md);
+}
+
+.checkbox-item input[type="checkbox"] {
+    margin-right: 10px;
+    width: 16px;
+    height: 16px;
+}
+
+.checkbox-item label {
+    margin: 0;
+    font-weight: normal;
+    cursor: pointer;
+    flex: 1;
+}
+
+/* Filter Search - Static above scroll box */
+.filter-search {
+    width: 100%;
+    padding: 6px 10px;
+    margin-bottom: 6px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    box-sizing: border-box;
+    flex-shrink: 0;
+}
+
+.filter-search:focus {
+    outline: none;
+    border-color: var(--color-primary);
+}
+
+/* Date Range Table */
+.date-range-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--font-size-md);
+}
+
+.date-range-table tr {
+    cursor: pointer;
+    border-bottom: 1px solid var(--color-border-light);
+}
+
+.date-range-table tr:hover {
+    background-color: var(--color-background);
+}
+
+.date-range-table tr.selected {
+    background-color: #e3f2fd;
+    font-weight: 600;
+}
+
+.date-range-table td {
+    padding: var(--spacing-sm) var(--spacing-xs);
+}
+
+/* Report Selector */
+.report-selector-container {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.report-selector-container label {
+    font-weight: 600;
+    color: var(--color-text);
+    font-size: var(--font-size-base);
+}
+
+.report-selector-container select {
+    padding: 6px 10px;
+    border: 2px solid var(--color-primary);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text);
+    font-size: var(--font-size-base);
+    cursor: pointer;
+    min-width: 180px;
+}
+
+.report-selector-container select:hover {
+    background: var(--color-primary-light);
+}
+
+.report-selector-container select:focus {
+    outline: none;
+    border-color: var(--color-primary-dark);
+    box-shadow: 0 0 0 3px rgba(0, 120, 212, 0.1);
+}
+
+/* Export Button */
+.export-pdf-btn {
+    padding: 6px 16px;
+    background: var(--color-primary);
+    color: var(--color-surface);
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-base);
+    font-weight: 600;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+    white-space: nowrap;
+}
+
+.export-pdf-btn:hover {
+    background: var(--color-primary-dark);
+}
+
+.export-pdf-btn:active {
+    transform: scale(0.98);
+}
+
+.export-pdf-btn:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+
+/* Report Sections */
+.report-section {
+    display: none;
+}
+
+.report-section.active {
+    display: block;
+}
+
+/* Chart Container */
+.chart-container {
+    position: relative;
+    height: var(--chart-height);
+    margin-bottom: var(--spacing-xl);
+    padding: var(--spacing-lg);
+    background: var(--color-surface-alt);
+    border-radius: var(--radius-md);
+}
+
+/* Tables */
+.table-container {
+    overflow-x: auto;
+    margin-bottom: var(--spacing-xl);
+    padding: var(--spacing-lg);
+    background: var(--color-surface-alt);
+    border-radius: var(--radius-md);
+}
+
+table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: var(--font-size-base);
+    overflow: hidden;
+    border-radius: var(--radius-md);
+}
+
+thead {
+    background: var(--color-primary);
+    color: var(--color-surface);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+
+th {
+    padding: 12px;
+    text-align: left;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+}
+
+th:first-child {
+    border-top-left-radius: var(--radius-md);
+}
+
+th:last-child {
+    border-top-right-radius: var(--radius-md);
+}
+
+th:hover {
+    background: var(--color-primary-dark);
+}
+
+td {
+    padding: 12px;
+    border-bottom: 1px solid var(--color-border);
+}
+
+tbody tr {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+    background: var(--color-surface);
+}
+
+tbody tr:last-child td:first-child {
+    border-bottom-left-radius: var(--radius-md);
+}
+
+tbody tr:last-child td:last-child {
+    border-bottom-right-radius: var(--radius-md);
+}
+
+tbody tr:last-child td {
+    border-bottom: none;
+}
+
+tbody tr:hover {
+    background: var(--color-primary-light);
+}
+
+/* Severity Badges */
+.badge {
+    display: inline-block;
+    padding: var(--spacing-xs) var(--spacing-sm);
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+}
+
+.badge.critical {
+    background: var(--color-critical);
+    color: var(--color-surface);
+}
+
+.badge.high {
+    background: var(--color-high);
+    color: var(--color-surface);
+}
+
+.badge.medium {
+    background: var(--color-medium);
+    color: var(--color-surface);
+}
+
+.badge.low {
+    background: var(--color-low);
+    color: var(--color-surface);
+}
+
+/* Modal */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    animation: fadeIn var(--transition-normal);
+}
+
+.modal.active {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-content {
+    background: var(--color-surface);
+    border-radius: var(--radius-lg);
+    width: 90%;
+    max-width: 1200px;
+    max-height: 90vh;
+    overflow-y: auto;
+    animation: slideIn var(--transition-normal);
+    box-shadow: var(--shadow-modal);
+}
+
+.modal-header {
+    padding: var(--spacing-lg) var(--spacing-xl);
+    background: var(--color-primary);
+    color: var(--color-surface);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.modal-header h2 {
+    margin: 0;
+    font-size: var(--font-size-lg);
+}
+
+.close-btn {
+    background: none;
+    border: none;
+    color: var(--color-surface);
+    font-size: var(--font-size-xl);
+    cursor: pointer;
+    padding: 0;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+}
+
+.close-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.modal-body {
+    padding: var(--spacing-xl);
+}
+
+/* Detail Table (inside modals) */
+.detail-table {
+    width: 100%;
+    margin-top: var(--spacing-lg);
+}
+
+.detail-table th {
+    background: var(--color-background);
+    color: var(--color-text);
+    text-align: left;
+    padding: 10px;
+}
+
+.detail-table td {
+    padding: 10px;
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes slideIn {
+    from {
+        transform: translateY(-50px);
+        opacity: 0;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+/* Utility Classes */
+.loading {
+    text-align: center;
+    padding: var(--spacing-lg);
+    color: var(--color-text-muted);
+}
