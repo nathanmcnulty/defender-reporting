@@ -1,0 +1,1590 @@
+[
+  {
+    "id": "1609d7ab7e47b44e2b30e0f0cd69fe4c48003b44",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "pl-cl01.patriotlab.cc",
+    "firstSeen": "2025-09-02T20:50:12.8441564Z",
+    "lastSeen": "2026-01-30T19:14:51.2461032Z",
+    "osPlatform": "Windows11",
+    "osProcessor": "x64",
+    "version": "24H2",
+    "lastIpAddress": "192.168.0.212",
+    "lastExternalIpAddress": "206.174.124.114",
+    "agentVersion": "10.8805.26100.7623",
+    "osBuild": 26100,
+    "healthStatus": "Active",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "Medium",
+    "exposureLevel": "Medium",
+    "isAadJoined": true,
+    "aadDeviceId": "ae501565-9bab-481c-af22-bd4df61ea399",
+    "machineTags": [
+      "PatriotLab"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "169.254.83.107",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::d5ed:16a2:a769:c4d",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "192.168.0.212",
+        "macAddress": "00155D003903",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:9771:4558:6705:d07c",
+        "macAddress": "00155D003903",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:d428:2cd9:c1f1:e7c2",
+        "macAddress": "00155D003903",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::3d89:7b7b:fa66:6265",
+        "macAddress": "00155D003903",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "18ec84bd7f226fd01a8d0cbbe14422d7b92dd6d8",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "pl-cl02.patriotlab.cc",
+    "firstSeen": "2025-09-04T05:49:05.1405802Z",
+    "lastSeen": "2026-01-08T22:32:43.7521935Z",
+    "osPlatform": "Windows11",
+    "osProcessor": "x64",
+    "version": "24H2",
+    "lastIpAddress": "10.40.0.11",
+    "lastExternalIpAddress": "206.174.124.114",
+    "agentVersion": "10.8805.26100.7462",
+    "osBuild": 26100,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "Low",
+    "exposureLevel": "Medium",
+    "isAadJoined": true,
+    "aadDeviceId": "0925d379-5129-4d54-9382-409d21fc88ba",
+    "machineTags": [
+      "MDE-Management",
+      "VDI"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "100.82.39.47",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd7a:115c:a1e0::3001:272f",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::5531:c47a:5b56:583e",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "10.40.0.11",
+        "macAddress": "00155D003909",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::5d39:98f4:3b1b:f6b1",
+        "macAddress": "00155D003909",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "30fc44abfd258142f9429aca1102c29b04bf3a2e",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "sml-cl02.sharemylabs.com",
+    "firstSeen": "2025-09-04T20:44:38.4247949Z",
+    "lastSeen": "2026-01-14T08:00:21.8110491Z",
+    "osPlatform": "Windows11",
+    "osProcessor": "x64",
+    "version": "24H2",
+    "lastIpAddress": "10.0.0.6",
+    "lastExternalIpAddress": "20.64.153.227",
+    "agentVersion": "10.8798.26100.6584",
+    "osBuild": 26100,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "Low",
+    "exposureLevel": "High",
+    "isAadJoined": false,
+    "aadDeviceId": "d4282cd4-9557-4705-a752-a179cbde7fbc",
+    "machineTags": [
+      "MDE-Management",
+      "VDI"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Unknown",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "10.0.0.6",
+        "macAddress": "002248BD05B8",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::6447:45ab:aa91:c4aa",
+        "macAddress": "002248BD05B8",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": {
+      "vmId": "764a572c-6dc3-4d41-ae21-820d444ab309",
+      "cloudProvider": "Azure",
+      "resourceId": "/subscriptions/43babb60-9e73-4dc8-b769-4401c01aad73/resourceGroups/rg-sml-mgmt/providers/Microsoft.Compute/virtualMachines/sml-cl02",
+      "subscriptionId": "43babb60-9e73-4dc8-b769-4401c01aad73"
+    }
+  },
+  {
+    "id": "333c69d3e404e46cada10a6f7a9962efd6072853",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "pl-cl03",
+    "firstSeen": "2025-09-16T00:16:59.9705285Z",
+    "lastSeen": "2025-09-29T23:20:21.8061372Z",
+    "osPlatform": "Windows11",
+    "osProcessor": "x64",
+    "version": "24H2",
+    "lastIpAddress": "172.16.0.4",
+    "lastExternalIpAddress": "20.125.26.68",
+    "agentVersion": "10.8798.26100.6584",
+    "osBuild": 26100,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "Low",
+    "exposureLevel": "Medium",
+    "isAadJoined": true,
+    "aadDeviceId": "d7140145-bc3f-48e2-81eb-4000cbf29a12",
+    "machineTags": [
+      "PatriotLab"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "172.16.0.4",
+        "macAddress": "002248C25B50",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::4131:1161:b99e:500f",
+        "macAddress": "002248C25B50",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": {
+      "vmId": "fcb2dfff-6fd8-45b4-87ff-68a7f407c795",
+      "cloudProvider": "Azure",
+      "resourceId": "/subscriptions/a80941e8-c2b9-4bc9-83ad-117cc40d0bea/resourceGroups/rg-pl-vm/providers/Microsoft.Compute/virtualMachines/pl-cl03",
+      "subscriptionId": "a80941e8-c2b9-4bc9-83ad-117cc40d0bea"
+    }
+  },
+  {
+    "id": "3a229e760356556f168d17ad8cd76c3bc151be5e",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "ASDF2",
+    "firstSeen": "2023-11-21T03:52:38.919789Z",
+    "lastSeen": "2026-01-30T13:30:38.6372957Z",
+    "osPlatform": "macOS",
+    "osProcessor": "x64",
+    "version": "Tahoe 26.2",
+    "lastIpAddress": "192.168.0.203",
+    "lastExternalIpAddress": "206.174.124.114",
+    "agentVersion": "20.125122.7.0",
+    "osBuild": 1,
+    "healthStatus": "Active",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "None",
+    "exposureLevel": "Medium",
+    "isAadJoined": false,
+    "aadDeviceId": "dd9b7cea-81f0-4058-a039-72f7a48904e4",
+    "machineTags": [
+      "macOS"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "fe80:16::4562:f930:23b:6b2c",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:15::a09:34f7:f4ad:1a26",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "10.10.10.10",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:14::cfe:7279:cf77:430c",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd00::1",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "100.86.93.30",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:13::cfe:7279:cf77:430c",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd7a:115c:a1e0:ab12:4843:cd96:6256:5d1e",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:12::ce81:b1c:bd2c:69e",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:e::4805:7eff:feb0:e4b9",
+        "macAddress": "4A057EB0E4B9",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:10::3405:759f:2865:9b2c",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:11::1583:78ee:d672:ade1",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:f::8d4c:7fc9:8f6b:32b0",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "192.168.0.203",
+        "macAddress": "CAAFBD5EB350",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:b::cb0:6594:7559:50d",
+        "macAddress": "CAAFBD5EB350",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:61:5a3f:4a6a:bcaa",
+        "macAddress": "CAAFBD5EB350",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:d::4805:7eff:feb0:e4b9",
+        "macAddress": "4A057EB0E4B9",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": "000000000000",
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": "000000000000",
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:1::1",
+        "macAddress": "000000000000",
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "45e58a60b9ae3224c0fd2d641fe6d89457f7739d",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "pl-cl04",
+    "firstSeen": "2025-09-15T23:50:14.5278177Z",
+    "lastSeen": "2025-12-31T21:35:56.8694148Z",
+    "osPlatform": "Windows11",
+    "osProcessor": "x64",
+    "version": "24H2",
+    "lastIpAddress": "192.168.0.230",
+    "lastExternalIpAddress": "206.174.124.114",
+    "agentVersion": "10.8805.26100.7171",
+    "osBuild": 26100,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "Low",
+    "exposureLevel": "High",
+    "isAadJoined": true,
+    "aadDeviceId": "e690b883-8f83-4441-bd51-531843f20893",
+    "machineTags": [
+      "PatriotLab"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "192.168.0.230",
+        "macAddress": "00155D003915",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:a575:88bf:c8ca:47ba",
+        "macAddress": "00155D003915",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:74f7:31be:6f36:4c48",
+        "macAddress": "00155D003915",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::2640:73e0:819e:34f3",
+        "macAddress": "00155D003915",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "55a5db7b474470725e0131dec38c07b2f54bf2ad",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "pl-dc01.patriotlab.cc",
+    "firstSeen": "2025-10-02T06:26:30.2850334Z",
+    "lastSeen": "2026-01-30T18:53:24.945Z",
+    "osPlatform": "WindowsServer2025",
+    "osProcessor": "x64",
+    "version": "24H2",
+    "lastIpAddress": "10.20.0.5",
+    "lastExternalIpAddress": "206.174.124.114",
+    "agentVersion": "10.8805.26100.7171",
+    "osBuild": 26100,
+    "healthStatus": "Active",
+    "deviceValue": "Normal",
+    "rbacGroupId": 341,
+    "rbacGroupName": "Servers",
+    "riskScore": "None",
+    "exposureLevel": "High",
+    "isAadJoined": false,
+    "aadDeviceId": null,
+    "machineTags": [
+      "MDE-Management",
+      "VDI"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "MicrosoftDefenderForEndpoint",
+    "managedByStatus": "Success",
+    "ipAddresses": [
+      {
+        "ipAddress": "10.20.0.5",
+        "macAddress": "00155D003904",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::2f7d:a531:e035:adb5",
+        "macAddress": "00155D003904",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "60f5b39257073be3c9bd8ca66f8164cde0dcf8a6",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "sml-mac-1",
+    "firstSeen": "2025-02-01T09:19:02.251319Z",
+    "lastSeen": "2025-09-21T06:22:08.36887Z",
+    "osPlatform": "macOS",
+    "osProcessor": "x64",
+    "version": "Sequoia 15.6",
+    "lastIpAddress": "192.168.64.5",
+    "lastExternalIpAddress": "206.174.124.114",
+    "agentVersion": "20.125062.5.0",
+    "osBuild": 1,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "None",
+    "exposureLevel": "Medium",
+    "isAadJoined": false,
+    "aadDeviceId": "cb50dcc8-56a0-4f98-af91-50bef5dbbf36",
+    "machineTags": [
+      "macOS"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "10.10.10.10",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:d::6c54:d6a:7beb:94fd",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd00::1",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "100.88.107.50",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:c::6c54:d6a:7beb:94fd",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd7a:115c:a1e0::d201:6b32",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:7::9252:4016:7d19:b865",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:9::a145:add0:e2be:a246",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:a::9358:51b4:b248:6d62",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:b::ce81:b1c:bd2c:69e",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "192.168.64.5",
+        "macAddress": "EEBE7F3471FA",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:5::e5:d082:2667:1b0f",
+        "macAddress": "EEBE7F3471FA",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fdc6:7687:d995:83ed:1442:3ad7:80c0:c438",
+        "macAddress": "EEBE7F3471FA",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": "000000000000",
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": "000000000000",
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:1::1",
+        "macAddress": "000000000000",
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "63be9aba8978cfdec1f33517c7f54f2a71778aba",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "sml-cl01.sharemylabs.com",
+    "firstSeen": "2024-01-23T20:05:46.194377Z",
+    "lastSeen": "2026-01-23T08:06:08.5617699Z",
+    "osPlatform": "Windows11",
+    "osProcessor": "x64",
+    "version": "23H2",
+    "lastIpAddress": "10.0.0.7",
+    "lastExternalIpAddress": "52.151.37.70",
+    "agentVersion": "10.8805.22631.6491",
+    "osBuild": 22631,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "High",
+    "exposureLevel": "Medium",
+    "isAadJoined": true,
+    "aadDeviceId": "04faf88e-6fe3-46df-8d9c-6da64b912f5b",
+    "machineTags": [
+      "MDE-Management",
+      "VDI"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "100.110.33.100",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd7a:115c:a1e0::6a6e:2164",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::d8ff:5060:f230:9168",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "10.0.0.7",
+        "macAddress": "000D3AF75C59",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::5d07:5083:cb59:3253",
+        "macAddress": "000D3AF75C59",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": {
+      "vmId": "6c983059-0a28-4e56-ade1-3e461cceaaa7",
+      "cloudProvider": "Azure",
+      "resourceId": "/subscriptions/43babb60-9e73-4dc8-b769-4401c01aad73/resourceGroups/rg-sml-mgmt/providers/Microsoft.Compute/virtualMachines/sml-cl01",
+      "subscriptionId": "43babb60-9e73-4dc8-b769-4401c01aad73"
+    }
+  },
+  {
+    "id": "7435bd2584ae553bd5c86d064a18362eee10d558",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "sml-fps01.sharemylabs.com",
+    "firstSeen": "2024-04-16T19:49:00.5908947Z",
+    "lastSeen": "2026-01-14T07:55:51.6269818Z",
+    "osPlatform": "WindowsServer2022",
+    "osProcessor": "x64",
+    "version": "21H2",
+    "lastIpAddress": "10.0.0.11",
+    "lastExternalIpAddress": "20.64.252.36",
+    "agentVersion": "10.8805.20348.4529",
+    "osBuild": 20348,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 341,
+    "rbacGroupName": "Servers",
+    "riskScore": "None",
+    "exposureLevel": "Medium",
+    "isAadJoined": false,
+    "aadDeviceId": null,
+    "machineTags": [
+      "MDE-Management",
+      "VDI"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "MicrosoftDefenderForEndpoint",
+    "managedByStatus": "Success",
+    "ipAddresses": [
+      {
+        "ipAddress": "100.76.236.56",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd7a:115c:a1e0::cf01:ec38",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::d8ff:5060:f230:9168",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "10.0.0.11",
+        "macAddress": "0022487A7970",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::a3ef:f688:fcfc:8a64",
+        "macAddress": "0022487A7970",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": {
+      "vmId": "be7ffbe1-250e-49d1-94d4-6e4d01597502",
+      "cloudProvider": "Azure",
+      "resourceId": "/subscriptions/43babb60-9e73-4dc8-b769-4401c01aad73/resourceGroups/rg-sml-mgmt/providers/Microsoft.Compute/virtualMachines/sml-fps01",
+      "subscriptionId": "43babb60-9e73-4dc8-b769-4401c01aad73"
+    }
+  },
+  {
+    "id": "88811f9cf15cec4f4689ef892087b183180dd570",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "desktop-o3vlosv",
+    "firstSeen": "2025-09-08T06:39:27.7210011Z",
+    "lastSeen": "2025-09-15T23:08:52.1527285Z",
+    "osPlatform": "Windows11",
+    "osProcessor": "x64",
+    "version": "24H2",
+    "lastIpAddress": "192.168.0.232",
+    "lastExternalIpAddress": "128.94.12.80",
+    "agentVersion": "10.8798.26100.6584",
+    "osBuild": 26100,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "Medium",
+    "exposureLevel": "Medium",
+    "isAadJoined": true,
+    "aadDeviceId": "e690b883-8f83-4441-bd51-531843f20893",
+    "machineTags": [],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "192.168.0.232",
+        "macAddress": "00155D003915",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:a575:88bf:c8ca:47ba",
+        "macAddress": "00155D003915",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:880:6b91:e959:c206",
+        "macAddress": "00155D003915",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::2640:73e0:819e:34f3",
+        "macAddress": "00155D003915",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "91c41c167cb1f17c2bcb84b8183a19fe3ba82054",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "nathan_iPhone SE (2nd generation)",
+    "firstSeen": "2025-08-19T16:35:02.6060416Z",
+    "lastSeen": "2025-09-10T01:39:04.3552056Z",
+    "osPlatform": "iOS",
+    "osProcessor": null,
+    "version": "Other",
+    "lastIpAddress": "192.168.0.173",
+    "lastExternalIpAddress": null,
+    "agentVersion": "1.1.68200103",
+    "osBuild": 2,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "None",
+    "exposureLevel": "Medium",
+    "isAadJoined": true,
+    "aadDeviceId": "079f1d91-07ed-438e-92b3-961c4703676d",
+    "machineTags": [],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": null,
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "192.168.0.173",
+        "macAddress": null,
+        "type": null,
+        "operationalStatus": "Unknown"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:f1:2cd1:61da:9dc6",
+        "macAddress": null,
+        "type": null,
+        "operationalStatus": "Unknown"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "abaaf9aa3565399005e45f54d3cd86d86117d747",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "win2008r2",
+    "firstSeen": "2025-11-14T21:12:53.8795Z",
+    "lastSeen": "2026-01-05T19:16:41.6524194Z",
+    "osPlatform": "WindowsServer2008R2",
+    "osProcessor": "x64",
+    "version": "6.1",
+    "lastIpAddress": "192.168.0.234",
+    "lastExternalIpAddress": "206.174.124.114",
+    "agentVersion": "10.8814.7601.24544",
+    "osBuild": 7601,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 341,
+    "rbacGroupName": "Servers",
+    "riskScore": "None",
+    "exposureLevel": "High",
+    "isAadJoined": false,
+    "aadDeviceId": null,
+    "machineTags": [
+      "UnifiedSolution"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "MicrosoftDefenderForEndpoint",
+    "managedByStatus": "Success",
+    "ipAddresses": [
+      {
+        "ipAddress": "192.168.0.234",
+        "macAddress": "00155D003918",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:f18c:3dfd:cb17:48b",
+        "macAddress": "00155D003918",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::f18c:3dfd:cb17:48b",
+        "macAddress": "00155D003918",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::5efe:192.168.0.234",
+        "macAddress": "00000000000000E0",
+        "type": "Tunnel",
+        "operationalStatus": "Down"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "aea62c378e3c9d28fdff4642e0141702e5f09703",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "pl-dc02",
+    "firstSeen": "2025-09-14T06:35:05.6002714Z",
+    "lastSeen": "2026-01-14T08:00:31.3011465Z",
+    "osPlatform": "WindowsServer2025",
+    "osProcessor": "x64",
+    "version": "24H2",
+    "lastIpAddress": "172.17.0.4",
+    "lastExternalIpAddress": "20.64.176.17",
+    "agentVersion": "10.8797.26100.6508",
+    "osBuild": 26100,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 341,
+    "rbacGroupName": "Servers",
+    "riskScore": "None",
+    "exposureLevel": "High",
+    "isAadJoined": false,
+    "aadDeviceId": null,
+    "machineTags": [
+      "VulnMgmt"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "MicrosoftDefenderForEndpoint",
+    "managedByStatus": "Success",
+    "ipAddresses": [
+      {
+        "ipAddress": "172.17.0.4",
+        "macAddress": "002248C0C6C2",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::eac5:6d71:fe1a:6e2",
+        "macAddress": "002248C0C6C2",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": {
+      "vmId": "fe686f8a-7ef6-49c9-9927-0d897b137d22",
+      "cloudProvider": "Azure",
+      "resourceId": "/subscriptions/c9b84fe9-cf00-4006-b485-9b7be3eaf5b8/resourceGroups/rg-pl-vm/providers/Microsoft.Compute/virtualMachines/pl-dc02",
+      "subscriptionId": "c9b84fe9-cf00-4006-b485-9b7be3eaf5b8"
+    }
+  },
+  {
+    "id": "b3c0c270d0465a7f6c59e13e15ee68f47f924bb6",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "win7sp1",
+    "firstSeen": "2025-11-14T21:12:29.057125Z",
+    "lastSeen": "2026-01-05T18:55:02.1951114Z",
+    "osPlatform": "Windows7",
+    "osProcessor": "x64",
+    "version": "6.1",
+    "lastIpAddress": "192.168.0.232",
+    "lastExternalIpAddress": "206.174.124.114",
+    "agentVersion": "10.8814.7601.24544",
+    "osBuild": 7601,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "Low",
+    "exposureLevel": "High",
+    "isAadJoined": false,
+    "aadDeviceId": null,
+    "machineTags": [
+      "UnifiedSolution"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "MicrosoftDefenderForEndpoint",
+    "managedByStatus": "Success",
+    "ipAddresses": [
+      {
+        "ipAddress": "192.168.0.232",
+        "macAddress": "00155D003917",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:c599:d73c:a2c4:437e",
+        "macAddress": "00155D003917",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:792e:aaf1:472e:8132",
+        "macAddress": "00155D003917",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::c599:d73c:a2c4:437e",
+        "macAddress": "00155D003917",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::5efe:192.168.0.232",
+        "macAddress": "00000000000000E0",
+        "type": "Tunnel",
+        "operationalStatus": "Down"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "b85c431631c65f88f297dd69dcec2d83b87ea47e",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "nathan_iPhone SE (1st generation)",
+    "firstSeen": "2025-08-21T20:44:58.6091326Z",
+    "lastSeen": "2025-09-10T04:24:44.9624621Z",
+    "osPlatform": "iOS",
+    "osProcessor": null,
+    "version": "Other",
+    "lastIpAddress": "192.168.0.137",
+    "lastExternalIpAddress": null,
+    "agentVersion": "1.1.64030101",
+    "osBuild": 4,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "None",
+    "exposureLevel": "Medium",
+    "isAadJoined": true,
+    "aadDeviceId": "00672322-fe36-4ec4-8138-fb381aeb3a3b",
+    "machineTags": [],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": null,
+    "managedBy": "Unknown",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "192.168.0.137",
+        "macAddress": null,
+        "type": null,
+        "operationalStatus": "Unknown"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:1029:21fa:a369:633",
+        "macAddress": null,
+        "type": null,
+        "operationalStatus": "Unknown"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "b9612a4cdf18968121404e62c3cbc4f9eafa208a",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "sml-cl04",
+    "firstSeen": "2024-12-09T06:54:29.6854112Z",
+    "lastSeen": "2026-01-14T07:15:48.8997635Z",
+    "osPlatform": "Windows11",
+    "osProcessor": "x64",
+    "version": "24H2",
+    "lastIpAddress": "10.0.0.10",
+    "lastExternalIpAddress": "20.64.254.117",
+    "agentVersion": "10.8805.26100.7462",
+    "osBuild": 26100,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "Low",
+    "exposureLevel": "Medium",
+    "isAadJoined": true,
+    "aadDeviceId": "a6aef257-6660-4ad6-b280-37f4358830c7",
+    "machineTags": [
+      "MDE-Management",
+      "VDI"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "10.0.0.10",
+        "macAddress": "000D3AC60059",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::e1f7:5421:5a2:5f8",
+        "macAddress": "000D3AC60059",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "100.76.198.47",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd7a:115c:a1e0::1401:c62f",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::83f5:c3fe:7abd:198b",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": {
+      "vmId": "eb06eefe-2b12-4c34-bda2-6bae7bc051e9",
+      "cloudProvider": "Azure",
+      "resourceId": "/subscriptions/43babb60-9e73-4dc8-b769-4401c01aad73/resourceGroups/rg-sml-mgmt/providers/Microsoft.Compute/virtualMachines/sml-cl04",
+      "subscriptionId": "43babb60-9e73-4dc8-b769-4401c01aad73"
+    }
+  },
+  {
+    "id": "d1776723b1a33e325d8859b12dace5cc02d21d62",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "Adrianas-Virtual-Machine",
+    "firstSeen": "2025-09-21T08:39:39.22619Z",
+    "lastSeen": "2025-11-27T10:56:46.802992Z",
+    "osPlatform": "macOS",
+    "osProcessor": "x64",
+    "version": "Tahoe 26.0",
+    "lastIpAddress": "192.168.64.6",
+    "lastExternalIpAddress": "128.94.12.106",
+    "agentVersion": "20.125082.6.0",
+    "osBuild": null,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "Low",
+    "exposureLevel": "Medium",
+    "isAadJoined": false,
+    "aadDeviceId": "ed30b340-ead6-429d-b73d-92536c1da2a0",
+    "machineTags": [
+      "macOS"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "fe80:a::e727:3b93:97d:703f",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:7::61b5:1d37:db7b:d72f",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:9::ce81:b1c:bd2c:69e",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:8::c066:eb21:afb3:85ce",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "10.10.10.10",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:b::f455:e641:e1d2:38",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd00::1",
+        "macAddress": "000000000000",
+        "type": "Other",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "192.168.64.6",
+        "macAddress": "4A4A033F8217",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:5::cca:a5d6:e42e:9b20",
+        "macAddress": "4A4A033F8217",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fdc6:7687:d995:83ed:419:b3d8:fc97:a206",
+        "macAddress": "4A4A033F8217",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": "000000000000",
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": "000000000000",
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80:1::1",
+        "macAddress": "000000000000",
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "d20a08f786badd36496c80d9bec2daf2a40b848d",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "sml-23525656355",
+    "firstSeen": "2025-03-21T05:13:12.1502218Z",
+    "lastSeen": "2026-01-08T19:51:23.7932991Z",
+    "osPlatform": "Windows11",
+    "osProcessor": "x64",
+    "version": "25H2",
+    "lastIpAddress": "192.168.0.219",
+    "lastExternalIpAddress": "206.174.124.114",
+    "agentVersion": "10.8805.26200.7462",
+    "osBuild": 26200,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 343,
+    "rbacGroupName": "Endpoints",
+    "riskScore": "Low",
+    "exposureLevel": "Medium",
+    "isAadJoined": true,
+    "aadDeviceId": "fbf4077d-957e-434c-a717-386f28f8df95",
+    "machineTags": [
+      "Autopilot"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "Intune",
+    "managedByStatus": "Unknown",
+    "ipAddresses": [
+      {
+        "ipAddress": "192.168.0.219",
+        "macAddress": "00155D00390A",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd6b:e429:24d8:2f70:cfa0:3723:d5ec:1836",
+        "macAddress": "00155D00390A",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::cf7b:796b:3d38:5d28",
+        "macAddress": "00155D00390A",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": null
+  },
+  {
+    "id": "ed03a120996f01ae7d381fe89ef5c9fbab61321a",
+    "mergedIntoMachineId": null,
+    "isPotentialDuplication": false,
+    "isExcluded": false,
+    "exclusionReason": null,
+    "computerDnsName": "sml-dc01.sharemylabs.com",
+    "firstSeen": "2024-01-23T07:20:32.2764505Z",
+    "lastSeen": "2026-01-23T08:44:00.5154294Z",
+    "osPlatform": "WindowsServer2022",
+    "osProcessor": "x64",
+    "version": "21H2",
+    "lastIpAddress": "10.0.0.4",
+    "lastExternalIpAddress": "52.151.9.89",
+    "agentVersion": "10.8805.20348.4405",
+    "osBuild": 20348,
+    "healthStatus": "Inactive",
+    "deviceValue": "Normal",
+    "rbacGroupId": 341,
+    "rbacGroupName": "Servers",
+    "riskScore": "None",
+    "exposureLevel": "High",
+    "isAadJoined": false,
+    "aadDeviceId": null,
+    "machineTags": [
+      "MDE-Management",
+      "VDI"
+    ],
+    "onboardingStatus": "Onboarded",
+    "osArchitecture": "64-bit",
+    "managedBy": "MicrosoftDefenderForEndpoint",
+    "managedByStatus": "Success",
+    "ipAddresses": [
+      {
+        "ipAddress": "100.92.82.8",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fd7a:115c:a1e0::451c:5208",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::d8ff:5060:f230:9168",
+        "macAddress": null,
+        "type": "53",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "10.0.0.4",
+        "macAddress": "000D3AF7806D",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "fe80::6e05:255b:b79f:c516",
+        "macAddress": "000D3AF7806D",
+        "type": "Ethernet",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "127.0.0.1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      },
+      {
+        "ipAddress": "::1",
+        "macAddress": null,
+        "type": "SoftwareLoopback",
+        "operationalStatus": "Up"
+      }
+    ],
+    "vmMetadata": {
+      "vmId": "8bca483a-9aeb-48fc-b610-d665bc557441",
+      "cloudProvider": "Azure",
+      "resourceId": "/subscriptions/43babb60-9e73-4dc8-b769-4401c01aad73/resourceGroups/rg-sml-mgmt/providers/Microsoft.Compute/virtualMachines/sml-dc01",
+      "subscriptionId": "43babb60-9e73-4dc8-b769-4401c01aad73"
+    }
+  }
+]
