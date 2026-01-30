@@ -128,6 +128,9 @@ __CSS_CONTENT__
                         </tr>
                     </tbody>
                 </table>
+                <div class="scroll-controls" id="remediationScrollControls">
+                    <span id="remediationScrollInfo">Showing 0 of 0</span>
+                </div>
             </div>
         </div>
 
@@ -156,6 +159,9 @@ __CSS_CONTENT__
                         </tr>
                     </tbody>
                 </table>
+                <div class="scroll-controls" id="remediationDetailsScrollControls">
+                    <span id="remediationDetailsScrollInfo">Showing 0 of 0</span>
+                </div>
             </div>
         </div>
 
@@ -184,6 +190,9 @@ __CSS_CONTENT__
                         </tr>
                     </tbody>
                 </table>
+                <div class="scroll-controls" id="impactAnalysisScrollControls">
+                    <span id="impactAnalysisScrollInfo">Showing 0 of 0</span>
+                </div>
             </div>
         </div>
     </div>
@@ -201,14 +210,20 @@ __CSS_CONTENT__
         </div>
     </div>
 
-    <!-- Vulnerability Data -->
-    <script id="vulnerabilityData" type="application/json">
-__VULNERABILITY_DATA__
+    <!-- Pako library for decompression (only included if data is compressed) -->
+    __PAKO_CONTENT__
+
+    <!-- Data format marker -->
+    <script id="dataFormat" type="text/plain">__DATA_FORMAT__</script>
+
+    <!-- Lookups data (normalized reference tables) -->
+    <script id="lookupsData" type="application/json">
+__LOOKUPS_DATA__
     </script>
 
-    <!-- Filter Indexes (pre-computed for performance) -->
-    <script id="filterIndexes" type="application/json">
-__FILTER_INDEXES__
+    <!-- Vulnerability records (normalized, may be compressed) -->
+    <script id="vulnsData" type="application/json">
+__VULNS_DATA__
     </script>
 
     <!-- Chart.js embedded directly to avoid tracking prevention -->
