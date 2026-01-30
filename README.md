@@ -131,6 +131,29 @@ $files | ForEach-Object {
 
 For more details on this API, see the docs: https://learn.microsoft.com/en-us/defender-endpoint/api/get-assessment-software-vulnerabilities
 
+## Obtaining Machine Data
+
+The dashboard uses machine data to show tags as a filter option and likely more data in the future. This data comes from the `/api/machines` endpoint and is saved separately from vulnerability exports.
+
+After authenticating (using either method above), add this to download the machine data:
+
+```powershell
+# Download machine data
+$uri = "https://api.securitycenter.microsoft.com/api/machines?`$filter=onboardingStatus eq 'Onboarded'"
+$allMachines = @()
+
+do {
+    $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
+    if ($response.value) { $allMachines += $response.value }
+    $uri = if ($response.PSObject.Properties['@odata.nextLink']) { $response.'@odata.nextLink' } else { $null }
+} while ($uri)
+
+$timestamp = Get-Date -Format "yyyy-MM-dd"
+$allMachines | ConvertTo-Json -Depth 10 | Out-File -FilePath "./exports/Machines_$timestamp.json" -Encoding UTF8
+```
+
+The dashboard script will automatically read any `Machines_*.json` files in the exports folder.
+
 ## Generating the report
 
 You will need to extract the JSON files from the gzip files, and how you do this will likely depend on your environment (I'm open to clean, simple PowerShell methods that are cross-platform too!).
