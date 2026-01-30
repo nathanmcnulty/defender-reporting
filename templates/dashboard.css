@@ -517,24 +517,18 @@ tbody tr:hover {
 
 .evidence-tooltip {
     display: none;
-    position: absolute;
-    bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%);
+    position: fixed;
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-md);
     padding: var(--spacing-md);
     box-shadow: var(--shadow-lg);
-    z-index: 100;
+    z-index: 2000;
     min-width: 300px;
     max-width: 500px;
     max-height: 300px;
     overflow-y: auto;
-}
-
-.evidence-cell:hover .evidence-tooltip {
-    display: block;
+    pointer-events: none;
 }
 
 .evidence-tooltip h5 {

@@ -2117,6 +2117,61 @@ function sortImpactAnalysisTable(columnIndex) {
 // =============================================================================
 
 /**
+ * Initialize evidence tooltip positioning
+ * Uses event delegation to handle dynamically created tooltips
+ */
+function initEvidenceTooltips() {
+    document.addEventListener('mouseenter', function(e) {
+        const cell = e.target.closest('.evidence-cell');
+        if (!cell) return;
+        
+        const tooltip = cell.querySelector('.evidence-tooltip');
+        if (!tooltip) return;
+        
+        // Get the indicator position
+        const indicator = cell.querySelector('.evidence-indicator');
+        if (!indicator) return;
+        
+        const rect = indicator.getBoundingClientRect();
+        
+        // Position tooltip above the indicator, centered
+        tooltip.style.display = 'block';
+        
+        // Calculate position
+        let left = rect.left + (rect.width / 2) - (tooltip.offsetWidth / 2);
+        let top = rect.top - tooltip.offsetHeight - 8;
+        
+        // Keep within viewport bounds
+        const viewportWidth = window.innerWidth;
+        const viewportHeight = window.innerHeight;
+        
+        // Horizontal bounds
+        if (left < 10) left = 10;
+        if (left + tooltip.offsetWidth > viewportWidth - 10) {
+            left = viewportWidth - tooltip.offsetWidth - 10;
+        }
+        
+        // If tooltip would go above viewport, show it below instead
+        if (top < 10) {
+            top = rect.bottom + 8;
+        }
+        
+        tooltip.style.left = left + 'px';
+        tooltip.style.top = top + 'px';
+    }, true);
+    
+    document.addEventListener('mouseleave', function(e) {
+        const cell = e.target.closest('.evidence-cell');
+        if (!cell) return;
+        
+        const tooltip = cell.querySelector('.evidence-tooltip');
+        if (tooltip) {
+            tooltip.style.display = 'none';
+        }
+    }, true);
+}
+
+/**
  * Build evidence tooltip HTML for DiskPaths and RegistryPaths
  * @param {Object} v - Vulnerability object with DiskPaths and RegistryPaths
  * @returns {string} HTML for evidence cell
@@ -2823,5 +2878,6 @@ window.addEventListener('DOMContentLoaded', function() {
     } else {
         console.log('Chart.js loaded successfully');
     }
+    initEvidenceTooltips();
     init();
 });
