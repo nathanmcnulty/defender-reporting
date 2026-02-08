@@ -548,6 +548,68 @@ tbody tr:hover {
     margin-bottom: var(--spacing-xs);
 }
 
+/* Pinned tooltip (click-to-pin for text selection/copying) */
+.evidence-tooltip.pinned {
+    display: block;
+    pointer-events: auto;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+/* Device bubbles container (groups of device names above CVE table) */
+.device-bubbles-container {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-xs);
+    margin-bottom: var(--spacing-md);
+    margin-top: var(--spacing-md);
+}
+
+.device-bubble-wrapper {
+    display: inline-block;
+}
+
+.device-bubble {
+    background: var(--color-primary-light);
+    color: var(--color-primary);
+}
+
+/* Device tooltip — dynamic sizing for machine info */
+.device-tooltip {
+    min-width: 280px;
+    max-width: 450px;
+    max-height: none;
+    overflow: visible;
+    line-height: 1.6;
+    white-space: nowrap;
+}
+
+.device-tooltip .tooltip-label {
+    font-weight: 600;
+    color: var(--color-text-muted);
+    font-size: var(--font-size-sm);
+}
+
+/* CVE link styled as evidence indicator */
+.cve-link {
+    text-decoration: none;
+    color: var(--color-primary);
+}
+
+.cve-link:hover {
+    color: var(--color-surface);
+}
+
+/* CVE description tooltip — wider for long descriptions */
+.cve-description-tooltip {
+    min-width: 350px;
+    max-width: 600px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+}
+
 /* Severity Badges */
 .badge {
     display: inline-block;
@@ -650,6 +712,13 @@ tbody tr:hover {
 .detail-table {
     width: 100%;
     margin-top: var(--spacing-lg);
+}
+
+/* Virtual scroll spacer rows (invisible, maintain scroll height) */
+.virtual-spacer td {
+    padding: 0 !important;
+    border: 0 !important;
+    line-height: 0;
 }
 
 .detail-table th {
