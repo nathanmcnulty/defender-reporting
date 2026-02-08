@@ -64,6 +64,293 @@ let impactAnalysisAllData = [];
 let impactAnalysisExpanded = false;
 
 // =============================================================================
+// INDEXEDDB CACHE
+// =============================================================================
+
+const VULNDB_NAME = 'VulnDashboardCache';
+const VULNDB_VERSION = 1;
+const VULNDB_STORE = 'denormalized';
+
+/**
+ * Compute a lightweight fingerprint for the embedded dataset.
+ * Uses record count + first/last raw record JSON to detect data changes.
+ */
+function computeDataFingerprint() {
+    const len = rawVulns.length;
+    if (len === 0) return 'empty';
+    const first = JSON.stringify(rawVulns[0]);
+    const last = JSON.stringify(rawVulns[len - 1]);
+    // Simple hash: length + djb2 of first+last
+    let hash = 5381;
+    const sample = first + last + len;
+    for (let i = 0; i < sample.length; i++) {
+        hash = ((hash << 5) + hash + sample.charCodeAt(i)) | 0;
+    }
+    return 'fp_' + len + '_' + (hash >>> 0).toString(36);
+}
+
+/**
+ * Open (or create) the IndexedDB cache database.
+ * @returns {Promise<IDBDatabase>}
+ */
+function openVulnDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(VULNDB_NAME, VULNDB_VERSION);
+        req.onupgradeneeded = () => {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(VULNDB_STORE)) {
+                db.createObjectStore(VULNDB_STORE, { keyPath: 'fingerprint' });
+            }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+/**
+ * Retrieve cached denormalized data from IndexedDB.
+ * @param {string} fingerprint
+ * @returns {Promise<Array|null>}
+ */
+async function getCachedData(fingerprint) {
+    try {
+        const db = await openVulnDB();
+        return new Promise((resolve) => {
+            const tx = db.transaction(VULNDB_STORE, 'readonly');
+            const store = tx.objectStore(VULNDB_STORE);
+            const req = store.get(fingerprint);
+            req.onsuccess = () => resolve(req.result ? req.result.data : null);
+            req.onerror = () => resolve(null);
+        });
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Store denormalized data in IndexedDB cache.
+ * Clears old entries first to avoid unbounded growth.
+ * @param {string} fingerprint
+ * @param {Array} data
+ */
+async function setCachedData(fingerprint, data) {
+    try {
+        const db = await openVulnDB();
+        const tx = db.transaction(VULNDB_STORE, 'readwrite');
+        const store = tx.objectStore(VULNDB_STORE);
+        store.clear(); // Keep only the latest dataset
+        store.put({ fingerprint, data, ts: Date.now() });
+    } catch {
+        // Cache failure is non-fatal
+    }
+}
+
+// =============================================================================
+// WEB WORKER (Blob-based, self-contained)
+// =============================================================================
+
+/**
+ * Build the Web Worker source code as a string.
+ * The worker receives lookups + rawVulns and returns the denormalized array.
+ */
+function buildWorkerSource() {
+    // We stringify the denormalize logic so it runs inside the worker context
+    return `
+'use strict';
+self.onmessage = function(e) {
+    var lookups = e.data.lookups;
+    var rawVulns = e.data.rawVulns;
+    var result = new Array(rawVulns.length);
+    for (var i = 0; i < rawVulns.length; i++) {
+        var v = rawVulns[i];
+        var device = lookups.devices[v[0]];
+        var cve = lookups.cves[v[1]];
+        var software = lookups.software[v[2]];
+
+        var tagNames;
+        if (device.t && device.t.length > 0) {
+            tagNames = [];
+            for (var ti = 0; ti < device.t.length; ti++) {
+                tagNames.push(lookups.tags[device.t[ti]]);
+            }
+        } else {
+            tagNames = [];
+        }
+
+        var vendorName = lookups.vendors[software.v];
+        var softwareName = software.n;
+        var updateName = v[7] >= 0 ? lookups.updates[v[7]] : null;
+
+        result[i] = {
+            DeviceId: device.id,
+            DeviceName: device.n,
+            RbacGroupName: lookups.groups[device.g],
+            OSPlatform: lookups.platforms[device.o],
+            OSVersion: device.ov,
+            MachineTags: tagNames,
+            MachineInfo: device.m || null,
+            CveId: cve.id,
+            CvssScore: cve.sc,
+            VulnerabilitySeverityLevel: lookups.severities[cve.sv],
+            ExploitabilityLevel: cve.ex >= 0 ? lookups.exploitLevels[cve.ex] : null,
+            CveBatchUrl: cve.u,
+            CveBatchTitle: cve.bt,
+            PublishedDate: cve.pd || null,
+            VulnerabilityDescription: cve.desc || null,
+            EpssScore: cve.ep != null ? cve.ep : null,
+            SoftwareVendor: vendorName,
+            SoftwareName: softwareName,
+            SoftwareVersion: v[3],
+            RecommendationReference: software.r,
+            _firstSeenDate: v[4],
+            _lastSeenDate: v[5],
+            FirstSeenTimestamp: v[4],
+            LastSeenTimestamp: v[5],
+            SecurityUpdateAvailable: v[6] === 1,
+            RecommendedSecurityUpdate: updateName,
+            RecommendedSecurityUpdateId: null,
+            DiskPaths: v[8] || [],
+            RegistryPaths: v[9] || [],
+            _remediationKey: updateName
+                ? vendorName + ' ' + softwareName + ' - ' + updateName
+                : vendorName + ' ' + softwareName,
+            _index: i
+        };
+    }
+    self.postMessage(result);
+};
+`;
+}
+
+/**
+ * Run denormalization in a Web Worker.
+ * Falls back to main-thread if Worker is unavailable.
+ * @returns {Promise<Array>}
+ */
+function denormalizeInWorker() {
+    return new Promise((resolve, reject) => {
+        try {
+            const blob = new Blob([buildWorkerSource()], { type: 'application/javascript' });
+            const url = URL.createObjectURL(blob);
+            const worker = new Worker(url);
+
+            worker.onmessage = function(e) {
+                worker.terminate();
+                URL.revokeObjectURL(url);
+                resolve(e.data);
+            };
+            worker.onerror = function(err) {
+                worker.terminate();
+                URL.revokeObjectURL(url);
+                reject(err);
+            };
+
+            // Transfer data to worker
+            worker.postMessage({ lookups, rawVulns });
+        } catch (err) {
+            reject(err);
+        }
+    });
+}
+
+// =============================================================================
+// VIRTUAL SCROLL FOR MODALS
+// =============================================================================
+
+/**
+ * Lightweight virtual scroll for modal table bodies.
+ * Only renders visible rows + a buffer, swapping rows on scroll.
+ */
+class VirtualModalTable {
+    /**
+     * @param {HTMLElement} scrollContainer - The scrollable parent (.modal-content)
+     * @param {HTMLElement} tbody - The <tbody> element to virtualize
+     * @param {Array} rows - Array of HTML strings, one per <tr>
+     * @param {number} rowHeight - Estimated row height in px
+     */
+    constructor(scrollContainer, tbody, rows, rowHeight = 36) {
+        this.container = scrollContainer;
+        this.tbody = tbody;
+        this.rows = rows;
+        this.rowHeight = rowHeight;
+        this.bufferRows = 20;
+        this.renderedStart = -1;
+        this.renderedEnd = -1;
+
+        // Spacer rows for maintaining scroll height
+        this.topSpacer = document.createElement('tr');
+        this.bottomSpacer = document.createElement('tr');
+        this.topSpacer.className = 'virtual-spacer';
+        this.bottomSpacer.className = 'virtual-spacer';
+
+        this._onScroll = this._onScroll.bind(this);
+        this.container.addEventListener('scroll', this._onScroll, { passive: true });
+
+        this.render();
+    }
+
+    _onScroll() {
+        requestAnimationFrame(() => this.render());
+    }
+
+    render() {
+        const totalRows = this.rows.length;
+        if (totalRows === 0) return;
+
+        const totalHeight = totalRows * this.rowHeight;
+        const scrollTop = this.container.scrollTop;
+        const viewHeight = this.container.clientHeight;
+
+        // Find the table's offset relative to scroll container
+        const tableRect = this.tbody.parentElement.getBoundingClientRect();
+        const containerRect = this.container.getBoundingClientRect();
+        const tableOffset = tableRect.top - containerRect.top + this.container.scrollTop;
+
+        // Visible range within this table
+        const relativeTop = Math.max(0, scrollTop - tableOffset);
+        const relativeBottom = relativeTop + viewHeight;
+
+        let startIdx = Math.floor(relativeTop / this.rowHeight) - this.bufferRows;
+        let endIdx = Math.ceil(relativeBottom / this.rowHeight) + this.bufferRows;
+        startIdx = Math.max(0, startIdx);
+        endIdx = Math.min(totalRows, endIdx);
+
+        // Skip re-render if range hasn't changed
+        if (startIdx === this.renderedStart && endIdx === this.renderedEnd) return;
+        this.renderedStart = startIdx;
+        this.renderedEnd = endIdx;
+
+        // Build visible rows
+        const fragment = document.createDocumentFragment();
+
+        // Top spacer
+        const topH = startIdx * this.rowHeight;
+        this.topSpacer.innerHTML = `<td colspan="99" style="height:${topH}px;padding:0;border:0;"></td>`;
+        fragment.appendChild(this.topSpacer);
+
+        // Visible rows
+        const template = document.createElement('template');
+        template.innerHTML = this.rows.slice(startIdx, endIdx).join('');
+        fragment.appendChild(template.content);
+
+        // Bottom spacer
+        const bottomH = (totalRows - endIdx) * this.rowHeight;
+        this.bottomSpacer.innerHTML = `<td colspan="99" style="height:${bottomH}px;padding:0;border:0;"></td>`;
+        fragment.appendChild(this.bottomSpacer);
+
+        this.tbody.innerHTML = '';
+        this.tbody.appendChild(fragment);
+    }
+
+    destroy() {
+        this.container.removeEventListener('scroll', this._onScroll);
+    }
+}
+
+// Track active virtual tables so we can clean up when modal closes
+let activeVirtualTables = [];
+
+// =============================================================================
 // DATA LOADING AND DENORMALIZATION
 // =============================================================================
 
@@ -115,6 +402,7 @@ function denormalizeVuln(v, index) {
         OSPlatform: lookups.platforms[device.o],
         OSVersion: device.ov,
         MachineTags: tagNames,
+        MachineInfo: device.m || null,
         
         // CVE info
         CveId: cve.id,
@@ -123,6 +411,9 @@ function denormalizeVuln(v, index) {
         ExploitabilityLevel: cve.ex >= 0 ? lookups.exploitLevels[cve.ex] : null,
         CveBatchUrl: cve.u,
         CveBatchTitle: cve.bt,
+        PublishedDate: cve.pd || null,
+        VulnerabilityDescription: cve.desc || null,
+        EpssScore: cve.ep ?? null,
         
         // Software info
         SoftwareVendor: lookups.vendors[software.v],
@@ -153,16 +444,49 @@ function denormalizeVuln(v, index) {
 }
 
 /**
- * Denormalize all vulnerability records
+ * Denormalize all vulnerability records (main-thread fallback)
  */
 function denormalizeAllVulns() {
-    console.log('Denormalizing', rawVulns.length, 'records...');
+    console.log('Denormalizing', rawVulns.length, 'records (main thread)...');
     const startTime = performance.now();
     
     vulnerabilityData = rawVulns.map((v, i) => denormalizeVuln(v, i));
     
     const elapsed = Math.round(performance.now() - startTime);
     console.log('Denormalization complete in', elapsed, 'ms');
+}
+
+/**
+ * Denormalize with Worker + IndexedDB caching.
+ * Falls back to main-thread denormalization on any failure.
+ * @returns {Promise<void>}
+ */
+async function denormalizeWithCaching() {
+    const fingerprint = computeDataFingerprint();
+    console.log('Data fingerprint:', fingerprint);
+
+    // 1. Try IndexedDB cache
+    const cached = await getCachedData(fingerprint);
+    if (cached && cached.length === rawVulns.length) {
+        console.log('Loaded', cached.length, 'records from IndexedDB cache');
+        vulnerabilityData = cached;
+        return;
+    }
+
+    // 2. Try Web Worker
+    try {
+        console.log('Denormalizing', rawVulns.length, 'records via Web Worker...');
+        const startTime = performance.now();
+        vulnerabilityData = await denormalizeInWorker();
+        const elapsed = Math.round(performance.now() - startTime);
+        console.log('Worker denormalization complete in', elapsed, 'ms');
+    } catch (err) {
+        console.warn('Web Worker failed, falling back to main thread:', err);
+        denormalizeAllVulns();
+    }
+
+    // 3. Cache the result (fire-and-forget)
+    setCachedData(fingerprint, vulnerabilityData);
 }
 
 // =============================================================================
@@ -172,10 +496,10 @@ function denormalizeAllVulns() {
 /**
  * Initialize the dashboard on page load
  */
-function init() {
+async function init() {
     // Load and process data
     loadData();
-    denormalizeAllVulns();
+    await denormalizeWithCaching();
     
     console.log('Initializing dashboard with', vulnerabilityData.length, 'vulnerabilities');
     buildDeviceGroupMap();
@@ -2127,6 +2451,7 @@ function initEvidenceTooltips() {
         
         const tooltip = cell.querySelector('.evidence-tooltip');
         if (!tooltip) return;
+        if (tooltip.classList.contains('pinned')) return; // Don't reposition pinned tooltips
         
         // Get the indicator position
         const indicator = cell.querySelector('.evidence-indicator');
@@ -2165,10 +2490,37 @@ function initEvidenceTooltips() {
         if (!cell) return;
         
         const tooltip = cell.querySelector('.evidence-tooltip');
-        if (tooltip) {
+        if (tooltip && !tooltip.classList.contains('pinned')) {
             tooltip.style.display = 'none';
         }
     }, true);
+
+    // Click to pin/unpin tooltip (allows text selection & copying)
+    document.addEventListener('click', function(e) {
+        const cell = e.target.closest('.evidence-cell');
+        if (cell) {
+            const tooltip = cell.querySelector('.evidence-tooltip');
+            if (tooltip) {
+                const wasPinned = tooltip.classList.contains('pinned');
+                // Unpin all others first
+                document.querySelectorAll('.evidence-tooltip.pinned').forEach(t => {
+                    t.classList.remove('pinned');
+                    t.style.display = 'none';
+                });
+                if (!wasPinned) {
+                    tooltip.classList.add('pinned');
+                    tooltip.style.display = 'block';
+                }
+                e.stopPropagation();
+                return;
+            }
+        }
+        // Click outside — unpin all
+        document.querySelectorAll('.evidence-tooltip.pinned').forEach(t => {
+            t.classList.remove('pinned');
+            t.style.display = 'none';
+        });
+    });
 }
 
 /**
@@ -2219,6 +2571,189 @@ function escapeHtml(text) {
 }
 
 /**
+ * Build device bubble HTML with machine-info tooltip
+ * @param {Object} v - Denormalized vulnerability object (for DeviceName, DeviceId, MachineInfo)
+ * @returns {string} HTML for a device bubble
+ */
+function buildDeviceBubbleHtml(v) {
+    let tooltipContent = `<strong>${escapeHtml(v.DeviceName)}</strong>`;
+    if (v.DeviceId) {
+        tooltipContent += `<br><span class="tooltip-label">ID:</span> ${escapeHtml(v.DeviceId)}`;
+    }
+    if (v.MachineInfo) {
+        const mi = v.MachineInfo;
+        if (mi.ip)  tooltipContent += `<br><span class="tooltip-label">IP:</span> ${escapeHtml(mi.ip)}`;
+        if (mi.eip) tooltipContent += `<br><span class="tooltip-label">External IP:</span> ${escapeHtml(mi.eip)}`;
+        if (mi.hs)  tooltipContent += `<br><span class="tooltip-label">Health:</span> ${escapeHtml(mi.hs)}`;
+        if (mi.rs)  tooltipContent += `<br><span class="tooltip-label">Risk:</span> ${escapeHtml(mi.rs)}`;
+        if (mi.el)  tooltipContent += `<br><span class="tooltip-label">Exposure:</span> ${escapeHtml(mi.el)}`;
+        if (mi.dv)  tooltipContent += `<br><span class="tooltip-label">Value:</span> ${escapeHtml(mi.dv)}`;
+        if (mi.mb)  tooltipContent += `<br><span class="tooltip-label">Managed By:</span> ${escapeHtml(mi.mb)}`;
+        if (mi.aad != null) tooltipContent += `<br><span class="tooltip-label">AAD Joined:</span> ${mi.aad ? 'Yes' : 'No'}`;
+        if (mi.ls)  tooltipContent += `<br><span class="tooltip-label">Last Seen:</span> ${escapeHtml(mi.ls)}`;
+        if (mi.fs)  tooltipContent += `<br><span class="tooltip-label">First Seen:</span> ${escapeHtml(mi.fs)}`;
+    }
+    return `<span class="evidence-cell device-bubble-wrapper">` +
+        `<span class="evidence-indicator device-bubble">${escapeHtml(v.DeviceName)}</span>` +
+        `<div class="evidence-tooltip device-tooltip">${tooltipContent}</div>` +
+        `</span>`;
+}
+
+/**
+ * Build CVE link HTML with description tooltip
+ * @param {Object} v - Denormalized vulnerability object
+ * @returns {string} HTML for a CVE link cell with optional description tooltip
+ */
+function buildCveLinkHtml(v) {
+    const cveUrl = v.CveBatchUrl || `https://portal.msrc.microsoft.com/en-US/security-guidance/advisory/${v.CveId}`;
+    if (v.VulnerabilityDescription) {
+        return `<td class="evidence-cell">` +
+            `<a href="${cveUrl}" target="_blank" class="evidence-indicator cve-link">${escapeHtml(v.CveId)}</a>` +
+            `<div class="evidence-tooltip cve-description-tooltip">${escapeHtml(v.VulnerabilityDescription)}</div>` +
+            `</td>`;
+    }
+    return `<td><a href="${cveUrl}" target="_blank">${escapeHtml(v.CveId)}</a></td>`;
+}
+
+/**
+ * Group devices by their shared CVE signature (identical set of CVE IDs)
+ * @param {Array} details - Array of denormalized vulnerability objects
+ * @returns {Array} Array of { signature, deviceBubbles: [{DeviceName,DeviceId,MachineInfo}], vulns: [unique vuln per CVE] }
+ */
+function groupDevicesByCveSignature(details) {
+    // Build per-device CVE map
+    const deviceMap = new Map();
+    for (let i = 0; i < details.length; i++) {
+        const d = details[i];
+        const key = d.DeviceId || d.DeviceName;
+        let dev = deviceMap.get(key);
+        if (!dev) {
+            dev = {
+                DeviceName: d.DeviceName,
+                DeviceId: d.DeviceId,
+                MachineInfo: d.MachineInfo,
+                cveIds: new Set(),
+                vulnsByCve: {}
+            };
+            deviceMap.set(key, dev);
+        }
+        dev.cveIds.add(d.CveId);
+        if (!dev.vulnsByCve[d.CveId]) {
+            dev.vulnsByCve[d.CveId] = d;
+        }
+    }
+
+    // Group devices by signature (sorted CVE ID list)
+    const signatureMap = new Map();
+    const sevOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+    for (const dev of deviceMap.values()) {
+        const sig = Array.from(dev.cveIds).sort().join('|');
+        let group = signatureMap.get(sig);
+        if (!group) {
+            // Build sorted vulns immediately from this device
+            const vulns = Object.values(dev.vulnsByCve);
+            vulns.sort((a, b) => {
+                const aSev = sevOrder[a.VulnerabilitySeverityLevel?.toLowerCase()] ?? 9;
+                const bSev = sevOrder[b.VulnerabilitySeverityLevel?.toLowerCase()] ?? 9;
+                return aSev !== bSev ? aSev - bSev : a.CveId.localeCompare(b.CveId);
+            });
+            group = { devices: [], vulns };
+            signatureMap.set(sig, group);
+        }
+        group.devices.push({
+            DeviceName: dev.DeviceName,
+            DeviceId: dev.DeviceId,
+            MachineInfo: dev.MachineInfo
+        });
+    }
+
+    // Sort groups by device count desc, then vuln count desc
+    const result = Array.from(signatureMap.values());
+    result.sort((a, b) => {
+        if (b.devices.length !== a.devices.length) return b.devices.length - a.devices.length;
+        return b.vulns.length - a.vulns.length;
+    });
+    return result;
+}
+
+/**
+ * Show vulnerability details modal
+ * @param {string} remediation - The remediation name
+ * @param {Array} details - Array of vulnerability details
+ */
+/**
+ * Threshold: tables with more rows than this use virtual scrolling
+ */
+const VIRTUAL_SCROLL_THRESHOLD = 50;
+
+/**
+ * Build a detail-row HTML string for showDetails CVE tables
+ */
+function buildDetailRow(v) {
+    const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
+    let recommendedUpdate;
+    if (v.RecommendedSecurityUpdate && v.RecommendedSecurityUpdateId) {
+        recommendedUpdate = v.RecommendedSecurityUpdate + ' (' + v.RecommendedSecurityUpdateId + ')';
+    } else {
+        recommendedUpdate = v.RecommendedSecurityUpdate || v.RecommendedSecurityUpdateId || '-';
+    }
+    const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
+    const publishedDisplay = v.PublishedDate ? v.PublishedDate.split('T')[0] : '-';
+
+    return '<tr>' +
+        buildCveLinkHtml(v) +
+        '<td>' + escapeHtml(v.SoftwareVendor) + ' - ' + escapeHtml(v.SoftwareName) + '</td>' +
+        '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
+        '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
+        '<td>' + v.CvssScore + '</td>' +
+        '<td>' + epssDisplay + '</td>' +
+        '<td>' + (v.ExploitabilityLevel || '-') + '</td>' +
+        '<td>' + escapeHtml(recommendedUpdate) + '</td>' +
+        buildEvidenceHtml(v) +
+        '<td>' + publishedDisplay + '</td>' +
+        '</tr>';
+}
+
+/**
+ * Build a remediation-row HTML string for showRemediationDetails CVE tables
+ */
+function buildRemediationRow(v) {
+    const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
+    const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
+    const publishedDisplay = v.PublishedDate ? v.PublishedDate.split('T')[0] : '-';
+
+    return '<tr>' +
+        buildCveLinkHtml(v) +
+        '<td>' + escapeHtml(v.SoftwareVendor) + ' - ' + escapeHtml(v.SoftwareName) + '</td>' +
+        '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
+        '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
+        '<td>' + v.CvssScore + '</td>' +
+        '<td>' + epssDisplay + '</td>' +
+        buildEvidenceHtml(v) +
+        '<td>' + publishedDisplay + '</td>' +
+        '</tr>';
+}
+
+/**
+ * After modal innerHTML is set, attach VirtualModalTable to each tbody
+ * that has a data-vt-rows attribute storing row data.
+ */
+function attachVirtualTables(scrollContainer, vtRowData) {
+    activeVirtualTables.forEach(vt => vt.destroy());
+    activeVirtualTables = [];
+
+    for (const [vtId, rows] of Object.entries(vtRowData)) {
+        const tbody = scrollContainer.querySelector(`tbody[data-vt-id="${vtId}"]`);
+        if (tbody && rows.length > VIRTUAL_SCROLL_THRESHOLD) {
+            activeVirtualTables.push(new VirtualModalTable(scrollContainer, tbody, rows));
+        } else if (tbody) {
+            // Small table — render all rows directly
+            tbody.innerHTML = rows.join('');
+        }
+    }
+}
+
+/**
  * Show vulnerability details modal
  * @param {string} remediation - The remediation name
  * @param {Array} details - Array of vulnerability details
@@ -2229,64 +2764,54 @@ function showDetails(remediation, details) {
     const modalBody = document.getElementById('modalBody');
 
     modalTitle.textContent = remediation;
-
-    // Group by device (using DeviceId as key to handle name changes)
-    const deviceMap = {};
-    details.forEach(d => {
-        const deviceKey = d.DeviceId || d.DeviceName;
-        if (!deviceMap[deviceKey]) {
-            deviceMap[deviceKey] = {
-                name: d.DeviceName,
-                id: d.DeviceId,
-                vulns: []
-            };
-        }
-        deviceMap[deviceKey].vulns.push(d);
-    });
-
-    let html = '<h3>Affected Devices and Vulnerabilities</h3>';
-    
-    Object.values(deviceMap).forEach(device => {
-        // Include DeviceId in header
-        const deviceIdDisplay = device.id ? ` <span style="font-size: 0.8em; color: #666;">(${device.id})</span>` : '';
-        html += `<h4>${device.name}${deviceIdDisplay}</h4>`;
-        html += '<table class="detail-table"><thead><tr>';
-        html += '<th>CVE ID</th><th>Software</th><th>Version</th><th>Severity</th><th>CVSS Score</th><th>Exploitability</th><th>Recommended Update</th><th>Evidence</th>';
-        html += '</tr></thead><tbody>';
-
-        device.vulns.forEach(v => {
-            const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
-            const cveUrl = v.CveBatchUrl || `https://portal.msrc.microsoft.com/en-US/security-guidance/advisory/${v.CveId}`;
-            
-            // Format recommended update
-            let recommendedUpdate = '';
-            if (v.RecommendedSecurityUpdate && v.RecommendedSecurityUpdateId) {
-                recommendedUpdate = `${v.RecommendedSecurityUpdate} (${v.RecommendedSecurityUpdateId})`;
-            } else if (v.RecommendedSecurityUpdate) {
-                recommendedUpdate = v.RecommendedSecurityUpdate;
-            } else if (v.RecommendedSecurityUpdateId) {
-                recommendedUpdate = v.RecommendedSecurityUpdateId;
-            } else {
-                recommendedUpdate = '-';
-            }
-            
-            html += `<tr>
-                <td><a href="${cveUrl}" target="_blank">${v.CveId}</a></td>
-                <td>${v.SoftwareVendor} - ${v.SoftwareName}</td>
-                <td>${v.SoftwareVersion}</td>
-                <td><span class="badge ${severityClass}">${v.VulnerabilitySeverityLevel}</span></td>
-                <td>${v.CvssScore}</td>
-                <td>${v.ExploitabilityLevel || '-'}</td>
-                <td>${recommendedUpdate}</td>
-                ${buildEvidenceHtml(v)}
-            </tr>`;
-        });
-
-        html += '</tbody></table><br>';
-    });
-
-    modalBody.innerHTML = html;
+    modalBody.innerHTML = '<p class="loading">Loading details...</p>';
     modal.classList.add('active');
+
+    // Defer heavy work so the modal + loading indicator render first
+    requestAnimationFrame(() => {
+        const groups = groupDevicesByCveSignature(details);
+        const totalDevices = new Set(details.map(d => d.DeviceId || d.DeviceName)).size;
+        const totalCves = new Set(details.map(d => d.CveId)).size;
+
+        const parts = [];
+        const vtRowData = {}; // vtId → array of row HTML strings
+
+        parts.push('<h3>Affected Devices and Vulnerabilities</h3>');
+        parts.push('<p style="color:var(--color-text-muted);margin-bottom:var(--spacing-md);">' +
+            totalDevices + ' device' + (totalDevices !== 1 ? 's' : '') + ', ' +
+            totalCves + ' CVE' + (totalCves !== 1 ? 's' : '') + '</p>');
+
+        for (let gi = 0; gi < groups.length; gi++) {
+            const group = groups[gi];
+            const vtId = 'det_' + gi;
+
+            // Device bubbles
+            parts.push('<div class="device-bubbles-container">');
+            group.devices.sort((a, b) => a.DeviceName.localeCompare(b.DeviceName));
+            for (let di = 0; di < group.devices.length; di++) {
+                parts.push(buildDeviceBubbleHtml(group.devices[di]));
+            }
+            parts.push('</div>');
+
+            // CVE table with empty tbody (rows added via virtual scroll)
+            parts.push('<table class="detail-table"><thead><tr>',
+                '<th>CVE ID</th><th>Software</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>Exploitability</th><th>Recommended Update</th><th>Evidence</th><th>Published</th>',
+                '</tr></thead><tbody data-vt-id="', vtId, '"></tbody></table>');
+
+            // Build row data for this group
+            const rows = new Array(group.vulns.length);
+            for (let vi = 0; vi < group.vulns.length; vi++) {
+                rows[vi] = buildDetailRow(group.vulns[vi]);
+            }
+            vtRowData[vtId] = rows;
+
+            if (gi < groups.length - 1) parts.push('<hr style="margin:var(--spacing-lg) 0;border-color:var(--color-border);">');
+        }
+
+        modalBody.innerHTML = parts.join('');
+        const scrollContainer = modalBody.closest('.modal-content');
+        attachVirtualTables(scrollContainer, vtRowData);
+    });
 }
 
 /**
@@ -2299,57 +2824,53 @@ function showRemediationDetails(data) {
     const modalBody = document.getElementById('modalBody');
     
     modalTitle.textContent = `Remediation on ${data.date}: ${data.remediation}`;
-    
-    let html = '<h3>Summary</h3>';
-    html += '<table class="detail-table"><tr>';
-    html += `<td><strong>Date:</strong> ${data.date}</td>`;
-    html += `<td><strong>Assets Remediated:</strong> ${data.devices.size}</td>`;
-    html += `<td><strong>Vulnerabilities Remediated:</strong> ${data.vulnerabilities.size}</td>`;
-    html += '</tr></table><br>';
-    
-    // Group by device (using DeviceId as key)
-    const deviceMap = {};
-    data.details.forEach(d => {
-        const deviceKey = d.DeviceId || d.DeviceName;
-        if (!deviceMap[deviceKey]) {
-            deviceMap[deviceKey] = {
-                name: d.DeviceName,
-                id: d.DeviceId,
-                vulns: []
-            };
-        }
-        deviceMap[deviceKey].vulns.push(d);
-    });
-    
-    html += '<h3>Devices Patched</h3>';
-    
-    Object.values(deviceMap).forEach(device => {
-        // Include DeviceId in header
-        const deviceIdDisplay = device.id ? ` <span style="font-size: 0.8em; color: #666;">(${device.id})</span>` : '';
-        html += `<h4>${device.name}${deviceIdDisplay} (${device.vulns.length} vulnerabilities)</h4>`;
-        html += '<table class="detail-table"><thead><tr>';
-        html += '<th>CVE ID</th><th>Software</th><th>Version</th><th>Severity</th><th>CVSS Score</th><th>Evidence</th>';
-        html += '</tr></thead><tbody>';
-        
-        device.vulns.forEach(v => {
-            const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
-            const cveUrl = v.CveBatchUrl || `https://portal.msrc.microsoft.com/en-US/security-guidance/advisory/${v.CveId}`;
-            
-            html += `<tr>
-                <td><a href="${cveUrl}" target="_blank">${v.CveId}</a></td>
-                <td>${v.SoftwareVendor} - ${v.SoftwareName}</td>
-                <td>${v.SoftwareVersion}</td>
-                <td><span class="badge ${severityClass}">${v.VulnerabilitySeverityLevel}</span></td>
-                <td>${v.CvssScore}</td>
-                ${buildEvidenceHtml(v)}
-            </tr>`;
-        });
-        
-        html += '</tbody></table><br>';
-    });
-    
-    modalBody.innerHTML = html;
+    modalBody.innerHTML = '<p class="loading">Loading details...</p>';
     modal.classList.add('active');
+
+    requestAnimationFrame(() => {
+        const groups = groupDevicesByCveSignature(data.details);
+        const vtRowData = {};
+
+        const parts = [];
+        parts.push('<h3>Summary</h3>',
+            '<table class="detail-table"><tr>',
+            '<td><strong>Date:</strong> ', escapeHtml(data.date), '</td>',
+            '<td><strong>Assets Remediated:</strong> ', String(data.devices.size), '</td>',
+            '<td><strong>Vulnerabilities Remediated:</strong> ', String(data.vulnerabilities.size), '</td>',
+            '</tr></table><br>',
+            '<h3>Devices Patched</h3>');
+
+        for (let gi = 0; gi < groups.length; gi++) {
+            const group = groups[gi];
+            const vtId = 'rem_' + gi;
+
+            // Device bubbles
+            parts.push('<div class="device-bubbles-container">');
+            group.devices.sort((a, b) => a.DeviceName.localeCompare(b.DeviceName));
+            for (let di = 0; di < group.devices.length; di++) {
+                parts.push(buildDeviceBubbleHtml(group.devices[di]));
+            }
+            parts.push('</div>');
+
+            // CVE table with empty tbody
+            parts.push('<table class="detail-table"><thead><tr>',
+                '<th>CVE ID</th><th>Software</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>Evidence</th><th>Published</th>',
+                '</tr></thead><tbody data-vt-id="', vtId, '"></tbody></table>');
+
+            // Build row data
+            const rows = new Array(group.vulns.length);
+            for (let vi = 0; vi < group.vulns.length; vi++) {
+                rows[vi] = buildRemediationRow(group.vulns[vi]);
+            }
+            vtRowData[vtId] = rows;
+
+            if (gi < groups.length - 1) parts.push('<hr style="margin:var(--spacing-lg) 0;border-color:var(--color-border);">');
+        }
+
+        modalBody.innerHTML = parts.join('');
+        const scrollContainer = modalBody.closest('.modal-content');
+        attachVirtualTables(scrollContainer, vtRowData);
+    });
 }
 
 /**
@@ -2404,9 +2925,11 @@ function showImpactAnalysisDetails(item) {
 }
 
 /**
- * Close the modal
+ * Close the modal and clean up virtual tables
  */
 function closeModal() {
+    activeVirtualTables.forEach(vt => vt.destroy());
+    activeVirtualTables = [];
     document.getElementById('detailModal').classList.remove('active');
 }
 
