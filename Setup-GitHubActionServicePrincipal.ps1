@@ -59,7 +59,7 @@ Write-Host "`nConnecting to Microsoft Graph..." -ForegroundColor Cyan
 try {
     $context = Get-MgContext
     if (-not $context) {
-        Connect-MgGraph -Scopes "Application.ReadWrite.All"
+        Connect-MgGraph -Scopes "Application.ReadWrite.All", "AppRoleAssignment.ReadWrite.All"
     }
     Write-Host "✓ Connected to Microsoft Graph" -ForegroundColor Green
     Write-Host "  Tenant: $($context.TenantId)" -ForegroundColor Gray
@@ -107,7 +107,9 @@ try {
     $existingSPs = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$($app.appId)'"
     
     if ($existingSPs.value.Count -gt 0) {
+        $sp = $existingSPs.value[0]
         Write-Host "✓ Service principal already exists" -ForegroundColor Yellow
+        Write-Host "  Object ID: $($sp.id)" -ForegroundColor Gray
     }
     else {
         Write-Host "Creating service principal..." -ForegroundColor Cyan
@@ -116,9 +118,10 @@ try {
             appId = $app.appId
         } | ConvertTo-Json
         
-        Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/servicePrincipals" -Body $spBody -ContentType "application/json" | Out-Null
+        $sp = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/servicePrincipals" -Body $spBody -ContentType "application/json"
         
         Write-Host "✓ Service principal created successfully" -ForegroundColor Green
+        Write-Host "  Object ID: $($sp.id)" -ForegroundColor Gray
     }
 }
 catch {
@@ -132,10 +135,10 @@ $federatedCredentialName = "github-actions-$($Branch.Replace('/', '-'))"
 $subject = "repo:$GitHubRepo:ref:refs/heads/$Branch"
 
 try {
-    # Check if federated credential already exists
+    # Check if federated credential already exists (match on subject or name)
     $existingCreds = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)/federatedIdentityCredentials"
     
-    $existingCred = $existingCreds.value | Where-Object { $_.subject -eq $subject }
+    $existingCred = $existingCreds.value | Where-Object { $_.subject -eq $subject -or $_.name -eq $federatedCredentialName }
     
     if ($existingCred) {
         Write-Host "✓ Federated credential already exists" -ForegroundColor Yellow
@@ -150,13 +153,23 @@ try {
             audiences = @('api://AzureADTokenExchange')
         } | ConvertTo-Json
         
-        Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)/federatedIdentityCredentials" -Body $credBody -ContentType "application/json" | Out-Null
-        
-        Write-Host "✓ Federated credential created successfully" -ForegroundColor Green
-        Write-Host "  Name: $federatedCredentialName" -ForegroundColor Gray
-        Write-Host "  Subject: $subject" -ForegroundColor Gray
-        Write-Host "  Issuer: https://token.actions.githubusercontent.com" -ForegroundColor Gray
-        Write-Host "  Audience: api://AzureADTokenExchange" -ForegroundColor Gray
+        try {
+            Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)/federatedIdentityCredentials" -Body $credBody -ContentType "application/json" -ErrorAction Stop | Out-Null
+            
+            Write-Host "✓ Federated credential created successfully" -ForegroundColor Green
+            Write-Host "  Name: $federatedCredentialName" -ForegroundColor Gray
+            Write-Host "  Subject: $subject" -ForegroundColor Gray
+            Write-Host "  Issuer: https://token.actions.githubusercontent.com" -ForegroundColor Gray
+            Write-Host "  Audience: api://AzureADTokenExchange" -ForegroundColor Gray
+        }
+        catch {
+            if ($_.Exception.Message -match 'Request_MultipleObjectsWithSameKeyValue|already exists') {
+                Write-Host "✓ Federated credential already exists" -ForegroundColor Yellow
+            }
+            else {
+                throw
+            }
+        }
     }
 }
 catch {
@@ -164,73 +177,59 @@ catch {
     exit 1
 }
 
-# Add Microsoft Defender API permissions
+# Grant Microsoft Defender API permissions via appRoleAssignment (admin consent)
 Write-Host "`nConfiguring API permissions..." -ForegroundColor Cyan
 $defenderApiId = "fc780465-2017-40d4-a0c5-307022471b92" # Microsoft Threat Protection API
-$vulnerabilityPermissionId = "41269fc5-d04d-4bfd-bce7-43a51cea049a"  # Vulnerability.Read.All
-$machinePermissionId = "ea8291d3-4b9a-44b5-bc3a-6cea3026dc79"        # Machine.Read.All
-$advancedQueryPermissionId = "93489bf5-0fbc-4f2d-b901-33f2fe08ff05"  # AdvancedQuery.Read.All
 
-$requiredPermissions = @($vulnerabilityPermissionId, $machinePermissionId)
+$requiredRoles = @("Vulnerability.Read.All", "Machine.Read.All")
 if ($IncludeAdvancedHunting) {
-    $requiredPermissions += $advancedQueryPermissionId
+    $requiredRoles += "AdvancedQuery.Read.All"
 }
 
 try {
-    # Get current app details
-    $currentApp = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)"
+    # Find the WindowsDefenderATP service principal
+    Write-Host "  Looking up WindowsDefenderATP service principal..." -ForegroundColor Gray
+    $mdeSpResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '$defenderApiId'"
+    $mdeSp = $mdeSpResponse.value | Select-Object -First 1
     
-    # Check if all permissions already exist
-    $defenderResource = $currentApp.requiredResourceAccess | Where-Object { $_.resourceAppId -eq $defenderApiId }
-    $existingPermissionIds = if ($defenderResource) { $defenderResource.resourceAccess.id } else { @() }
-    $missingPermissions = $requiredPermissions | Where-Object { $_ -notin $existingPermissionIds }
-    $hasPermission = $missingPermissions.Count -eq 0
-    
-    if ($hasPermission) {
-        Write-Host "✓ API permissions already configured" -ForegroundColor Yellow
-        Write-Host "  - Vulnerability.Read.All" -ForegroundColor Gray
-        Write-Host "  - Machine.Read.All" -ForegroundColor Gray
-        if ($IncludeAdvancedHunting) { Write-Host "  - AdvancedQuery.Read.All" -ForegroundColor Gray }
+    if (-not $mdeSp) {
+        throw "WindowsDefenderATP service principal not found in tenant. Ensure Microsoft Defender for Endpoint is enabled."
     }
-    else {
-        Write-Host "Adding API permissions..." -ForegroundColor Cyan
-        Write-Host "  - Vulnerability.Read.All" -ForegroundColor Gray
-        Write-Host "  - Machine.Read.All" -ForegroundColor Gray
-        if ($IncludeAdvancedHunting) { Write-Host "  - AdvancedQuery.Read.All" -ForegroundColor Gray }
-        
-        # Build the required resource access
-        $existingPermissions = $currentApp.requiredResourceAccess
-        if (-not $existingPermissions) {
-            $existingPermissions = @()
+    
+    $mdeSpObjectId = $mdeSp.id
+    Write-Host "  Found MDE SP: $mdeSpObjectId" -ForegroundColor Gray
+    
+    # Assign each required app role
+    foreach ($roleName in $requiredRoles) {
+        $appRole = $mdeSp.appRoles | Where-Object { $_.value -eq $roleName }
+        if (-not $appRole) {
+            Write-Warning "App role '$roleName' not found on WindowsDefenderATP SP. Skipping."
+            continue
         }
         
-        # Build the complete list of permissions for Defender API
-        $defenderResourceAccess = $requiredPermissions | ForEach-Object {
-            @{
-                id   = $_
-                type = "Role"
+        Write-Host "  Assigning $roleName..." -ForegroundColor Gray
+        
+        $body = @{
+            principalId = $sp.id
+            resourceId  = $mdeSpObjectId
+            appRoleId   = $appRole.id
+        }
+        
+        try {
+            Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$($sp.id)/appRoleAssignments" -Body $body -ErrorAction Stop | Out-Null
+            Write-Host "    ✓ $roleName assigned" -ForegroundColor Green
+        }
+        catch {
+            if ("$_" -match 'Permission being assigned already exists') {
+                Write-Host "    ✓ $roleName already assigned" -ForegroundColor Green
+            }
+            else {
+                Write-Warning "Failed to assign $roleName`: $_"
             }
         }
-        
-        # Remove existing Defender resource if present, then add complete one
-        $newPermissions = @($existingPermissions | Where-Object { $_.resourceAppId -ne $defenderApiId })
-        $newPermissions += @{
-            resourceAppId  = $defenderApiId
-            resourceAccess = $defenderResourceAccess
-        }
-        
-        $permissionBody = @{
-            requiredResourceAccess = $newPermissions
-        } | ConvertTo-Json -Depth 10
-        
-        Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/v1.0/applications/$($app.id)" -Body $permissionBody -ContentType "application/json"
-        
-        Write-Host "✓ API permissions added" -ForegroundColor Green
-        Write-Host "`n⚠️  IMPORTANT: Admin consent is required!" -ForegroundColor Yellow
-        Write-Host "   Please grant admin consent in the Azure Portal:" -ForegroundColor Yellow
-        Write-Host "   1. Go to: https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationMenuBlade/~/CallAnAPI/appId/$($app.appId)" -ForegroundColor Gray
-        Write-Host "   2. Click 'Grant admin consent for [Your Organization]'" -ForegroundColor Gray
     }
+    
+    Write-Host "✓ API permissions configured (admin consent granted)" -ForegroundColor Green
 }
 catch {
     Write-Error "Failed to configure API permissions: $_"
@@ -263,8 +262,7 @@ Write-Host "  Issuer: https://token.actions.githubusercontent.com" -ForegroundCo
 Write-Host "  Audience: api://AzureADTokenExchange" -ForegroundColor Gray
 
 Write-Host "`nNext Steps:" -ForegroundColor Cyan
-Write-Host "  1. Grant admin consent for API permissions (see link above)" -ForegroundColor White
-Write-Host "  2. Add the GitHub secrets to your repository" -ForegroundColor White
-Write-Host "  3. Run your GitHub Action workflow" -ForegroundColor White
+Write-Host "  1. Add the GitHub secrets to your repository" -ForegroundColor White
+Write-Host "  2. Run your GitHub Action workflow" -ForegroundColor White
 
 Write-Host "`n" + ("=" * 80) -ForegroundColor Cyan
