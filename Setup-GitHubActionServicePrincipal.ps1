@@ -17,11 +17,17 @@
 .PARAMETER Branch
     The branch name for the federated credential (default: "main")
 
+.PARAMETER IncludeAdvancedHunting
+    Include the AdvancedQuery.Read.All permission for MDE Advanced Hunting queries.
+
 .EXAMPLE
     .\Setup-GitHubActionServicePrincipal.ps1
     
 .EXAMPLE
     .\Setup-GitHubActionServicePrincipal.ps1 -AppName "MyApp" -GitHubRepo "myorg/myrepo" -Branch "production"
+
+.EXAMPLE
+    .\Setup-GitHubActionServicePrincipal.ps1 -IncludeAdvancedHunting
 #>
 
 [CmdletBinding()]
@@ -33,7 +39,10 @@ param(
     [string]$GitHubRepo = "nathanmcnulty/defender-reporting",
     
     [Parameter()]
-    [string]$Branch = "main"
+    [string]$Branch = "main",
+
+    [Parameter()]
+    [switch]$IncludeAdvancedHunting
 )
 
 # Ensure Microsoft.Graph module is installed
@@ -160,8 +169,12 @@ Write-Host "`nConfiguring API permissions..." -ForegroundColor Cyan
 $defenderApiId = "fc780465-2017-40d4-a0c5-307022471b92" # Microsoft Threat Protection API
 $vulnerabilityPermissionId = "41269fc5-d04d-4bfd-bce7-43a51cea049a"  # Vulnerability.Read.All
 $machinePermissionId = "ea8291d3-4b9a-44b5-bc3a-6cea3026dc79"        # Machine.Read.All
+$advancedQueryPermissionId = "93489bf5-0fbc-4f2d-b901-33f2fe08ff05"  # AdvancedQuery.Read.All
 
 $requiredPermissions = @($vulnerabilityPermissionId, $machinePermissionId)
+if ($IncludeAdvancedHunting) {
+    $requiredPermissions += $advancedQueryPermissionId
+}
 
 try {
     # Get current app details
@@ -177,11 +190,13 @@ try {
         Write-Host "✓ API permissions already configured" -ForegroundColor Yellow
         Write-Host "  - Vulnerability.Read.All" -ForegroundColor Gray
         Write-Host "  - Machine.Read.All" -ForegroundColor Gray
+        if ($IncludeAdvancedHunting) { Write-Host "  - AdvancedQuery.Read.All" -ForegroundColor Gray }
     }
     else {
         Write-Host "Adding API permissions..." -ForegroundColor Cyan
         Write-Host "  - Vulnerability.Read.All" -ForegroundColor Gray
         Write-Host "  - Machine.Read.All" -ForegroundColor Gray
+        if ($IncludeAdvancedHunting) { Write-Host "  - AdvancedQuery.Read.All" -ForegroundColor Gray }
         
         # Build the required resource access
         $existingPermissions = $currentApp.requiredResourceAccess

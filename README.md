@@ -159,3 +159,78 @@ The dashboard script will automatically read any `Machines_*.json` files in the 
 You will need to extract the JSON files from the gzip files, and how you do this will likely depend on your environment (I'm open to clean, simple PowerShell methods that are cross-platform too!).
 
 I recommend placing these in the /exports folder as this is the default path the Generate-VulnerabilityDashboard.ps1 uses. Running that script should output an updated VulnerabilityDashboard.html file.
+
+## Azure Resource Setup
+
+`Setup-AzureResources.ps1` provisions the full pipeline infrastructure: Resource Group, Automation Account (with managed identity), Storage Account (with `exports`, `templates`, and `dashboards` containers), RBAC, a PowerShell 7.4 runtime environment, runbook, and a weekly schedule.
+
+### Prerequisites
+
+- PowerShell module: `Az.Accounts`
+- PowerShell module: `Microsoft.Graph.Authentication` (only needed for MDE permissions)
+- Authenticated session: `Connect-AzAccount`
+- MDE permission step requires Application Administrator role in Entra ID
+
+### Basic Usage
+
+```powershell
+.\Setup-AzureResources.ps1 -ResourceGroupName "rg-defender-reporting" `
+    -AutomationAccountName "aa-defender-reporting" `
+    -StorageAccountName "stdefenderreporting"
+```
+
+### With Container App (Entra ID-protected dashboard)
+
+Adds an Azure Container App with Caddy serving the dashboard HTML, protected by Easy Auth (SSO restricted to members of the specified security group).
+
+```powershell
+.\Setup-AzureResources.ps1 -ResourceGroupName "rg-defender-reporting" `
+    -AutomationAccountName "aa-defender-reporting" `
+    -StorageAccountName "stdefenderreporting" `
+    -IncludeContainerApp -SecurityGroup "Dashboard Viewers"
+```
+
+`-SecurityGroup` accepts either an Object ID (GUID) or display name.
+
+### Parameters
+
+| Parameter | Required | Description |
+|---|---|---|
+| `-ResourceGroupName` | Yes | Resource group name |
+| `-AutomationAccountName` | Yes | Automation account name |
+| `-StorageAccountName` | Yes | Storage account name (lowercase, 3-24 chars) |
+| `-Location` | No | Azure region (default: `westus2`) |
+| `-IncludeContainerApp` | No | Deploy Container App with Easy Auth |
+| `-SecurityGroup` | With `-IncludeContainerApp` | Entra ID group allowed access |
+| `-ContainerAppName` | No | Override Container App name (default: derived from RG name) |
+| `-SkipMdePermissions` | No | Skip MDE API role assignment |
+| `-SkipValidation` | No | Skip end-to-end validation after provisioning |
+
+## GitHub Actions Setup
+
+The included workflow (`.github/workflows/update-vulnerability-dashboard.yml`) runs on a schedule (daily cron, but self-gates to every 7 days), exports vulnerability and machine data from MDE, generates the dashboard, and commits the result. It authenticates via OIDC federated credentials (no secrets stored).
+
+### Steps
+
+1. **Fork the repository** (can be private)
+
+2. **Create the service principal** — requires `Application.ReadWrite.All` Graph consent:
+
+   ```powershell
+   .\Setup-GitHubActionServicePrincipal.ps1 -GitHubRepo "yourorg/defender-reporting"
+   ```
+
+   The script creates an app registration, service principal, federated credential for GitHub Actions OIDC, and configures MDE API permissions (`Vulnerability.Read.All`, `Machine.Read.All`).
+
+3. **Grant admin consent** for the MDE API permissions in the Azure Portal (link provided in script output)
+
+4. **Add repository secrets** (Settings → Secrets and variables → Actions):
+
+   | Secret | Value |
+   |---|---|
+   | `AZURE_CLIENT_ID` | Application (Client) ID from script output |
+   | `AZURE_TENANT_ID` | Tenant ID from script output |
+
+5. **Protect the main branch** — add a ruleset (Settings → Rules → Rulesets) to prevent force pushes, since the workflow commits export data directly to main
+
+6. **Run the workflow** — trigger manually via Actions → "Update Vulnerability Dashboard" → Run workflow, or wait for the daily schedule
