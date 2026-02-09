@@ -1435,7 +1435,6 @@ exec caddy file-server --root /data --listen :80
         }
         $appResult = Invoke-MgGraphRequest -Method POST -Uri '/v1.0/applications' -Body $appBody -ErrorAction Stop
         $appClientId = $appResult.appId
-        $appObjectId = $appResult.id
         Write-Host "  App registration created: $appClientId" -ForegroundColor Green
 
         # Create service principal for the app
