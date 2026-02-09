@@ -1257,7 +1257,7 @@ fi
 exec caddy file-server --root /data --listen :80
 "@
         # Strip Windows \r\n → Unix \n so the shell script runs correctly on Linux
-        $startupScriptB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($startupScript -replace "`r`n", "`n"))
+        $startupScriptB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(($startupScript -replace "`r`n", "`n")))
         $caddyArg = "echo '$startupScriptB64' | base64 -d | sh"
 
         # Use System.Text.Json for reliable JSON serialization (avoids ConvertTo-Json
@@ -1371,6 +1371,33 @@ exec caddy file-server --root /data --listen :80
                 $roles = Invoke-ArmApi -Path "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName/providers/Microsoft.Authorization/roleAssignments?api-version=$($Script:ArmApiVersions.RoleAssignment)&`$filter=principalId eq '$camiPrincipalId'" -Method GET -Description "Check Container App RBAC"
                 return ($roles.value.Count -gt 0)
             } | Out-Null
+
+            # Restart the Container App so it picks up the new RBAC permissions
+            Write-Host "  Restarting Container App with updated permissions..." -ForegroundColor Gray
+            Start-Sleep -Seconds 15
+
+            $caBasePath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.App/containerApps/${ContainerAppName}"
+            $caRevisionsList = Invoke-ArmApi -Path "${caBasePath}/revisions?api-version=$($Script:ArmApiVersions.ContainerApp)" -Method GET -Description "List revisions"
+            $activeRevision = $caRevisionsList.value | Where-Object { $_.properties.active -eq $true } | Select-Object -First 1
+
+            if ($activeRevision) {
+                $revName = $activeRevision.name
+                Invoke-ArmApi -Path "${caBasePath}/revisions/${revName}/deactivate?api-version=$($Script:ArmApiVersions.ContainerApp)" -Method POST -Description "Deactivate revision" | Out-Null
+                Start-Sleep -Seconds 5
+                Invoke-ArmApi -Path "${caBasePath}/revisions/${revName}/activate?api-version=$($Script:ArmApiVersions.ContainerApp)" -Method POST -Description "Activate revision" | Out-Null
+
+                # Verify the Container App starts back up
+                Wait-WithPolling -Description "Container App restart" -IntervalSeconds 10 -TimeoutSeconds 120 -Condition {
+                    $rev = Invoke-ArmApi -Path "${caBasePath}/revisions/${revName}?api-version=$($Script:ArmApiVersions.ContainerApp)" -Method GET -Description "Check revision state"
+                    $state = $rev.properties.runningState
+                    Write-Host "    Revision state: $state" -ForegroundColor Gray
+                    return ($state -eq 'Running' -or $state -eq 'RunningAtMaxScale')
+                } | Out-Null
+                Write-Host "  Container App restarted successfully" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  No active revision found to restart" -ForegroundColor Yellow
+            }
         }
 
         # -----------------------------------------------------------------
