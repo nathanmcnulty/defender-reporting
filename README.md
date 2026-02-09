@@ -214,23 +214,21 @@ The included workflow (`.github/workflows/update-vulnerability-dashboard.yml`) r
 
 1. **Fork the repository** (can be private)
 
-2. **Create the service principal** — requires `Application.ReadWrite.All` Graph consent:
+2. **Create the service principal** — requires Application Administrator role (for `Application.ReadWrite.All` and `AppRoleAssignment.ReadWrite.All` Graph consent):
 
    ```powershell
    .\Setup-GitHubActionServicePrincipal.ps1 -GitHubRepo "yourorg/defender-reporting"
    ```
 
-   The script creates an app registration, service principal, federated credential for GitHub Actions OIDC, and configures MDE API permissions (`Vulnerability.Read.All`, `Machine.Read.All`).
+   The script creates an app registration, service principal, federated credential for GitHub Actions OIDC, and grants MDE API permissions (`Vulnerability.Read.All`, `Machine.Read.All`) with admin consent — no portal visit required.
 
-3. **Grant admin consent** for the MDE API permissions in the Azure Portal (link provided in script output)
-
-4. **Add repository secrets** (Settings → Secrets and variables → Actions):
+3. **Add repository secrets** (Settings → Secrets and variables → Actions):
 
    | Secret | Value |
    |---|---|
    | `AZURE_CLIENT_ID` | Application (Client) ID from script output |
    | `AZURE_TENANT_ID` | Tenant ID from script output |
 
-5. **Protect the main branch** — add a ruleset (Settings → Rules → Rulesets) to prevent force pushes, since the workflow commits export data directly to main
+4. **Protect the main branch** — add a ruleset (Settings → Rules → Rulesets) to prevent force pushes, since the workflow commits export data directly to main
 
-6. **Run the workflow** — trigger manually via Actions → "Update Vulnerability Dashboard" → Run workflow, or wait for the daily schedule
+5. **Run the workflow** — trigger manually via Actions → "Update Vulnerability Dashboard" → Run workflow, or wait for the daily schedule
