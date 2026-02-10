@@ -1471,9 +1471,28 @@ exec caddy file-server --root /data --listen :80
                 $consentUrl = "https://login.microsoftonline.com/$tenantId/adminconsent?client_id=$appClientId"
                 Write-Host "  $consentUrl`n" -ForegroundColor Cyan
                 
-                # Wait for user to grant consent
-                $null = Read-Host "  Press Enter after you have granted consent to continue"
-                Write-Host "  Continuing deployment..." -ForegroundColor Gray
+                # Wait for user to grant consent and verify
+                $consentVerified = $false
+                while (-not $consentVerified) {
+                    $null = Read-Host "  Press Enter after you have granted consent to continue"
+                    Write-Host "  Verifying consent..." -ForegroundColor Gray
+                    
+                    # Check if the permission grant now exists
+                    $existingGrants = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$spObjectId' and resourceId eq '$msgraphSpId'" -ErrorAction SilentlyContinue
+                    
+                    if ($existingGrants.value -and $existingGrants.value.Count -gt 0) {
+                        Write-Host "  Admin consent verified successfully" -ForegroundColor Green
+                        $consentVerified = $true
+                    }
+                    else {
+                        Write-Host "  Consent not detected. Please ensure you completed the consent process." -ForegroundColor Yellow
+                        Write-Host "  URL: $consentUrl" -ForegroundColor Cyan
+                        $retry = Read-Host "  Try again? (Y/n)"
+                        if ($retry -eq 'n' -or $retry -eq 'N') {
+                            throw "Admin consent required but not granted. Cannot continue deployment."
+                        }
+                    }
+                }
             }
         }
 
