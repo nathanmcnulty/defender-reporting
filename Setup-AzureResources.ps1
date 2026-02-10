@@ -1464,7 +1464,17 @@ exec caddy file-server --root /data --listen :80
             if ($_.Exception.Message -match 'already exists') {
                 Write-Host "  Admin consent already granted" -ForegroundColor Green
             }
-            else { throw }
+            else {
+                Write-Host "`n  Failed to grant admin consent automatically" -ForegroundColor Yellow
+                Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Host "`n  Please open the following URL in your browser to grant admin consent:" -ForegroundColor Yellow
+                $consentUrl = "https://login.microsoftonline.com/$tenantId/adminconsent?client_id=$appClientId"
+                Write-Host "  $consentUrl`n" -ForegroundColor Cyan
+                
+                # Wait for user to grant consent
+                $null = Read-Host "  Press Enter after you have granted consent to continue"
+                Write-Host "  Continuing deployment..." -ForegroundColor Gray
+            }
         }
 
         # Require assignment (restricts access to assigned users/groups only)
