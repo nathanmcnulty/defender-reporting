@@ -179,7 +179,10 @@ self.onmessage = function(e) {
 
         var vendorName = lookups.vendors[software.v];
         var softwareName = software.n;
-        var updateName = v[7] >= 0 ? lookups.updates[v[7]] : null;
+        var updateObj = v[7] >= 0 ? lookups.updates[v[7]] : null;
+        var updateName = updateObj ? (updateObj.n || updateObj) : null;
+        var updateId = updateObj ? updateObj.id : null;
+        var updateUrl = updateObj ? updateObj.url : null;
 
         result[i] = {
             DeviceId: device.id,
@@ -208,7 +211,8 @@ self.onmessage = function(e) {
             LastSeenTimestamp: v[5],
             SecurityUpdateAvailable: v[6] === 1,
             RecommendedSecurityUpdate: updateName,
-            RecommendedSecurityUpdateId: null,
+            RecommendedSecurityUpdateId: updateId || null,
+            RecommendedSecurityUpdateUrl: updateUrl || null,
             DiskPaths: v[8] || [],
             RegistryPaths: v[9] || [],
             _remediationKey: updateName
@@ -429,16 +433,22 @@ function denormalizeVuln(v, index) {
         
         // Update info
         SecurityUpdateAvailable: v[6] === 1,
-        RecommendedSecurityUpdate: v[7] >= 0 ? lookups.updates[v[7]] : null,
+        RecommendedSecurityUpdate: v[7] >= 0 ? (lookups.updates[v[7]].n || lookups.updates[v[7]]) : null,
+        RecommendedSecurityUpdateId: v[7] >= 0 && lookups.updates[v[7]].id ? lookups.updates[v[7]].id : null,
+        RecommendedSecurityUpdateUrl: v[7] >= 0 && lookups.updates[v[7]].url ? lookups.updates[v[7]].url : null,
         
         // Evidence
         DiskPaths: v[8] || [],
         RegistryPaths: v[9] || [],
         
         // Pre-computed fields
-        _remediationKey: v[7] >= 0 && lookups.updates[v[7]]
-            ? `${lookups.vendors[software.v]} ${software.n} - ${lookups.updates[v[7]]}`
-            : `${lookups.vendors[software.v]} ${software.n}`,
+        _remediationKey: (() => {
+            const uObj = v[7] >= 0 ? lookups.updates[v[7]] : null;
+            const uName = uObj ? (uObj.n || uObj) : null;
+            return uName
+                ? `${lookups.vendors[software.v]} ${software.n} - ${uName}`
+                : `${lookups.vendors[software.v]} ${software.n}`;
+        })(),
         _index: index
     };
 }
@@ -1165,14 +1175,32 @@ function createSegmentStyle(cutoffIdx) {
  * @returns {string} Formatted remediation string
  */
 function buildRemediationString(v) {
-    if (v.RecommendedSecurityUpdate && v.RecommendedSecurityUpdateId) {
-        return `${v.RecommendedSecurityUpdate} (${v.RecommendedSecurityUpdateId})`;
+    const kbId = v.RecommendedSecurityUpdateId
+        ? (v.RecommendedSecurityUpdateId.toString().startsWith('KB') ? v.RecommendedSecurityUpdateId : 'KB' + v.RecommendedSecurityUpdateId)
+        : null;
+    if (v.RecommendedSecurityUpdate && kbId) {
+        return `${v.RecommendedSecurityUpdate} (${kbId})`;
     } else if (v.RecommendedSecurityUpdate) {
         return v.RecommendedSecurityUpdate;
-    } else if (v.RecommendedSecurityUpdateId) {
-        return v.RecommendedSecurityUpdateId;
+    } else if (kbId) {
+        return kbId;
     }
     return 'Not Specified';
+}
+
+/**
+ * Build remediation HTML with link from vulnerability data.
+ * Returns an <a> tag linking to RecommendedSecurityUpdateUrl when available,
+ * otherwise returns plain escaped text.
+ * @param {Object} v - Vulnerability object (or any object with RecommendedSecurityUpdate/Id/Url)
+ * @returns {string} HTML string for the remediation cell
+ */
+function buildRemediationHtml(v) {
+    const text = buildRemediationString(v);
+    if (v.RecommendedSecurityUpdateUrl) {
+        return `<a href="${escapeHtml(v.RecommendedSecurityUpdateUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${escapeHtml(text)}</a>`;
+    }
+    return escapeHtml(text);
 }
 
 // =============================================================================
@@ -1465,6 +1493,7 @@ function renderTable() {
             remediationMap[key] = {
                 software: software,
                 remediation: remediation,
+                remediationHtml: buildRemediationHtml(v),
                 devices: new Set(),
                 vulnerabilities: new Set(),
                 exploits: new Set(),
@@ -1532,7 +1561,7 @@ function appendRemediationRow(tbody, rem) {
     const row = tbody.insertRow();
     row.innerHTML = `
         <td>${rem.software}</td>
-        <td>${rem.remediation}</td>
+        <td>${rem.remediationHtml}</td>
         <td>${rem.devices.size}</td>
         <td>${rem.vulnerabilities.size}</td>
         <td>${rem.exploits.size}</td>
@@ -1833,6 +1862,7 @@ function renderRemediationDetailsTable() {
             remediationByDate[key] = {
                 date: lastSeenDate,
                 remediation: remediation,
+                remediationHtml: buildRemediationHtml(v),
                 devices: new Set(),
                 vulnerabilities: new Set(),
                 details: []
@@ -1891,7 +1921,7 @@ function appendRemediationDetailsRow(tbody, data) {
     const row = tbody.insertRow();
     row.innerHTML = `
         <td>${data.date}</td>
-        <td>${data.remediation}</td>
+        <td>${data.remediationHtml}</td>
         <td>${data.devices.size}</td>
         <td>${data.vulnerabilities.size}</td>
         <td>${total}</td>
@@ -1991,6 +2021,7 @@ function renderImpactChart() {
         
         if (!remediationMap[remediation]) {
             remediationMap[remediation] = {
+                remediationHtml: buildRemediationHtml(v),
                 devices: new Set(),
                 vulnerabilities: []
             };
@@ -2005,6 +2036,7 @@ function renderImpactChart() {
         const impact = data.devices.size * new Set(data.vulnerabilities.map(v => v.CveId)).size;
         return {
             name: name,
+            nameHtml: data.remediationHtml,
             impact: impact,
             vulnerabilities: data.vulnerabilities
         };
@@ -2311,6 +2343,7 @@ function renderImpactAnalysisTable() {
         return {
             rank: index + 1,
             name: item.name,
+            nameHtml: item.nameHtml || escapeHtml(item.name),
             devices: devices.size,
             cveIds: cveIds.size,
             impact: item.impact,
@@ -2363,7 +2396,7 @@ function appendImpactAnalysisRow(tbody, item) {
     const row = tbody.insertRow();
     row.innerHTML = `
         <td>${item.rank}</td>
-        <td>${item.name}</td>
+        <td>${item.nameHtml}</td>
         <td>${item.devices}</td>
         <td>${item.cveIds}</td>
         <td>${item.impact}</td>
@@ -2693,10 +2726,14 @@ function buildDetailRow(v) {
     const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
     let recommendedUpdate;
     if (v.RecommendedSecurityUpdate && v.RecommendedSecurityUpdateId) {
-        recommendedUpdate = v.RecommendedSecurityUpdate + ' (' + v.RecommendedSecurityUpdateId + ')';
+        const kbId = v.RecommendedSecurityUpdateId.toString().startsWith('KB') ? v.RecommendedSecurityUpdateId : 'KB' + v.RecommendedSecurityUpdateId;
+        recommendedUpdate = v.RecommendedSecurityUpdate + ' (' + kbId + ')';
     } else {
         recommendedUpdate = v.RecommendedSecurityUpdate || v.RecommendedSecurityUpdateId || '-';
     }
+    const recommendedUpdateHtml = v.RecommendedSecurityUpdateUrl
+        ? '<a href="' + escapeHtml(v.RecommendedSecurityUpdateUrl) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(recommendedUpdate) + '</a>'
+        : escapeHtml(recommendedUpdate);
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
     const publishedDisplay = v.PublishedDate ? v.PublishedDate.split('T')[0] : '-';
 
@@ -2708,7 +2745,7 @@ function buildDetailRow(v) {
         '<td>' + v.CvssScore + '</td>' +
         '<td>' + epssDisplay + '</td>' +
         '<td>' + (v.ExploitabilityLevel || '-') + '</td>' +
-        '<td>' + escapeHtml(recommendedUpdate) + '</td>' +
+        '<td>' + recommendedUpdateHtml + '</td>' +
         buildEvidenceHtml(v) +
         '<td>' + publishedDisplay + '</td>' +
         '</tr>';
