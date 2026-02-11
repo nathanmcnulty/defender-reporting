@@ -60,6 +60,7 @@ try {
     $context = Get-MgContext
     if (-not $context) {
         Connect-MgGraph -Scopes "Application.ReadWrite.All", "AppRoleAssignment.ReadWrite.All"
+        $context = Get-MgContext
     }
     Write-Host "✓ Connected to Microsoft Graph" -ForegroundColor Green
     Write-Host "  Tenant: $($context.TenantId)" -ForegroundColor Gray
