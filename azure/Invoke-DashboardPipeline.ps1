@@ -743,7 +743,7 @@ function ConvertTo-NormalizedData {
         groups        = [System.Collections.Generic.List[string]]::new()
         platforms     = [System.Collections.Generic.List[string]]::new()
         tags          = [System.Collections.Generic.List[string]]::new()
-        updates       = [System.Collections.Generic.List[string]]::new()
+        updates       = [System.Collections.Generic.List[PSObject]]::new()
         devices       = [System.Collections.Generic.List[PSObject]]::new()
         software      = [System.Collections.Generic.List[PSObject]]::new()
         cves          = [System.Collections.Generic.List[PSObject]]::new()
@@ -879,9 +879,22 @@ function ConvertTo-NormalizedData {
         }
         $cveIdx = $cveIndex[$cveId]
 
+        # Get or create update index (stores object with name, id, url)
         $recUpdate = $v.PSObject.Properties['RecommendedSecurityUpdate']?.Value
         $updateName = if ($recUpdate -and $recUpdate -ne '--') { $recUpdate } else { $null }
-        $updIdx = Get-OrCreateIndex -value $updateName -list $lookups.updates -indexMap $updateIndex
+        if ($null -eq $updateName -or $updateName -eq '') {
+            $updIdx = -1
+        } elseif ($updateIndex.ContainsKey($updateName)) {
+            $updIdx = $updateIndex[$updateName]
+        } else {
+            $updIdx = $lookups.updates.Count
+            $updateIndex[$updateName] = $updIdx
+            $lookups.updates.Add([PSCustomObject]@{
+                n   = $updateName
+                id  = $v.PSObject.Properties['RecommendedSecurityUpdateId']?.Value
+                url = $v.PSObject.Properties['RecommendedSecurityUpdateUrl']?.Value
+            })
+        }
 
         $firstSeenTs = $v.PSObject.Properties['FirstSeenTimestamp']?.Value
         $lastSeenTs = $v.PSObject.Properties['LastSeenTimestamp']?.Value
