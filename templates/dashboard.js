@@ -1170,6 +1170,40 @@ function createSegmentStyle(cutoffIdx) {
 }
 
 /**
+ * Map ExploitabilityLevel to a friendly display name
+ * @param {string} level - Raw ExploitabilityLevel value
+ * @returns {string} Human-readable exploitability description
+ */
+function formatExploitLevel(level) {
+    switch (level) {
+        case 'NoExploit': return 'No known exploits';
+        case 'ExploitIsVerified': return 'Exploit verified by vendor';
+        case 'ExploitIsPublic': return 'Exploit publicly available';
+        case 'ExploitIsInKit': return 'Exploit in attacker toolkits';
+        default: return level || '-';
+    }
+}
+
+/**
+ * Format a date string to YYYY-MM-DD, handling ISO ('T') and space-separated timestamps.
+ * @param {string|null} dateStr - Raw date string
+ * @returns {string} YYYY-MM-DD or '-'
+ */
+function formatDateYMD(dateStr) {
+    if (!dateStr) return '-';
+    // Strip time portion from ISO or space-separated timestamps
+    const datePart = dateStr.split(/[T ]/)[0];
+    // If already YYYY-MM-DD, return as-is
+    if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) return datePart;
+    // Handle M/D/YYYY format → YYYY-MM-DD
+    const slash = datePart.split('/');
+    if (slash.length === 3) {
+        return slash[2] + '-' + slash[0].padStart(2, '0') + '-' + slash[1].padStart(2, '0');
+    }
+    return datePart;
+}
+
+/**
  * Build remediation string from vulnerability data
  * @param {Object} v - Vulnerability object
  * @returns {string} Formatted remediation string
@@ -1486,11 +1520,17 @@ function renderTable() {
 
     filteredData.forEach(v => {
         const remediation = buildRemediationString(v);
-        const software = formatSoftwareName(v.SoftwareVendor, v.SoftwareName);
-        const key = `${software}|${remediation}`;
+        const formatPart = (text) => {
+            if (!text) return 'Unknown';
+            return text.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+        };
+        const vendor = formatPart(v.SoftwareVendor);
+        const software = formatPart(v.SoftwareName);
+        const key = `${vendor}|${software}|${remediation}`;
 
         if (!remediationMap[key]) {
             remediationMap[key] = {
+                vendor: vendor,
                 software: software,
                 remediation: remediation,
                 remediationHtml: buildRemediationHtml(v),
@@ -1560,6 +1600,7 @@ function renderRemediationTablePage() {
 function appendRemediationRow(tbody, rem) {
     const row = tbody.insertRow();
     row.innerHTML = `
+        <td>${rem.vendor}</td>
         <td>${rem.software}</td>
         <td>${rem.remediationHtml}</td>
         <td>${rem.devices.size}</td>
@@ -1567,7 +1608,7 @@ function appendRemediationRow(tbody, rem) {
         <td>${rem.exploits.size}</td>
         <td>${rem.kits.size}</td>
     `;
-    row.onclick = () => showDetails(rem.remediation, rem.details);
+    row.onclick = () => showDetails(rem.vendor + ' ' + rem.software + ' - ' + rem.remediation, rem.details);
 }
 
 /**
@@ -1618,12 +1659,13 @@ function sortTable(columnIndex) {
     remediationAllData.sort((a, b) => {
         let aValue, bValue;
         switch(columnIndex) {
-            case 0: aValue = a.software; bValue = b.software; break;
-            case 1: aValue = a.remediation; bValue = b.remediation; break;
-            case 2: aValue = a.devices.size; bValue = b.devices.size; break;
-            case 3: aValue = a.vulnerabilities.size; bValue = b.vulnerabilities.size; break;
-            case 4: aValue = a.exploits.size; bValue = b.exploits.size; break;
-            case 5: aValue = a.kits.size; bValue = b.kits.size; break;
+            case 0: aValue = a.vendor; bValue = b.vendor; break;
+            case 1: aValue = a.software; bValue = b.software; break;
+            case 2: aValue = a.remediation; bValue = b.remediation; break;
+            case 3: aValue = a.devices.size; bValue = b.devices.size; break;
+            case 4: aValue = a.vulnerabilities.size; bValue = b.vulnerabilities.size; break;
+            case 5: aValue = a.exploits.size; bValue = b.exploits.size; break;
+            case 6: aValue = a.kits.size; bValue = b.kits.size; break;
         }
 
         if (aValue < bValue) return ascending ? -1 : 1;
@@ -2645,7 +2687,7 @@ function buildCveLinkHtml(v) {
             `<div class="evidence-tooltip cve-description-tooltip">${escapeHtml(v.VulnerabilityDescription)}</div>` +
             `</td>`;
     }
-    return `<td><a href="${cveUrl}" target="_blank">${escapeHtml(v.CveId)}</a></td>`;
+    return `<td class="evidence-cell"><a href="${cveUrl}" target="_blank" class="evidence-indicator cve-link">${escapeHtml(v.CveId)}</a></td>`;
 }
 
 /**
@@ -2676,32 +2718,76 @@ function groupDevicesByCveSignature(details) {
         }
     }
 
-    // Group devices by signature (sorted CVE ID list)
-    const signatureMap = new Map();
     const sevOrder = { critical: 0, high: 1, medium: 2, low: 3 };
-    for (const dev of deviceMap.values()) {
-        const sig = Array.from(dev.cveIds).sort().join('|');
-        let group = signatureMap.get(sig);
-        if (!group) {
-            // Build sorted vulns immediately from this device
-            const vulns = Object.values(dev.vulnsByCve);
-            vulns.sort((a, b) => {
-                const aSev = sevOrder[a.VulnerabilitySeverityLevel?.toLowerCase()] ?? 9;
-                const bSev = sevOrder[b.VulnerabilitySeverityLevel?.toLowerCase()] ?? 9;
-                return aSev !== bSev ? aSev - bSev : a.CveId.localeCompare(b.CveId);
-            });
-            group = { devices: [], vulns };
-            signatureMap.set(sig, group);
+    const sortVulns = (vulns) => {
+        vulns.sort((a, b) => {
+            const aSev = sevOrder[a.VulnerabilitySeverityLevel?.toLowerCase()] ?? 9;
+            const bSev = sevOrder[b.VulnerabilitySeverityLevel?.toLowerCase()] ?? 9;
+            return aSev !== bSev ? aSev - bSev : a.CveId.localeCompare(b.CveId);
+        });
+        return vulns;
+    };
+
+    const devices = Array.from(deviceMap.values());
+
+    // If only one device, return a single group with all its CVEs
+    if (devices.length <= 1) {
+        const dev = devices[0];
+        return [{
+            devices: [{ DeviceName: dev.DeviceName, DeviceId: dev.DeviceId, MachineInfo: dev.MachineInfo }],
+            vulns: sortVulns(Object.values(dev.vulnsByCve))
+        }];
+    }
+
+    // Find CVEs shared by ALL devices vs CVEs unique to some devices
+    const allDeviceKeys = devices.map(d => d.DeviceId || d.DeviceName);
+    const cveCounts = new Map(); // cveId -> Set of device keys that have it
+    for (const dev of devices) {
+        const devKey = dev.DeviceId || dev.DeviceName;
+        for (const cveId of dev.cveIds) {
+            if (!cveCounts.has(cveId)) cveCounts.set(cveId, new Set());
+            cveCounts.get(cveId).add(devKey);
         }
-        group.devices.push({
-            DeviceName: dev.DeviceName,
-            DeviceId: dev.DeviceId,
-            MachineInfo: dev.MachineInfo
+    }
+
+    const totalDevices = devices.length;
+    const sharedCves = new Set();
+    for (const [cveId, devKeys] of cveCounts) {
+        if (devKeys.size === totalDevices) sharedCves.add(cveId);
+    }
+
+    const result = [];
+
+    // Group 1: Shared CVEs (all devices together)
+    if (sharedCves.size > 0) {
+        const refDev = devices[0];
+        const sharedVulns = [];
+        for (const cveId of sharedCves) {
+            if (refDev.vulnsByCve[cveId]) sharedVulns.push(refDev.vulnsByCve[cveId]);
+        }
+        result.push({
+            devices: devices.map(d => ({ DeviceName: d.DeviceName, DeviceId: d.DeviceId, MachineInfo: d.MachineInfo })),
+            vulns: sortVulns(sharedVulns)
         });
     }
 
-    // Sort groups by device count desc, then vuln count desc
-    const result = Array.from(signatureMap.values());
+    // Remaining groups: per-device unique CVEs (only for devices that have non-shared CVEs)
+    for (const dev of devices) {
+        const uniqueVulns = [];
+        for (const cveId of dev.cveIds) {
+            if (!sharedCves.has(cveId) && dev.vulnsByCve[cveId]) {
+                uniqueVulns.push(dev.vulnsByCve[cveId]);
+            }
+        }
+        if (uniqueVulns.length > 0) {
+            result.push({
+                devices: [{ DeviceName: dev.DeviceName, DeviceId: dev.DeviceId, MachineInfo: dev.MachineInfo }],
+                vulns: sortVulns(uniqueVulns)
+            });
+        }
+    }
+
+    // Sort groups: most devices first, then most vulns
     result.sort((a, b) => {
         if (b.devices.length !== a.devices.length) return b.devices.length - a.devices.length;
         return b.vulns.length - a.vulns.length;
@@ -2724,30 +2810,20 @@ const VIRTUAL_SCROLL_THRESHOLD = 50;
  */
 function buildDetailRow(v) {
     const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
-    let recommendedUpdate;
-    if (v.RecommendedSecurityUpdate && v.RecommendedSecurityUpdateId) {
-        const kbId = v.RecommendedSecurityUpdateId.toString().startsWith('KB') ? v.RecommendedSecurityUpdateId : 'KB' + v.RecommendedSecurityUpdateId;
-        recommendedUpdate = v.RecommendedSecurityUpdate + ' (' + kbId + ')';
-    } else {
-        recommendedUpdate = v.RecommendedSecurityUpdate || v.RecommendedSecurityUpdateId || '-';
-    }
-    const recommendedUpdateHtml = v.RecommendedSecurityUpdateUrl
-        ? '<a href="' + escapeHtml(v.RecommendedSecurityUpdateUrl) + '" target="_blank" rel="noopener noreferrer">' + escapeHtml(recommendedUpdate) + '</a>'
-        : escapeHtml(recommendedUpdate);
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
-    const publishedDisplay = v.PublishedDate ? v.PublishedDate.split('T')[0] : '-';
+    const publishedDisplay = formatDateYMD(v.PublishedDate);
+    const firstSeenDisplay = formatDateYMD(v._firstSeenDate || v.FirstSeenTimestamp);
 
     return '<tr>' +
         buildCveLinkHtml(v) +
-        '<td>' + escapeHtml(v.SoftwareVendor) + ' - ' + escapeHtml(v.SoftwareName) + '</td>' +
         '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
         '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
         '<td>' + v.CvssScore + '</td>' +
         '<td>' + epssDisplay + '</td>' +
-        '<td>' + (v.ExploitabilityLevel || '-') + '</td>' +
-        '<td>' + recommendedUpdateHtml + '</td>' +
+        '<td>' + formatExploitLevel(v.ExploitabilityLevel) + '</td>' +
         buildEvidenceHtml(v) +
         '<td>' + publishedDisplay + '</td>' +
+        '<td>' + firstSeenDisplay + '</td>' +
         '</tr>';
 }
 
@@ -2757,17 +2833,18 @@ function buildDetailRow(v) {
 function buildRemediationRow(v) {
     const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
-    const publishedDisplay = v.PublishedDate ? v.PublishedDate.split('T')[0] : '-';
+    const publishedDisplay = formatDateYMD(v.PublishedDate);
+    const firstSeenDisplay = formatDateYMD(v._firstSeenDate || v.FirstSeenTimestamp);
 
     return '<tr>' +
         buildCveLinkHtml(v) +
-        '<td>' + escapeHtml(v.SoftwareVendor) + ' - ' + escapeHtml(v.SoftwareName) + '</td>' +
         '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
         '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
         '<td>' + v.CvssScore + '</td>' +
         '<td>' + epssDisplay + '</td>' +
         buildEvidenceHtml(v) +
         '<td>' + publishedDisplay + '</td>' +
+        '<td>' + firstSeenDisplay + '</td>' +
         '</tr>';
 }
 
@@ -2814,6 +2891,17 @@ function showDetails(remediation, details) {
         const vtRowData = {}; // vtId → array of row HTML strings
 
         parts.push('<h3>Affected Devices and Vulnerabilities</h3>');
+
+        // Add update link above the table (right-aligned) if URL is available
+        const updateUrl = details.find(d => d.RecommendedSecurityUpdateUrl);
+        if (updateUrl) {
+            const updateText = buildRemediationString(updateUrl);
+            parts.push('<div style="text-align:right;margin-bottom:var(--spacing-sm);">');
+            parts.push('<strong>Update details:</strong><br>');
+            parts.push('<a href="' + escapeHtml(updateUrl.RecommendedSecurityUpdateUrl) + '" target="_blank" rel="noopener noreferrer" style="color:#0078d4;">&#x1F517; ' + escapeHtml(updateText) + '</a>');
+            parts.push('</div>');
+        }
+
         parts.push('<p style="color:var(--color-text-muted);margin-bottom:var(--spacing-md);">' +
             totalDevices + ' device' + (totalDevices !== 1 ? 's' : '') + ', ' +
             totalCves + ' CVE' + (totalCves !== 1 ? 's' : '') + '</p>');
@@ -2832,7 +2920,7 @@ function showDetails(remediation, details) {
 
             // CVE table with empty tbody (rows added via virtual scroll)
             parts.push('<table class="detail-table"><thead><tr>',
-                '<th>CVE ID</th><th>Software</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>Exploitability</th><th>Recommended Update</th><th>Evidence</th><th>Published</th>',
+                '<th>CVE ID</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>Exploitability</th><th>Evidence</th><th>Published</th><th>First Seen</th>',
                 '</tr></thead><tbody data-vt-id="', vtId, '"></tbody></table>');
 
             // Build row data for this group
@@ -2891,7 +2979,7 @@ function showRemediationDetails(data) {
 
             // CVE table with empty tbody
             parts.push('<table class="detail-table"><thead><tr>',
-                '<th>CVE ID</th><th>Software</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>Evidence</th><th>Published</th>',
+                '<th>CVE ID</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>Evidence</th><th>Published</th><th>First Seen</th>',
                 '</tr></thead><tbody data-vt-id="', vtId, '"></tbody></table>');
 
             // Build row data
@@ -3213,10 +3301,22 @@ async function exportToPDF() {
 
         // Add table if available
         if (tableBody.length > 0) {
+            // Determine column widths based on which table is active
+            let columnWidths;
+            if (tableHeaders.length === 7) {
+                // Active Vulnerabilities: Vendor, Software, Remediation, Assets, Vulns, Exploits, Kits
+                columnWidths = [55, 65, '*', 35, 35, 35, 25];
+            } else if (tableHeaders.length === 5) {
+                // Remediation Activity or Impact Analysis tables
+                columnWidths = ['*', '*', 55, 55, 55];
+            } else {
+                columnWidths = Array(tableHeaders.length).fill('*');
+            }
+
             docDefinition.content.push({
                 table: {
                     headerRows: 1,
-                    widths: tableHeaders.length === 6 ? [80, '*', 45, 70, 45, 35] : Array(tableHeaders.length).fill('*'),
+                    widths: columnWidths,
                     body: [
                         tableHeaders,
                         ...tableBody
@@ -3230,12 +3330,12 @@ async function exportToPDF() {
                     vLineWidth: function () { return 1; },
                     hLineColor: function () { return '#dddddd'; },
                     vLineColor: function () { return '#dddddd'; },
-                    paddingLeft: function () { return 8; },
-                    paddingRight: function () { return 8; },
-                    paddingTop: function () { return 6; },
-                    paddingBottom: function () { return 6; }
+                    paddingLeft: function () { return 4; },
+                    paddingRight: function () { return 4; },
+                    paddingTop: function () { return 4; },
+                    paddingBottom: function () { return 4; }
                 },
-                fontSize: 9,
+                fontSize: 8,
                 margin: [0, 0, 0, 15]
             });
         }
