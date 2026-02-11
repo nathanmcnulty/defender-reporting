@@ -24,7 +24,7 @@ __CSS_CONTENT__
         </h1>
 
         <!-- Stats Summary -->
-        <div class="stats-summary" id="statsSummary">
+        <div class="stats-summary" id="statsSummary" aria-live="polite" aria-label="Vulnerability statistics">
             <div class="stat-card critical">
                 <div class="stat-value" id="criticalCount">0</div>
                 <div class="stat-label">Critical</div>
@@ -44,8 +44,8 @@ __CSS_CONTENT__
         </div>
 
         <!-- Filters -->
-        <div class="filters">
-            <div class="filter-group filter-group-date">
+        <div class="filters" role="region" aria-label="Dashboard filters">
+            <div class="filter-group filter-group-date" role="group" aria-label="Date range filter">
                 <div class="date-inputs" id="dateInputs">
                     <div class="date-input-group">
                         <label for="filterStartDate">Start Date</label>
@@ -75,27 +75,27 @@ __CSS_CONTENT__
                     </table>
                 </div>
             </div>
-            <div class="filter-group filter-group-dynamic">
+            <div class="filter-group filter-group-dynamic" role="group" aria-label="Device Group filter">
                 <label for="filterRbacGroup">Device Group</label>
                 <div class="checkbox-container" id="filterRbacGroup">
                 </div>
             </div>
-            <div class="filter-group filter-group-dynamic" id="filterDeviceTagsGroup">
+            <div class="filter-group filter-group-dynamic" id="filterDeviceTagsGroup" role="group" aria-label="Device Tags filter">
                 <label for="filterDeviceTags">Device Tags</label>
                 <div class="checkbox-container" id="filterDeviceTags">
                 </div>
             </div>
-            <div class="filter-group filter-group-dynamic">
+            <div class="filter-group filter-group-dynamic" role="group" aria-label="Device Name filter">
                 <label for="filterDeviceName">Device Name</label>
                 <div class="checkbox-container" id="filterDeviceName">
                 </div>
             </div>
-            <div class="filter-group filter-group-dynamic">
+            <div class="filter-group filter-group-dynamic" role="group" aria-label="OS Platform filter">
                 <label for="filterOSPlatform">OS Platform</label>
                 <div class="checkbox-container" id="filterOSPlatform">
                 </div>
             </div>
-            <div class="filter-group filter-group-fixed">
+            <div class="filter-group filter-group-fixed" role="group" aria-label="Severity filter">
                 <label for="filterSeverity">Severity</label>
                 <div class="checkbox-container" id="filterSeverity">
                 </div>
@@ -199,11 +199,11 @@ __CSS_CONTENT__
     </div>
 
     <!-- Modal -->
-    <div id="detailModal" class="modal">
+    <div id="detailModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-hidden="true">
         <div class="modal-content">
             <div class="modal-header">
                 <h2 id="modalTitle">Vulnerability Details</h2>
-                <button class="close-btn" onclick="closeModal()">&times;</button>
+                <button class="close-btn" onclick="closeModal()" aria-label="Close dialog">&times;</button>
             </div>
             <div class="modal-body" id="modalBody">
                 <!-- Details will be populated here -->

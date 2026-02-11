@@ -98,9 +98,24 @@ foreach ($file in $templateFiles) {
         'x-ms-access-tier' = 'Cool'
     }
 
-    Invoke-RestMethod -Uri $blobUri -Method Put -Headers $headers -InFile $localPath -ContentType $file.ContentType
-
-    Write-Host "    Uploaded" -ForegroundColor Green
+    $maxRetries = 3
+    $retryDelay = 2
+    for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
+        try {
+            Invoke-RestMethod -Uri $blobUri -Method Put -Headers $headers -InFile $localPath -ContentType $file.ContentType
+            Write-Host "    Uploaded" -ForegroundColor Green
+            break
+        }
+        catch {
+            if ($attempt -eq $maxRetries) {
+                Write-Error "    Failed to upload $($file.Name) after $maxRetries attempts: $_"
+                throw
+            }
+            Write-Host "    Attempt $attempt failed, retrying in ${retryDelay}s..." -ForegroundColor Yellow
+            Start-Sleep -Seconds $retryDelay
+            $retryDelay *= 2
+        }
+    }
 }
 
 Write-Host "`nAll templates uploaded to: $baseUrl/$ContainerName/" -ForegroundColor Green

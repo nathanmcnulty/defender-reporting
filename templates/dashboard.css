@@ -755,3 +755,94 @@ tbody tr:hover {
     padding: var(--spacing-lg);
     color: var(--color-text-muted);
 }
+
+/* =============================================================================
+   REDUCED MOTION
+   Disable animations and transitions for users who prefer reduced motion.
+   ============================================================================= */
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* =============================================================================
+   RESPONSIVE BREAKPOINTS
+   ============================================================================= */
+
+/* Tablet and below */
+@media (max-width: 1200px) {
+    .filters {
+        grid-template-columns: repeat(3, 1fr);
+    }
+
+    .filter-group-fixed {
+        max-width: none;
+    }
+}
+
+/* Small tablets / large phones */
+@media (max-width: 768px) {
+    body {
+        padding: var(--spacing-sm);
+    }
+
+    .container {
+        padding: var(--spacing-md);
+    }
+
+    h1 {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--spacing-sm);
+        font-size: var(--font-size-lg);
+    }
+
+    .report-selector-container {
+        width: 100%;
+    }
+
+    .report-selector-container select {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .filters {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .chart-container {
+        height: 300px;
+        padding: var(--spacing-sm);
+    }
+
+    .modal-content {
+        width: 98%;
+        max-height: 95vh;
+    }
+}
+
+/* Phones */
+@media (max-width: 480px) {
+    .filters {
+        grid-template-columns: 1fr;
+    }
+
+    .stats-summary {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .chart-container {
+        height: 250px;
+    }
+
+    th, td {
+        padding: 8px 6px;
+        font-size: var(--font-size-sm);
+    }
+}

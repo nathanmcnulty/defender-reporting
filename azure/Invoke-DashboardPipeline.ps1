@@ -541,7 +541,7 @@ function Export-AdvancedHuntingData {
     $query = @"
 DeviceTvmSoftwareVulnerabilities
 | join kind=leftouter DeviceTvmSoftwareVulnerabilitiesKB on CveId
-| project DeviceId, CveId, PublishedDate, VulnerabilityDescription, IsExploitAvailable, EpssScore, LastModifiedTime, AffectedSoftware
+| summarize arg_max(LastModifiedTime, PublishedDate, VulnerabilityDescription, IsExploitAvailable, EpssScore) by CveId
 "@
 
     $body = @{ Query = $query } | ConvertTo-Json
@@ -880,20 +880,26 @@ function ConvertTo-NormalizedData {
         $cveIdx = $cveIndex[$cveId]
 
         # Get or create update index (stores object with name, id, url)
+        # Key by name+id to distinguish different KBs sharing the same update name
         $recUpdate = $v.PSObject.Properties['RecommendedSecurityUpdate']?.Value
+        $recUpdateId = $v.PSObject.Properties['RecommendedSecurityUpdateId']?.Value
+        $recUpdateUrl = $v.PSObject.Properties['RecommendedSecurityUpdateUrl']?.Value
         $updateName = if ($recUpdate -and $recUpdate -ne '--') { $recUpdate } else { $null }
         if ($null -eq $updateName -or $updateName -eq '') {
             $updIdx = -1
-        } elseif ($updateIndex.ContainsKey($updateName)) {
-            $updIdx = $updateIndex[$updateName]
         } else {
-            $updIdx = $lookups.updates.Count
-            $updateIndex[$updateName] = $updIdx
-            $lookups.updates.Add([PSCustomObject]@{
-                n   = $updateName
-                id  = $v.PSObject.Properties['RecommendedSecurityUpdateId']?.Value
-                url = $v.PSObject.Properties['RecommendedSecurityUpdateUrl']?.Value
-            })
+            $updateKey = if ($recUpdateId) { "$updateName|$recUpdateId" } else { $updateName }
+            if ($updateIndex.ContainsKey($updateKey)) {
+                $updIdx = $updateIndex[$updateKey]
+            } else {
+                $updIdx = $lookups.updates.Count
+                $updateIndex[$updateKey] = $updIdx
+                $lookups.updates.Add([PSCustomObject]@{
+                    n   = $updateName
+                    id  = $recUpdateId
+                    url = $recUpdateUrl
+                })
+            }
         }
 
         $firstSeenTs = $v.PSObject.Properties['FirstSeenTimestamp']?.Value
