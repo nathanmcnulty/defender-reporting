@@ -710,6 +710,46 @@ function Read-AdvancedHuntingData {
     return $ahData
 }
 
+function Convert-CveUrl {
+    <#
+    .SYNOPSIS
+        Converts old Microsoft CVE URLs to the new format.
+    
+    .DESCRIPTION
+        Microsoft changed their CVE URL format from:
+        https://portal.msrc.microsoft.com/en-US/security-guidance/advisory/CVE-XXXX-XXXXX
+        to:
+        https://msrc.microsoft.com/update-guide/vulnerability/CVE-XXXX-XXXXX
+        
+        This function detects and converts old URLs to the new format.
+    
+    .PARAMETER Url
+        The CVE URL to convert (if needed).
+    
+    .OUTPUTS
+        The converted URL string, or null if input is null/empty.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Url
+    )
+    
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        return $Url
+    }
+    
+    # Check if URL matches old format (with or without 'portal.' subdomain)
+    if ($Url -match '^https://(?:portal\.)?msrc\.microsoft\.com/en-US/security-guidance/advisory/(CVE-\d{4}-\d+)') {
+        $cveId = $Matches[1]
+        return "https://msrc.microsoft.com/update-guide/vulnerability/$cveId"
+    }
+    
+    return $Url
+}
+
 function ConvertTo-NormalizedData {
     <#
     .SYNOPSIS
@@ -870,7 +910,7 @@ function ConvertTo-NormalizedData {
                 sc   = $v.PSObject.Properties['CvssScore']?.Value
                 sv   = $sevIdx
                 ex   = $expIdx
-                u    = $v.PSObject.Properties['CveBatchUrl']?.Value
+                u    = Convert-CveUrl -Url $v.PSObject.Properties['CveBatchUrl']?.Value
                 bt   = $v.PSObject.Properties['CveBatchTitle']?.Value
                 pd   = $publishedDate
                 desc = $vulnDescription

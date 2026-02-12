@@ -2753,7 +2753,7 @@ function buildDeviceBubbleHtml(v) {
  * @returns {string} HTML for a CVE link cell with optional description tooltip
  */
 function buildCveLinkHtml(v) {
-    const cveUrl = v.CveBatchUrl || `https://portal.msrc.microsoft.com/en-US/security-guidance/advisory/${v.CveId}`;
+    const cveUrl = v.CveBatchUrl || `https://msrc.microsoft.com/update-guide/vulnerability/${v.CveId}`;
     if (v.VulnerabilityDescription) {
         return `<td class="evidence-cell">` +
             `<a href="${cveUrl}" target="_blank" class="evidence-indicator cve-link">${escapeHtml(v.CveId)}</a>` +
