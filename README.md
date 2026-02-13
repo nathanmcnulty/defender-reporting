@@ -1,6 +1,8 @@
 # Defender Vulnerability Reporting Dashboard
 
-<img width="3246" height="1953" alt="image" src="https://github.com/user-attachments/assets/9ef016fb-262f-476b-9d68-1fd81d21a9aa" />
+<img width="2785" height="1640" alt="image" src="https://github.com/user-attachments/assets/cc006078-530a-4587-924b-a94a9549a666" />
+
+
 <br><br>
 
 I wanted to practice a bit of AI coding to build a dashboard that did not have a dependency on Power BI or other tools. The concept was simple - export vulnerability data from the Defender for Endpoint APIs, then use PowerShell to create an HTML report from the data.
