@@ -1266,22 +1266,14 @@ function buildRemediationHtml(v) {
 // =============================================================================
 
 /**
- * Render the main vulnerability chart
+ * Render the main vulnerability chart with custom styling
  */
 function renderChart() {
-    const ctx = document.getElementById('vulnerabilityChart');
-    if (!ctx) {
-        console.error('Canvas element not found');
-        return;
-    }
+    const canvas = document.getElementById('vulnerabilityChart');
+    if (!canvas) return;
     
-    const context = ctx.getContext('2d');
-    if (!context) {
-        console.error('Could not get 2D context');
-        return;
-    }
-
-    // Get date range from filters
+    const context = canvas.getContext('2d');
+    
     const startDate = document.getElementById('filterStartDate').value;
     const endDate = document.getElementById('filterEndDate').value;
     
@@ -1345,11 +1337,19 @@ function renderChart() {
         });
     }
     
-    // Build start/end events for sweep-line algorithm: O(N) instead of O(D×N)
+    filteredData = candidates;
+    
+    // Build start/end events for sweep-line algorithm
     const events = new Map();
     candidates.forEach(v => {
         const sd = v._firstSeenDate || v.FirstSeenTimestamp.split(' ')[0];
-        const ed = nextDay(v._lastSeenDate || v.LastSeenTimestamp.split(' ')[0]);
+        let ed = nextDay(v._lastSeenDate || v.LastSeenTimestamp.split(' ')[0]);
+        
+        // Data validation: ensure end date is after start date
+        if (ed <= sd) {
+            ed = nextDay(sd);
+        }
+        
         if (!events.has(sd)) events.set(sd, { starts: [], ends: [] });
         events.get(sd).starts.push(v);
         if (!events.has(ed)) events.set(ed, { starts: [], ends: [] });
@@ -1368,9 +1368,9 @@ function renderChart() {
         deviceActive.set(v.DeviceName, (deviceActive.get(v.DeviceName) || 0) + 1);
     };
     const processEnd = (v) => {
-        sweepTotal--;
+        if (sweepTotal > 0) sweepTotal--;
         const sev = v.VulnerabilitySeverityLevel;
-        if (sweepSeverity[sev] !== undefined) sweepSeverity[sev]--;
+        if (sweepSeverity[sev] !== undefined && sweepSeverity[sev] > 0) sweepSeverity[sev]--;
         const dc = deviceActive.get(v.DeviceName);
         if (dc <= 1) deviceActive.delete(v.DeviceName);
         else deviceActive.set(v.DeviceName, dc - 1);
@@ -1433,46 +1433,61 @@ function renderChart() {
                         label: 'Critical',
                         data: severityCounts.Critical,
                         borderColor: '#d13438',
-                        backgroundColor: 'rgba(209, 52, 56, 0.1)',
+                        backgroundColor: 'rgba(209, 52, 56, 0.3)',
                         tension: 0.3,
                         yAxisID: 'y',
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'High',
                         data: severityCounts.High,
                         borderColor: '#ff6b35',
-                        backgroundColor: 'rgba(255, 107, 53, 0.1)',
+                        backgroundColor: 'rgba(255, 107, 53, 0.3)',
                         tension: 0.3,
                         yAxisID: 'y',
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'Medium',
                         data: severityCounts.Medium,
                         borderColor: '#ffa500',
-                        backgroundColor: 'rgba(255, 165, 0, 0.1)',
+                        backgroundColor: 'rgba(255, 165, 0, 0.3)',
                         tension: 0.3,
                         yAxisID: 'y',
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'Low',
                         data: severityCounts.Low,
                         borderColor: '#4caf50',
-                        backgroundColor: 'rgba(76, 175, 80, 0.1)',
+                        backgroundColor: 'rgba(76, 175, 80, 0.3)',
                         tension: 0.3,
                         yAxisID: 'y',
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'Total',
                         data: totalCounts,
                         borderColor: '#9c27b0',
-                        backgroundColor: 'rgba(156, 39, 176, 0.1)',
+                        backgroundColor: 'rgba(156, 39, 176, 0.3)',
                         tension: 0.3,
                         yAxisID: 'y',
                         borderWidth: 3,
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex),
                         hidden: true
                     },
@@ -1480,11 +1495,13 @@ function renderChart() {
                         label: 'Devices',
                         data: deviceCounts,
                         borderColor: '#000000',
-                        backgroundColor: 'rgba(0, 0, 0, 0.1)',
+                        backgroundColor: 'rgba(0, 0, 0, 0.2)',
                         tension: 0.3,
                         yAxisID: 'y1',
                         borderWidth: 2,
-                        pointRadius: 3,
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex)
                     }
                 ]
@@ -1510,11 +1527,12 @@ function renderChart() {
                         intersect: false,
                         callbacks: {
                             footer: function(tooltipItems) {
-                                let total = 0;
-                                tooltipItems.forEach(item => {
-                                    total += item.parsed.y;
-                                });
-                                return 'Total: ' + total;
+                                const dateIndex = tooltipItems[0].dataIndex;
+                                const date = sortedDates[dateIndex];
+                                if (cutoffIndex !== -1 && dateIndex >= cutoffIndex) {
+                                    return '\n⚠ Projected data (no recent scans)';
+                                }
+                                return '';
                             }
                         }
                     }
@@ -1522,9 +1540,7 @@ function renderChart() {
                 scales: {
                     y: {
                         beginAtZero: true,
-                        ticks: {
-                            stepSize: 1
-                        },
+                        stacked: false,
                         title: {
                             display: true,
                             text: 'Vulnerabilities'
@@ -1533,9 +1549,6 @@ function renderChart() {
                     },
                     y1: {
                         beginAtZero: true,
-                        ticks: {
-                            stepSize: 1
-                        },
                         title: {
                             display: true,
                             text: 'Devices'
@@ -1548,9 +1561,8 @@ function renderChart() {
                 }
             }
         });
-        console.log('Chart rendered successfully');
     } catch (error) {
-        console.error('Error creating chart:', error);
+        console.error('Error creating vulnerability chart:', error);
     }
 }
 
@@ -1729,11 +1741,12 @@ function sortTable(columnIndex) {
 // =============================================================================
 
 /**
- * Render the remediation activity chart
+ * Render remediation chart with custom styling
  */
 function renderRemediationChart() {
     const canvas = document.getElementById('remediationChart');
     if (!canvas) return;
+    
     const context = canvas.getContext('2d');
     
     const startDate = document.getElementById('filterStartDate').value;
@@ -1823,46 +1836,61 @@ function renderRemediationChart() {
                         label: 'Critical',
                         data: severityCounts.Critical,
                         borderColor: '#d13438',
-                        backgroundColor: 'rgba(209, 52, 56, 0.1)',
+                        backgroundColor: 'rgba(209, 52, 56, 0.3)',
                         tension: 0.3,
                         yAxisID: 'y',
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'High',
                         data: severityCounts.High,
                         borderColor: '#ff6b35',
-                        backgroundColor: 'rgba(255, 107, 53, 0.1)',
+                        backgroundColor: 'rgba(255, 107, 53, 0.3)',
                         tension: 0.3,
                         yAxisID: 'y',
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'Medium',
                         data: severityCounts.Medium,
                         borderColor: '#ffa500',
-                        backgroundColor: 'rgba(255, 165, 0, 0.1)',
+                        backgroundColor: 'rgba(255, 165, 0, 0.3)',
                         tension: 0.3,
                         yAxisID: 'y',
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'Low',
                         data: severityCounts.Low,
                         borderColor: '#4caf50',
-                        backgroundColor: 'rgba(76, 175, 80, 0.1)',
+                        backgroundColor: 'rgba(76, 175, 80, 0.3)',
                         tension: 0.3,
                         yAxisID: 'y',
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'Total Remediations',
                         data: totalRemediationCounts,
                         borderColor: '#9c27b0',
-                        backgroundColor: 'rgba(156, 39, 176, 0.1)',
+                        backgroundColor: 'rgba(156, 39, 176, 0.3)',
                         tension: 0.3,
                         yAxisID: 'y',
                         borderWidth: 3,
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex),
                         hidden: true
                     },
@@ -1870,11 +1898,13 @@ function renderRemediationChart() {
                         label: 'Devices',
                         data: deviceCounts,
                         borderColor: '#000000',
-                        backgroundColor: 'rgba(0, 0, 0, 0.1)',
+                        backgroundColor: 'rgba(0, 0, 0, 0.2)',
                         tension: 0.3,
                         yAxisID: 'y1',
                         borderWidth: 2,
-                        pointRadius: 3,
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex)
                     }
                 ]
@@ -1903,9 +1933,7 @@ function renderRemediationChart() {
                 scales: {
                     y: {
                         beginAtZero: true,
-                        ticks: {
-                            stepSize: 1
-                        },
+                        stacked: false,
                         title: {
                             display: true,
                             text: 'Remediations'
@@ -1914,9 +1942,6 @@ function renderRemediationChart() {
                     },
                     y1: {
                         beginAtZero: true,
-                        ticks: {
-                            stepSize: 1
-                        },
                         title: {
                             display: true,
                             text: 'Devices'
@@ -2093,9 +2118,13 @@ function sortRemediationDetailsTable(columnIndex) {
 /**
  * Render the impact analysis chart
  */
+/**
+ * Render impact chart with custom styling
+ */
 function renderImpactChart() {
     const canvas = document.getElementById('impactChart');
     if (!canvas) return;
+    
     const context = canvas.getContext('2d');
     
     const startDate = document.getElementById('filterStartDate').value;
@@ -2171,50 +2200,59 @@ function renderImpactChart() {
     let lastActualCurrentSeverity = { Critical: 0, High: 0, Medium: 0, Low: 0 };
     let lastActualProjectedSeverity = { Critical: 0, High: 0, Medium: 0, Low: 0 };
     
-    // Build start/end events for sweep-line: O(F) instead of O(D×F)
+    // Build start/end events for sweep-line
     const impactEvents = new Map();
+    
     filteredData.forEach(v => {
+        const isTop25 = top25VulnIds.has(v._index);
         const sd = v._firstSeenDate || v.FirstSeenTimestamp.split(' ')[0];
-        const ed = nextDay(v._lastSeenDate || v.LastSeenTimestamp.split(' ')[0]);
-        if (!impactEvents.has(sd)) impactEvents.set(sd, { starts: [], ends: [] });
+        let ed = nextDay(v._lastSeenDate || v.LastSeenTimestamp.split(' ')[0]);
+        
+        // Data validation: ensure end date is after start date
+        if (ed <= sd) {
+            ed = nextDay(sd);
+        }
+        
+        if (!impactEvents.has(sd)) impactEvents.set(sd, { starts: [], ends: [], isTop25Starts: new Set(), isTop25Ends: new Set() });
         impactEvents.get(sd).starts.push(v);
-        if (!impactEvents.has(ed)) impactEvents.set(ed, { starts: [], ends: [] });
+        if (isTop25) impactEvents.get(sd).isTop25Starts.add(v._index);
+        if (!impactEvents.has(ed)) impactEvents.set(ed, { starts: [], ends: [], isTop25Starts: new Set(), isTop25Ends: new Set() });
         impactEvents.get(ed).ends.push(v);
+        if (isTop25) impactEvents.get(ed).isTop25Ends.add(v._index);
     });
     
-    // Running sweep state (current = all, projected = excluding top 25)
     let sweepCurrentTotal = 0;
     let sweepProjectedTotal = 0;
-    const sweepCurrentSev = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-    const sweepProjectedSev = { Critical: 0, High: 0, Medium: 0, Low: 0 };
+    let sweepCurrentSev = { Critical: 0, High: 0, Medium: 0, Low: 0 };
+    let sweepProjectedSev = { Critical: 0, High: 0, Medium: 0, Low: 0 };
     
-    const processImpactStart = (v) => {
-        const sev = v.VulnerabilitySeverityLevel;
+    const processImpactStart = (v, isTop25) => {
         sweepCurrentTotal++;
+        const sev = v.VulnerabilitySeverityLevel;
         if (sweepCurrentSev[sev] !== undefined) sweepCurrentSev[sev]++;
-        if (!top25VulnIds.has(v._index)) {
+        if (!isTop25) {
             sweepProjectedTotal++;
             if (sweepProjectedSev[sev] !== undefined) sweepProjectedSev[sev]++;
         }
     };
-    const processImpactEnd = (v) => {
+    
+    const processImpactEnd = (v, isTop25) => {
+        if (sweepCurrentTotal > 0) sweepCurrentTotal--;
         const sev = v.VulnerabilitySeverityLevel;
-        sweepCurrentTotal--;
-        if (sweepCurrentSev[sev] !== undefined) sweepCurrentSev[sev]--;
-        if (!top25VulnIds.has(v._index)) {
-            sweepProjectedTotal--;
-            if (sweepProjectedSev[sev] !== undefined) sweepProjectedSev[sev]--;
+        if (sweepCurrentSev[sev] !== undefined && sweepCurrentSev[sev] > 0) sweepCurrentSev[sev]--;
+        if (!isTop25) {
+            if (sweepProjectedTotal > 0) sweepProjectedTotal--;
+            if (sweepProjectedSev[sev] !== undefined && sweepProjectedSev[sev] > 0) sweepProjectedSev[sev]--;
         }
     };
     
-    // Process events before the visible date range to establish initial state
     const impactRangeStart = sortedDates[0];
     const allImpactDates = [...impactEvents.keys()].sort();
     for (const eventDate of allImpactDates) {
         if (eventDate >= impactRangeStart) break;
         const ev = impactEvents.get(eventDate);
-        ev.starts.forEach(processImpactStart);
-        ev.ends.forEach(processImpactEnd);
+        ev.starts.forEach(v => processImpactStart(v, ev.isTop25Starts.has(v._index)));
+        ev.ends.forEach(v => processImpactEnd(v, ev.isTop25Ends.has(v._index)));
     }
     
     // Sweep through visible dates
@@ -2235,8 +2273,8 @@ function renderImpactChart() {
         
         const ev = impactEvents.get(date);
         if (ev) {
-            ev.starts.forEach(processImpactStart);
-            ev.ends.forEach(processImpactEnd);
+            ev.starts.forEach(v => processImpactStart(v, ev.isTop25Starts.has(v._index)));
+            ev.ends.forEach(v => processImpactEnd(v, ev.isTop25Ends.has(v._index)));
         }
         
         currentTotalCounts.push(sweepCurrentTotal);
@@ -2273,8 +2311,11 @@ function renderImpactChart() {
                         label: 'Current - Critical',
                         data: currentSeverityCounts.Critical,
                         borderColor: '#d13438',
-                        backgroundColor: 'rgba(209, 52, 56, 0.1)',
+                        backgroundColor: 'rgba(209, 52, 56, 0.3)',
                         tension: 0.3,
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         borderWidth: 2,
                         segment: createSegmentStyle(cutoffIndex)
                     },
@@ -2282,8 +2323,11 @@ function renderImpactChart() {
                         label: 'Current - High',
                         data: currentSeverityCounts.High,
                         borderColor: '#ff6b35',
-                        backgroundColor: 'rgba(255, 107, 53, 0.1)',
+                        backgroundColor: 'rgba(255, 107, 53, 0.3)',
                         tension: 0.3,
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         borderWidth: 2,
                         segment: createSegmentStyle(cutoffIndex)
                     },
@@ -2291,8 +2335,11 @@ function renderImpactChart() {
                         label: 'Current - Medium',
                         data: currentSeverityCounts.Medium,
                         borderColor: '#ffa500',
-                        backgroundColor: 'rgba(255, 165, 0, 0.1)',
+                        backgroundColor: 'rgba(255, 165, 0, 0.3)',
                         tension: 0.3,
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         borderWidth: 2,
                         segment: createSegmentStyle(cutoffIndex)
                     },
@@ -2300,8 +2347,11 @@ function renderImpactChart() {
                         label: 'Current - Low',
                         data: currentSeverityCounts.Low,
                         borderColor: '#4caf50',
-                        backgroundColor: 'rgba(76, 175, 80, 0.1)',
+                        backgroundColor: 'rgba(76, 175, 80, 0.3)',
                         tension: 0.3,
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         borderWidth: 2,
                         segment: createSegmentStyle(cutoffIndex)
                     },
@@ -2309,60 +2359,78 @@ function renderImpactChart() {
                         label: 'Current Total',
                         data: currentTotalCounts,
                         borderColor: '#9c27b0',
-                        backgroundColor: 'rgba(156, 39, 176, 0.1)',
+                        backgroundColor: 'rgba(156, 39, 176, 0.3)',
                         tension: 0.3,
                         borderWidth: 3,
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex),
                         hidden: true
                     },
                     {
                         label: 'After Top 25 - Critical',
                         data: projectedSeverityCounts.Critical,
-                        borderColor: '#d13438',
-                        backgroundColor: 'rgba(209, 52, 56, 0.05)',
+                        borderColor: '#ff9999',
+                        backgroundColor: 'rgba(255, 153, 153, 0.2)',
                         tension: 0.3,
-                        borderWidth: 1,
-                        borderDash: [3, 3],
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
+                        borderWidth: 2,
+                        borderDash: [5, 5],
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'After Top 25 - High',
                         data: projectedSeverityCounts.High,
-                        borderColor: '#ff6b35',
-                        backgroundColor: 'rgba(255, 107, 53, 0.05)',
+                        borderColor: '#ffb380',
+                        backgroundColor: 'rgba(255, 179, 128, 0.2)',
                         tension: 0.3,
-                        borderWidth: 1,
-                        borderDash: [3, 3],
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
+                        borderWidth: 2,
+                        borderDash: [5, 5],
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'After Top 25 - Medium',
                         data: projectedSeverityCounts.Medium,
-                        borderColor: '#ffa500',
-                        backgroundColor: 'rgba(255, 165, 0, 0.05)',
+                        borderColor: '#ffcc66',
+                        backgroundColor: 'rgba(255, 204, 102, 0.2)',
                         tension: 0.3,
-                        borderWidth: 1,
-                        borderDash: [3, 3],
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
+                        borderWidth: 2,
+                        borderDash: [5, 5],
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'After Top 25 - Low',
                         data: projectedSeverityCounts.Low,
-                        borderColor: '#4caf50',
-                        backgroundColor: 'rgba(76, 175, 80, 0.05)',
+                        borderColor: '#90ee90',
+                        backgroundColor: 'rgba(144, 238, 144, 0.2)',
                         tension: 0.3,
-                        borderWidth: 1,
-                        borderDash: [3, 3],
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
+                        borderWidth: 2,
+                        borderDash: [5, 5],
                         segment: createSegmentStyle(cutoffIndex)
                     },
                     {
                         label: 'After Top 25 Total',
                         data: projectedTotalCounts,
-                        borderColor: '#9c27b0',
-                        backgroundColor: 'rgba(156, 39, 176, 0.1)',
+                        borderColor: '#d9a3ff',
+                        backgroundColor: 'rgba(217, 163, 255, 0.2)',
                         tension: 0.3,
                         borderWidth: 3,
-                        borderDash: [3, 3],
+                        borderDash: [5, 5],
+                        fill: true,
+                        pointRadius: 0,
+                        pointHoverRadius: 6,
                         segment: createSegmentStyle(cutoffIndex),
                         hidden: true
                     }
@@ -2386,37 +2454,13 @@ function renderImpactChart() {
                     },
                     tooltip: {
                         mode: 'index',
-                        intersect: false,
-                        callbacks: {
-                            footer: function(tooltipItems) {
-                                // Find Current Total and After Top 25 Total
-                                let currentTotal = 0;
-                                let projectedTotal = 0;
-                                
-                                tooltipItems.forEach(item => {
-                                    if (item.dataset.label === 'Current Total') {
-                                        currentTotal = item.parsed.y;
-                                    } else if (item.dataset.label === 'After Top 25 Total') {
-                                        projectedTotal = item.parsed.y;
-                                    }
-                                });
-                                
-                                if (currentTotal > 0) {
-                                    const reduction = currentTotal - projectedTotal;
-                                    const percent = ((reduction / currentTotal) * 100).toFixed(1);
-                                    return `Reduction: ${reduction} (${percent}%)`;
-                                }
-                                return '';
-                            }
-                        }
+                        intersect: false
                     }
                 },
                 scales: {
                     y: {
                         beginAtZero: true,
-                        ticks: {
-                            stepSize: 1
-                        },
+                        stacked: false,
                         title: {
                             display: true,
                             text: 'Total Vulnerabilities'
@@ -2429,7 +2473,6 @@ function renderImpactChart() {
         console.error('Error creating impact chart:', error);
     }
     
-    // Store top25 data for table rendering
     window.top25RemediationsData = top25;
 }
 
@@ -2594,6 +2637,7 @@ function sortImpactAnalysisTable(columnIndex) {
  */
 function initEvidenceTooltips() {
     document.addEventListener('mouseenter', function(e) {
+        if (!e.target || !e.target.closest) return;
         const cell = e.target.closest('.evidence-cell');
         if (!cell) return;
         
@@ -2634,6 +2678,7 @@ function initEvidenceTooltips() {
     }, true);
     
     document.addEventListener('mouseleave', function(e) {
+        if (!e.target || !e.target.closest) return;
         const cell = e.target.closest('.evidence-cell');
         if (!cell) return;
         
@@ -2645,6 +2690,7 @@ function initEvidenceTooltips() {
 
     // Click to pin/unpin tooltip (allows text selection & copying)
     document.addEventListener('click', function(e) {
+        if (!e.target || !e.target.closest) return;
         const cell = e.target.closest('.evidence-cell');
         if (cell) {
             const tooltip = cell.querySelector('.evidence-tooltip');
