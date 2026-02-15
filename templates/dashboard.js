@@ -203,6 +203,35 @@ self.onmessage = function(e) {
         var updateId = updateObj ? updateObj.id : null;
         var updateUrl = updateObj ? updateObj.url : null;
 
+        // Resolve version from lookup
+        var version = v[3] >= 0 ? lookups.versions[v[3]] : null;
+        // Resolve dates from lookup
+        var firstSeen = v[4] >= 0 ? lookups.dates[v[4]] : '';
+        var lastSeen = v[5] >= 0 ? lookups.dates[v[5]] : '';
+        // Resolve evidence paths from lookup indices
+        var diskPaths = [];
+        if (v[8] && v[8].length > 0) {
+            for (var di = 0; di < v[8].length; di++) {
+                diskPaths.push(lookups.diskPaths[v[8][di]]);
+            }
+        }
+        var regPathsArr = [];
+        if (v[9] && v[9].length > 0) {
+            for (var ri = 0; ri < v[9].length; ri++) {
+                regPathsArr.push(lookups.regPaths[v[9][ri]]);
+            }
+        }
+        // Resolve batch title from lookup
+        var batchTitle = cve.bt >= 0 ? lookups.batchTitles[cve.bt] : null;
+        // Resolve affected software from lookup indices
+        var affSoftware = null;
+        if (cve.as && cve.as.length > 0) {
+            affSoftware = [];
+            for (var ai = 0; ai < cve.as.length; ai++) {
+                affSoftware.push(lookups.affSoftware[cve.as[ai]]);
+            }
+        }
+
         result[i] = {
             DeviceId: device.id,
             DeviceName: device.n,
@@ -216,25 +245,25 @@ self.onmessage = function(e) {
             VulnerabilitySeverityLevel: lookups.severities[cve.sv],
             ExploitabilityLevel: cve.ex >= 0 ? lookups.exploitLevels[cve.ex] : null,
             CveBatchUrl: cve.u,
-            CveBatchTitle: cve.bt,
+            CveBatchTitle: batchTitle,
             PublishedDate: cve.pd || null,
             VulnerabilityDescription: cve.desc || null,
             EpssScore: cve.ep != null ? cve.ep : null,
-            AffectedSoftware: cve.as || null,
+            AffectedSoftware: affSoftware,
             SoftwareVendor: vendorName,
             SoftwareName: softwareName,
-            SoftwareVersion: v[3],
+            SoftwareVersion: version,
             RecommendationReference: software.r,
-            _firstSeenDate: v[4],
-            _lastSeenDate: v[5],
-            FirstSeenTimestamp: v[4],
-            LastSeenTimestamp: v[5],
+            _firstSeenDate: firstSeen,
+            _lastSeenDate: lastSeen,
+            FirstSeenTimestamp: firstSeen,
+            LastSeenTimestamp: lastSeen,
             SecurityUpdateAvailable: v[6] === 1,
             RecommendedSecurityUpdate: updateName,
             RecommendedSecurityUpdateId: updateId || null,
             RecommendedSecurityUpdateUrl: updateUrl || null,
-            DiskPaths: v[8] || [],
-            RegistryPaths: v[9] || [],
+            DiskPaths: diskPaths,
+            RegistryPaths: regPathsArr,
             _remediationKey: updateName
                 ? vendorName + ' ' + softwareName + ' - ' + updateName
                 : vendorName + ' ' + softwareName,
@@ -418,6 +447,19 @@ function denormalizeVuln(v, index) {
         ? device.t.map(idx => lookups.tags[idx])
         : [];
     
+    // Resolve version from lookup
+    const version = v[3] >= 0 ? lookups.versions[v[3]] : null;
+    // Resolve dates from lookup
+    const firstSeen = v[4] >= 0 ? lookups.dates[v[4]] : '';
+    const lastSeen = v[5] >= 0 ? lookups.dates[v[5]] : '';
+    // Resolve evidence paths from lookup indices
+    const diskPaths = v[8] && v[8].length > 0 ? v[8].map(idx => lookups.diskPaths[idx]) : [];
+    const regPaths = v[9] && v[9].length > 0 ? v[9].map(idx => lookups.regPaths[idx]) : [];
+    // Resolve batch title from lookup
+    const batchTitle = cve.bt >= 0 ? lookups.batchTitles[cve.bt] : null;
+    // Resolve affected software from lookup indices
+    const affSoftware = cve.as && cve.as.length > 0 ? cve.as.map(idx => lookups.affSoftware[idx]) : null;
+    
     return {
         // Device info
         DeviceId: device.id,
@@ -434,23 +476,23 @@ function denormalizeVuln(v, index) {
         VulnerabilitySeverityLevel: lookups.severities[cve.sv],
         ExploitabilityLevel: cve.ex >= 0 ? lookups.exploitLevels[cve.ex] : null,
         CveBatchUrl: cve.u,
-        CveBatchTitle: cve.bt,
+        CveBatchTitle: batchTitle,
         PublishedDate: cve.pd || null,
         VulnerabilityDescription: cve.desc || null,
         EpssScore: cve.ep ?? null,
-        AffectedSoftware: cve.as || null,
+        AffectedSoftware: affSoftware,
         
         // Software info
         SoftwareVendor: lookups.vendors[software.v],
         SoftwareName: software.n,
-        SoftwareVersion: v[3],
+        SoftwareVersion: version,
         RecommendationReference: software.r,
         
-        // Timestamps (already in YYYY-MM-DD format)
-        _firstSeenDate: v[4],
-        _lastSeenDate: v[5],
-        FirstSeenTimestamp: v[4],
-        LastSeenTimestamp: v[5],
+        // Timestamps (resolved from lookup)
+        _firstSeenDate: firstSeen,
+        _lastSeenDate: lastSeen,
+        FirstSeenTimestamp: firstSeen,
+        LastSeenTimestamp: lastSeen,
         
         // Update info
         SecurityUpdateAvailable: v[6] === 1,
@@ -458,9 +500,9 @@ function denormalizeVuln(v, index) {
         RecommendedSecurityUpdateId: v[7] >= 0 && lookups.updates[v[7]].id ? lookups.updates[v[7]].id : null,
         RecommendedSecurityUpdateUrl: v[7] >= 0 && lookups.updates[v[7]].url ? lookups.updates[v[7]].url : null,
         
-        // Evidence
-        DiskPaths: v[8] || [],
-        RegistryPaths: v[9] || [],
+        // Evidence (resolved from lookup)
+        DiskPaths: diskPaths,
+        RegistryPaths: regPaths,
         
         // Pre-computed fields
         _remediationKey: (() => {
