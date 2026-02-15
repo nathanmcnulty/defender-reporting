@@ -18,6 +18,8 @@ __CSS_CONTENT__
                     <option value="active-vulnerabilities">Active Vulnerabilities</option>
                     <option value="remediation-activity">Remediation Activity</option>
                     <option value="impact-analysis">Impact Analysis</option>
+                    <option value="devices-by-remediation">Devices by Remediation</option>
+                    <option value="remediations-by-device">Remediations by Device</option>
                 </select>
                 <button class="export-pdf-btn" onclick="exportToPDF()">📄 Export to PDF</button>
             </div>
@@ -193,6 +195,41 @@ __CSS_CONTENT__
                 </table>
                 <div class="scroll-controls" id="impactAnalysisScrollControls">
                     <span id="impactAnalysisScrollInfo">Showing 0 of 0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Devices by Remediation Report Section -->
+        <div id="devices-by-remediation-section" class="report-section">
+            <div class="remediation-cards-container" id="devicesByRemediationContainer">
+                <div class="loading-message">Loading data...</div>
+            </div>
+            <div class="scroll-controls" id="devicesByRemediationScrollControls">
+                <span id="devicesByRemediationScrollInfo">Showing 0 of 0</span>
+            </div>
+        </div>
+
+        <!-- Remediations by Device Report Section -->
+        <div id="remediations-by-device-section" class="report-section">
+            <div class="table-container">
+                <table id="remediationsByDeviceTable">
+                    <thead>
+                        <tr>
+                            <th onclick="sortRemediationsByDeviceTable(0)">Device</th>
+                            <th onclick="sortRemediationsByDeviceTable(1)">IP Address</th>
+                            <th onclick="sortRemediationsByDeviceTable(2)">Device Group</th>
+                            <th onclick="sortRemediationsByDeviceTable(3)">Remediations</th>
+                            <th onclick="sortRemediationsByDeviceTable(4)">CVEs</th>
+                        </tr>
+                    </thead>
+                    <tbody id="remediationsByDeviceTableBody">
+                        <tr>
+                            <td colspan="5" class="loading">Loading data...</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div class="scroll-controls" id="remediationsByDeviceScrollControls">
+                    <span id="remediationsByDeviceScrollInfo">Showing 0 of 0</span>
                 </div>
             </div>
         </div>
