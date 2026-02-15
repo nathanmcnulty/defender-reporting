@@ -403,7 +403,7 @@ class VirtualModalTable {
 
         // Top spacer
         const topH = startIdx * this.rowHeight;
-        this.topSpacer.innerHTML = `<td colspan="99" style="height:${topH}px;padding:0;border:0;"></td>`;
+        this.topSpacer.innerHTML = `<td colspan="99" class="virtual-spacer-cell" style="height:${topH}px;"></td>`;
         fragment.appendChild(this.topSpacer);
 
         // Visible rows
@@ -413,7 +413,7 @@ class VirtualModalTable {
 
         // Bottom spacer
         const bottomH = (totalRows - endIdx) * this.rowHeight;
-        this.bottomSpacer.innerHTML = `<td colspan="99" style="height:${bottomH}px;padding:0;border:0;"></td>`;
+        this.bottomSpacer.innerHTML = `<td colspan="99" class="virtual-spacer-cell" style="height:${bottomH}px;"></td>`;
         fragment.appendChild(this.bottomSpacer);
 
         this.tbody.innerHTML = '';
@@ -2889,6 +2889,15 @@ function capitalizeFirst(str) {
 }
 
 /**
+ * Format CVE ID for compact badge display
+ * @param {string} cveId - Raw CVE ID (e.g., CVE-2025-1234)
+ * @returns {string} Display CVE ID without the CVE- prefix
+ */
+function formatCveDisplayId(cveId) {
+    return String(cveId || '').replace(/^CVE-/i, '');
+}
+
+/**
  * Generate tooltip HTML for CVE badge
  */
 function generateCveTooltipContent(cveDetail) {
@@ -3035,15 +3044,15 @@ function renderDevicesByRemediationTable() {
  * Generate tooltip content for severity badges showing CVE IDs
  */
 function generateSeverityTooltipContent(cveIds) {
-    if (!cveIds || cveIds.length === 0) return '<div style="padding: 10px; font-size: 13px;">No CVEs</div>';
+    if (!cveIds || cveIds.length === 0) return '<div class="severity-tooltip-empty">No CVEs</div>';
     
     // Sort CVE IDs alphabetically and filter out any undefined/null values
     const sortedCveIds = [...cveIds].filter(id => id).sort();
     
-    if (sortedCveIds.length === 0) return '<div style="padding: 10px; font-size: 13px;">No valid CVE IDs</div>';
+    if (sortedCveIds.length === 0) return '<div class="severity-tooltip-empty">No valid CVE IDs</div>';
     
     // Return simple comma-separated list
-    return `<div style="padding: 10px; font-size: 13px; max-width: 600px; word-wrap: break-word;">${sortedCveIds.join(', ')}</div>`;
+    return `<div class="severity-tooltip-content">${sortedCveIds.join(', ')}</div>`;
 }
 
 /**
@@ -3303,7 +3312,7 @@ function appendDevicesByRemediationCard(container, data, index) {
         
         cveBadgesSection = '<div class="cve-badges-section">';
         cveBadgesSection += '<div class="cve-badges-header">';
-        cveBadgesSection += '<h4>Exposed CVEs:</h4>';
+        cveBadgesSection += '<h4>Exposed CVEs</h4>';
         cveBadgesSection += `<div class="severity-badges">${severityBadges}</div>`;
         cveBadgesSection += '</div>';
         cveBadgesSection += '<div class="cve-badges-container">';
@@ -3312,7 +3321,7 @@ function appendDevicesByRemediationCard(container, data, index) {
             const severityClass = (cve.severity || 'Unknown').toLowerCase();
             
             // Remove CVE- prefix for cleaner display
-            const displayId = cve.id.replace(/^CVE-/i, '');
+            const displayId = formatCveDisplayId(cve.id);
             
             // Store tooltip content in global data store
             const tooltipId = `cve-${cve.id}`;
@@ -3361,7 +3370,7 @@ function appendDevicesByRemediationCard(container, data, index) {
         </div>
         ${cveBadgesSection}
         <div class="devices-header-row">
-            <h4>Vulnerable devices:</h4>
+            <h4>Vulnerable Devices</h4>
             <div class="remediation-stats">
                 <div class="stat-badges">
                     <span class="stat-badge">Devices: ${data.deviceCount}</span>
@@ -3683,12 +3692,12 @@ function appendRemediationsByDeviceCard(container, data, index) {
         </div>
         <div class="cve-badges-section">
             <div class="cve-badges-header">
-                <h4>Device Vulnerability Summary:</h4>
+                <h4>Device Vulnerability Summary</h4>
                 <div class="severity-badges">${deviceSeverityBadges}</div>
             </div>
         </div>
         <div class="devices-header-row">
-            <h4>Remediations needed:</h4>
+            <h4>Remediations Needed</h4>
             <div class="remediation-stats">
                 <div class="stat-badges">
                     <span class="stat-badge">Remediations: ${data.remediationCount}</span>
@@ -3926,13 +3935,33 @@ function buildDeviceBubbleHtml(v) {
  */
 function buildCveLinkHtml(v) {
     const cveUrl = v.CveBatchUrl || `https://msrc.microsoft.com/update-guide/vulnerability/${v.CveId}`;
-    if (v.VulnerabilityDescription) {
-        return `<td class="evidence-cell">` +
-            `<a href="${cveUrl}" target="_blank" class="evidence-indicator cve-link">${escapeHtml(v.CveId)}</a>` +
-            `<div class="evidence-tooltip cve-description-tooltip">${escapeHtml(v.VulnerabilityDescription)}</div>` +
-            `</td>`;
+    const displayId = formatCveDisplayId(v.CveId);
+    const severityClass = (v.VulnerabilitySeverityLevel || 'unknown').toLowerCase();
+    const tooltipId = `modal-cve-${++severityBadgeIdCounter}`;
+    const versions = new Set();
+    if (v.SoftwareVersion) {
+        versions.add(v.SoftwareVersion);
     }
-    return `<td class="evidence-cell"><a href="${cveUrl}" target="_blank" class="evidence-indicator cve-link">${escapeHtml(v.CveId)}</a></td>`;
+
+    cveTooltipData[tooltipId] = generateCveTooltipContent({
+        cve: v.CveId,
+        id: v.CveId,
+        softwareVendor: v.SoftwareVendor,
+        softwareName: v.SoftwareName,
+        versions: versions,
+        description: v.VulnerabilityDescription,
+        cvssScore: v.CvssScore,
+        severity: v.VulnerabilitySeverityLevel || 'Unknown',
+        publishedDate: v.PublishedDate,
+        firstSeen: v._firstSeenDate || v.FirstSeenTimestamp,
+        lastSeen: v._lastSeenDate || v.LastSeenTimestamp
+    });
+
+    if (cveUrl) {
+        return `<td><a href="${escapeHtml(cveUrl)}" target="_blank" rel="noopener noreferrer" class="cve-severity-badge ${severityClass}" data-tooltip-id="${tooltipId}">${escapeHtml(displayId)}</a></td>`;
+    }
+
+    return `<td><span class="cve-severity-badge ${severityClass}" data-tooltip-id="${tooltipId}">${escapeHtml(displayId)}</span></td>`;
 }
 
 /**
@@ -4053,7 +4082,7 @@ const VIRTUAL_SCROLL_THRESHOLD = 50;
 /**
  * Build a detail-row HTML string for showDetails CVE tables
  */
-function buildDetailRow(v) {
+function buildDetailRow(v, includeEvidenceColumn) {
     const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
     const publishedDisplay = formatDateYMD(v.PublishedDate);
@@ -4066,16 +4095,16 @@ function buildDetailRow(v) {
         '<td>' + v.CvssScore + '</td>' +
         '<td>' + epssDisplay + '</td>' +
         '<td>' + formatExploitLevel(v.ExploitabilityLevel) + '</td>' +
-        buildEvidenceHtml(v) +
-        '<td>' + publishedDisplay + '</td>' +
-        '<td>' + firstSeenDisplay + '</td>' +
+        (includeEvidenceColumn ? buildEvidenceHtml(v) : '') +
+        '<td class="modal-date-col">' + publishedDisplay + '</td>' +
+        '<td class="modal-date-col">' + firstSeenDisplay + '</td>' +
         '</tr>';
 }
 
 /**
  * Build a remediation-row HTML string for showRemediationDetails CVE tables
  */
-function buildRemediationRow(v) {
+function buildRemediationRow(v, includeEvidenceColumn) {
     const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
     const publishedDisplay = formatDateYMD(v.PublishedDate);
@@ -4087,10 +4116,26 @@ function buildRemediationRow(v) {
         '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
         '<td>' + v.CvssScore + '</td>' +
         '<td>' + epssDisplay + '</td>' +
-        buildEvidenceHtml(v) +
-        '<td>' + publishedDisplay + '</td>' +
-        '<td>' + firstSeenDisplay + '</td>' +
+        (includeEvidenceColumn ? buildEvidenceHtml(v) : '') +
+        '<td class="modal-date-col">' + publishedDisplay + '</td>' +
+        '<td class="modal-date-col">' + firstSeenDisplay + '</td>' +
         '</tr>';
+}
+
+/**
+ * Check whether any vulnerability in a list has evidence paths
+ * @param {Array} vulnerabilities - Array of vulnerability objects
+ * @returns {boolean} True when evidence exists
+ */
+function hasAnyEvidence(vulnerabilities) {
+    for (let i = 0; i < vulnerabilities.length; i++) {
+        const vulnerability = vulnerabilities[i];
+        if ((vulnerability.DiskPaths && vulnerability.DiskPaths.length > 0) ||
+            (vulnerability.RegistryPaths && vulnerability.RegistryPaths.length > 0)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /**
@@ -4127,9 +4172,14 @@ function showDetails(remediation, details) {
     modal.classList.add('active');
     modal.setAttribute('aria-hidden', 'false');
 
+    if (!document.getElementById('cve-global-tooltip')) {
+        initCveTooltips();
+    }
+
     // Defer heavy work so the modal + loading indicator render first
     requestAnimationFrame(() => {
         const groups = groupDevicesByCveSignature(details);
+        const includeEvidenceColumn = hasAnyEvidence(details);
         const totalDevices = new Set(details.map(d => d.DeviceId || d.DeviceName)).size;
         const totalCves = new Set(details.map(d => d.CveId)).size;
 
@@ -4142,13 +4192,13 @@ function showDetails(remediation, details) {
         const updateUrl = details.find(d => d.RecommendedSecurityUpdateUrl);
         if (updateUrl) {
             const updateText = buildRemediationString(updateUrl);
-            parts.push('<div style="text-align:right;margin-bottom:var(--spacing-sm);">');
-            parts.push('<strong>Update details:</strong><br>');
-            parts.push('<a href="' + escapeHtml(updateUrl.RecommendedSecurityUpdateUrl) + '" target="_blank" rel="noopener noreferrer" style="color:#0078d4;">&#x1F517; ' + escapeHtml(updateText) + '</a>');
+            parts.push('<div class="modal-update-link-row">');
+            parts.push('<strong>Update Details:</strong><br>');
+            parts.push('<a class="modal-update-link" href="' + escapeHtml(updateUrl.RecommendedSecurityUpdateUrl) + '" target="_blank" rel="noopener noreferrer">&#x1F517; ' + escapeHtml(updateText) + '</a>');
             parts.push('</div>');
         }
 
-        parts.push('<p style="color:var(--color-text-muted);margin-bottom:var(--spacing-md);">' +
+        parts.push('<p class="modal-summary-text">' +
             totalDevices + ' device' + (totalDevices !== 1 ? 's' : '') + ', ' +
             totalCves + ' CVE' + (totalCves !== 1 ? 's' : '') + '</p>');
 
@@ -4165,18 +4215,20 @@ function showDetails(remediation, details) {
             parts.push('</div>');
 
             // CVE table with empty tbody (rows added via virtual scroll)
-            parts.push('<table class="detail-table"><thead><tr>',
-                '<th>CVE ID</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>Exploitability</th><th>Evidence</th><th>Published</th><th>First Seen</th>',
-                '</tr></thead><tbody data-vt-id="', vtId, '"></tbody></table>');
+            parts.push('<div class="modal-table-container"><table class="detail-table"><thead><tr>',
+                '<th>CVE ID</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>Exploitability</th>' +
+                (includeEvidenceColumn ? '<th>Evidence</th>' : '') +
+                '<th class="modal-date-col">Published</th><th class="modal-date-col">First Seen</th>',
+                '</tr></thead><tbody data-vt-id="', vtId, '"></tbody></table></div>');
 
             // Build row data for this group
             const rows = new Array(group.vulns.length);
             for (let vi = 0; vi < group.vulns.length; vi++) {
-                rows[vi] = buildDetailRow(group.vulns[vi]);
+                rows[vi] = buildDetailRow(group.vulns[vi], includeEvidenceColumn);
             }
             vtRowData[vtId] = rows;
 
-            if (gi < groups.length - 1) parts.push('<hr style="margin:var(--spacing-lg) 0;border-color:var(--color-border);">');
+            if (gi < groups.length - 1) parts.push('<hr class="modal-section-divider">');
         }
 
         modalBody.innerHTML = parts.join('');
@@ -4199,17 +4251,22 @@ function showRemediationDetails(data) {
     modal.classList.add('active');
     modal.setAttribute('aria-hidden', 'false');
 
+    if (!document.getElementById('cve-global-tooltip')) {
+        initCveTooltips();
+    }
+
     requestAnimationFrame(() => {
         const groups = groupDevicesByCveSignature(data.details);
+        const includeEvidenceColumn = hasAnyEvidence(data.details);
         const vtRowData = {};
 
         const parts = [];
         parts.push('<h3>Summary</h3>',
-            '<table class="detail-table"><tr>',
+            '<div class="modal-table-container"><table class="detail-table"><tr>',
             '<td><strong>Date:</strong> ', escapeHtml(data.date), '</td>',
             '<td><strong>Assets Remediated:</strong> ', String(data.devices.size), '</td>',
             '<td><strong>Vulnerabilities Remediated:</strong> ', String(data.vulnerabilities.size), '</td>',
-            '</tr></table><br>',
+            '</tr></table></div><br>',
             '<h3>Devices Patched</h3>');
 
         for (let gi = 0; gi < groups.length; gi++) {
@@ -4225,18 +4282,20 @@ function showRemediationDetails(data) {
             parts.push('</div>');
 
             // CVE table with empty tbody
-            parts.push('<table class="detail-table"><thead><tr>',
-                '<th>CVE ID</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>Evidence</th><th>Published</th><th>First Seen</th>',
-                '</tr></thead><tbody data-vt-id="', vtId, '"></tbody></table>');
+            parts.push('<div class="modal-table-container"><table class="detail-table"><thead><tr>',
+                '<th>CVE ID</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th>' +
+                (includeEvidenceColumn ? '<th>Evidence</th>' : '') +
+                '<th class="modal-date-col">Published</th><th class="modal-date-col">First Seen</th>',
+                '</tr></thead><tbody data-vt-id="', vtId, '"></tbody></table></div>');
 
             // Build row data
             const rows = new Array(group.vulns.length);
             for (let vi = 0; vi < group.vulns.length; vi++) {
-                rows[vi] = buildRemediationRow(group.vulns[vi]);
+                rows[vi] = buildRemediationRow(group.vulns[vi], includeEvidenceColumn);
             }
             vtRowData[vtId] = rows;
 
-            if (gi < groups.length - 1) parts.push('<hr style="margin:var(--spacing-lg) 0;border-color:var(--color-border);">');
+            if (gi < groups.length - 1) parts.push('<hr class="modal-section-divider">');
         }
 
         modalBody.innerHTML = parts.join('');
@@ -4255,6 +4314,10 @@ function showImpactAnalysisDetails(item) {
     const modalBody = document.getElementById('modalBody');
     
     modalTitle.textContent = `Remediation Details: ${item.name}`;
+
+    if (!document.getElementById('cve-global-tooltip')) {
+        initCveTooltips();
+    }
     
     // Group vulnerabilities by device (using DeviceId as key)
     const deviceMap = {};
@@ -4271,7 +4334,7 @@ function showImpactAnalysisDetails(item) {
     });
     
     let html = '<h3>Affected Devices</h3>';
-    html += '<table class="detail-table"><thead><tr>';
+    html += '<div class="modal-table-container"><table class="detail-table"><thead><tr>';
     html += '<th>Device Name</th><th>Device ID</th><th>CVE Count</th><th>CVE IDs</th>';
     html += '</tr></thead><tbody>';
     
@@ -4286,11 +4349,11 @@ function showImpactAnalysisDetails(item) {
             <td>${escapeHtml(device.name)}</td>
             <td title="${escapeHtml(device.id || '')}">${escapeHtml(deviceIdShort)}</td>
             <td>${device.cves.size}</td>
-            <td style="max-width: 500px; word-wrap: break-word;">${escapeHtml(cveList)}</td>
+            <td class="modal-cve-list-cell">${escapeHtml(cveList)}</td>
         </tr>`;
     });
     
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
     
     modalBody.innerHTML = html;
     modal.classList.add('active');
