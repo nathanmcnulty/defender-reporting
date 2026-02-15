@@ -33,6 +33,10 @@
     Export target for the generated dashboard. Default: BlobStorage
     Options: BlobStorage, SharePoint, StaticWebApp
 
+.PARAMETER IncludeDataQuality
+    If true, includes the Data Quality summary section in the generated dashboard.
+    Default: false
+
 .NOTES
     Author: Nathan McNulty
     Runtime: PowerShell 7.4 (Azure Automation - custom runtime environment)
@@ -59,7 +63,10 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateSet('BlobStorage', 'SharePoint', 'StaticWebApp')]
-    [string]$Export = 'BlobStorage'
+    [string]$Export = 'BlobStorage',
+
+    [Parameter(Mandatory = $false)]
+    [switch]$IncludeDataQuality
 )
 
 $ErrorActionPreference = 'Stop'
@@ -541,7 +548,8 @@ function Export-AdvancedHuntingData {
     $query = @"
 DeviceTvmSoftwareVulnerabilities
 | join kind=leftouter DeviceTvmSoftwareVulnerabilitiesKB on CveId
-| summarize arg_max(LastModifiedTime, PublishedDate, VulnerabilityDescription, IsExploitAvailable, EpssScore) by CveId
+| summarize arg_max(LastModifiedTime, PublishedDate, VulnerabilityDescription, IsExploitAvailable, EpssScore, AffectedSoftware) by CveId
+| project CveId, PublishedDate = format_datetime(PublishedDate, 'yyyy-MM-dd'), VulnerabilityDescription, IsExploitAvailable, EpssScore, AffectedSoftware, LastModifiedTime
 "@
 
     $body = @{ Query = $query } | ConvertTo-Json
@@ -693,9 +701,10 @@ function Read-AdvancedHuntingData {
                 if ($cveId -and -not $ahData.ContainsKey($cveId)) {
                     $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
                     $ahData[$cveId] = @{
-                        PublishedDate            = if ($pdRaw) { ($pdRaw.ToString() -split '[T ]')[0] } else { $null }
+                        PublishedDate            = Convert-ToYmdDate -DateValue $pdRaw
                         VulnerabilityDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
                         EpssScore                = $record.PSObject.Properties['EpssScore']?.Value
+                        AffectedSoftware         = $record.PSObject.Properties['AffectedSoftware']?.Value
                     }
                 }
             }
@@ -750,6 +759,48 @@ function Convert-CveUrl {
     return $Url
 }
 
+function Convert-ToYmdDate {
+    <#
+    .SYNOPSIS
+        Normalizes date/datetime values to YYYY-MM-DD.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$DateValue
+    )
+
+    if ($null -eq $DateValue) {
+        return $null
+    }
+
+    $raw = $DateValue.ToString().Trim()
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $null
+    }
+
+    if ($raw -match '^\d{4}-\d{2}-\d{2}$') {
+        return $raw
+    }
+
+    if ($raw -match '^(\d{1,2})/(\d{1,2})/(\d{4})') {
+        $month = [int]$Matches[1]
+        $day = [int]$Matches[2]
+        $year = [int]$Matches[3]
+        if ($month -ge 1 -and $month -le 12 -and $day -ge 1 -and $day -le 31) {
+            return ('{0:D4}-{1:D2}-{2:D2}' -f $year, $month, $day)
+        }
+    }
+
+    try {
+        return ([datetime]$raw).ToString('yyyy-MM-dd')
+    }
+    catch {
+        return $null
+    }
+}
+
 function ConvertTo-NormalizedData {
     <#
     .SYNOPSIS
@@ -784,6 +835,12 @@ function ConvertTo-NormalizedData {
         platforms     = [System.Collections.Generic.List[string]]::new()
         tags          = [System.Collections.Generic.List[string]]::new()
         updates       = [System.Collections.Generic.List[PSObject]]::new()
+        versions      = [System.Collections.Generic.List[string]]::new()
+        dates         = [System.Collections.Generic.List[string]]::new()
+        diskPaths     = [System.Collections.Generic.List[string]]::new()
+        regPaths      = [System.Collections.Generic.List[string]]::new()
+        affSoftware   = [System.Collections.Generic.List[string]]::new()
+        batchTitles   = [System.Collections.Generic.List[string]]::new()
         devices       = [System.Collections.Generic.List[PSObject]]::new()
         software      = [System.Collections.Generic.List[PSObject]]::new()
         cves          = [System.Collections.Generic.List[PSObject]]::new()
@@ -799,6 +856,12 @@ function ConvertTo-NormalizedData {
     $deviceIndex = @{}
     $softwareIndex = @{}
     $cveIndex = @{}
+    $versionIndex = @{}
+    $dateIndex = @{}
+    $diskPathIndex = @{}
+    $regPathIndex = @{}
+    $affSoftwareIndex = @{}
+    $batchTitleIndex = @{}
 
     function Get-OrCreateIndex {
         param($value, $list, $indexMap)
@@ -812,6 +875,7 @@ function ConvertTo-NormalizedData {
     }
 
     $vulnRecords = [System.Collections.Generic.List[PSObject]]::new()
+    $firstLastSwappedCount = 0
 
     foreach ($v in $Vulnerabilities) {
         $deviceId = $v.DeviceId
@@ -848,8 +912,8 @@ function ConvertTo-NormalizedData {
                     dv  = $machine.PSObject.Properties['deviceValue']?.Value
                     mb  = $machine.PSObject.Properties['managedBy']?.Value
                     aad = $machine.PSObject.Properties['isAadJoined']?.Value
-                    ls  = if ($machineLastSeen) { ($machineLastSeen -split 'T')[0] } else { $null }
-                    fs  = if ($machineFirstSeen) { ($machineFirstSeen -split 'T')[0] } else { $null }
+                    ls  = Convert-ToYmdDate -DateValue $machineLastSeen
+                    fs  = Convert-ToYmdDate -DateValue $machineFirstSeen
                 }
             }
 
@@ -897,12 +961,23 @@ function ConvertTo-NormalizedData {
             $publishedDate = $null
             $vulnDescription = $null
             $epssScore = $null
+            $affSoftwareIndices = $null
             if ($ahData) {
                 $pdRaw = $ahData.PublishedDate
-                $publishedDate = if ($pdRaw) { ($pdRaw -split 'T')[0] } else { $null }
+                $publishedDate = Convert-ToYmdDate -DateValue $pdRaw
                 $vulnDescription = $ahData.VulnerabilityDescription
                 $epssScore = $ahData.EpssScore
+                if ($ahData.AffectedSoftware -and $ahData.AffectedSoftware.Count -gt 0) {
+                    $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
+                    foreach ($sw in $ahData.AffectedSoftware) {
+                        $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
+                        if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
+                    }
+                }
             }
+
+            $btValue = $v.PSObject.Properties['CveBatchTitle']?.Value
+            $btIdx = Get-OrCreateIndex -value $btValue -list $lookups.batchTitles -indexMap $batchTitleIndex
 
             $cveIndex[$cveId] = $lookups.cves.Count
             $lookups.cves.Add([PSCustomObject]@{
@@ -911,10 +986,11 @@ function ConvertTo-NormalizedData {
                 sv   = $sevIdx
                 ex   = $expIdx
                 u    = Convert-CveUrl -Url $v.PSObject.Properties['CveBatchUrl']?.Value
-                bt   = $v.PSObject.Properties['CveBatchTitle']?.Value
+                bt   = $btIdx
                 pd   = $publishedDate
                 desc = $vulnDescription
                 ep   = $epssScore
+                as   = $affSoftwareIndices
             })
         }
         $cveIdx = $cveIndex[$cveId]
@@ -944,24 +1020,56 @@ function ConvertTo-NormalizedData {
 
         $firstSeenTs = $v.PSObject.Properties['FirstSeenTimestamp']?.Value
         $lastSeenTs = $v.PSObject.Properties['LastSeenTimestamp']?.Value
-        $firstSeen = if ($firstSeenTs) { ($firstSeenTs -split ' ')[0] } else { '' }
-        $lastSeen = if ($lastSeenTs) { ($lastSeenTs -split ' ')[0] } else { '' }
+        $firstSeen = Convert-ToYmdDate -DateValue $firstSeenTs
+        $lastSeen = Convert-ToYmdDate -DateValue $lastSeenTs
 
-        $diskPaths = $v.PSObject.Properties['DiskPaths']?.Value
-        $regPaths = $v.PSObject.Properties['RegistryPaths']?.Value
+        if ($firstSeen -and $lastSeen -and $firstSeen -gt $lastSeen) {
+            $temp = $firstSeen
+            $firstSeen = $lastSeen
+            $lastSeen = $temp
+            $firstLastSwappedCount++
+        }
+
+        if (-not $firstSeen) { $firstSeen = '' }
+        if (-not $lastSeen) { $lastSeen = '' }
+
+        $firstSeenIdx = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
+        $lastSeenIdx = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
+
+        $versionStr = $v.PSObject.Properties['SoftwareVersion']?.Value
+        $versionIdx = Get-OrCreateIndex -value $versionStr -list $lookups.versions -indexMap $versionIndex
+
+        $rawDiskPaths = $v.PSObject.Properties['DiskPaths']?.Value
+        $rawRegPaths = $v.PSObject.Properties['RegistryPaths']?.Value
+        $diskPathIndices = $null
+        $regPathIndices = $null
+        if ($rawDiskPaths -and $rawDiskPaths.Count -gt 0) {
+            $diskPathIndices = [System.Collections.Generic.List[int]]::new()
+            foreach ($dp in $rawDiskPaths) {
+                $dpIdx = Get-OrCreateIndex -value $dp -list $lookups.diskPaths -indexMap $diskPathIndex
+                if ($dpIdx -ge 0) { $diskPathIndices.Add($dpIdx) }
+            }
+        }
+        if ($rawRegPaths -and $rawRegPaths.Count -gt 0) {
+            $regPathIndices = [System.Collections.Generic.List[int]]::new()
+            foreach ($rp in $rawRegPaths) {
+                $rpIdx = Get-OrCreateIndex -value $rp -list $lookups.regPaths -indexMap $regPathIndex
+                if ($rpIdx -ge 0) { $regPathIndices.Add($rpIdx) }
+            }
+        }
 
         $secUpdateAvail = $v.PSObject.Properties['SecurityUpdateAvailable']?.Value
         $vulnRecords.Add(@(
             $devIdx,
             $cveIdx,
             $swIdx,
-            $v.PSObject.Properties['SoftwareVersion']?.Value,
-            $firstSeen,
-            $lastSeen,
+            $versionIdx,
+            $firstSeenIdx,
+            $lastSeenIdx,
             [int]($secUpdateAvail -eq $true),
             $updIdx,
-            $diskPaths,
-            $regPaths
+            $diskPathIndices,
+            $regPathIndices
         ))
     }
 
@@ -975,6 +1083,28 @@ function ConvertTo-NormalizedData {
     $noTagsIdx = if ($tagIndex.ContainsKey($noTagsLabel)) { $tagIndex[$noTagsLabel] } else { -1 }
 
     Write-Host "  Normalized: $($lookups.devices.Count) devices, $($lookups.cves.Count) CVEs, $($lookups.software.Count) software"
+    if ($firstLastSwappedCount -gt 0) {
+        Write-Warning "  Corrected $firstLastSwappedCount record(s) with FirstSeenTimestamp > LastSeenTimestamp"
+    }
+
+    $datasetVendors = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($vendor in $lookups.vendors) {
+        [void]$datasetVendors.Add($vendor)
+    }
+
+    foreach ($cve in $lookups.cves) {
+        if ($null -ne $cve.as -and $cve.as.Count -gt 0) {
+            $filteredIndices = [System.Collections.Generic.List[int]]::new()
+            foreach ($asIdx in $cve.as) {
+                $swStr = $lookups.affSoftware[$asIdx]
+                $swVendor = ($swStr -split ':')[0]
+                if ($datasetVendors.Contains($swVendor)) {
+                    $filteredIndices.Add($asIdx)
+                }
+            }
+            $cve.as = if ($filteredIndices.Count -gt 0) { $filteredIndices } else { $null }
+        }
+    }
 
     return @{
         Lookups = [PSCustomObject]@{
@@ -985,12 +1115,21 @@ function ConvertTo-NormalizedData {
             platforms     = $lookups.platforms
             tags          = $lookups.tags
             updates       = $lookups.updates
+            versions      = $lookups.versions
+            dates         = $lookups.dates
+            diskPaths     = $lookups.diskPaths
+            regPaths      = $lookups.regPaths
+            affSoftware   = $lookups.affSoftware
+            batchTitles   = $lookups.batchTitles
             devices       = $lookups.devices
             software      = $lookups.software
             cves          = $lookups.cves
             noTagsIdx     = $noTagsIdx
         }
         Vulns = $vulnRecords
+        Quality = [PSCustomObject]@{
+            FirstLastSwappedCount = $firstLastSwappedCount
+        }
     }
 }
 
@@ -1300,6 +1439,10 @@ try {
     Write-Output "Preparing data for embedding..."
     $lookupsJson = $normalizedResult.Lookups | ConvertTo-Json -Depth 10 -Compress
     $vulnsJson = $normalizedResult.Vulns | ConvertTo-Json -Depth 10 -Compress
+    $dataQualityMetaJson = @{
+        firstLastSwapped = ($normalizedResult.Quality.PSObject.Properties['FirstLastSwappedCount']?.Value ?? 0)
+        generatedOnUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    } | ConvertTo-Json -Compress
 
     $lookupsSize = [math]::Round($lookupsJson.Length / 1KB, 1)
     $vulnsSize = [math]::Round($vulnsJson.Length / 1KB, 1)
@@ -1307,6 +1450,8 @@ try {
 
     # Step 7: Compress data if requested
     $dataIsCompressed = $false
+    $dataQualitySectionHtml = ""
+    $dataQualityMetaScript = ""
     if ($CompressData) {
         Write-Output "  Compressing embedded data..."
         $combinedData = @{ lookups = $normalizedResult.Lookups; vulns = $normalizedResult.Vulns }
@@ -1331,6 +1476,48 @@ try {
     else {
         $lookupsJsonEscaped = $lookupsJson -replace '</script>', '<\/script>'
         $vulnsJsonEscaped = $vulnsJson -replace '</script>', '<\/script>'
+        $dataQualityMetaJsonEscaped = $dataQualityMetaJson -replace '</script>', '<\/script>'
+
+        if ($IncludeDataQuality) {
+            $dataQualitySectionHtml = @"
+        <!-- Data Quality Summary -->
+        <div class="data-quality-panel" aria-live="polite" aria-label="Data quality summary">
+            <h2>Data Quality</h2>
+            <div class="data-quality-grid">
+                <div class="data-quality-item">
+                    <div class="data-quality-label">Records Loaded</div>
+                    <div class="data-quality-value" id="dqTotalRecords">0</div>
+                </div>
+                <div class="data-quality-item">
+                    <div class="data-quality-label">Unique Devices</div>
+                    <div class="data-quality-value" id="dqUniqueDevices">0</div>
+                </div>
+                <div class="data-quality-item">
+                    <div class="data-quality-label">Unique CVEs</div>
+                    <div class="data-quality-value" id="dqUniqueCves">0</div>
+                </div>
+                <div class="data-quality-item">
+                    <div class="data-quality-label">Missing Published Date</div>
+                    <div class="data-quality-value" id="dqMissingPublished">0</div>
+                </div>
+                <div class="data-quality-item">
+                    <div class="data-quality-label">Non-YMD Published Date</div>
+                    <div class="data-quality-value" id="dqNonYmdPublished">0</div>
+                </div>
+                <div class="data-quality-item">
+                    <div class="data-quality-label">Invalid First/Last Order</div>
+                    <div class="data-quality-value" id="dqInvertedRanges">0</div>
+                </div>
+                <div class="data-quality-item">
+                    <div class="data-quality-label">Corrected First/Last Order</div>
+                    <div class="data-quality-value" id="dqCorrectedRanges">0</div>
+                </div>
+            </div>
+        </div>
+"@
+
+            $dataQualityMetaScript = '<script id="dataQualityMeta" type="application/json">' + $dataQualityMetaJsonEscaped + '</script>'
+        }
     }
 
     # Step 8: Assemble final HTML
@@ -1344,6 +1531,8 @@ try {
     $htmlOutput = $htmlOutput.Replace('__JS_CONTENT__', $jsContent)
     $htmlOutput = $htmlOutput.Replace('__LOOKUPS_DATA__', $lookupsJsonEscaped)
     $htmlOutput = $htmlOutput.Replace('__VULNS_DATA__', $vulnsJsonEscaped)
+    $htmlOutput = $htmlOutput.Replace('__DATA_QUALITY_SECTION__', $dataQualitySectionHtml)
+    $htmlOutput = $htmlOutput.Replace('__DATA_QUALITY_META_SCRIPT__', $dataQualityMetaScript)
     $htmlOutput = $htmlOutput.Replace('__DATA_FORMAT__', $dataFormatMarker)
     $htmlOutput = $htmlOutput.Replace('__PAKO_CONTENT__', $pakoScript)
     $htmlOutput = $htmlOutput.Replace('__CHARTJS_CONTENT__', $chartJsContent)
