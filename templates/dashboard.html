@@ -18,6 +18,8 @@ __CSS_CONTENT__
                     <option value="active-vulnerabilities">Active Vulnerabilities</option>
                     <option value="remediation-activity">Remediation Activity</option>
                     <option value="impact-analysis">Impact Analysis</option>
+                    <option value="devices-by-remediation">Devices by Remediation</option>
+                    <option value="remediations-by-device">Remediations by Device</option>
                 </select>
                 <button class="export-pdf-btn" onclick="exportToPDF()">📄 Export to PDF</button>
             </div>
@@ -42,6 +44,8 @@ __CSS_CONTENT__
                 <div class="stat-label">Low</div>
             </div>
         </div>
+
+__DATA_QUALITY_SECTION__
 
         <!-- Filters -->
         <div class="filters" role="region" aria-label="Dashboard filters">
@@ -196,6 +200,26 @@ __CSS_CONTENT__
                 </div>
             </div>
         </div>
+
+        <!-- Devices by Remediation Report Section -->
+        <div id="devices-by-remediation-section" class="report-section">
+            <div class="remediation-cards-container" id="devicesByRemediationContainer">
+                <div class="loading-message">Loading data...</div>
+            </div>
+            <div class="scroll-controls" id="devicesByRemediationScrollControls">
+                <span id="devicesByRemediationScrollInfo">Showing 0 of 0</span>
+            </div>
+        </div>
+
+        <!-- Remediations by Device Report Section -->
+        <div id="remediations-by-device-section" class="report-section">
+            <div class="remediation-cards-container" id="remediationsByDeviceContainer">
+                <div class="loading-message">Loading data...</div>
+            </div>
+            <div class="scroll-controls" id="remediationsByDeviceScrollControls">
+                <span id="remediationsByDeviceScrollInfo">Showing 0 of 0</span>
+            </div>
+        </div>
     </div>
 
     <!-- Modal -->
@@ -216,6 +240,8 @@ __CSS_CONTENT__
 
     <!-- Data format marker -->
     <script id="dataFormat" type="text/plain">__DATA_FORMAT__</script>
+
+__DATA_QUALITY_META_SCRIPT__
 
     <!-- Lookups data (normalized reference tables) -->
     <script id="lookupsData" type="application/json">
