@@ -523,7 +523,11 @@ function Export-MachineData {
 
     $timestamp = Get-Date -Format "yyyy-MM-dd"
     $outputFile = Join-Path -Path $OutputPath -ChildPath "Machines_$timestamp.json"
-    $allMachines | ConvertTo-Json -Depth 10 | Out-File -FilePath $outputFile -Encoding UTF8
+    $machineJson = $allMachines | ConvertTo-Json -Depth 5
+    $allMachines = $null
+    [GC]::Collect()
+    [System.IO.File]::WriteAllText($outputFile, $machineJson, [System.Text.Encoding]::UTF8)
+    $machineJson = $null
 
     Write-Host "  Saved: $(Split-Path -Leaf $outputFile)"
     return $outputFile
@@ -567,8 +571,19 @@ DeviceTvmSoftwareVulnerabilities
     $timestamp = Get-Date -Format "yyyy-MM-dd"
     $outputFile = Join-Path -Path $OutputPath -ChildPath "AdvancedHunting_${resultCount}_$timestamp.json"
 
-    $ndjsonLines = $response.Results | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 10 }
-    $ndjsonLines -join "`n" | Out-File -FilePath $outputFile -Encoding UTF8 -NoNewline
+    $writer = [System.IO.StreamWriter]::new($outputFile, $false, [System.Text.Encoding]::UTF8)
+    try {
+        $firstLine = $true
+        foreach ($result in $response.Results) {
+            if (-not $firstLine) { $writer.WriteLine() }
+            $writer.Write(($result | ConvertTo-Json -Compress -Depth 10))
+            $firstLine = $false
+        }
+    }
+    finally {
+        $writer.Dispose()
+    }
+    $response = $null
 
     Write-Host "  Saved: $(Split-Path -Leaf $outputFile)"
     return $outputFile
@@ -603,8 +618,9 @@ function Read-MachineData {
 
     foreach ($file in $machineFiles) {
         Write-Host "  Processing $($file.Name)..."
-        $content = Get-Content -Path $file.FullName -Raw
-        $machineList = $content | ConvertFrom-Json
+        $rawContent = Get-Content -Path $file.FullName -Raw
+        $machineList = $rawContent | ConvertFrom-Json
+        $rawContent = $null
         if ($null -eq $machineList) { continue }
         if ($machineList -isnot [System.Array]) { $machineList = @($machineList) }
 
@@ -645,10 +661,8 @@ function Read-VulnerabilityData {
 
     foreach ($file in $jsonFiles) {
         Write-Host "  Processing $($file.Name)..."
-        $content = Get-Content -Path $file.FullName -Raw
-        $lines = $content -split "`n" | Where-Object { $_.Trim() -ne "" }
-
-        foreach ($line in $lines) {
+        foreach ($line in [System.IO.File]::ReadLines($file.FullName)) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
             try {
                 $vuln = $line | ConvertFrom-Json
                 $vulnerabilities.Add($vuln)
@@ -691,10 +705,8 @@ function Read-AdvancedHuntingData {
 
     foreach ($file in $ahFiles) {
         Write-Host "  Processing $($file.Name)..."
-        $content = Get-Content -Path $file.FullName -Raw
-        $lines = $content -split "`n" | Where-Object { $_.Trim() -ne "" }
-
-        foreach ($line in $lines) {
+        foreach ($line in [System.IO.File]::ReadLines($file.FullName)) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
             try {
                 $record = $line | ConvertFrom-Json
                 $cveId = $record.CveId
@@ -806,7 +818,8 @@ function ConvertTo-NormalizedData {
     .SYNOPSIS
         Normalizes vulnerability data into compact lookup tables and indexed records.
     .DESCRIPTION
-        Transforms raw vulnerability data into a normalized structure with:
+        Streams VulnExport_*.json files directly from DataPath — no intermediate List[PSObject].
+        Applies the IsOnboarded filter inline, then transforms each record into:
         - Lookup tables for repeated strings (vendors, software, CVEs, etc.)
         - Compact vulnerability records using indices instead of strings
         - Machine data merged from separate source
@@ -815,7 +828,7 @@ function ConvertTo-NormalizedData {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [System.Collections.Generic.List[PSObject]]$Vulnerabilities,
+        [string]$DataPath,
 
         [Parameter(Mandatory)]
         [hashtable]$Machines,
@@ -876,9 +889,28 @@ function ConvertTo-NormalizedData {
 
     $vulnRecords = [System.Collections.Generic.List[PSObject]]::new()
     $firstLastSwappedCount = 0
+    $processedCount = 0
+    $parseErrors = 0
 
-    foreach ($v in $Vulnerabilities) {
-        $deviceId = $v.DeviceId
+    $jsonFiles = Get-ChildItem -Path $DataPath -Filter "VulnExport_*.json" -File |
+        Where-Object { $_.Name -notmatch '_enriched\.json$' }
+    if ($jsonFiles.Count -eq 0) { throw "No VulnExport JSON files found in '$DataPath'." }
+    Write-Host "  Found $($jsonFiles.Count) export file(s) to normalize..."
+
+    foreach ($file in $jsonFiles) {
+        Write-Host "  Processing $($file.Name)..."
+        foreach ($line in [System.IO.File]::ReadLines($file.FullName)) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            try { $v = $line | ConvertFrom-Json }
+            catch {
+                $parseErrors++
+                if ($parseErrors -le 5) { Write-Warning "Parse error in $($file.Name): $_" }
+                continue
+            }
+            if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { continue }
+            $processedCount++
+
+            $deviceId = $v.DeviceId
         if (-not $deviceIndex.ContainsKey($deviceId)) {
             $machine = $Machines[$deviceId]
 
@@ -1071,7 +1103,12 @@ function ConvertTo-NormalizedData {
             $diskPathIndices,
             $regPathIndices
         ))
-    }
+        } # end foreach ($line ...)
+    } # end foreach ($file ...)
+
+    if ($parseErrors -gt 0) { Write-Host "  Parse errors: $parseErrors" }
+    if ($processedCount -eq 0) { throw "No onboarded vulnerabilities found after streaming all export files." }
+    Write-Host "  Loaded $processedCount onboarded vulnerability records"
 
     # Handle "(No Tags)" label
     $noTagsLabel = "(No Tags)"
@@ -1130,6 +1167,7 @@ function ConvertTo-NormalizedData {
         Quality = [PSCustomObject]@{
             FirstLastSwappedCount = $firstLastSwappedCount
         }
+        VulnCount = $processedCount
     }
 }
 
@@ -1376,23 +1414,11 @@ try {
     # -----------------------------------------------------------------
     Write-Output "`n--- Stage D: Generate dashboard ---"
 
-    # Step 1: Read all data
+    # Step 1: Read machine and Advanced Hunting data
     $machines = Read-MachineData -Path $tempExports
     $advancedHuntingData = Read-AdvancedHuntingData -Path $tempExports
-    $allVulnerabilities = Read-VulnerabilityData -Path $tempExports
 
-    # Step 2: Filter to onboarded devices
-    $onboardedVulnerabilities = [System.Collections.Generic.List[PSObject]]::new()
-    foreach ($vuln in $allVulnerabilities) {
-        if ($vuln.PSObject.Properties['IsOnboarded']?.Value -eq $true) {
-            $onboardedVulnerabilities.Add($vuln)
-        }
-    }
-    Write-Output "  Filtered to onboarded: $($onboardedVulnerabilities.Count) vulnerabilities"
-
-    if ($onboardedVulnerabilities.Count -eq 0) {
-        throw "No vulnerabilities found for onboarded devices."
-    }
+    # Step 2 (skipped): vulnerability files are streamed directly inside ConvertTo-NormalizedData
 
     # Step 3: Download JavaScript libraries
     Write-Output "Downloading JavaScript libraries..."
@@ -1433,7 +1459,10 @@ try {
 
     # Step 5: Normalize data
     Write-Output "Normalizing data..."
-    $normalizedResult = ConvertTo-NormalizedData -Vulnerabilities $onboardedVulnerabilities -Machines $machines -AdvancedHuntingData $advancedHuntingData
+    $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -Machines $machines -AdvancedHuntingData $advancedHuntingData
+    $machines = $null
+    $advancedHuntingData = $null
+    [GC]::Collect()
 
     # Step 6: Convert to JSON
     Write-Output "Preparing data for embedding..."
@@ -1443,6 +1472,11 @@ try {
         firstLastSwapped = ($normalizedResult.Quality.PSObject.Properties['FirstLastSwappedCount']?.Value ?? 0)
         generatedOnUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     } | ConvertTo-Json -Compress
+    $vulnCount = $normalizedResult.VulnCount
+    $deviceCount = $normalizedResult.Lookups.devices.Count
+    $cveCount = $normalizedResult.Lookups.cves.Count
+    $normalizedResult = $null
+    [GC]::Collect()
 
     $lookupsSize = [math]::Round($lookupsJson.Length / 1KB, 1)
     $vulnsSize = [math]::Round($vulnsJson.Length / 1KB, 1)
@@ -1454,28 +1488,36 @@ try {
     $dataQualityMetaScript = ""
     if ($CompressData) {
         Write-Output "  Compressing embedded data..."
-        $combinedData = @{ lookups = $normalizedResult.Lookups; vulns = $normalizedResult.Vulns }
-        $combinedJson = $combinedData | ConvertTo-Json -Depth 10 -Compress
+        # Reuse already-serialized JSON strings to avoid re-serializing the full object graph
+        $combinedJson = '{"lookups":' + $lookupsJson + ',"vulns":' + $vulnsJson + '}'
+        $lookupsJson = $null
+        $vulnsJson = $null
 
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($combinedJson)
+        $combinedJson = $null
         $memStream = [System.IO.MemoryStream]::new()
         $gzipStream = [System.IO.Compression.GZipStream]::new($memStream, [System.IO.Compression.CompressionMode]::Compress)
         $gzipStream.Write($bytes, 0, $bytes.Length)
+        $bytes = $null
         $gzipStream.Close()
         $compressedBytes = $memStream.ToArray()
-        $memStream.Close()
+        $memStream.Dispose()
 
         $compressedBase64 = [Convert]::ToBase64String($compressedBytes)
+        $compressedBytes = $null
         $compressedSize = [math]::Round($compressedBase64.Length / 1KB, 1)
         Write-Output "  Compressed: ${compressedSize}KB"
 
         $lookupsJsonEscaped = ""
         $vulnsJsonEscaped = $compressedBase64
+        $compressedBase64 = $null
         $dataIsCompressed = $true
     }
     else {
         $lookupsJsonEscaped = $lookupsJson -replace '</script>', '<\/script>'
+        $lookupsJson = $null
         $vulnsJsonEscaped = $vulnsJson -replace '</script>', '<\/script>'
+        $vulnsJson = $null
         $dataQualityMetaJsonEscaped = $dataQualityMetaJson -replace '</script>', '<\/script>'
 
         if ($IncludeDataQuality) {
@@ -1526,23 +1568,37 @@ try {
     $pakoScript = if ($CompressData -and $pakoContent) { "<script>$pakoContent</script>" } else { "" }
 
     # Use [string]::Replace() to avoid regex interpretation of $ in JS code
+    # Null each source string immediately after replacement to allow early GC
     $htmlOutput = $htmlTemplate
+    $htmlTemplate = $null
     $htmlOutput = $htmlOutput.Replace('__CSS_CONTENT__', $cssContent)
+    $cssContent = $null
     $htmlOutput = $htmlOutput.Replace('__JS_CONTENT__', $jsContent)
+    $jsContent = $null
     $htmlOutput = $htmlOutput.Replace('__LOOKUPS_DATA__', $lookupsJsonEscaped)
+    $lookupsJsonEscaped = $null
     $htmlOutput = $htmlOutput.Replace('__VULNS_DATA__', $vulnsJsonEscaped)
+    $vulnsJsonEscaped = $null
     $htmlOutput = $htmlOutput.Replace('__DATA_QUALITY_SECTION__', $dataQualitySectionHtml)
     $htmlOutput = $htmlOutput.Replace('__DATA_QUALITY_META_SCRIPT__', $dataQualityMetaScript)
     $htmlOutput = $htmlOutput.Replace('__DATA_FORMAT__', $dataFormatMarker)
     $htmlOutput = $htmlOutput.Replace('__PAKO_CONTENT__', $pakoScript)
+    $pakoScript = $null
     $htmlOutput = $htmlOutput.Replace('__CHARTJS_CONTENT__', $chartJsContent)
+    $chartJsContent = $null
     $htmlOutput = $htmlOutput.Replace('__PDFMAKE_CONTENT__', $pdfmakeContent)
+    $pdfmakeContent = $null
     $htmlOutput = $htmlOutput.Replace('__VFSFONTS_CONTENT__', $vfsfontsContent)
+    $vfsfontsContent = $null
     $htmlOutput = $htmlOutput.Replace('__HTML2PDF_CONTENT__', $html2pdfContent)
+    $html2pdfContent = $null
     $htmlOutput = $htmlOutput.Replace('__HTML2CANVAS_CONTENT__', $html2canvasContent)
+    $html2canvasContent = $null
 
     $dashboardOutputPath = Join-Path -Path $tempDashboards -ChildPath "VulnerabilityDashboard.html"
     $htmlOutput | Out-File -FilePath $dashboardOutputPath -Encoding UTF8
+    $htmlOutput = $null
+    [GC]::Collect()
 
     $finalSize = [math]::Round((Get-Item $dashboardOutputPath).Length / 1MB, 2)
     Write-Output "  Dashboard generated: ${finalSize}MB"
@@ -1597,9 +1653,9 @@ try {
     Write-Output "`n========================================"
     Write-Output "  Pipeline Complete!"
     Write-Output "========================================"
-    Write-Output "  Vulnerabilities: $($onboardedVulnerabilities.Count)"
-    Write-Output "  Devices: $($normalizedResult.Lookups.devices.Count)"
-    Write-Output "  CVEs: $($normalizedResult.Lookups.cves.Count)"
+    Write-Output "  Vulnerabilities: $vulnCount"
+    Write-Output "  Devices: $deviceCount"
+    Write-Output "  CVEs: $cveCount"
     Write-Output "  Dashboard size: ${finalSize}MB"
     Write-Output "  Export target: $Export"
     Write-Output "  Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC"
