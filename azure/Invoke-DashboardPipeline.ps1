@@ -26,16 +26,9 @@
     Include Advanced Hunting data for CVE enrichment (PublishedDate, Description, EPSS).
     Requires AdvancedQuery.Read.All permission on the Managed Identity. Default: true
 
-.PARAMETER CompressData
-    Compress embedded dashboard data with gzip for smaller HTML file size.
-
 .PARAMETER Export
     Export target for the generated dashboard. Default: BlobStorage
     Options: BlobStorage, SharePoint, StaticWebApp
-
-.PARAMETER IncludeDataQuality
-    If true, includes the Data Quality summary section in the generated dashboard.
-    Default: false
 
 .NOTES
     Author: Nathan McNulty
@@ -59,14 +52,8 @@ param(
     [bool]$IncludeAdvancedHunting = $true,
 
     [Parameter(Mandatory = $false)]
-    [switch]$CompressData,
-
-    [Parameter(Mandatory = $false)]
     [ValidateSet('BlobStorage', 'SharePoint', 'StaticWebApp')]
-    [string]$Export = 'BlobStorage',
-
-    [Parameter(Mandatory = $false)]
-    [switch]$IncludeDataQuality
+    [string]$Export = 'BlobStorage'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -123,6 +110,28 @@ $Script:LibraryConfig = @{
         Name = "pako"
         Critical = $false
     }
+}
+
+# =============================================================================
+# HELPER FUNCTIONS - DIAGNOSTICS
+# =============================================================================
+
+function Write-MemoryUsage {
+    <#
+    .SYNOPSIS
+        Writes current process memory usage to output for monitoring in Azure Automation.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Label = ""
+    )
+
+    $proc = [System.Diagnostics.Process]::GetCurrentProcess()
+    $workingSetMB = [math]::Round($proc.WorkingSet64 / 1MB, 1)
+    $gcHeapMB     = [math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
+    $prefix = if ($Label) { "[$Label] " } else { "" }
+    Write-Output "  ${prefix}Memory — Working set: ${workingSetMB}MB  |  GC heap: ${gcHeapMB}MB"
 }
 
 # =============================================================================
@@ -1308,6 +1317,7 @@ try {
     Write-Output "  Vulnerability Dashboard Pipeline"
     Write-Output "========================================"
     Write-Output "  Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC"
+    Write-MemoryUsage -Label "Start"
 
     # -----------------------------------------------------------------
     # Stage A: Authenticate
@@ -1342,6 +1352,8 @@ try {
     else {
         Write-Warning "GZip compression not available in this runtime. Files will be stored uncompressed."
     }
+
+    Write-MemoryUsage -Label "Post-Auth"
 
     # -----------------------------------------------------------------
     # Stage B: Download historical data from blob storage
@@ -1390,6 +1402,8 @@ try {
         Get-BlobContent -AccountName $StorageAccountName -Container $Script:BlobContainers.Templates -BlobName $blobName -DestinationPath $localFile -StorageToken $storageToken
     }
 
+    Write-MemoryUsage -Label "Post-BlobDownload"
+
     # -----------------------------------------------------------------
     # Stage C: Export fresh MDE data
     # -----------------------------------------------------------------
@@ -1408,6 +1422,8 @@ try {
     else {
         Write-Output "Skipping Advanced Hunting export (IncludeAdvancedHunting = false)"
     }
+
+    Write-MemoryUsage -Label "Post-MdeExport"
 
     # -----------------------------------------------------------------
     # Stage D: Generate dashboard
@@ -1437,11 +1453,10 @@ try {
     $lib = $Script:LibraryConfig.Html2Canvas
     $html2canvasContent = Get-JSLibrary -Url $lib.Url -Name $lib.Name -Critical $lib.Critical
 
-    $pakoContent = ""
-    if ($CompressData) {
-        $lib = $Script:LibraryConfig.Pako
-        $pakoContent = Get-JSLibrary -Url $lib.Url -Name $lib.Name -Critical $false
-    }
+    # Download pako for data decompression
+    $lib = $Script:LibraryConfig.Pako
+    $pakoContent = Get-JSLibrary -Url $lib.Url -Name $lib.Name -Critical $false
+    Write-MemoryUsage -Label "JS Libraries"
 
     # Step 4: Load templates
     Write-Output "Loading templates..."
@@ -1468,104 +1483,50 @@ try {
     Write-Output "Preparing data for embedding..."
     $lookupsJson = $normalizedResult.Lookups | ConvertTo-Json -Depth 10 -Compress
     $vulnsJson = $normalizedResult.Vulns | ConvertTo-Json -Depth 10 -Compress
-    $dataQualityMetaJson = @{
-        firstLastSwapped = ($normalizedResult.Quality.PSObject.Properties['FirstLastSwappedCount']?.Value ?? 0)
-        generatedOnUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    } | ConvertTo-Json -Compress
     $vulnCount = $normalizedResult.VulnCount
     $deviceCount = $normalizedResult.Lookups.devices.Count
     $cveCount = $normalizedResult.Lookups.cves.Count
     $normalizedResult = $null
     [GC]::Collect()
+    Write-MemoryUsage -Label "Post-Normalize"
 
     $lookupsSize = [math]::Round($lookupsJson.Length / 1KB, 1)
     $vulnsSize = [math]::Round($vulnsJson.Length / 1KB, 1)
     Write-Output "  Lookups: ${lookupsSize}KB, Vulns: ${vulnsSize}KB"
 
-    # Step 7: Compress data if requested
-    $dataIsCompressed = $false
+    # Step 7: Compress data for embedding
+    Write-Output "  Compressing embedded data..."
+    # Reuse already-serialized JSON strings to avoid re-serializing the full object graph
+    $combinedJson = '{"lookups":' + $lookupsJson + ',"vulns":' + $vulnsJson + '}'
+    $lookupsJson = $null
+    $vulnsJson = $null
+
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($combinedJson)
+    $combinedJson = $null
+    $memStream = [System.IO.MemoryStream]::new()
+    $gzipStream = [System.IO.Compression.GZipStream]::new($memStream, [System.IO.Compression.CompressionMode]::Compress)
+    $gzipStream.Write($bytes, 0, $bytes.Length)
+    $bytes = $null
+    $gzipStream.Close()
+    $compressedBytes = $memStream.ToArray()
+    $memStream.Dispose()
+
+    $compressedBase64 = [Convert]::ToBase64String($compressedBytes)
+    $compressedBytes = $null
+    $compressedSize = [math]::Round($compressedBase64.Length / 1KB, 1)
+    Write-Output "  Compressed: ${compressedSize}KB"
+
+    $lookupsJsonEscaped = ""
+    $vulnsJsonEscaped = $compressedBase64
+    $compressedBase64 = $null
     $dataQualitySectionHtml = ""
     $dataQualityMetaScript = ""
-    if ($CompressData) {
-        Write-Output "  Compressing embedded data..."
-        # Reuse already-serialized JSON strings to avoid re-serializing the full object graph
-        $combinedJson = '{"lookups":' + $lookupsJson + ',"vulns":' + $vulnsJson + '}'
-        $lookupsJson = $null
-        $vulnsJson = $null
-
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($combinedJson)
-        $combinedJson = $null
-        $memStream = [System.IO.MemoryStream]::new()
-        $gzipStream = [System.IO.Compression.GZipStream]::new($memStream, [System.IO.Compression.CompressionMode]::Compress)
-        $gzipStream.Write($bytes, 0, $bytes.Length)
-        $bytes = $null
-        $gzipStream.Close()
-        $compressedBytes = $memStream.ToArray()
-        $memStream.Dispose()
-
-        $compressedBase64 = [Convert]::ToBase64String($compressedBytes)
-        $compressedBytes = $null
-        $compressedSize = [math]::Round($compressedBase64.Length / 1KB, 1)
-        Write-Output "  Compressed: ${compressedSize}KB"
-
-        $lookupsJsonEscaped = ""
-        $vulnsJsonEscaped = $compressedBase64
-        $compressedBase64 = $null
-        $dataIsCompressed = $true
-    }
-    else {
-        $lookupsJsonEscaped = $lookupsJson -replace '</script>', '<\/script>'
-        $lookupsJson = $null
-        $vulnsJsonEscaped = $vulnsJson -replace '</script>', '<\/script>'
-        $vulnsJson = $null
-        $dataQualityMetaJsonEscaped = $dataQualityMetaJson -replace '</script>', '<\/script>'
-
-        if ($IncludeDataQuality) {
-            $dataQualitySectionHtml = @"
-        <!-- Data Quality Summary -->
-        <div class="data-quality-panel" aria-live="polite" aria-label="Data quality summary">
-            <h2>Data Quality</h2>
-            <div class="data-quality-grid">
-                <div class="data-quality-item">
-                    <div class="data-quality-label">Records Loaded</div>
-                    <div class="data-quality-value" id="dqTotalRecords">0</div>
-                </div>
-                <div class="data-quality-item">
-                    <div class="data-quality-label">Unique Devices</div>
-                    <div class="data-quality-value" id="dqUniqueDevices">0</div>
-                </div>
-                <div class="data-quality-item">
-                    <div class="data-quality-label">Unique CVEs</div>
-                    <div class="data-quality-value" id="dqUniqueCves">0</div>
-                </div>
-                <div class="data-quality-item">
-                    <div class="data-quality-label">Missing Published Date</div>
-                    <div class="data-quality-value" id="dqMissingPublished">0</div>
-                </div>
-                <div class="data-quality-item">
-                    <div class="data-quality-label">Non-YMD Published Date</div>
-                    <div class="data-quality-value" id="dqNonYmdPublished">0</div>
-                </div>
-                <div class="data-quality-item">
-                    <div class="data-quality-label">Invalid First/Last Order</div>
-                    <div class="data-quality-value" id="dqInvertedRanges">0</div>
-                </div>
-                <div class="data-quality-item">
-                    <div class="data-quality-label">Corrected First/Last Order</div>
-                    <div class="data-quality-value" id="dqCorrectedRanges">0</div>
-                </div>
-            </div>
-        </div>
-"@
-
-            $dataQualityMetaScript = '<script id="dataQualityMeta" type="application/json">' + $dataQualityMetaJsonEscaped + '</script>'
-        }
-    }
+    Write-MemoryUsage -Label "Post-Compress"
 
     # Step 8: Assemble final HTML
     Write-Output "Assembling dashboard HTML..."
-    $dataFormatMarker = if ($dataIsCompressed) { "compressed" } else { "normalized" }
-    $pakoScript = if ($CompressData -and $pakoContent) { "<script>$pakoContent</script>" } else { "" }
+    $dataFormatMarker = "compressed"
+    $pakoScript = if ($pakoContent) { "<script>$pakoContent</script>" } else { "" }
 
     # Use [string]::Replace() to avoid regex interpretation of $ in JS code
     # Null each source string immediately after replacement to allow early GC
@@ -1602,6 +1563,7 @@ try {
 
     $finalSize = [math]::Round((Get-Item $dashboardOutputPath).Length / 1MB, 2)
     Write-Output "  Dashboard generated: ${finalSize}MB"
+    Write-MemoryUsage -Label "Post-Assembly"
 
     # -----------------------------------------------------------------
     # Stage E: Export results
