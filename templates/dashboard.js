@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Vulnerability Dashboard - Main JavaScript
  * 
  * This file contains all the client-side logic for the vulnerability dashboard.
@@ -40,6 +40,35 @@ let allDeviceTags = new Set();
 
 // Constant for devices without tags
 const NO_TAGS_VALUE = '(No Tags)';
+
+// Constant for devices without an RBAC group
+const NO_GROUP_VALUE = '(none)';
+
+/**
+ * Normalize RBAC group names so null/blank values are represented consistently.
+ * @param {string|null|undefined} value - Raw group name
+ * @returns {string} Normalized group name
+ */
+function normalizeGroupName(value) {
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (trimmed.length > 0) return trimmed;
+    }
+    return NO_GROUP_VALUE;
+}
+
+/**
+ * Resolve and normalize a device's group name from lookups.
+ * @param {Object} device - Normalized device record
+ * @returns {string} Normalized group name
+ */
+function getDeviceGroupName(device) {
+    if (!device || !lookups || !Array.isArray(lookups.groups)) return NO_GROUP_VALUE;
+    const groupValue = (typeof device.g === 'number' && device.g >= 0 && device.g < lookups.groups.length)
+        ? lookups.groups[device.g]
+        : null;
+    return normalizeGroupName(groupValue);
+}
 
 // Table sort state
 let sortDirection = {};
@@ -103,7 +132,7 @@ function computeDataFingerprint() {
     }
     // Include key lookup-table slices so enrichment-only changes invalidate cache
     if (lookups) {
-        const lookupKeys = ['cves', 'updates', 'dates', 'batchTitles', 'affSoftware'];
+        const lookupKeys = ['groups', 'devices', 'cves', 'updates', 'dates', 'batchTitles', 'affSoftware'];
         for (let i = 0; i < lookupKeys.length; i++) {
             const key = lookupKeys[i];
             const arr = lookups[key] || [];
@@ -260,7 +289,7 @@ self.onmessage = function(e) {
         result[i] = {
             DeviceId: device.id,
             DeviceName: device.n,
-            RbacGroupName: lookups.groups[device.g],
+            RbacGroupName: (lookups.groups[device.g] && String(lookups.groups[device.g]).trim() !== '') ? lookups.groups[device.g] : '(none)',
             OSPlatform: lookups.platforms[device.o],
             OSVersion: device.ov,
             MachineTags: tagNames,
@@ -503,7 +532,7 @@ function denormalizeVuln(v, index) {
         // Device info
         DeviceId: device.id,
         DeviceName: device.n,
-        RbacGroupName: lookups.groups[device.g],
+        RbacGroupName: (lookups.groups[device.g] && String(lookups.groups[device.g]).trim() !== '') ? lookups.groups[device.g] : '(none)',
         OSPlatform: lookups.platforms[device.o],
         OSVersion: device.ov,
         MachineTags: tagNames,
@@ -686,7 +715,7 @@ function buildDeviceGroupMap() {
     
     // Build from lookups - each device has a group index
     lookups.devices.forEach(device => {
-        const groupName = lookups.groups[device.g];
+        const groupName = getDeviceGroupName(device);
         if (!allDevicesByGroup[groupName]) {
             allDevicesByGroup[groupName] = new Set();
         }
@@ -845,7 +874,11 @@ function setDateRange(range) {
  */
 function populateFilters() {
     // Get values directly from lookups - much faster than iterating all records
-    const rbacGroups = [...lookups.groups].sort();
+    const rbacGroups = Array.from(new Set(lookups.devices.map(device => getDeviceGroupName(device)))).sort((a, b) => {
+        if (a === NO_GROUP_VALUE && b !== NO_GROUP_VALUE) return -1;
+        if (b === NO_GROUP_VALUE && a !== NO_GROUP_VALUE) return 1;
+        return a.localeCompare(b);
+    });
     const osPlatforms = [...lookups.platforms].sort();
     const severities = ['Critical', 'High', 'Medium', 'Low'];
     
@@ -983,7 +1016,7 @@ function updateAllCheckbox(containerId) {
 function updateDeviceFiltersCascade(changedFilter) {
     // Only device filters cascade with each other
     const deviceFilters = {
-        filterRbacGroup: { getValue: v => v.RbacGroupName },
+        filterRbacGroup: { getValue: v => normalizeGroupName(v.RbacGroupName) },
         filterDeviceTags: { getValue: v => v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : [NO_TAGS_VALUE] },
         filterDeviceName: { getValue: v => v.DeviceName }
     };
@@ -1159,7 +1192,7 @@ function applyFilters() {
         
         // Apply selected checkbox filters using Set.has() for O(1) lookups
         if (deviceNameSet.size > 0 && !deviceNameSet.has(v.DeviceName)) return false;
-        if (rbacGroupSet.size > 0 && !rbacGroupSet.has(v.RbacGroupName)) return false;
+        if (rbacGroupSet.size > 0 && !rbacGroupSet.has(normalizeGroupName(v.RbacGroupName))) return false;
         
         // Device Tags filter with OR logic
         if (deviceTagSet.size > 0) {
@@ -1553,7 +1586,7 @@ function renderChart() {
     } else {
         candidates = vulnerabilityData.filter(v => {
             if (deviceNameSet.size > 0 && !deviceNameSet.has(v.DeviceName)) return false;
-            if (rbacGroupSet.size > 0 && !rbacGroupSet.has(v.RbacGroupName)) return false;
+            if (rbacGroupSet.size > 0 && !rbacGroupSet.has(normalizeGroupName(v.RbacGroupName))) return false;
             if (deviceTagSet.size > 0) {
                 const vulnTags = v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : [NO_TAGS_VALUE];
                 if (!vulnTags.some(tag => deviceTagSet.has(tag))) return false;
@@ -2976,7 +3009,7 @@ function renderDevicesByRemediationTable() {
                 DeviceName: v.DeviceName,
                 IpAddress: v.MachineInfo?.ip || '',
                 MachineTags: v.MachineTags || [],
-                RbacGroupName: v.RbacGroupName || '(No Group)'
+                RbacGroupName: normalizeGroupName(v.RbacGroupName)
             });
         }
         
@@ -3461,7 +3494,7 @@ function renderRemediationsByDeviceTable() {
                 deviceName: v.DeviceName,
                 ipAddress: v.MachineInfo?.ip || '',
                 machineTags: v.MachineTags || [],
-                rbacGroupName: v.RbacGroupName || '(No Group)',
+                rbacGroupName: normalizeGroupName(v.RbacGroupName),
                 remediations: new Map(), // Map of remediation key -> remediation details
                 cves: new Set(),
                 deviceSeverities: { Critical: 0, High: 0, Medium: 0, Low: 0 } // Device-level severity totals
