@@ -112,6 +112,10 @@ $Script:LibraryConfig = @{
     }
 }
 
+$Script:MachineCurrentFileName = 'Machines_Current.json'
+$Script:MachineHistoryFileName = 'Machines_History.json'
+$Script:AdvancedHuntingCurrentFileName = 'AdvancedHunting_Current.json'
+
 # =============================================================================
 # HELPER FUNCTIONS - DIAGNOSTICS
 # =============================================================================
@@ -153,6 +157,696 @@ function Get-PlainToken {
     $ssPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResponse.Token)
     try { return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ssPtr) }
     finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ssPtr) }
+}
+
+function ConvertTo-CompactMachineRecord {
+    <#
+    .SYNOPSIS
+        Projects a machine object down to the fields used by the dashboard.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [psobject]$Machine
+    )
+
+    return [PSCustomObject]@{
+        id                    = $Machine.PSObject.Properties['id']?.Value
+        computerDnsName       = $Machine.PSObject.Properties['computerDnsName']?.Value
+        rbacGroupName         = $Machine.PSObject.Properties['rbacGroupName']?.Value
+        osPlatform            = $Machine.PSObject.Properties['osPlatform']?.Value
+        osVersion             = $Machine.PSObject.Properties['osVersion']?.Value
+        machineTags           = Get-NormalizedMachineTags -Tags $Machine.PSObject.Properties['machineTags']?.Value
+        lastIpAddress         = $Machine.PSObject.Properties['lastIpAddress']?.Value
+        lastExternalIpAddress = $Machine.PSObject.Properties['lastExternalIpAddress']?.Value
+        healthStatus          = $Machine.PSObject.Properties['healthStatus']?.Value
+        riskScore             = $Machine.PSObject.Properties['riskScore']?.Value
+        exposureLevel         = $Machine.PSObject.Properties['exposureLevel']?.Value
+        deviceValue           = $Machine.PSObject.Properties['deviceValue']?.Value
+        managedBy             = $Machine.PSObject.Properties['managedBy']?.Value
+        isAadJoined           = $Machine.PSObject.Properties['isAadJoined']?.Value
+        lastSeen              = $Machine.PSObject.Properties['lastSeen']?.Value
+        firstSeen             = $Machine.PSObject.Properties['firstSeen']?.Value
+    }
+}
+
+function Get-NormalizedMachineTags {
+    <#
+    .SYNOPSIS
+        Returns a stable, sorted tag array for machine records.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Tags
+    )
+
+    $tagList = [System.Collections.Generic.List[string]]::new()
+
+    if ($null -eq $Tags) {
+        return @()
+    }
+
+    if ($Tags -is [string]) {
+        if (-not [string]::IsNullOrWhiteSpace($Tags)) {
+            $tagList.Add($Tags)
+        }
+    }
+    elseif ($Tags -is [System.Collections.IEnumerable]) {
+        foreach ($tag in $Tags) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$tag)) {
+                $tagList.Add([string]$tag)
+            }
+        }
+    }
+    else {
+        $tagValue = [string]$Tags
+        if (-not [string]::IsNullOrWhiteSpace($tagValue)) {
+            $tagList.Add($tagValue)
+        }
+    }
+
+    if ($tagList.Count -eq 0) {
+        return @()
+    }
+
+    return @($tagList | Sort-Object -Unique)
+}
+
+function Get-MachineCurrentPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$BasePath
+    )
+
+    return Join-Path -Path $BasePath -ChildPath $Script:MachineCurrentFileName
+}
+
+function Get-MachineHistoryPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$BasePath
+    )
+
+    return Join-Path -Path $BasePath -ChildPath $Script:MachineHistoryFileName
+}
+
+function Get-AdvancedHuntingCurrentPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$BasePath
+    )
+
+    return Join-Path -Path $BasePath -ChildPath $Script:AdvancedHuntingCurrentFileName
+}
+
+function Test-IsLegacyMachineSnapshotFileName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    return ($Name -match '^Machines_\d{4}-\d{2}-\d{2}\.json$')
+}
+
+function Test-IsLegacyAdvancedHuntingSnapshotFileName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    return ($Name -match '^AdvancedHunting_\d+_\d{4}-\d{2}-\d{2}\.json$')
+}
+
+function Read-MachineRecordsFromFile {
+    <#
+    .SYNOPSIS
+        Reads machine records from NDJSON or array JSON files.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $fileMode = Get-JsonFileMode -Path $Path
+    if ($fileMode -eq 'Empty') {
+        return
+    }
+
+    if ($fileMode -eq 'Array') {
+        $rawContent = Get-Content -Path $Path -Raw
+        $machineList = $rawContent | ConvertFrom-Json
+        $rawContent = $null
+        if ($null -eq $machineList) { return }
+        if ($machineList -isnot [System.Array]) { $machineList = @($machineList) }
+
+        foreach ($machine in $machineList) {
+            if ($null -eq $machine) { continue }
+            $record = ConvertTo-CompactMachineRecord -Machine $machine
+            $stateHash = $machine.PSObject.Properties['stateHash']?.Value
+            $observedOn = $machine.PSObject.Properties['observedOn']?.Value
+            if ($stateHash) { Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash }
+            if ($observedOn) { Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn }
+            Write-Output $record
+        }
+
+        return
+    }
+
+    foreach ($line in [System.IO.File]::ReadLines($Path)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try {
+            $machine = $line | ConvertFrom-Json
+        }
+        catch {
+            Write-Warning "Parse error in $(Split-Path -Leaf $Path): $_"
+            continue
+        }
+
+        if ($null -eq $machine) { continue }
+        $record = ConvertTo-CompactMachineRecord -Machine $machine
+        $stateHash = $machine.PSObject.Properties['stateHash']?.Value
+        $observedOn = $machine.PSObject.Properties['observedOn']?.Value
+        if ($stateHash) { Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash }
+        if ($observedOn) { Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn }
+        Write-Output $record
+    }
+}
+
+function Get-AdvancedHuntingLastModifiedKey {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$LastModifiedTime,
+
+        [Parameter(Mandatory = $false)]
+        [string]$FallbackDate = ''
+    )
+
+    if ($null -ne $LastModifiedTime) {
+        $rawValue = $LastModifiedTime.ToString().Trim()
+        if (-not [string]::IsNullOrWhiteSpace($rawValue)) {
+            try {
+                return ([datetimeoffset]$rawValue).UtcDateTime.ToString('o')
+            }
+            catch {
+                $normalized = Convert-ToYmdDate -DateValue $rawValue
+                if ($normalized) {
+                    return $normalized
+                }
+
+                return $rawValue
+            }
+        }
+    }
+
+    return $FallbackDate
+}
+
+function Read-AdvancedHuntingRecordsFromFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $fileMode = Get-JsonFileMode -Path $Path
+    if ($fileMode -eq 'Empty') {
+        return
+    }
+
+    if ($fileMode -eq 'Array') {
+        $rawContent = Get-Content -Path $Path -Raw
+        $records = $rawContent | ConvertFrom-Json
+        $rawContent = $null
+        if ($null -eq $records) { return }
+        if ($records -isnot [System.Array]) { $records = @($records) }
+
+        foreach ($record in $records) {
+            if ($null -ne $record) {
+                Write-Output $record
+            }
+        }
+
+        return
+    }
+
+    foreach ($line in [System.IO.File]::ReadLines($Path)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        try {
+            $record = $line | ConvertFrom-Json
+            if ($null -ne $record) {
+                Write-Output $record
+            }
+        }
+        catch {
+            Write-Warning "Parse error in $(Split-Path -Leaf $Path): $_"
+        }
+    }
+}
+
+function Initialize-AdvancedHuntingStore {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$RemoveLegacyFiles
+    )
+
+    $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
+    $currentRecords = @{}
+    $migratedLegacy = $false
+    $legacyFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File | Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } | Sort-Object Name)
+
+    if (Test-Path -Path $currentPath) {
+        foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $currentPath) {
+            $cveId = $record.PSObject.Properties['CveId']?.Value
+            if ($cveId) {
+                $currentRecords[$cveId] = $record
+            }
+        }
+    }
+
+    if ($legacyFiles.Count -gt 0) {
+        foreach ($file in $legacyFiles) {
+            $fallbackDate = [regex]::Match($file.Name, '\d{4}-\d{2}-\d{2}').Value
+            foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
+                $cveId = $record.PSObject.Properties['CveId']?.Value
+                if (-not $cveId) { continue }
+
+                $incomingKey = Get-AdvancedHuntingLastModifiedKey -LastModifiedTime $record.PSObject.Properties['LastModifiedTime']?.Value -FallbackDate $fallbackDate
+                $existing = $currentRecords[$cveId]
+
+                if ($null -eq $existing) {
+                    $currentRecords[$cveId] = $record
+                    $migratedLegacy = $true
+                    continue
+                }
+
+                $existingKey = Get-AdvancedHuntingLastModifiedKey -LastModifiedTime $existing.PSObject.Properties['LastModifiedTime']?.Value -FallbackDate ''
+                if ([string]::CompareOrdinal($incomingKey, $existingKey) -gt 0) {
+                    $currentRecords[$cveId] = $record
+                    $migratedLegacy = $true
+                }
+            }
+        }
+
+        if ($migratedLegacy) {
+            Write-NdjsonRecordsFile -Path $currentPath -Records $currentRecords.Values
+        }
+
+        if ($RemoveLegacyFiles -and $currentRecords.Count -gt 0) {
+            Remove-Item -Path $legacyFiles.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    return @{
+        CurrentPath    = $currentPath
+        CurrentRecords = $currentRecords
+        MigratedLegacy = $migratedLegacy
+    }
+}
+
+function Get-MachineStateHash {
+    <#
+    .SYNOPSIS
+        Computes a stable hash for machine state fields that matter historically.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [psobject]$Machine
+    )
+
+    $state = [ordered]@{
+        computerDnsName       = $Machine.PSObject.Properties['computerDnsName']?.Value
+        rbacGroupName         = $Machine.PSObject.Properties['rbacGroupName']?.Value
+        osPlatform            = $Machine.PSObject.Properties['osPlatform']?.Value
+        osVersion             = $Machine.PSObject.Properties['osVersion']?.Value
+        machineTags           = @(Get-NormalizedMachineTags -Tags $Machine.PSObject.Properties['machineTags']?.Value)
+        lastIpAddress         = $Machine.PSObject.Properties['lastIpAddress']?.Value
+        lastExternalIpAddress = $Machine.PSObject.Properties['lastExternalIpAddress']?.Value
+        healthStatus          = $Machine.PSObject.Properties['healthStatus']?.Value
+        riskScore             = $Machine.PSObject.Properties['riskScore']?.Value
+        exposureLevel         = $Machine.PSObject.Properties['exposureLevel']?.Value
+        deviceValue           = $Machine.PSObject.Properties['deviceValue']?.Value
+        managedBy             = $Machine.PSObject.Properties['managedBy']?.Value
+        isAadJoined           = $Machine.PSObject.Properties['isAadJoined']?.Value
+    }
+
+    $stateJson = $state | ConvertTo-Json -Compress -Depth 5
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($stateJson)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash($bytes)
+    }
+    finally {
+        $sha256.Dispose()
+    }
+
+    return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+}
+
+function New-MachineSnapshotRecord {
+    <#
+    .SYNOPSIS
+        Creates a machine snapshot record with observed date and state hash.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [psobject]$Machine,
+
+        [Parameter(Mandatory)]
+        [string]$ObservedOn
+    )
+
+    $compactRecord = ConvertTo-CompactMachineRecord -Machine $Machine
+    $snapshot = [ordered]@{}
+    foreach ($property in $compactRecord.PSObject.Properties) {
+        $snapshot[$property.Name] = $property.Value
+    }
+    $snapshot['observedOn'] = $ObservedOn
+    $snapshot['stateHash'] = Get-MachineStateHash -Machine $compactRecord
+
+    return [PSCustomObject]$snapshot
+}
+
+function Write-NdjsonRecordsFile {
+    <#
+    .SYNOPSIS
+        Writes machine records as NDJSON.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [System.Collections.IEnumerable]$Records
+    )
+
+    $writer = [System.IO.StreamWriter]::new($Path, $false, [System.Text.UTF8Encoding]::new($false))
+    try {
+        foreach ($record in $Records) {
+            if ($null -eq $record) { continue }
+            $writer.WriteLine(($record | ConvertTo-Json -Compress -Depth 6))
+        }
+    }
+    finally {
+        $writer.Dispose()
+    }
+}
+
+function Initialize-MachineHistoryStore {
+    <#
+    .SYNOPSIS
+        Loads or migrates machine history/current files for export updates.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$RemoveLegacyFiles
+    )
+
+    $currentPath = Get-MachineCurrentPath -BasePath $Path
+    $historyPath = Get-MachineHistoryPath -BasePath $Path
+    $currentExists = Test-Path -Path $currentPath
+    $historyExists = Test-Path -Path $historyPath
+    $currentItem = if ($currentExists) { Get-Item -Path $currentPath } else { $null }
+    $historyItem = if ($historyExists) { Get-Item -Path $historyPath } else { $null }
+    $legacyFiles = @(Get-ChildItem -Path $Path -Filter 'Machines_*.json' -File | Where-Object { Test-IsLegacyMachineSnapshotFileName -Name $_.Name } | Sort-Object Name)
+    $currentRecords = @{}
+    $migratedLegacy = $false
+
+    $loadHistory = $historyExists -and ((-not $currentExists) -or ($historyItem.LastWriteTimeUtc -gt $currentItem.LastWriteTimeUtc))
+
+    if ($loadHistory) {
+        foreach ($record in Read-MachineRecordsFromFile -Path $historyPath) {
+            if (-not $record.id) { continue }
+            if (-not $record.PSObject.Properties['stateHash']) {
+                Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
+            }
+            $currentRecords[$record.id] = $record
+        }
+    }
+    elseif ($currentExists) {
+        foreach ($record in Read-MachineRecordsFromFile -Path $currentPath) {
+            if (-not $record.id) { continue }
+            if (-not $record.PSObject.Properties['stateHash']) {
+                Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
+            }
+            if (-not $record.PSObject.Properties['observedOn']) {
+                Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
+            }
+            $currentRecords[$record.id] = $record
+        }
+    }
+
+    if (($currentRecords.Count -eq 0) -and $legacyFiles.Count -gt 0) {
+        $historyRecords = [System.Collections.Generic.List[object]]::new()
+
+        foreach ($file in $legacyFiles) {
+            $observedOn = [regex]::Match($file.Name, '\d{4}-\d{2}-\d{2}').Value
+            foreach ($record in Read-MachineRecordsFromFile -Path $file.FullName) {
+                if (-not $record.id) { continue }
+                $snapshot = New-MachineSnapshotRecord -Machine $record -ObservedOn $observedOn
+                $existing = $currentRecords[$snapshot.id]
+                if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
+                    $historyRecords.Add($snapshot)
+                }
+                $currentRecords[$snapshot.id] = $snapshot
+            }
+        }
+
+        if ($historyRecords.Count -gt 0) {
+            Write-NdjsonRecordsFile -Path $historyPath -Records $historyRecords
+        }
+        if ($currentRecords.Count -gt 0) {
+            Write-NdjsonRecordsFile -Path $currentPath -Records $currentRecords.Values
+        }
+        if ($RemoveLegacyFiles) {
+            Remove-Item -Path $legacyFiles.FullName -Force -ErrorAction SilentlyContinue
+        }
+        $migratedLegacy = $true
+        $historyExists = Test-Path -Path $historyPath
+        $currentExists = Test-Path -Path $currentPath
+    }
+
+    if ((-not $historyExists) -and $currentRecords.Count -gt 0) {
+        $seedRecords = foreach ($record in $currentRecords.Values) {
+            if (-not $record.PSObject.Properties['stateHash']) {
+                Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
+            }
+            if (-not $record.PSObject.Properties['observedOn']) {
+                Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
+            }
+            $record
+        }
+        Write-NdjsonRecordsFile -Path $historyPath -Records $seedRecords
+    }
+
+    if ((-not $currentExists) -and $currentRecords.Count -gt 0) {
+        Write-NdjsonRecordsFile -Path $currentPath -Records $currentRecords.Values
+    }
+
+    if ($RemoveLegacyFiles -and $legacyFiles.Count -gt 0 -and $currentRecords.Count -gt 0) {
+        Remove-Item -Path $legacyFiles.FullName -Force -ErrorAction SilentlyContinue
+    }
+
+    return @{
+        CurrentPath    = $currentPath
+        HistoryPath    = $historyPath
+        CurrentRecords = $currentRecords
+        MigratedLegacy = $migratedLegacy
+    }
+}
+
+function Get-JsonFileMode {
+    <#
+    .SYNOPSIS
+        Detects whether a JSON file starts as an array or line-delimited objects.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    $reader = [System.IO.StreamReader]::new($Path, [System.Text.Encoding]::UTF8, $true)
+    try {
+        while (-not $reader.EndOfStream) {
+            $charValue = $reader.Read()
+            if ($charValue -lt 0) { break }
+            $char = [char]$charValue
+            if (-not [char]::IsWhiteSpace($char)) {
+                if ($char -eq '[') { return 'Array' }
+                return 'Ndjson'
+            }
+        }
+
+        return 'Empty'
+    }
+    finally {
+        $reader.Dispose()
+    }
+}
+
+function Write-Base64FileContent {
+    <#
+    .SYNOPSIS
+        Streams a file as base64 into an existing text writer.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.IO.TextWriter]$Writer,
+
+        [Parameter(Mandatory)]
+        [string]$FilePath
+    )
+
+    $stream = [System.IO.File]::OpenRead($FilePath)
+    try {
+        $buffer = New-Object byte[] 12288
+        $carry = New-Object byte[] 2
+        $carryCount = 0
+
+        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $total = $carryCount + $read
+            $chunk = New-Object byte[] $total
+
+            if ($carryCount -gt 0) {
+                [System.Buffer]::BlockCopy($carry, 0, $chunk, 0, $carryCount)
+            }
+
+            [System.Buffer]::BlockCopy($buffer, 0, $chunk, $carryCount, $read)
+
+            $alignedLength = $total - ($total % 3)
+            if ($alignedLength -gt 0) {
+                $Writer.Write([System.Convert]::ToBase64String($chunk, 0, $alignedLength))
+            }
+
+            $carryCount = $total - $alignedLength
+            if ($carryCount -gt 0) {
+                [System.Buffer]::BlockCopy($chunk, $alignedLength, $carry, 0, $carryCount)
+            }
+        }
+
+        if ($carryCount -gt 0) {
+            $Writer.Write([System.Convert]::ToBase64String($carry, 0, $carryCount))
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Write-CombinedPayloadGzip {
+    <#
+    .SYNOPSIS
+        Streams the combined lookups and vulnerability payload into a gzip file.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Lookups,
+
+        [Parameter(Mandatory)]
+        [string]$VulnsPath,
+
+        [Parameter(Mandatory)]
+        [string]$OutputPath
+    )
+
+    $fileStream = $null
+    $gzipStream = $null
+    $writer = $null
+    $vulnReader = $null
+
+    try {
+        $fileStream = [System.IO.File]::Create($OutputPath)
+        $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+        $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
+
+        $writer.Write('{"lookups":')
+        $lookupsJson = $Lookups | ConvertTo-Json -Depth 10 -Compress
+        $writer.Write($lookupsJson)
+        $lookupsJson = $null
+
+        $writer.Write(',"vulns":')
+        $vulnReader = [System.IO.StreamReader]::new($VulnsPath, [System.Text.Encoding]::UTF8)
+        $charBuffer = New-Object char[] 16384
+        while (($charsRead = $vulnReader.Read($charBuffer, 0, $charBuffer.Length)) -gt 0) {
+            $writer.Write($charBuffer, 0, $charsRead)
+        }
+
+        $writer.Write('}')
+    }
+    finally {
+        if ($vulnReader) { $vulnReader.Dispose() }
+        if ($writer) { $writer.Dispose() }
+        elseif ($gzipStream) { $gzipStream.Dispose() }
+        elseif ($fileStream) { $fileStream.Dispose() }
+    }
+}
+
+function Write-TemplatedHtml {
+    <#
+    .SYNOPSIS
+        Writes the final dashboard HTML without creating repeated full-document copies.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Template,
+
+        [Parameter(Mandatory)]
+        [array]$Segments,
+
+        [Parameter(Mandatory)]
+        [string]$OutputPath
+    )
+
+    $writer = [System.IO.StreamWriter]::new($OutputPath, $false, [System.Text.UTF8Encoding]::new($false))
+    try {
+        $position = 0
+        foreach ($segment in $Segments) {
+            $placeholder = $segment.Placeholder
+            $index = $Template.IndexOf($placeholder, $position, [System.StringComparison]::Ordinal)
+            if ($index -lt 0) {
+                throw "Template placeholder not found: $placeholder"
+            }
+
+            $writer.Write($Template.Substring($position, $index - $position))
+            if ($segment.ContainsKey('Base64FilePath')) {
+                Write-Base64FileContent -Writer $writer -FilePath $segment.Base64FilePath
+            }
+            else {
+                $writer.Write([string]$segment.Value)
+            }
+
+            $position = $index + $placeholder.Length
+        }
+
+        $writer.Write($Template.Substring($position))
+    }
+    finally {
+        $writer.Dispose()
+    }
 }
 
 # =============================================================================
@@ -422,6 +1116,40 @@ function Test-BlobExists {
     }
 }
 
+function Remove-Blob {
+    <#
+    .SYNOPSIS
+        Deletes a blob from storage.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory)]
+        [string]$Container,
+
+        [Parameter(Mandatory)]
+        [string]$BlobName,
+
+        [Parameter(Mandatory)]
+        [string]$StorageToken
+    )
+
+    $baseUrl = "https://$AccountName.blob.core.windows.net"
+    $uri = "$baseUrl/$Container/$BlobName"
+    $headers = Get-BlobHeaders -StorageToken $StorageToken
+
+    try {
+        Invoke-WebRequest -Uri $uri -Headers $headers -Method Delete -ErrorAction Stop | Out-Null
+    }
+    catch {
+        if ($_.Exception.Response.StatusCode -ne 404) {
+            throw "Failed to delete blob '$BlobName' from '$Container': $_"
+        }
+    }
+}
+
 # =============================================================================
 # HELPER FUNCTIONS - MDE API
 # =============================================================================
@@ -495,7 +1223,7 @@ function Export-BulkVulnerabilities {
 function Export-MachineData {
     <#
     .SYNOPSIS
-        Exports machine data from the MDE /api/machines endpoint (paginated).
+        Exports machine data from the MDE /api/machines endpoint into current/history files.
     #>
     [CmdletBinding()]
     param(
@@ -508,38 +1236,57 @@ function Export-MachineData {
 
     Write-Host "Exporting machine data from MDE API..."
 
-    $allMachines = [System.Collections.Generic.List[PSObject]]::new()
     $uri = "$($Script:MdeApiUrl)/api/machines?`$filter=onboardingStatus eq 'Onboarded'"
     $pageCount = 0
+    $observedOn = Get-Date -Format "yyyy-MM-dd"
+    $store = Initialize-MachineHistoryStore -Path $OutputPath -RemoveLegacyFiles
+    $historyWriter = $null
 
-    do {
-        $pageCount++
-        Write-Host "  Fetching page $pageCount..."
-        $response = Invoke-RestMethod -Uri $uri -Headers $Headers -Method Get
+    try {
+        $historyWriter = [System.IO.StreamWriter]::new($store.HistoryPath, $true, [System.Text.UTF8Encoding]::new($false))
+        $machineCount = 0
+        $changeCount = 0
 
-        if ($response.value) {
-            foreach ($machine in $response.value) {
-                $allMachines.Add($machine)
+        do {
+            $pageCount++
+            Write-Host "  Fetching page $pageCount..."
+            $response = Invoke-RestMethod -Uri $uri -Headers $Headers -Method Get
+
+            if ($response.value) {
+                foreach ($machine in $response.value) {
+                    $snapshot = New-MachineSnapshotRecord -Machine $machine -ObservedOn $observedOn
+                    $existing = $store.CurrentRecords[$snapshot.id]
+                    if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
+                        $historyWriter.WriteLine(($snapshot | ConvertTo-Json -Depth 6 -Compress))
+                        $changeCount++
+                    }
+                    $store.CurrentRecords[$snapshot.id] = $snapshot
+                    $machineCount++
+                }
             }
+
+            $uri = if ($response.PSObject.Properties['@odata.nextLink']) {
+                $response.'@odata.nextLink'
+            } else { $null }
+        } while ($uri)
+
+        $historyWriter.Dispose()
+        $historyWriter = $null
+        Write-NdjsonRecordsFile -Path $store.CurrentPath -Records $store.CurrentRecords.Values
+    }
+    finally {
+        if ($historyWriter) {
+            $historyWriter.Dispose()
         }
+    }
 
-        $uri = if ($response.PSObject.Properties['@odata.nextLink']) {
-            $response.'@odata.nextLink'
-        } else { $null }
-    } while ($uri)
-
-    Write-Host "  Total machines: $($allMachines.Count)"
-
-    $timestamp = Get-Date -Format "yyyy-MM-dd"
-    $outputFile = Join-Path -Path $OutputPath -ChildPath "Machines_$timestamp.json"
-    $machineJson = $allMachines | ConvertTo-Json -Depth 5
-    $allMachines = $null
-    [GC]::Collect()
-    [System.IO.File]::WriteAllText($outputFile, $machineJson, [System.Text.Encoding]::UTF8)
-    $machineJson = $null
-
-    Write-Host "  Saved: $(Split-Path -Leaf $outputFile)"
-    return $outputFile
+    Write-Host "  Total machines: $machineCount"
+    Write-Host "  Machine state changes captured: $changeCount"
+    if ($store.MigratedLegacy) {
+        Write-Host "  Migrated legacy machine snapshots to current/history store"
+    }
+    Write-Host "  Saved: $(Split-Path -Leaf $store.CurrentPath), $(Split-Path -Leaf $store.HistoryPath)"
+    return @($store.CurrentPath, $store.HistoryPath)
 }
 
 function Export-AdvancedHuntingData {
@@ -577,23 +1324,21 @@ DeviceTvmSoftwareVulnerabilities
     $resultCount = $response.Results.Count
     Write-Host "  Retrieved $resultCount records"
 
-    $timestamp = Get-Date -Format "yyyy-MM-dd"
-    $outputFile = Join-Path -Path $OutputPath -ChildPath "AdvancedHunting_${resultCount}_$timestamp.json"
-
-    $writer = [System.IO.StreamWriter]::new($outputFile, $false, [System.Text.Encoding]::UTF8)
-    try {
-        $firstLine = $true
-        foreach ($result in $response.Results) {
-            if (-not $firstLine) { $writer.WriteLine() }
-            $writer.Write(($result | ConvertTo-Json -Compress -Depth 10))
-            $firstLine = $false
+    $store = Initialize-AdvancedHuntingStore -Path $OutputPath -RemoveLegacyFiles
+    foreach ($result in $response.Results) {
+        $cveId = $result.PSObject.Properties['CveId']?.Value
+        if ($cveId) {
+            $store.CurrentRecords[$cveId] = $result
         }
     }
-    finally {
-        $writer.Dispose()
-    }
+
+    $outputFile = $store.CurrentPath
+    Write-NdjsonRecordsFile -Path $outputFile -Records $store.CurrentRecords.Values
     $response = $null
 
+    if ($store.MigratedLegacy) {
+        Write-Host "  Migrated legacy Advanced Hunting snapshots to current cache"
+    }
     Write-Host "  Saved: $(Split-Path -Leaf $outputFile)"
     return $outputFile
 }
@@ -605,7 +1350,8 @@ DeviceTvmSoftwareVulnerabilities
 function Read-MachineData {
     <#
     .SYNOPSIS
-        Reads and merges machine data from Machines_*.json files, deduplicating by machine ID.
+        Reads the machine current-state store when available, otherwise falls back
+        to the history file or legacy dated snapshots.
     #>
     [CmdletBinding()]
     param(
@@ -614,29 +1360,43 @@ function Read-MachineData {
     )
 
     Write-Host "Reading machine data from $Path..."
-
-    $machineFiles = @(Get-ChildItem -Path $Path -Filter "Machines_*.json" -File | Sort-Object Name -Descending)
-
-    if ($machineFiles.Count -eq 0) {
-        Write-Warning "No machine data files found."
-        return @{}
-    }
-
-    Write-Host "  Found $($machineFiles.Count) machine data file(s)"
     $machines = @{}
 
-    foreach ($file in $machineFiles) {
-        Write-Host "  Processing $($file.Name)..."
-        $rawContent = Get-Content -Path $file.FullName -Raw
-        $machineList = $rawContent | ConvertFrom-Json
-        $rawContent = $null
-        if ($null -eq $machineList) { continue }
-        if ($machineList -isnot [System.Array]) { $machineList = @($machineList) }
+    $currentPath = Get-MachineCurrentPath -BasePath $Path
+    $historyPath = Get-MachineHistoryPath -BasePath $Path
 
-        foreach ($machine in $machineList) {
-            if ($null -eq $machine) { continue }
-            $id = $machine.id
-            if ($id -and -not $machines.ContainsKey($id)) { $machines[$id] = $machine }
+    if (Test-Path -Path $currentPath) {
+        Write-Host "  Using $(Split-Path -Leaf $currentPath)"
+        foreach ($record in Read-MachineRecordsFromFile -Path $currentPath) {
+            if ($record.id) {
+                $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
+            }
+        }
+    }
+    elseif (Test-Path -Path $historyPath) {
+        Write-Host "  Using $(Split-Path -Leaf $historyPath) to reconstruct current state"
+        foreach ($record in Read-MachineRecordsFromFile -Path $historyPath) {
+            if ($record.id) {
+                $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
+            }
+        }
+    }
+    else {
+        $machineFiles = @(Get-ChildItem -Path $Path -Filter "Machines_*.json" -File | Where-Object { Test-IsLegacyMachineSnapshotFileName -Name $_.Name } | Sort-Object Name -Descending)
+
+        if ($machineFiles.Count -eq 0) {
+            Write-Warning "No machine data files found."
+            return @{}
+        }
+
+        Write-Host "  Found $($machineFiles.Count) legacy machine snapshot file(s)"
+        foreach ($file in $machineFiles) {
+            Write-Host "  Processing $($file.Name)..."
+            foreach ($record in Read-MachineRecordsFromFile -Path $file.FullName) {
+                if ($record.id -and -not $machines.ContainsKey($record.id)) {
+                    $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
+                }
+            }
         }
     }
 
@@ -644,54 +1404,11 @@ function Read-MachineData {
     return $machines
 }
 
-function Read-VulnerabilityData {
-    <#
-    .SYNOPSIS
-        Reads VulnExport_*.json files (NDJSON format), returns list of vulnerability objects.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path
-    )
-
-    Write-Host "Reading vulnerability data from $Path..."
-
-    $jsonFiles = Get-ChildItem -Path $Path -Filter "VulnExport_*.json" -File |
-        Where-Object { $_.Name -notmatch '_enriched\.json$' }
-
-    if ($jsonFiles.Count -eq 0) {
-        throw "No VulnExport JSON files found in '$Path'."
-    }
-
-    Write-Host "  Found $($jsonFiles.Count) file(s)"
-    $vulnerabilities = [System.Collections.Generic.List[PSObject]]::new()
-    $parseErrors = 0
-
-    foreach ($file in $jsonFiles) {
-        Write-Host "  Processing $($file.Name)..."
-        foreach ($line in [System.IO.File]::ReadLines($file.FullName)) {
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            try {
-                $vuln = $line | ConvertFrom-Json
-                $vulnerabilities.Add($vuln)
-            }
-            catch {
-                $parseErrors++
-                if ($parseErrors -le 5) { Write-Warning "Parse error in $($file.Name): $_" }
-            }
-        }
-    }
-
-    if ($parseErrors -gt 0) { Write-Host "  Parse errors: $parseErrors" }
-    Write-Host "  Total vulnerabilities loaded: $($vulnerabilities.Count)"
-    return $vulnerabilities
-}
-
 function Read-AdvancedHuntingData {
     <#
     .SYNOPSIS
-        Reads AdvancedHunting_*.json files, deduplicates by CveId, returns hashtable.
+        Reads the canonical AdvancedHunting_Current.json cache when present,
+        otherwise falls back to legacy dated Advanced Hunting exports.
     #>
     [CmdletBinding()]
     param(
@@ -701,23 +1418,29 @@ function Read-AdvancedHuntingData {
 
     Write-Host "Reading Advanced Hunting data from $Path..."
 
-    $ahFiles = @(Get-ChildItem -Path $Path -Filter "AdvancedHunting_*.json" -File | Sort-Object Name -Descending)
-
-    if ($ahFiles.Count -eq 0) {
-        Write-Host "  No Advanced Hunting files found. CVE enrichment skipped."
-        return @{}
-    }
-
-    Write-Host "  Found $($ahFiles.Count) file(s)"
     $ahData = @{}
     $parseErrors = 0
 
-    foreach ($file in $ahFiles) {
+    $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
+    if (Test-Path -Path $currentPath) {
+        Write-Host "  Using $(Split-Path -Leaf $currentPath)"
+        $sourceFiles = @(Get-Item -Path $currentPath)
+    }
+    else {
+        $sourceFiles = @(Get-ChildItem -Path $Path -Filter "AdvancedHunting_*.json" -File | Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } | Sort-Object Name -Descending)
+
+        if ($sourceFiles.Count -eq 0) {
+            Write-Host "  No Advanced Hunting files found. CVE enrichment skipped."
+            return @{}
+        }
+
+        Write-Host "  Found $($sourceFiles.Count) legacy file(s)"
+    }
+
+    foreach ($file in $sourceFiles) {
         Write-Host "  Processing $($file.Name)..."
-        foreach ($line in [System.IO.File]::ReadLines($file.FullName)) {
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
             try {
-                $record = $line | ConvertFrom-Json
                 $cveId = $record.CveId
                 if ($cveId -and -not $ahData.ContainsKey($cveId)) {
                     $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
@@ -731,7 +1454,7 @@ function Read-AdvancedHuntingData {
             }
             catch {
                 $parseErrors++
-                if ($parseErrors -le 5) { Write-Warning "Parse error in $($file.Name): $_" }
+                if ($parseErrors -le 5) { Write-Warning "Failed to process Advanced Hunting record in $($file.Name): $_" }
             }
         }
     }
@@ -822,6 +1545,9 @@ function Convert-ToYmdDate {
     }
 }
 
+# Keep the shared store helpers in this section aligned with the equivalent
+# helpers in Invoke-VulnerabilityExport.ps1 and Generate-VulnerabilityDashboard.ps1.
+
 function ConvertTo-NormalizedData {
     <#
     .SYNOPSIS
@@ -838,6 +1564,9 @@ function ConvertTo-NormalizedData {
     param(
         [Parameter(Mandatory)]
         [string]$DataPath,
+
+        [Parameter(Mandatory)]
+        [string]$VulnOutputPath,
 
         [Parameter(Mandatory)]
         [hashtable]$Machines,
@@ -896,224 +1625,280 @@ function ConvertTo-NormalizedData {
         return $indexMap[$key]
     }
 
-    $vulnRecords = [System.Collections.Generic.List[PSObject]]::new()
+    $dateValueCache = @{}
+    function Get-CachedYmdDate {
+        param($dateValue)
+
+        if ($null -eq $dateValue) {
+            return $null
+        }
+
+        $cacheKey = $dateValue.ToString()
+        if ($dateValueCache.ContainsKey($cacheKey)) {
+            return $dateValueCache[$cacheKey]
+        }
+
+        $normalized = Convert-ToYmdDate -DateValue $dateValue
+        $dateValueCache[$cacheKey] = $normalized
+        return $normalized
+    }
+
     $firstLastSwappedCount = 0
     $processedCount = 0
     $parseErrors = 0
+    $hasNoTags = $false
+    $vulnWriter = $null
+    $isFirstVuln = $true
 
     $jsonFiles = Get-ChildItem -Path $DataPath -Filter "VulnExport_*.json" -File |
         Where-Object { $_.Name -notmatch '_enriched\.json$' }
     if ($jsonFiles.Count -eq 0) { throw "No VulnExport JSON files found in '$DataPath'." }
     Write-Host "  Found $($jsonFiles.Count) export file(s) to normalize..."
 
-    foreach ($file in $jsonFiles) {
-        Write-Host "  Processing $($file.Name)..."
-        foreach ($line in [System.IO.File]::ReadLines($file.FullName)) {
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            try { $v = $line | ConvertFrom-Json }
-            catch {
-                $parseErrors++
-                if ($parseErrors -le 5) { Write-Warning "Parse error in $($file.Name): $_" }
-                continue
-            }
-            if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { continue }
-            $processedCount++
+    try {
+        $vulnWriter = [System.IO.StreamWriter]::new($VulnOutputPath, $false, [System.Text.UTF8Encoding]::new($false))
+        $vulnWriter.Write('[')
 
-            $deviceId = $v.DeviceId
-        if (-not $deviceIndex.ContainsKey($deviceId)) {
-            $machine = $Machines[$deviceId]
-
-            $groupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $v.PSObject.Properties['RbacGroupName']?.Value }
-            $groupIdx = Get-OrCreateIndex -value $groupName -list $lookups.groups -indexMap $groupIndex
-
-            $osPlat = if ($machine) { $machine.PSObject.Properties['osPlatform']?.Value } else { $v.PSObject.Properties['OSPlatform']?.Value }
-            $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
-
-            $machineTags = if ($machine -and $machine.PSObject.Properties['machineTags']?.Value) { $machine.machineTags }
-                          elseif ($v.PSObject.Properties['MachineTags']?.Value) { $v.PSObject.Properties['MachineTags']?.Value }
-                          else { @() }
-            $tagIndices = [System.Collections.Generic.List[int]]::new()
-            foreach ($tag in $machineTags) {
-                $tagIdx = Get-OrCreateIndex -value $tag -list $lookups.tags -indexMap $tagIndex
-                if ($tagIdx -ge 0) { $tagIndices.Add($tagIdx) }
-            }
-
-            $deviceIndex[$deviceId] = $lookups.devices.Count
-
-            $machineInfo = $null
-            if ($machine) {
-                $machineLastSeen = $machine.PSObject.Properties['lastSeen']?.Value
-                $machineFirstSeen = $machine.PSObject.Properties['firstSeen']?.Value
-                $machineInfo = [PSCustomObject]@{
-                    ip  = $machine.PSObject.Properties['lastIpAddress']?.Value
-                    eip = $machine.PSObject.Properties['lastExternalIpAddress']?.Value
-                    hs  = $machine.PSObject.Properties['healthStatus']?.Value
-                    rs  = $machine.PSObject.Properties['riskScore']?.Value
-                    el  = $machine.PSObject.Properties['exposureLevel']?.Value
-                    dv  = $machine.PSObject.Properties['deviceValue']?.Value
-                    mb  = $machine.PSObject.Properties['managedBy']?.Value
-                    aad = $machine.PSObject.Properties['isAadJoined']?.Value
-                    ls  = Convert-ToYmdDate -DateValue $machineLastSeen
-                    fs  = Convert-ToYmdDate -DateValue $machineFirstSeen
+        foreach ($file in $jsonFiles) {
+            Write-Host "  Processing $($file.Name)..."
+            foreach ($line in [System.IO.File]::ReadLines($file.FullName)) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                try { $v = $line | ConvertFrom-Json }
+                catch {
+                    $parseErrors++
+                    if ($parseErrors -le 5) { Write-Warning "Parse error in $($file.Name): $_" }
+                    continue
                 }
-            }
+                if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { continue }
+                $processedCount++
 
-            $lookups.devices.Add([PSCustomObject]@{
-                id = $deviceId
-                n  = if ($machine) { $machine.PSObject.Properties['computerDnsName']?.Value } elseif ($v.PSObject.Properties['DeviceName']?.Value) { $v.PSObject.Properties['DeviceName']?.Value } else { "(no machine data)" }
-                g  = $groupIdx
-                o  = $platIdx
-                ov = if ($machine) { $machine.PSObject.Properties['osVersion']?.Value } else { $v.PSObject.Properties['OSVersion']?.Value }
-                t  = $tagIndices
-                m  = $machineInfo
-            })
-        }
-        $devIdx = $deviceIndex[$deviceId]
+                $deviceId = $v.DeviceId
+                if (-not $deviceIndex.ContainsKey($deviceId)) {
+                    $machine = $Machines[$deviceId]
 
-        $vendorIdx = Get-OrCreateIndex -value $v.PSObject.Properties['SoftwareVendor']?.Value -list $lookups.vendors -indexMap $vendorIndex
+                    $groupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $v.PSObject.Properties['RbacGroupName']?.Value }
+                    if ([string]::IsNullOrWhiteSpace([string]$groupName)) {
+                        $fallbackGroupName = $v.PSObject.Properties['RbacGroupName']?.Value
+                        $groupName = if ([string]::IsNullOrWhiteSpace([string]$fallbackGroupName)) { '(none)' } else { $fallbackGroupName }
+                    }
+                    $groupIdx = Get-OrCreateIndex -value $groupName -list $lookups.groups -indexMap $groupIndex
 
-        $softwareVendor = $v.PSObject.Properties['SoftwareVendor']?.Value ?? ''
-        $softwareName = $v.PSObject.Properties['SoftwareName']?.Value ?? ''
-        $softwareKey = "$softwareVendor|$softwareName"
-        if (-not $softwareIndex.ContainsKey($softwareKey)) {
-            $softwareIndex[$softwareKey] = $lookups.software.Count
-            $lookups.software.Add([PSCustomObject]@{
-                v = $vendorIdx
-                n = $softwareName
-                r = $v.PSObject.Properties['RecommendationReference']?.Value
-            })
-        }
-        $swIdx = $softwareIndex[$softwareKey]
+                    $osPlat = if ($machine) { $machine.PSObject.Properties['osPlatform']?.Value } else { $v.PSObject.Properties['OSPlatform']?.Value }
+                    $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
 
-        $cveId = $v.CveId
-        if (-not $cveIndex.ContainsKey($cveId)) {
-            $sevLevel = $v.PSObject.Properties['VulnerabilitySeverityLevel']?.Value
-            $sevIdx = switch ($sevLevel) {
-                'Critical' { 0 }
-                'High' { 1 }
-                'Medium' { 2 }
-                'Low' { 3 }
-                default { -1 }
-            }
+                    $machineTags = if ($machine -and $machine.PSObject.Properties['machineTags']?.Value) { $machine.machineTags }
+                                  elseif ($v.PSObject.Properties['MachineTags']?.Value) { $v.PSObject.Properties['MachineTags']?.Value }
+                                  else { @() }
+                    $tagIndices = [System.Collections.Generic.List[int]]::new()
+                    foreach ($tag in $machineTags) {
+                        $tagIdx = Get-OrCreateIndex -value $tag -list $lookups.tags -indexMap $tagIndex
+                        if ($tagIdx -ge 0) { $tagIndices.Add($tagIdx) }
+                    }
+                    if ($tagIndices.Count -eq 0) { $hasNoTags = $true }
 
-            $expIdx = Get-OrCreateIndex -value $v.PSObject.Properties['ExploitabilityLevel']?.Value -list $lookups.exploitLevels -indexMap $exploitIndex
+                    $deviceIndex[$deviceId] = $lookups.devices.Count
 
-            $ahData = $AdvancedHuntingData[$cveId]
-            $publishedDate = $null
-            $vulnDescription = $null
-            $epssScore = $null
-            $affSoftwareIndices = $null
-            if ($ahData) {
-                $pdRaw = $ahData.PublishedDate
-                $publishedDate = Convert-ToYmdDate -DateValue $pdRaw
-                $vulnDescription = $ahData.VulnerabilityDescription
-                $epssScore = $ahData.EpssScore
-                if ($ahData.AffectedSoftware -and $ahData.AffectedSoftware.Count -gt 0) {
-                    $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
-                    foreach ($sw in $ahData.AffectedSoftware) {
-                        $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
-                        if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
+                    $machineInfo = $null
+                    if ($machine) {
+                        $machineLastSeen = $machine.PSObject.Properties['lastSeen']?.Value
+                        $machineFirstSeen = $machine.PSObject.Properties['firstSeen']?.Value
+                        $machineInfo = [PSCustomObject]@{
+                            ip  = $machine.PSObject.Properties['lastIpAddress']?.Value
+                            eip = $machine.PSObject.Properties['lastExternalIpAddress']?.Value
+                            hs  = $machine.PSObject.Properties['healthStatus']?.Value
+                            rs  = $machine.PSObject.Properties['riskScore']?.Value
+                            el  = $machine.PSObject.Properties['exposureLevel']?.Value
+                            dv  = $machine.PSObject.Properties['deviceValue']?.Value
+                            mb  = $machine.PSObject.Properties['managedBy']?.Value
+                            aad = $machine.PSObject.Properties['isAadJoined']?.Value
+                            ls  = Get-CachedYmdDate -dateValue $machineLastSeen
+                            fs  = Get-CachedYmdDate -dateValue $machineFirstSeen
+                        }
+                    }
+
+                    $lookups.devices.Add([PSCustomObject]@{
+                        id = $deviceId
+                        n  = if ($machine) { $machine.PSObject.Properties['computerDnsName']?.Value } elseif ($v.PSObject.Properties['DeviceName']?.Value) { $v.PSObject.Properties['DeviceName']?.Value } else { "(no machine data)" }
+                        g  = $groupIdx
+                        o  = $platIdx
+                        ov = if ($machine) { $machine.PSObject.Properties['osVersion']?.Value } else { $v.PSObject.Properties['OSVersion']?.Value }
+                        t  = $tagIndices
+                        m  = $machineInfo
+                    })
+                }
+                $devIdx = $deviceIndex[$deviceId]
+
+                $vendorIdx = Get-OrCreateIndex -value $v.PSObject.Properties['SoftwareVendor']?.Value -list $lookups.vendors -indexMap $vendorIndex
+
+                $softwareVendor = $v.PSObject.Properties['SoftwareVendor']?.Value ?? ''
+                $softwareName = $v.PSObject.Properties['SoftwareName']?.Value ?? ''
+                $softwareKey = "$softwareVendor|$softwareName"
+                if (-not $softwareIndex.ContainsKey($softwareKey)) {
+                    $softwareIndex[$softwareKey] = $lookups.software.Count
+                    $lookups.software.Add([PSCustomObject]@{
+                        v = $vendorIdx
+                        n = $softwareName
+                        r = $v.PSObject.Properties['RecommendationReference']?.Value
+                    })
+                }
+                $swIdx = $softwareIndex[$softwareKey]
+
+                $cveId = $v.CveId
+                $cvssScore = $v.PSObject.Properties['CvssScore']?.Value
+                $sevLevel = $v.PSObject.Properties['VulnerabilitySeverityLevel']?.Value
+                $sevIdx = switch ($sevLevel) {
+                    'Critical' { 0 }
+                    'High' { 1 }
+                    'Medium' { 2 }
+                    'Low' { 3 }
+                    default { -1 }
+                }
+
+                $exploitabilityLevel = $v.PSObject.Properties['ExploitabilityLevel']?.Value
+                $expIdx = Get-OrCreateIndex -value $exploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
+
+                $cveBatchUrl = Convert-CveUrl -Url $v.PSObject.Properties['CveBatchUrl']?.Value
+                $btValue = $v.PSObject.Properties['CveBatchTitle']?.Value
+                $cveKey = (@(
+                    [string]$cveId,
+                    [string]$cvssScore,
+                    [string]$sevLevel,
+                    [string]$exploitabilityLevel,
+                    [string]$cveBatchUrl,
+                    [string]$btValue
+                ) -join '|')
+
+                if (-not $cveIndex.ContainsKey($cveKey)) {
+                    $ahData = $AdvancedHuntingData[$cveId]
+                    $publishedDate = $null
+                    $vulnDescription = $null
+                    $epssScore = $null
+                    $affSoftwareIndices = $null
+                    if ($ahData) {
+                        $publishedDate = $ahData.PublishedDate
+                        $vulnDescription = $ahData.VulnerabilityDescription
+                        $epssScore = $ahData.EpssScore
+                        if ($ahData.AffectedSoftware -and $ahData.AffectedSoftware.Count -gt 0) {
+                            $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
+                            foreach ($sw in $ahData.AffectedSoftware) {
+                                $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
+                                if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
+                            }
+                        }
+                    }
+
+                    $btIdx = Get-OrCreateIndex -value $btValue -list $lookups.batchTitles -indexMap $batchTitleIndex
+
+                    $cveIndex[$cveKey] = $lookups.cves.Count
+                    $lookups.cves.Add([PSCustomObject]@{
+                        id   = $cveId
+                        sc   = $cvssScore
+                        sv   = $sevIdx
+                        ex   = $expIdx
+                        u    = $cveBatchUrl
+                        bt   = $btIdx
+                        pd   = $publishedDate
+                        desc = $vulnDescription
+                        ep   = $epssScore
+                        as   = $affSoftwareIndices
+                    })
+                }
+                $cveIdx = $cveIndex[$cveKey]
+
+                $recUpdate = $v.PSObject.Properties['RecommendedSecurityUpdate']?.Value
+                $recUpdateId = $v.PSObject.Properties['RecommendedSecurityUpdateId']?.Value
+                $recUpdateUrl = $v.PSObject.Properties['RecommendedSecurityUpdateUrl']?.Value
+                $updateName = if ($recUpdate -and $recUpdate -ne '--') { $recUpdate } else { $null }
+                if ($null -eq $updateName -or $updateName -eq '') {
+                    $updIdx = -1
+                } else {
+                    $updateKey = @(
+                        [string]$updateName,
+                        [string]$recUpdateId,
+                        [string]$recUpdateUrl
+                    ) -join '|'
+                    if ($updateIndex.ContainsKey($updateKey)) {
+                        $updIdx = $updateIndex[$updateKey]
+                    } else {
+                        $updIdx = $lookups.updates.Count
+                        $updateIndex[$updateKey] = $updIdx
+                        $lookups.updates.Add([PSCustomObject]@{
+                            n   = $updateName
+                            id  = $recUpdateId
+                            url = $recUpdateUrl
+                        })
                     }
                 }
-            }
 
-            $btValue = $v.PSObject.Properties['CveBatchTitle']?.Value
-            $btIdx = Get-OrCreateIndex -value $btValue -list $lookups.batchTitles -indexMap $batchTitleIndex
+                $firstSeenTs = $v.PSObject.Properties['FirstSeenTimestamp']?.Value
+                $lastSeenTs = $v.PSObject.Properties['LastSeenTimestamp']?.Value
+                $firstSeen = Get-CachedYmdDate -dateValue $firstSeenTs
+                $lastSeen = Get-CachedYmdDate -dateValue $lastSeenTs
 
-            $cveIndex[$cveId] = $lookups.cves.Count
-            $lookups.cves.Add([PSCustomObject]@{
-                id   = $cveId
-                sc   = $v.PSObject.Properties['CvssScore']?.Value
-                sv   = $sevIdx
-                ex   = $expIdx
-                u    = Convert-CveUrl -Url $v.PSObject.Properties['CveBatchUrl']?.Value
-                bt   = $btIdx
-                pd   = $publishedDate
-                desc = $vulnDescription
-                ep   = $epssScore
-                as   = $affSoftwareIndices
-            })
-        }
-        $cveIdx = $cveIndex[$cveId]
+                if ($firstSeen -and $lastSeen -and $firstSeen -gt $lastSeen) {
+                    $temp = $firstSeen
+                    $firstSeen = $lastSeen
+                    $lastSeen = $temp
+                    $firstLastSwappedCount++
+                }
 
-        # Get or create update index (stores object with name, id, url)
-        # Key by name+id to distinguish different KBs sharing the same update name
-        $recUpdate = $v.PSObject.Properties['RecommendedSecurityUpdate']?.Value
-        $recUpdateId = $v.PSObject.Properties['RecommendedSecurityUpdateId']?.Value
-        $recUpdateUrl = $v.PSObject.Properties['RecommendedSecurityUpdateUrl']?.Value
-        $updateName = if ($recUpdate -and $recUpdate -ne '--') { $recUpdate } else { $null }
-        if ($null -eq $updateName -or $updateName -eq '') {
-            $updIdx = -1
-        } else {
-            $updateKey = if ($recUpdateId) { "$updateName|$recUpdateId" } else { $updateName }
-            if ($updateIndex.ContainsKey($updateKey)) {
-                $updIdx = $updateIndex[$updateKey]
-            } else {
-                $updIdx = $lookups.updates.Count
-                $updateIndex[$updateKey] = $updIdx
-                $lookups.updates.Add([PSCustomObject]@{
-                    n   = $updateName
-                    id  = $recUpdateId
-                    url = $recUpdateUrl
-                })
-            }
-        }
+                if (-not $firstSeen) { $firstSeen = '' }
+                if (-not $lastSeen) { $lastSeen = '' }
 
-        $firstSeenTs = $v.PSObject.Properties['FirstSeenTimestamp']?.Value
-        $lastSeenTs = $v.PSObject.Properties['LastSeenTimestamp']?.Value
-        $firstSeen = Convert-ToYmdDate -DateValue $firstSeenTs
-        $lastSeen = Convert-ToYmdDate -DateValue $lastSeenTs
+                $firstSeenIdx = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
+                $lastSeenIdx = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
 
-        if ($firstSeen -and $lastSeen -and $firstSeen -gt $lastSeen) {
-            $temp = $firstSeen
-            $firstSeen = $lastSeen
-            $lastSeen = $temp
-            $firstLastSwappedCount++
-        }
+                $versionStr = $v.PSObject.Properties['SoftwareVersion']?.Value
+                $versionIdx = Get-OrCreateIndex -value $versionStr -list $lookups.versions -indexMap $versionIndex
 
-        if (-not $firstSeen) { $firstSeen = '' }
-        if (-not $lastSeen) { $lastSeen = '' }
+                $rawDiskPaths = $v.PSObject.Properties['DiskPaths']?.Value
+                $rawRegPaths = $v.PSObject.Properties['RegistryPaths']?.Value
+                $diskPathIndices = $null
+                $regPathIndices = $null
+                if ($rawDiskPaths -and $rawDiskPaths.Count -gt 0) {
+                    $diskPathIndices = [System.Collections.Generic.List[int]]::new()
+                    foreach ($dp in $rawDiskPaths) {
+                        $dpIdx = Get-OrCreateIndex -value $dp -list $lookups.diskPaths -indexMap $diskPathIndex
+                        if ($dpIdx -ge 0) { $diskPathIndices.Add($dpIdx) }
+                    }
+                }
+                if ($rawRegPaths -and $rawRegPaths.Count -gt 0) {
+                    $regPathIndices = [System.Collections.Generic.List[int]]::new()
+                    foreach ($rp in $rawRegPaths) {
+                        $rpIdx = Get-OrCreateIndex -value $rp -list $lookups.regPaths -indexMap $regPathIndex
+                        if ($rpIdx -ge 0) { $regPathIndices.Add($rpIdx) }
+                    }
+                }
 
-        $firstSeenIdx = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
-        $lastSeenIdx = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
+                $secUpdateAvail = $v.PSObject.Properties['SecurityUpdateAvailable']?.Value
+                $compactRecord = @(
+                    $devIdx,
+                    $cveIdx,
+                    $swIdx,
+                    $versionIdx,
+                    $firstSeenIdx,
+                    $lastSeenIdx,
+                    [int]($secUpdateAvail -eq $true),
+                    $updIdx,
+                    $diskPathIndices,
+                    $regPathIndices
+                )
 
-        $versionStr = $v.PSObject.Properties['SoftwareVersion']?.Value
-        $versionIdx = Get-OrCreateIndex -value $versionStr -list $lookups.versions -indexMap $versionIndex
-
-        $rawDiskPaths = $v.PSObject.Properties['DiskPaths']?.Value
-        $rawRegPaths = $v.PSObject.Properties['RegistryPaths']?.Value
-        $diskPathIndices = $null
-        $regPathIndices = $null
-        if ($rawDiskPaths -and $rawDiskPaths.Count -gt 0) {
-            $diskPathIndices = [System.Collections.Generic.List[int]]::new()
-            foreach ($dp in $rawDiskPaths) {
-                $dpIdx = Get-OrCreateIndex -value $dp -list $lookups.diskPaths -indexMap $diskPathIndex
-                if ($dpIdx -ge 0) { $diskPathIndices.Add($dpIdx) }
-            }
-        }
-        if ($rawRegPaths -and $rawRegPaths.Count -gt 0) {
-            $regPathIndices = [System.Collections.Generic.List[int]]::new()
-            foreach ($rp in $rawRegPaths) {
-                $rpIdx = Get-OrCreateIndex -value $rp -list $lookups.regPaths -indexMap $regPathIndex
-                if ($rpIdx -ge 0) { $regPathIndices.Add($rpIdx) }
+                if (-not $isFirstVuln) {
+                    $vulnWriter.Write(',')
+                }
+                $vulnWriter.Write(($compactRecord | ConvertTo-Json -Compress -Depth 5))
+                $isFirstVuln = $false
             }
         }
 
-        $secUpdateAvail = $v.PSObject.Properties['SecurityUpdateAvailable']?.Value
-        $vulnRecords.Add(@(
-            $devIdx,
-            $cveIdx,
-            $swIdx,
-            $versionIdx,
-            $firstSeenIdx,
-            $lastSeenIdx,
-            [int]($secUpdateAvail -eq $true),
-            $updIdx,
-            $diskPathIndices,
-            $regPathIndices
-        ))
-        } # end foreach ($line ...)
-    } # end foreach ($file ...)
+        $vulnWriter.Write(']')
+    }
+    finally {
+        if ($vulnWriter) {
+            $vulnWriter.Dispose()
+        }
+    }
 
     if ($parseErrors -gt 0) { Write-Host "  Parse errors: $parseErrors" }
     if ($processedCount -eq 0) { throw "No onboarded vulnerabilities found after streaming all export files." }
@@ -1121,7 +1906,6 @@ function ConvertTo-NormalizedData {
 
     # Handle "(No Tags)" label
     $noTagsLabel = "(No Tags)"
-    $hasNoTags = $lookups.devices | Where-Object { $_.t.Count -eq 0 }
     if ($hasNoTags -and -not $tagIndex.ContainsKey($noTagsLabel)) {
         $tagIndex[$noTagsLabel] = $lookups.tags.Count
         $lookups.tags.Add($noTagsLabel)
@@ -1143,7 +1927,8 @@ function ConvertTo-NormalizedData {
             $filteredIndices = [System.Collections.Generic.List[int]]::new()
             foreach ($asIdx in $cve.as) {
                 $swStr = $lookups.affSoftware[$asIdx]
-                $swVendor = ($swStr -split ':')[0]
+                $separatorIndex = $swStr.IndexOf(':')
+                $swVendor = if ($separatorIndex -ge 0) { $swStr.Substring(0, $separatorIndex) } else { $swStr }
                 if ($datasetVendors.Contains($swVendor)) {
                     $filteredIndices.Add($asIdx)
                 }
@@ -1172,11 +1957,11 @@ function ConvertTo-NormalizedData {
             cves          = $lookups.cves
             noTagsIdx     = $noTagsIdx
         }
-        Vulns = $vulnRecords
         Quality = [PSCustomObject]@{
             FirstLastSwappedCount = $firstLastSwappedCount
         }
         VulnCount = $processedCount
+        VulnsPath = $VulnOutputPath
     }
 }
 
@@ -1231,6 +2016,10 @@ function Export-ToBlobStorage {
         [Parameter(Mandatory)]
         [string]$DashboardPath,
 
+        [string[]]$LegacyMachineBlobNames = @(),
+
+        [string[]]$LegacyAdvancedHuntingBlobNames = @(),
+
         [bool]$UseGzip = $true
     )
 
@@ -1239,12 +2028,13 @@ function Export-ToBlobStorage {
     # Upload new export files (compressed)
     $exportFiles = Get-ChildItem -Path $ExportsPath -Filter "*.json" -File
     foreach ($file in $exportFiles) {
+        $isCanonicalStoreFile = $file.Name -in @($Script:MachineCurrentFileName, $Script:MachineHistoryFileName, $Script:AdvancedHuntingCurrentFileName)
         if ($UseGzip) {
             $gzPath = "$($file.FullName).gz"
             $blobName = "$($file.Name).gz"
 
             # Skip if this blob already exists
-            if (Test-BlobExists -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken) {
+            if ((-not $isCanonicalStoreFile) -and (Test-BlobExists -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken)) {
                 Write-Output "  Skipping $blobName (already exists)"
                 continue
             }
@@ -1261,13 +2051,23 @@ function Export-ToBlobStorage {
         }
         else {
             $blobName = $file.Name
-            if (Test-BlobExists -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken) {
+            if ((-not $isCanonicalStoreFile) -and (Test-BlobExists -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken)) {
                 Write-Output "  Skipping $blobName (already exists)"
                 continue
             }
             Write-Output "  Uploading $($file.Name)..."
             Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -SourcePath $file.FullName -StorageToken $StorageToken -ContentType 'application/json' -AccessTier $Script:BlobAccessTiers.Exports
         }
+    }
+
+    foreach ($legacyBlob in $LegacyMachineBlobNames) {
+        Write-Output "  Removing legacy machine snapshot blob $legacyBlob..."
+        Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $legacyBlob -StorageToken $StorageToken
+    }
+
+    foreach ($legacyBlob in $LegacyAdvancedHuntingBlobNames) {
+        Write-Output "  Removing legacy Advanced Hunting snapshot blob $legacyBlob..."
+        Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $legacyBlob -StorageToken $StorageToken
     }
 
     # Upload dashboard HTML (always uncompressed)
@@ -1372,6 +2172,8 @@ try {
     # Download historical export files
     Write-Output "Downloading historical exports..."
     $existingBlobs = Get-BlobList -AccountName $StorageAccountName -Container $Script:BlobContainers.Exports -StorageToken $storageToken
+    $legacyMachineBlobs = @($existingBlobs | Where-Object { $_ -match '^Machines_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
+    $legacyAdvancedHuntingBlobs = @($existingBlobs | Where-Object { $_ -match '^AdvancedHunting_\d+_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
     Write-Output "  Found $($existingBlobs.Count) existing blob(s)"
 
     foreach ($blobName in $existingBlobs) {
@@ -1474,51 +2276,31 @@ try {
 
     # Step 5: Normalize data
     Write-Output "Normalizing data..."
-    $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -Machines $machines -AdvancedHuntingData $advancedHuntingData
+    $tempVulnsPath = Join-Path -Path $tempRoot -ChildPath 'vulns.json'
+    $tempPayloadPath = Join-Path -Path $tempRoot -ChildPath 'payload.json.gz'
+    $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -Machines $machines -AdvancedHuntingData $advancedHuntingData
     $machines = $null
     $advancedHuntingData = $null
     [GC]::Collect()
 
-    # Step 6: Convert to JSON
+    # Step 6: Prepare payload for embedding
     Write-Output "Preparing data for embedding..."
-    $lookupsJson = $normalizedResult.Lookups | ConvertTo-Json -Depth 10 -Compress
-    $vulnsJson = $normalizedResult.Vulns | ConvertTo-Json -Depth 10 -Compress
     $vulnCount = $normalizedResult.VulnCount
     $deviceCount = $normalizedResult.Lookups.devices.Count
     $cveCount = $normalizedResult.Lookups.cves.Count
+    $vulnsFileSize = [math]::Round((Get-Item $normalizedResult.VulnsPath).Length / 1KB, 1)
+    Write-Output "  Vulns JSON file: ${vulnsFileSize}KB"
+
+    Write-Output "  Compressing embedded data..."
+    Write-CombinedPayloadGzip -Lookups $normalizedResult.Lookups -VulnsPath $normalizedResult.VulnsPath -OutputPath $tempPayloadPath
     $normalizedResult = $null
     [GC]::Collect()
     Write-MemoryUsage -Label "Post-Normalize"
 
-    $lookupsSize = [math]::Round($lookupsJson.Length / 1KB, 1)
-    $vulnsSize = [math]::Round($vulnsJson.Length / 1KB, 1)
-    Write-Output "  Lookups: ${lookupsSize}KB, Vulns: ${vulnsSize}KB"
-
-    # Step 7: Compress data for embedding
-    Write-Output "  Compressing embedded data..."
-    # Reuse already-serialized JSON strings to avoid re-serializing the full object graph
-    $combinedJson = '{"lookups":' + $lookupsJson + ',"vulns":' + $vulnsJson + '}'
-    $lookupsJson = $null
-    $vulnsJson = $null
-
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($combinedJson)
-    $combinedJson = $null
-    $memStream = [System.IO.MemoryStream]::new()
-    $gzipStream = [System.IO.Compression.GZipStream]::new($memStream, [System.IO.Compression.CompressionMode]::Compress)
-    $gzipStream.Write($bytes, 0, $bytes.Length)
-    $bytes = $null
-    $gzipStream.Close()
-    $compressedBytes = $memStream.ToArray()
-    $memStream.Dispose()
-
-    $compressedBase64 = [Convert]::ToBase64String($compressedBytes)
-    $compressedBytes = $null
-    $compressedSize = [math]::Round($compressedBase64.Length / 1KB, 1)
+    $compressedSize = [math]::Round((Get-Item $tempPayloadPath).Length / 1KB, 1)
     Write-Output "  Compressed: ${compressedSize}KB"
 
     $lookupsJsonEscaped = ""
-    $vulnsJsonEscaped = $compressedBase64
-    $compressedBase64 = $null
     $dataQualitySectionHtml = ""
     $dataQualityMetaScript = ""
     Write-MemoryUsage -Label "Post-Compress"
@@ -1528,37 +2310,35 @@ try {
     $dataFormatMarker = "compressed"
     $pakoScript = if ($pakoContent) { "<script>$pakoContent</script>" } else { "" }
 
-    # Use [string]::Replace() to avoid regex interpretation of $ in JS code
-    # Null each source string immediately after replacement to allow early GC
-    $htmlOutput = $htmlTemplate
-    $htmlTemplate = $null
-    $htmlOutput = $htmlOutput.Replace('__CSS_CONTENT__', $cssContent)
+    $segments = @(
+        @{ Placeholder = '__CSS_CONTENT__'; Value = $cssContent },
+        @{ Placeholder = '__DATA_QUALITY_SECTION__'; Value = $dataQualitySectionHtml },
+        @{ Placeholder = '__PAKO_CONTENT__'; Value = $pakoScript },
+        @{ Placeholder = '__DATA_FORMAT__'; Value = $dataFormatMarker },
+        @{ Placeholder = '__DATA_QUALITY_META_SCRIPT__'; Value = $dataQualityMetaScript },
+        @{ Placeholder = '__LOOKUPS_DATA__'; Value = $lookupsJsonEscaped },
+        @{ Placeholder = '__VULNS_DATA__'; Base64FilePath = $tempPayloadPath },
+        @{ Placeholder = '__CHARTJS_CONTENT__'; Value = $chartJsContent },
+        @{ Placeholder = '__PDFMAKE_CONTENT__'; Value = $pdfmakeContent },
+        @{ Placeholder = '__VFSFONTS_CONTENT__'; Value = $vfsfontsContent },
+        @{ Placeholder = '__HTML2PDF_CONTENT__'; Value = $html2pdfContent },
+        @{ Placeholder = '__HTML2CANVAS_CONTENT__'; Value = $html2canvasContent },
+        @{ Placeholder = '__JS_CONTENT__'; Value = $jsContent }
+    )
     $cssContent = $null
-    $htmlOutput = $htmlOutput.Replace('__JS_CONTENT__', $jsContent)
     $jsContent = $null
-    $htmlOutput = $htmlOutput.Replace('__LOOKUPS_DATA__', $lookupsJsonEscaped)
     $lookupsJsonEscaped = $null
-    $htmlOutput = $htmlOutput.Replace('__VULNS_DATA__', $vulnsJsonEscaped)
-    $vulnsJsonEscaped = $null
-    $htmlOutput = $htmlOutput.Replace('__DATA_QUALITY_SECTION__', $dataQualitySectionHtml)
-    $htmlOutput = $htmlOutput.Replace('__DATA_QUALITY_META_SCRIPT__', $dataQualityMetaScript)
-    $htmlOutput = $htmlOutput.Replace('__DATA_FORMAT__', $dataFormatMarker)
-    $htmlOutput = $htmlOutput.Replace('__PAKO_CONTENT__', $pakoScript)
     $pakoScript = $null
-    $htmlOutput = $htmlOutput.Replace('__CHARTJS_CONTENT__', $chartJsContent)
     $chartJsContent = $null
-    $htmlOutput = $htmlOutput.Replace('__PDFMAKE_CONTENT__', $pdfmakeContent)
     $pdfmakeContent = $null
-    $htmlOutput = $htmlOutput.Replace('__VFSFONTS_CONTENT__', $vfsfontsContent)
     $vfsfontsContent = $null
-    $htmlOutput = $htmlOutput.Replace('__HTML2PDF_CONTENT__', $html2pdfContent)
     $html2pdfContent = $null
-    $htmlOutput = $htmlOutput.Replace('__HTML2CANVAS_CONTENT__', $html2canvasContent)
     $html2canvasContent = $null
 
     $dashboardOutputPath = Join-Path -Path $tempDashboards -ChildPath "VulnerabilityDashboard.html"
-    $htmlOutput | Out-File -FilePath $dashboardOutputPath -Encoding UTF8
-    $htmlOutput = $null
+    Write-TemplatedHtml -Template $htmlTemplate -Segments $segments -OutputPath $dashboardOutputPath
+    $htmlTemplate = $null
+    $segments = $null
     [GC]::Collect()
 
     $finalSize = [math]::Round((Get-Item $dashboardOutputPath).Length / 1MB, 2)
@@ -1577,6 +2357,8 @@ try {
                 -StorageToken $storageToken `
                 -ExportsPath $tempExports `
                 -DashboardPath $dashboardOutputPath `
+                -LegacyMachineBlobNames $legacyMachineBlobs `
+                -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -UseGzip $useGzip
         }
         'SharePoint' {
@@ -1586,6 +2368,8 @@ try {
                 -StorageToken $storageToken `
                 -ExportsPath $tempExports `
                 -DashboardPath $dashboardOutputPath `
+                -LegacyMachineBlobNames $legacyMachineBlobs `
+                -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -UseGzip $useGzip
             Export-ToSharePoint -DashboardPath $dashboardOutputPath
         }
@@ -1595,6 +2379,8 @@ try {
                 -StorageToken $storageToken `
                 -ExportsPath $tempExports `
                 -DashboardPath $dashboardOutputPath `
+                -LegacyMachineBlobNames $legacyMachineBlobs `
+                -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -UseGzip $useGzip
             Export-ToStaticWebApp -DashboardPath $dashboardOutputPath
         }
