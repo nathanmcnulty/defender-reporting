@@ -140,27 +140,46 @@ The dashboard uses machine data to show tags as a filter option and likely more 
 After authenticating (using either method above), add this to download the machine data:
 
 ```powershell
-# Download machine data
-$uri = "https://api.securitycenter.microsoft.com/api/machines?`$filter=onboardingStatus eq 'Onboarded'"
-$allMachines = @()
-
-do {
-    $response = Invoke-RestMethod -Uri $uri -Headers $headers -Method Get
-    if ($response.value) { $allMachines += $response.value }
-    $uri = if ($response.PSObject.Properties['@odata.nextLink']) { $response.'@odata.nextLink' } else { $null }
-} while ($uri)
-
-$timestamp = Get-Date -Format "yyyy-MM-dd"
-$allMachines | ConvertTo-Json -Depth 10 | Out-File -FilePath "./exports/Machines_$timestamp.json" -Encoding UTF8
+# Export the deduplicated machine store
+.\Invoke-VulnerabilityExport.ps1 -TenantId $tenantId -AppId $appId -AppSecret $secret
 ```
 
-The dashboard script will automatically read any `Machines_*.json` files in the exports folder.
+This writes two machine files in the exports folder:
+
+- `Machines_Current.json`: latest known state per `deviceId`
+- `Machines_History.json`: append-only state changes per `deviceId`
+
+The dashboard script automatically prefers `Machines_Current.json`, falls back to `Machines_History.json`, and still supports legacy `Machines_*.json` snapshot files during migration.
+
+## Obtaining Advanced Hunting Enrichment
+
+Advanced Hunting enrichment is now maintained as a canonical cache file instead of accumulating dated snapshots. This preserves the latest known CVE metadata even after a vulnerability no longer appears in current Advanced Hunting results.
+
+When you run:
+
+```powershell
+.\Invoke-VulnerabilityExport.ps1 -TenantId $tenantId -AppId $appId -AppSecret $secret -IncludeAdvancedHunting
+```
+
+the script upserts results into:
+
+- `AdvancedHunting_Current.json`: latest known enrichment per `CveId`, preserved even after remediation
+
+The dashboard script automatically prefers `AdvancedHunting_Current.json` and still supports legacy `AdvancedHunting_*_yyyy-MM-dd.json` files during migration.
 
 ## Generating the report
 
 You will need to extract the JSON files from the gzip files, and how you do this will likely depend on your environment (I'm open to clean, simple PowerShell methods that are cross-platform too!).
 
 I recommend placing these in the /exports folder as this is the default path the Generate-VulnerabilityDashboard.ps1 uses. Running that script should output an updated VulnerabilityDashboard.html file.
+
+After generating the dashboard, run the validator to confirm the embedded payload and all report aggregates still match the source exports:
+
+```powershell
+.\Validate-DashboardReports.ps1
+```
+
+This repository also enforces that check in GitHub Actions after regenerating the dashboard. The workflow uploads `validate-output.json` as a build artifact so you can inspect the audit result when a run fails.
 
 ## Azure Resource Setup
 
