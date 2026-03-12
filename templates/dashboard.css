@@ -315,14 +315,19 @@ h1 {
 .checkbox-item {
     display: flex;
     align-items: center;
+    gap: 10px;
     padding: 6px 0;
     font-size: 15px;
+    min-width: 0;
 }
 
 .checkbox-item input[type="checkbox"] {
-    margin-right: 10px;
     width: 16px;
     height: 16px;
+    min-width: 16px;
+    flex: 0 0 16px;
+    align-self: flex-start;
+    margin-top: 2px;
 }
 
 .checkbox-item label {
@@ -330,6 +335,36 @@ h1 {
     font-weight: normal;
     cursor: pointer;
     flex: 1;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+}
+
+.checkbox-label-text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.checkbox-count {
+    flex: 0 0 auto;
+    color: var(--color-text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.checkbox-item-zero label {
+    color: var(--color-text-muted);
+}
+
+.checkbox-item.checkbox-item-unavailable {
+    opacity: 0.55;
+}
+
+.checkbox-item.checkbox-item-unavailable label {
+    color: var(--color-text-muted);
+    cursor: not-allowed;
 }
 
 /* Filter Search - Static above scroll box */
