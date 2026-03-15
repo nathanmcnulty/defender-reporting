@@ -133,23 +133,30 @@ $files | ForEach-Object {
 
 For more details on this API, see the docs: https://learn.microsoft.com/en-us/defender-endpoint/api/get-assessment-software-vulnerabilities
 
-## Obtaining Machine Data
+## Exporting Dashboard Data
 
-The dashboard uses machine data to show tags as a filter option and likely more data in the future. This data comes from the `/api/machines` endpoint and is saved separately from vulnerability exports.
+`Invoke-VulnerabilityExport.ps1` is now the main entrypoint for dashboard data export. It downloads the Defender bulk vulnerability export, immediately converts it into the canonical vulnerability current/history gzip store, exports machine data, and optionally exports Advanced Hunting enrichment.
 
-After authenticating (using either method above), add this to download the machine data:
+After authenticating (using either method above), run:
 
 ```powershell
 # Export the deduplicated machine store
 .\Invoke-VulnerabilityExport.ps1 -TenantId $tenantId -AppId $appId -AppSecret $secret
 ```
 
-This writes two machine files in the exports folder:
+This writes the canonical vulnerability files:
 
-- `Machines_Current.json`: latest known state per `deviceId`
-- `Machines_History.json`: append-only state changes per `deviceId`
+- `VulnExport_current.json.gz`: current open vulnerability row versions
+- `VulnHistory_YYYY.json.gz`: historical row versions closed during that calendar year
 
-The dashboard script automatically prefers `Machines_Current.json`, falls back to `Machines_History.json`, and still supports legacy `Machines_*.json` snapshot files during migration.
+It also writes the machine files:
+
+- `Machines_Current.json.gz`: latest known state per `deviceId`
+- `Machines_History.json.gz`: append-only state changes per `deviceId`
+
+The export script automatically upgrades any legacy vulnerability snapshot files it finds while publishing the canonical store. Temporary legacy upgrade compatibility remains in the main scripts until `2026-07-01`, after which those compatibility paths should be removed.
+
+The dashboard script automatically prefers `Machines_Current.json.gz`, falls back to `Machines_History.json.gz`, and still supports older plain canonical files plus legacy `Machines_*.json` snapshot files during migration.
 
 ## Obtaining Advanced Hunting Enrichment
 
@@ -163,27 +170,57 @@ When you run:
 
 the script upserts results into:
 
-- `AdvancedHunting_Current.json`: latest known enrichment per `CveId`, preserved even after remediation
+- `AdvancedHunting_Current.json.gz`: latest known enrichment per `CveId`, preserved even after remediation
 
-The dashboard script automatically prefers `AdvancedHunting_Current.json` and still supports legacy `AdvancedHunting_*_yyyy-MM-dd.json` files during migration.
+The dashboard script automatically prefers `AdvancedHunting_Current.json.gz` and still supports the older plain canonical file plus legacy `AdvancedHunting_*_yyyy-MM-dd.json` files during migration.
+
+## Vulnerability History Store
+
+Vulnerability exports now support a canonical current/history store so repeated daily snapshots do not need to retain identical row versions forever.
+
+The canonical files are:
+
+- `VulnExport_current.json.gz`: current open vulnerability row versions
+- `VulnHistory_YYYY.json.gz`: historical row versions closed during that calendar year
+
+You should not need to run a separate migration command. The main scripts now auto-upgrade legacy `VulnExport_<group>_<date>.json(.gz)` files into the canonical layout when they encounter them.
+
+This temporary upgrade path is scheduled for removal on `2026-07-01` after callers have been updated.
 
 ## Generating the report
 
-You will need to extract the JSON files from the gzip files, and how you do this will likely depend on your environment (I'm open to clean, simple PowerShell methods that are cross-platform too!).
+Place your export files in the `/exports` folder. `Generate-VulnerabilityDashboard.ps1` now prefers the canonical vulnerability store when `VulnExport_current.json.gz` is present. If it only finds legacy `VulnExport_*.json(.gz)` snapshot files, it will temporarily auto-upgrade them into the canonical store before generating the dashboard. That compatibility path is scheduled for removal on `2026-07-01`.
 
-I recommend placing these in the /exports folder as this is the default path the Generate-VulnerabilityDashboard.ps1 uses. Running that script should output an updated VulnerabilityDashboard.html file.
-
-After generating the dashboard, run the validator to confirm the embedded payload and all report aggregates still match the source exports:
+After generating the dashboard, run the generator in validation mode to confirm the embedded payload and all report aggregates still match the source exports:
 
 ```powershell
+.\Generate-VulnerabilityDashboard.ps1 -ExportMachineData $false -Validate
+```
+
+If you only want to validate an existing HTML file without regenerating it, use `-ValidateOnly` or the compatibility wrapper:
+
+```powershell
+.\Generate-VulnerabilityDashboard.ps1 -ExportMachineData $false -ValidateOnly
 .\Validate-DashboardReports.ps1
 ```
 
-This repository also enforces that check in GitHub Actions after regenerating the dashboard. The workflow uploads `validate-output.json` as a build artifact so you can inspect the audit result when a run fails.
+By default validation prints the audit JSON to stdout and does not leave an audit file behind. If you want to keep a copy locally, pass `-KeepValidationAuditFile` to write the default audit file under `sample-reports`, or pass `-ValidationOutputPath` to choose an explicit path. The compatibility wrapper still accepts the older `-KeepAuditFile` and `-OutputPath` names.
+
+For migration signoff, the validator can compare the current dashboard HTML against an older dashboard HTML without requiring the row counts to match exactly. This check is migration-only and temporary through `2026-07-01`: it is auto-enabled only when legacy `VulnExport_<group>_<date>.json(.gz)` snapshots are still present in `exports/` and a baseline dashboard exists at `sample-reports/migration-baseline-dashboard.html`. Once those legacy snapshot files are cleaned up, future validation runs stop using the migration baseline automatically.
+
+If needed, you can still override the baseline path explicitly. In either mode, the validator confirms whether every vulnerability row from the old dashboard is still present in the new dashboard, while separately reporting any additional newer rows:
+
+```powershell
+.\Generate-VulnerabilityDashboard.ps1 -ExportMachineData $false -Validate -BaselineDashboardHtmlPath .\sample-reports\VulnerabilityDashboard.previous.html
+```
+
+Use `BaselineDashboardCoverage.ContainsAllBaselineRows` as the cleanup gate before deleting the legacy snapshot exports. The audit also includes `BaselineDashboardCoverage.RemovalDate` so the temporary nature of this check is visible in the output.
+
+This repository also enforces that check in GitHub Actions after regenerating the dashboard, but the workflow no longer persists validation artifacts by default.
 
 ## Azure Resource Setup
 
-`Setup-AzureResources.ps1` provisions the full pipeline infrastructure: Resource Group, Automation Account (with managed identity), Storage Account (with `exports`, `templates`, and `dashboards` containers), RBAC, a PowerShell 7.4 runtime environment, runbook, and a weekly schedule.
+`Setup-AzureResources.ps1` provisions the full pipeline infrastructure: Resource Group, Automation Account (with managed identity), Storage Account (with `exports`, `templates`, and `dashboards` containers), RBAC, a PowerShell 7.4 runtime environment, runbook, and a daily schedule.
 
 ### Prerequisites
 
@@ -229,7 +266,7 @@ Adds an Azure Container App with Caddy serving the dashboard HTML, protected by 
 
 ## GitHub Actions Setup
 
-The included workflow (`.github/workflows/update-vulnerability-dashboard.yml`) runs on a schedule (daily cron, but self-gates to every 7 days), exports vulnerability and machine data from MDE, generates the dashboard, and commits the result. It authenticates via OIDC federated credentials (no secrets stored).
+The included workflow (`.github/workflows/update-vulnerability-dashboard.yml`) runs daily, calls the main export, generate, and validate scripts directly, and commits the result. It authenticates via OIDC federated credentials (no secrets stored).
 
 ### Steps
 
