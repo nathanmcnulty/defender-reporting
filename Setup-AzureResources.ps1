@@ -10,7 +10,7 @@
     - Blob containers (exports, templates, dashboards)
     - RBAC: Storage Blob Data Contributor for the Automation Managed Identity
     - Custom PowerShell 7.4 runtime environment with latest Az.Accounts
-    - Runbook and 7-day recurring schedule
+    - Runbook and daily recurring schedule
     
     After provisioning, uploads dashboard templates and runs the pipeline
     end-to-end to validate the setup. Use -SkipValidation to skip this step.
@@ -230,6 +230,8 @@ $Script:MdeAppRoles = @(
 )
 
 $Script:BlobContainers = @('exports', 'templates', 'dashboards')
+$Script:AutomationDailyScheduleName = 'DashboardPipeline-Daily'
+$Script:AutomationLegacyWeeklyScheduleName = 'DashboardPipeline-Every7Days'
 
 # Container Apps constants
 $Script:ArmApiVersions.ContainerAppEnvironment = '2024-03-01'
@@ -319,6 +321,63 @@ function Invoke-ArmApi {
     }
 
     throw "$Description failed (HTTP $($response.StatusCode)): $errorDetail"
+}
+
+function Remove-AutomationJobSchedulesByScheduleName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SubscriptionPath,
+
+        [Parameter(Mandatory)]
+        [string]$ResourceGroupName,
+
+        [Parameter(Mandatory)]
+        [string]$AutomationAccountName,
+
+        [Parameter(Mandatory)]
+        [string]$ScheduleName
+    )
+
+    $jobSchedulesPath = "$SubscriptionPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobSchedules?api-version=$($Script:ArmApiVersions.AutomationAccount)"
+        $jobSchedulesResponse = Invoke-ArmApi -Path $jobSchedulesPath -Method GET -Description "List Automation job schedules"
+        $jobSchedules = if ($null -eq $jobSchedulesResponse) {
+            @()
+        }
+        elseif ($jobSchedulesResponse.PSObject.Properties['value']) {
+            @($jobSchedulesResponse.value)
+        }
+        else {
+            @($jobSchedulesResponse)
+        }
+
+    foreach ($jobSchedule in $jobSchedules) {
+        if ($null -eq $jobSchedule) { continue }
+
+        $jobScheduleName = ''
+        if ($jobSchedule.PSObject.Properties['name']) {
+            $jobScheduleName = [string]$jobSchedule.PSObject.Properties['name'].Value
+        }
+        if ([string]::IsNullOrWhiteSpace($jobScheduleName)) {
+            $jobScheduleName = [string]$jobSchedule.properties.jobScheduleId
+        }
+        if ([string]::IsNullOrWhiteSpace($jobScheduleName) -and -not [string]::IsNullOrWhiteSpace([string]$jobSchedule.id)) {
+            $jobScheduleName = Split-Path -Path ([string]$jobSchedule.id) -Leaf
+        }
+
+        $linkedScheduleName = ''
+        if ($null -ne $jobSchedule.properties -and $null -ne $jobSchedule.properties.schedule) {
+            $linkedScheduleName = [string]$jobSchedule.properties.schedule.name
+        }
+
+        if ([string]::IsNullOrWhiteSpace($jobScheduleName) -or $linkedScheduleName -ne $ScheduleName) {
+            continue
+        }
+
+        $deletePath = "$SubscriptionPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobSchedules/${jobScheduleName}?api-version=$($Script:ArmApiVersions.AutomationAccount)"
+        Invoke-ArmApi -Path $deletePath -Method DELETE -Description "Delete Automation job schedule '$jobScheduleName'" | Out-Null
+        Write-Host "  Removed existing job schedule link '$jobScheduleName' for schedule '$ScheduleName'" -ForegroundColor Gray
+    }
 }
 
 function Get-ArmToken {
@@ -582,22 +641,6 @@ try {
             policy = @{
                 rules = @(
                     @{
-                        name    = 'TierExportsToCold'
-                        enabled = $true
-                        type    = 'Lifecycle'
-                        definition = @{
-                            filters = @{
-                                blobTypes   = @('blockBlob')
-                                prefixMatch = @('exports/')
-                            }
-                            actions = @{
-                                baseBlob = @{
-                                    tierToCold = @{ daysAfterCreationGreaterThan = 1 }
-                                }
-                            }
-                        }
-                    },
-                    @{
                         name    = 'TierTemplatesToCool'
                         enabled = $true
                         type    = 'Lifecycle'
@@ -620,8 +663,8 @@ try {
 
     if ($PSCmdlet.ShouldProcess($StorageAccountName, "Configure lifecycle management policy")) {
         Invoke-ArmApi -Path $lifecyclePath -Method PUT -Payload $lifecyclePayload -Description "Configure lifecycle policy" | Out-Null
-        Write-Host "  Lifecycle policy: exports -> Cold (1 day), templates -> Cool (1 day)" -ForegroundColor Green
-        Write-Host "  Dashboards container stays Hot (default)" -ForegroundColor Gray
+        Write-Host "  Lifecycle policy: templates -> Cool (1 day)" -ForegroundColor Green
+        Write-Host "  Exports and dashboards stay Hot for daily overwrite/read patterns" -ForegroundColor Gray
     }
 
     # -------------------------------------------------------------------------
@@ -851,28 +894,42 @@ try {
     # -------------------------------------------------------------------------
     # Step 12: Create schedule and link to runbook
     # -------------------------------------------------------------------------
-    Write-Host "`nStep 12: Creating 7-day schedule..." -ForegroundColor Cyan
+    Write-Host "`nStep 12: Creating daily schedule..." -ForegroundColor Cyan
 
-    $scheduleName = "DashboardPipeline-Every7Days"
+    $scheduleName = $Script:AutomationDailyScheduleName
     $schedulePath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/schedules/${scheduleName}?api-version=$($Script:ArmApiVersions.AutomationAccount)"
+    $legacySchedulePath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/schedules/$($Script:AutomationLegacyWeeklyScheduleName)?api-version=$($Script:ArmApiVersions.AutomationAccount)"
 
     # Start time: tomorrow at 2:00 AM UTC
     $startTime = [DateTime]::UtcNow.Date.AddDays(1).AddHours(2).ToString("yyyy-MM-ddTHH:mm:ssZ")
 
     $schedulePayload = @{
         properties = @{
-            description = "Runs the dashboard pipeline every 7 days"
+            description = "Runs the dashboard pipeline daily"
             startTime   = $startTime
             frequency   = "Day"
-            interval    = 7
+            interval    = 1
             isEnabled   = $true
             timeZone    = "UTC"
         }
     } | ConvertTo-Json -Depth 5
 
     if ($PSCmdlet.ShouldProcess($scheduleName, "Create schedule")) {
+        Remove-AutomationJobSchedulesByScheduleName -SubscriptionPath $subPath -ResourceGroupName $ResourceGroupName -AutomationAccountName $AutomationAccountName -ScheduleName $scheduleName
+        Remove-AutomationJobSchedulesByScheduleName -SubscriptionPath $subPath -ResourceGroupName $ResourceGroupName -AutomationAccountName $AutomationAccountName -ScheduleName $Script:AutomationLegacyWeeklyScheduleName
+
+        try {
+            Invoke-ArmApi -Path $legacySchedulePath -Method DELETE -Description "Delete legacy weekly schedule" | Out-Null
+            Write-Host "  Removed legacy weekly schedule '$($Script:AutomationLegacyWeeklyScheduleName)'" -ForegroundColor Gray
+        }
+        catch {
+            if ($_.Exception.Message -notmatch '404|NotFound') {
+                throw
+            }
+        }
+
         Invoke-ArmApi -Path $schedulePath -Method PUT -Payload $schedulePayload -Description "Create schedule" | Out-Null
-        Write-Host "  Schedule created: every 7 days starting $startTime" -ForegroundColor Green
+        Write-Host "  Schedule created: daily starting $startTime" -ForegroundColor Green
 
         # Link schedule to runbook
         $jobScheduleId = [guid]::NewGuid().ToString()
@@ -1574,7 +1631,7 @@ exec caddy file-server --root /data --listen :80
     Write-Host "  Storage Account:     $StorageAccountName" -ForegroundColor Gray
     Write-Host "  Managed Identity:    $miPrincipalId" -ForegroundColor Gray
     Write-Host "  Blob Containers:     $($Script:BlobContainers -join ', ')" -ForegroundColor Gray
-    Write-Host "  Schedule:            Every 7 days" -ForegroundColor Gray
+    Write-Host "  Schedule:            Daily" -ForegroundColor Gray
     if ($IncludeContainerApp) {
         Write-Host "  Container App Env:   $ContainerAppEnvName" -ForegroundColor Gray
         Write-Host "  Container App:       $ContainerAppName" -ForegroundColor Gray
@@ -1587,12 +1644,12 @@ exec caddy file-server --root /data --listen :80
     if ($IncludeContainerApp) {
         Write-Host "  1. Open https://$caFqdn in a browser to access the dashboard" -ForegroundColor Gray
         Write-Host "  2. Sign in with a user in the '$securityGroupName' security group" -ForegroundColor Gray
-        Write-Host "  3. The runbook will update the dashboard every 7 days" -ForegroundColor Gray
+        Write-Host "  3. The runbook will update the dashboard daily" -ForegroundColor Gray
         Write-Host "  4. Container App scales to zero when idle; cold starts fetch the latest blob`n" -ForegroundColor Gray
     }
     elseif (-not $SkipValidation) {
         Write-Host "  1. Download VulnerabilityDashboard.html from the 'dashboards' container" -ForegroundColor Gray
-        Write-Host "  2. The runbook will run automatically every 7 days`n" -ForegroundColor Gray
+        Write-Host "  2. The runbook will run automatically every day`n" -ForegroundColor Gray
     }
     else {
         Write-Host "  1. Upload templates: .\azure\Upload-Templates.ps1 -StorageAccountName $StorageAccountName" -ForegroundColor Gray
