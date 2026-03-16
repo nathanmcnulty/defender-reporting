@@ -222,6 +222,14 @@ This repository also enforces that check in GitHub Actions after regenerating th
 
 `Setup-AzureResources.ps1` provisions the full pipeline infrastructure: Resource Group, Automation Account (with managed identity), Storage Account (with `exports`, `templates`, and `dashboards` containers), RBAC, a PowerShell 7.4 runtime environment, runbook, and a daily schedule.
 
+The Azure Automation runbook committed at [azure/Invoke-DashboardPipeline.ps1](azure/Invoke-DashboardPipeline.ps1) is a generated artifact. Edit [shared-helpers.ps1](shared-helpers.ps1) and [azure/runbook-source.ps1](azure/runbook-source.ps1), then regenerate the public runbook with:
+
+```powershell
+.\azure\Build-Runbook.ps1
+```
+
+This keeps the copy/paste-ready runbook self-contained for Azure Automation users while the source stays split into reusable shared logic plus Azure-specific orchestration.
+
 ### Prerequisites
 
 - PowerShell module: `Az.Accounts`

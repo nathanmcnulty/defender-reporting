@@ -4,6 +4,12 @@ on:
   pull_request:
     paths:
       - 'Generate-VulnerabilityDashboard.ps1'
+      - 'Invoke-VulnerabilityExport.ps1'
+      - 'shared-helpers.ps1'
+      - 'VulnExportStore.ps1'
+      - 'azure/Build-Runbook.ps1'
+      - 'azure/runbook-source.ps1'
+      - 'azure/Invoke-DashboardPipeline.ps1'
       - 'Validate-DashboardReports.ps1'
       - 'templates/**'
       - 'exports/**'
@@ -16,6 +22,12 @@ on:
       - 'test/**'
     paths:
       - 'Generate-VulnerabilityDashboard.ps1'
+      - 'Invoke-VulnerabilityExport.ps1'
+      - 'shared-helpers.ps1'
+      - 'VulnExportStore.ps1'
+      - 'azure/Build-Runbook.ps1'
+      - 'azure/runbook-source.ps1'
+      - 'azure/Invoke-DashboardPipeline.ps1'
       - 'Validate-DashboardReports.ps1'
       - 'templates/**'
       - 'exports/**'
@@ -34,6 +46,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Rebuild generated runbook
+        shell: pwsh
+        run: |
+          Write-Host "Rebuilding the generated Azure Automation runbook..."
+          .\azure\Build-Runbook.ps1
+          git diff --quiet -- azure/Invoke-DashboardPipeline.ps1
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "azure/Invoke-DashboardPipeline.ps1 is out of date. Run .\azure\Build-Runbook.ps1 and commit the result."
+            git diff -- azure/Invoke-DashboardPipeline.ps1
+            exit 1
+          }
 
       - name: Regenerate dashboard from committed exports
         shell: pwsh

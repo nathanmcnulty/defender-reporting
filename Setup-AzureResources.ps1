@@ -239,6 +239,9 @@ $Script:ArmApiVersions.ContainerApp = '2024-03-01'
 $Script:StorageBlobDataReaderRoleId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
 $Script:CaddyImage = 'docker.io/library/caddy:alpine'
 $Script:DashboardBlobName = 'VulnerabilityDashboard.html'
+$Script:ProvisioningTags = @{
+    workload = 'defender-reporting'
+}
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -450,13 +453,28 @@ try {
         Write-Host "  Resource group not found, creating..." -ForegroundColor Gray
     }
 
-    if (-not $rgExists) {
-        if ($PSCmdlet.ShouldProcess($ResourceGroupName, "Create resource group")) {
-            $rgPayload = @{
-                location = $Location
-            } | ConvertTo-Json
+    $rgAction = if ($rgExists) { 'Update resource group tags' } else { 'Create resource group' }
+    if ($PSCmdlet.ShouldProcess($ResourceGroupName, $rgAction)) {
+        $rgTags = @{}
+        if ($rgExists -and $null -ne $rg.tags) {
+            foreach ($property in $rg.tags.PSObject.Properties) {
+                $rgTags[$property.Name] = [string]$property.Value
+            }
+        }
+        foreach ($tagKey in $Script:ProvisioningTags.Keys) {
+            $rgTags[$tagKey] = $Script:ProvisioningTags[$tagKey]
+        }
 
-            Invoke-ArmApi -Path $rgPath -Method PUT -Payload $rgPayload -Description "Create resource group" | Out-Null
+        $rgPayload = @{
+            location = if ($rgExists) { $rg.location } else { $Location }
+            tags     = $rgTags
+        } | ConvertTo-Json -Depth 5
+
+        Invoke-ArmApi -Path $rgPath -Method PUT -Payload $rgPayload -Description "Create/update resource group" | Out-Null
+        if ($rgExists) {
+            Write-Host "  Resource group tags updated" -ForegroundColor Green
+        }
+        else {
             Write-Host "  Resource group created" -ForegroundColor Green
         }
     }
@@ -470,6 +488,7 @@ try {
 
     $aaPayload = @{
         location   = $Location
+        tags       = $Script:ProvisioningTags
         identity   = @{
             type = "SystemAssigned"
         }
@@ -584,6 +603,7 @@ try {
     $saPayload = @{
         location   = $Location
         kind       = "StorageV2"
+        tags       = $Script:ProvisioningTags
         sku        = @{ name = "Standard_LRS" }
         properties = @{
             minimumTlsVersion          = "TLS1_2"
@@ -782,6 +802,7 @@ try {
 
     $runtimeEnvPayload = @{
         location   = $Location
+        tags       = $Script:ProvisioningTags
         properties = @{
             runtime         = @{
                 language = 'PowerShell'
@@ -832,6 +853,7 @@ try {
 
     $runbookPayload = @{
         location   = $Location
+        tags       = $Script:ProvisioningTags
         properties = @{
             runbookType        = "PowerShell"
             runtimeEnvironment = $Script:RuntimeEnvName
@@ -845,7 +867,14 @@ try {
         Invoke-ArmApi -Path $runbookPath -Method PUT -Payload $runbookPayload -Description "Create runbook" | Out-Null
         Write-Host "  Runbook '$runbookName' created (PowerShell 7.4 / $($Script:RuntimeEnvName))" -ForegroundColor Green
 
-        # Try to upload runbook content if the script file exists alongside this setup script
+        # Rebuild the generated runbook artifact before uploading it to Azure Automation.
+        $runbookBuildPath = Join-Path -Path $PSScriptRoot -ChildPath 'azure' | Join-Path -ChildPath 'Build-Runbook.ps1'
+        if (Test-Path -Path $runbookBuildPath) {
+            Write-Host "  Rebuilding runbook artifact from shared helpers..." -ForegroundColor Gray
+            & $runbookBuildPath
+        }
+
+        # Try to upload runbook content if the generated script exists alongside this setup script
         $runbookScriptPath = Join-Path -Path $PSScriptRoot -ChildPath 'azure' | Join-Path -ChildPath 'Invoke-DashboardPipeline.ps1'
         if (Test-Path -Path $runbookScriptPath) {
             Write-Host "  Uploading runbook content from $runbookScriptPath..." -ForegroundColor Gray
@@ -1237,6 +1266,7 @@ try {
 
         $caEnvPayload = @{
             location   = $Location
+            tags       = $Script:ProvisioningTags
             properties = @{
                 appLogsConfiguration = @{
                     destination = ''
@@ -1322,6 +1352,7 @@ exec caddy file-server --root /data --listen :80
         # stripping args with special characters)
         $caObj = [ordered]@{
             location   = $Location
+            tags       = $Script:ProvisioningTags
             identity   = @{ type = 'SystemAssigned' }
             properties = [ordered]@{
                 managedEnvironmentId = $caEnvResourceId
