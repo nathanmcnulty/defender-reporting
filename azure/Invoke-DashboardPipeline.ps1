@@ -162,7 +162,7 @@ function Get-VulnHistoryPath {
     return Join-Path -Path $BasePath -ChildPath ([string]::Format($Script:VulnHistoryFileNamePattern, $Year))
 }
 
-function Test-VulnStoreExists {
+function Test-VulnStoreExistence {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -173,7 +173,7 @@ function Test-VulnStoreExists {
         return $true
     }
 
-    return (Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue | Select-Object -First 1) -ne $null
+    return $null -ne (Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
 }
 
 function Test-IsLegacyVulnSnapshotFileName {
@@ -201,7 +201,7 @@ function Get-VulnSnapshotDateFromName {
     return $match.Value
 }
 
-function Get-LegacyVulnSnapshotFiles {
+function Get-LegacyVulnSnapshotFile {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -409,10 +409,15 @@ function Copy-VulnRecord {
         $Record
     )
 
-    return ($Record | ConvertTo-Json -Compress -Depth 20 | ConvertFrom-Json -Depth 20)
+    $copy = [ordered]@{}
+    foreach ($prop in $Record.PSObject.Properties) {
+        $copy[$prop.Name] = $prop.Value
+    }
+    return [PSCustomObject]$copy
 }
 
 function New-ClosedVulnEntry {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Record,
@@ -441,6 +446,7 @@ function New-ClosedVulnEntry {
 }
 
 function New-OpenVulnRecord {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Record,
@@ -464,6 +470,7 @@ function Get-VulnHistorySeed {
 
     return [ordered]@{
         year = $Year
+        latestDate = ''
         snapshots = @()
     }
 }
@@ -498,7 +505,7 @@ function Read-VulnHistoryDocument {
     return ($content | ConvertFrom-Json -Depth 100)
 }
 
-function Read-VulnHistoryDocuments {
+function Get-VulnHistoryDocumentList {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -554,7 +561,7 @@ function Write-VulnHistoryDocument {
     Write-GzipTextFile -Path $Path -Content $json
 }
 
-function Read-VulnStoreRows {
+function Read-VulnStoreRow {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$BasePath
@@ -567,7 +574,7 @@ function Read-VulnStoreRows {
         }
     }
 
-    foreach ($document in Read-VulnHistoryDocuments -BasePath $BasePath) {
+    foreach ($document in Get-VulnHistoryDocumentList -BasePath $BasePath) {
         foreach ($snapshot in @($document.snapshots)) {
             foreach ($entry in @($snapshot.closed)) {
                 if ($null -ne $entry -and $entry.PSObject.Properties['row']) {
@@ -637,6 +644,14 @@ function Test-VulnHistoryFile {
         }
     }
 
+    $storedLatestDate = [string](Get-VulnPropertyValue -InputObject $document -Name 'latestDate')
+    if (-not [string]::IsNullOrWhiteSpace($storedLatestDate) -and $snapshotDates.Count -gt 0) {
+        $maxSnapshotDate = @($snapshotDates | Sort-Object)[-1]
+        if ($storedLatestDate -ne $maxSnapshotDate) {
+            throw "History file '$Path' latestDate '$storedLatestDate' does not match max snapshot date '$maxSnapshotDate'."
+        }
+    }
+
     return @($document.snapshots).Count
 }
 
@@ -656,11 +671,16 @@ function Get-VulnStoreLatestSnapshotDate {
             }
         }
     }
-    foreach ($document in Read-VulnHistoryDocuments -BasePath $BasePath) {
-        foreach ($snapshot in @($document.snapshots)) {
-            $snapshotDate = Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $snapshot -Name 'date')
-            if (-not [string]::IsNullOrWhiteSpace($snapshotDate)) {
-                $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $snapshotDate
+    foreach ($document in Get-VulnHistoryDocumentList -BasePath $BasePath) {
+        $docLatest = [string](Get-VulnPropertyValue -InputObject $document -Name 'latestDate')
+        if (-not [string]::IsNullOrWhiteSpace($docLatest)) {
+            $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $docLatest
+        } else {
+            foreach ($snapshot in @($document.snapshots)) {
+                $snapshotDate = Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $snapshot -Name 'date')
+                if (-not [string]::IsNullOrWhiteSpace($snapshotDate)) {
+                    $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $snapshotDate
+                }
             }
         }
     }
@@ -673,19 +693,40 @@ function Add-VulnHistoryEntry {
         [Parameter(Mandatory)][hashtable]$HistoryByYear,
         [Parameter(Mandatory)][string]$SnapshotDate,
         [Parameter(Mandatory)][string]$ClosedOn,
-        [Parameter(Mandatory)]$Entry
+        [Parameter(Mandatory)]$Entry,
+        [hashtable]$SnapshotMaps = $null
     )
 
     $year = ([datetime]$ClosedOn).Year
     if (-not $HistoryByYear.ContainsKey($year)) {
         $HistoryByYear[$year] = Get-VulnHistorySeed -Year $year
     }
-    $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $HistoryByYear[$year]
-    if (-not $snapshotMap.ContainsKey($SnapshotDate)) {
-        $HistoryByYear[$year].snapshots += [PSCustomObject]@{ date = $SnapshotDate; closed = @() }
+    if ($null -ne $SnapshotMaps) {
+        if (-not $SnapshotMaps.ContainsKey($year)) {
+            $SnapshotMaps[$year] = Get-VulnHistorySnapshotMap -HistoryDocument $HistoryByYear[$year]
+        }
+        $snapshotMap = $SnapshotMaps[$year]
+        if (-not $snapshotMap.ContainsKey($SnapshotDate)) {
+            $newSnapshot = [PSCustomObject]@{ date = $SnapshotDate; closed = @() }
+            $HistoryByYear[$year].snapshots += $newSnapshot
+            $snapshotMap[$SnapshotDate] = $newSnapshot
+        }
+    } else {
         $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $HistoryByYear[$year]
+        if (-not $snapshotMap.ContainsKey($SnapshotDate)) {
+            $HistoryByYear[$year].snapshots += [PSCustomObject]@{ date = $SnapshotDate; closed = @() }
+            $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $HistoryByYear[$year]
+        }
     }
     $snapshotMap[$SnapshotDate].closed += $Entry
+
+    $currentLatest = [string](Get-VulnPropertyValue -InputObject $HistoryByYear[$year] -Name 'latestDate')
+    $newLatest = Get-MaxVulnDate -Primary $currentLatest -Secondary $SnapshotDate
+    if ($HistoryByYear[$year] -is [System.Collections.IDictionary]) {
+        $HistoryByYear[$year]['latestDate'] = $newLatest
+    } else {
+        $HistoryByYear[$year] | Add-Member -NotePropertyName 'latestDate' -NotePropertyValue $newLatest -Force
+    }
 }
 
 function Convert-LegacyVulnSnapshotsToStore {
@@ -694,19 +735,27 @@ function Convert-LegacyVulnSnapshotsToStore {
         [Parameter(Mandatory)][string]$BasePath
     )
 
-    $legacyFiles = @(Get-LegacyVulnSnapshotFiles -BasePath $BasePath)
+    $legacyFiles = @(Get-LegacyVulnSnapshotFile -BasePath $BasePath)
     if ($legacyFiles.Count -eq 0) {
         throw "No legacy VulnExport snapshot files found in '$BasePath'."
     }
 
     $openVersions = @{}
     $historyByYear = @{}
+    $snapshotMaps = @{}
     $allSnapshotDates = @($legacyFiles | ForEach-Object { Get-VulnSnapshotDateFromName -Name $_.Name } | Sort-Object -Unique)
     $lastSnapshotDate = $allSnapshotDates[-1]
 
+    $filesByDate = @{}
+    foreach ($file in $legacyFiles) {
+        $date = Get-VulnSnapshotDateFromName -Name $file.Name
+        if (-not $filesByDate.ContainsKey($date)) { $filesByDate[$date] = [System.Collections.Generic.List[object]]::new() }
+        $filesByDate[$date].Add($file)
+    }
+
     foreach ($snapshotDate in $allSnapshotDates) {
         $snapshotRows = @{}
-        foreach ($file in $legacyFiles | Where-Object { (Get-VulnSnapshotDateFromName -Name $_.Name) -eq $snapshotDate }) {
+        foreach ($file in ($filesByDate[$snapshotDate] ?? @())) {
             foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $file.FullName) {
                 $id = [string](Get-VulnPropertyValue -InputObject $record -Name 'Id')
                 if ([string]::IsNullOrWhiteSpace($id)) { continue }
@@ -719,7 +768,7 @@ function Convert-LegacyVulnSnapshotsToStore {
             if (-not $snapshotRows.ContainsKey($id)) {
                 $closedOn = Get-VulnPreviousDay -Date $snapshotDate
                 $closedEntry = New-ClosedVulnEntry -Record $openVersions[$id].Record -Reason 'removed' -ClosedOn $closedOn
-                Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry
+                Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry -SnapshotMaps $snapshotMaps
                 $openVersions.Remove($id)
             }
         }
@@ -749,7 +798,7 @@ function Convert-LegacyVulnSnapshotsToStore {
 
             $closedOn = Get-VulnPreviousDay -Date $snapshotDate
             $closedEntry = New-ClosedVulnEntry -Record $openVersion.Record -Reason 'changed' -ClosedOn $closedOn -ReplacementId $id
-            Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry
+            Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry -SnapshotMaps $snapshotMaps
 
             $openVersions[$id] = [PSCustomObject]@{
                 Record = New-OpenVulnRecord -Record $record -VersionStartDate $snapshotDate
@@ -767,17 +816,18 @@ function Convert-LegacyVulnSnapshotsToStore {
     }
 }
 
-function Update-VulnStoreFromLegacySnapshots {
+function Update-VulnStoreFromLegacySnapshot {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$BasePath
     )
 
-    $legacyFiles = @(Get-LegacyVulnSnapshotFiles -BasePath $BasePath)
+    $legacyFiles = @(Get-LegacyVulnSnapshotFile -BasePath $BasePath)
     if ($legacyFiles.Count -eq 0) {
         throw "No legacy VulnExport snapshot files found in '$BasePath'."
     }
-    if (-not (Test-VulnStoreExists -BasePath $BasePath)) {
+    if (-not (Test-VulnStoreExistence -BasePath $BasePath)) {
         return (Convert-LegacyVulnSnapshotsToStore -BasePath $BasePath)
     }
 
@@ -796,9 +846,10 @@ function Update-VulnStoreFromLegacySnapshots {
     }
 
     $historyByYear = @{}
-    foreach ($document in Read-VulnHistoryDocuments -BasePath $BasePath) {
+    foreach ($document in Get-VulnHistoryDocumentList -BasePath $BasePath) {
         $historyByYear[[int]$document.year] = $document
     }
+    $snapshotMaps = @{}
 
     $latestKnownSnapshot = Get-VulnStoreLatestSnapshotDate -BasePath $BasePath
     $snapshotDates = @($legacyFiles | ForEach-Object { Get-VulnSnapshotDateFromName -Name $_.Name } | Sort-Object -Unique)
@@ -810,9 +861,16 @@ function Update-VulnStoreFromLegacySnapshots {
         }
     }
 
+    $filesByDate = @{}
+    foreach ($file in $legacyFiles) {
+        $date = Get-VulnSnapshotDateFromName -Name $file.Name
+        if (-not $filesByDate.ContainsKey($date)) { $filesByDate[$date] = [System.Collections.Generic.List[object]]::new() }
+        $filesByDate[$date].Add($file)
+    }
+
     foreach ($snapshotDate in $snapshotDates) {
         $snapshotRows = @{}
-        foreach ($file in $legacyFiles | Where-Object { (Get-VulnSnapshotDateFromName -Name $_.Name) -eq $snapshotDate }) {
+        foreach ($file in ($filesByDate[$snapshotDate] ?? @())) {
             foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $file.FullName) {
                 $id = [string](Get-VulnPropertyValue -InputObject $record -Name 'Id')
                 if ([string]::IsNullOrWhiteSpace($id)) { continue }
@@ -824,7 +882,7 @@ function Update-VulnStoreFromLegacySnapshots {
         foreach ($id in @($currentMap.Keys)) {
             if ($snapshotRows.ContainsKey($id)) { continue }
             $closedOn = Get-VulnPreviousDay -Date $snapshotDate
-            Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry (New-ClosedVulnEntry -Record $currentMap[$id].Record -Reason 'removed' -ClosedOn $closedOn)
+            Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry (New-ClosedVulnEntry -Record $currentMap[$id].Record -Reason 'removed' -ClosedOn $closedOn) -SnapshotMaps $snapshotMaps
             $currentMap.Remove($id)
         }
 
@@ -852,7 +910,7 @@ function Update-VulnStoreFromLegacySnapshots {
             }
 
             $closedOn = Get-VulnPreviousDay -Date $snapshotDate
-            Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry (New-ClosedVulnEntry -Record $currentVersion.Record -Reason 'changed' -ClosedOn $closedOn -ReplacementId $id)
+            Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry (New-ClosedVulnEntry -Record $currentVersion.Record -Reason 'changed' -ClosedOn $closedOn -ReplacementId $id) -SnapshotMaps $snapshotMaps
             $currentMap[$id] = [PSCustomObject]@{
                 Record = New-OpenVulnRecord -Record $record -VersionStartDate $snapshotDate
                 Signature = $signature
@@ -877,32 +935,52 @@ function Publish-VulnStore {
         [switch]$RemoveLegacyFiles
     )
 
-    $currentPath = Get-VulnCurrentPath -BasePath $BasePath
-    if (Test-Path -Path $currentPath) {
-        Remove-Item -Path $currentPath -Force
+    $stageRoot = Join-Path $BasePath '.vuln-store-staging'
+    if (Test-Path -Path $stageRoot) {
+        Remove-Item -Path $stageRoot -Recurse -Force
     }
-    foreach ($existingHistory in Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue) {
-        Remove-Item -Path $existingHistory.FullName -Force
-    }
+    New-Item -Path $stageRoot -ItemType Directory | Out-Null
 
-    Write-VulnCurrentFile -Path $currentPath -Records $Store.CurrentRecords
-    foreach ($historyDocument in $Store.HistoryDocuments) {
-        $historyPath = Get-VulnHistoryPath -BasePath $BasePath -Year ([int]$historyDocument.year)
-        Write-VulnHistoryDocument -Path $historyPath -HistoryDocument $historyDocument
-    }
+    try {
+        $stagedCurrentPath = Get-VulnCurrentPath -BasePath $stageRoot
+        Write-VulnCurrentFile -Path $stagedCurrentPath -Records $Store.CurrentRecords
+        foreach ($historyDocument in $Store.HistoryDocuments) {
+            $historyPath = Get-VulnHistoryPath -BasePath $stageRoot -Year ([int]$historyDocument.year)
+            Write-VulnHistoryDocument -Path $historyPath -HistoryDocument $historyDocument
+        }
 
-    $currentCount = Test-VulnCurrentFile -Path $currentPath
-    $historySnapshotCount = 0
-    foreach ($historyFile in Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue) {
-        $historySnapshotCount += (Test-VulnHistoryFile -Path $historyFile.FullName)
-    }
-    if (@(Read-VulnStoreRows -BasePath $BasePath).Count -le 0) {
-        throw 'Published vulnerability store is empty.'
-    }
-    Write-Output "  Vulnerability store validated: $currentCount current row(s), $historySnapshotCount historical snapshot bucket(s)."
+        $currentCount = Test-VulnCurrentFile -Path $stagedCurrentPath
+        $historySnapshotCount = 0
+        foreach ($historyFile in Get-ChildItem -Path $stageRoot -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue) {
+            $historySnapshotCount += (Test-VulnHistoryFile -Path $historyFile.FullName)
+        }
 
-    if ($RemoveLegacyFiles) {
-        Get-LegacyVulnSnapshotFiles -BasePath $BasePath | Remove-Item -Force
+        $finalCurrentPath = Get-VulnCurrentPath -BasePath $BasePath
+        if (Test-Path -Path $finalCurrentPath) {
+            Remove-Item -Path $finalCurrentPath -Force
+        }
+        foreach ($existingHistory in Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue) {
+            Remove-Item -Path $existingHistory.FullName -Force
+        }
+
+        Move-Item -Path $stagedCurrentPath -Destination $finalCurrentPath -Force
+        foreach ($historyFile in Get-ChildItem -Path $stageRoot -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue) {
+            Move-Item -Path $historyFile.FullName -Destination (Join-Path $BasePath $historyFile.Name) -Force
+        }
+
+        if (@(Read-VulnStoreRow -BasePath $BasePath).Count -le 0) {
+            throw 'Published vulnerability store is empty.'
+        }
+        Write-Output "  Vulnerability store validated: $currentCount current row(s), $historySnapshotCount historical snapshot bucket(s)."
+
+        if ($RemoveLegacyFiles) {
+            Get-LegacyVulnSnapshotFile -BasePath $BasePath | Remove-Item -Force
+        }
+    }
+    finally {
+        if (Test-Path -Path $stageRoot) {
+            Remove-Item -Path $stageRoot -Recurse -Force
+        }
     }
 }
 
@@ -913,9 +991,11 @@ function Write-VulnCompatibilitySnapshot {
         [Parameter(Mandatory)][string]$OutputPath
     )
 
-    $writer = [System.IO.StreamWriter]::new($OutputPath, $false, [System.Text.UTF8Encoding]::new($false))
+    $fileStream = [System.IO.File]::Create($OutputPath)
+    $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+    $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
     try {
-        foreach ($row in Read-VulnStoreRows -BasePath $BasePath) {
+        foreach ($row in Read-VulnStoreRow -BasePath $BasePath) {
             $writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
         }
     }
@@ -931,16 +1011,18 @@ function Write-VulnCompatibilitySnapshotFromStore {
         [Parameter(Mandatory)][string]$OutputPath
     )
 
-    $writer = [System.IO.StreamWriter]::new($OutputPath, $false, [System.Text.UTF8Encoding]::new($false))
+    $fileStream = [System.IO.File]::Create($OutputPath)
+    $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+    $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
     try {
-        foreach ($record in @($Store.CurrentRecords)) {
+        foreach ($record in $Store.CurrentRecords) {
             if ($null -eq $record) { continue }
             $writer.WriteLine(($record | ConvertTo-Json -Compress -Depth 20))
         }
 
-        foreach ($historyDocument in @($Store.HistoryDocuments)) {
-            foreach ($snapshot in @($historyDocument.snapshots)) {
-                foreach ($entry in @($snapshot.closed)) {
+        foreach ($historyDocument in $Store.HistoryDocuments) {
+            foreach ($snapshot in $historyDocument.snapshots) {
+                foreach ($entry in $snapshot.closed) {
                     $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
                     if ($null -eq $row) { continue }
                     $writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
@@ -1012,7 +1094,7 @@ function ConvertTo-CompactMachineRecord {
         id                    = $Machine.PSObject.Properties['id']?.Value
         computerDnsName       = $Machine.PSObject.Properties['computerDnsName']?.Value
         rbacGroupName         = $Machine.PSObject.Properties['rbacGroupName']?.Value
-        machineTags           = Get-NormalizedMachineTags -Tags $Machine.PSObject.Properties['machineTags']?.Value
+        machineTags           = Get-NormalizedMachineTag -Tags $Machine.PSObject.Properties['machineTags']?.Value
         lastIpAddress         = $Machine.PSObject.Properties['lastIpAddress']?.Value
         healthStatus          = $Machine.PSObject.Properties['healthStatus']?.Value
         riskScore             = $Machine.PSObject.Properties['riskScore']?.Value
@@ -1025,7 +1107,7 @@ function ConvertTo-CompactMachineRecord {
     }
 }
 
-function Get-NormalizedMachineTags {
+function Get-NormalizedMachineTag {
     <#
     .SYNOPSIS
         Returns a stable, sorted tag array for machine records.
@@ -1357,7 +1439,7 @@ function Get-MachineStateHash {
         rbacGroupName         = $Machine.PSObject.Properties['rbacGroupName']?.Value
         osPlatform            = $Machine.PSObject.Properties['osPlatform']?.Value
         osVersion             = $Machine.PSObject.Properties['osVersion']?.Value
-        machineTags           = @(Get-NormalizedMachineTags -Tags $Machine.PSObject.Properties['machineTags']?.Value)
+        machineTags           = @(Get-NormalizedMachineTag -Tags $Machine.PSObject.Properties['machineTags']?.Value)
         lastIpAddress         = $Machine.PSObject.Properties['lastIpAddress']?.Value
         lastExternalIpAddress = $Machine.PSObject.Properties['lastExternalIpAddress']?.Value
         healthStatus          = $Machine.PSObject.Properties['healthStatus']?.Value
@@ -1370,14 +1452,8 @@ function Get-MachineStateHash {
 
     $stateJson = $state | ConvertTo-Json -Compress -Depth 5
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($stateJson)
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $hashBytes = $sha256.ComputeHash($bytes)
-    }
-    finally {
-        $sha256.Dispose()
-    }
-
+    if ($null -eq $Script:_sha256) { $Script:_sha256 = [System.Security.Cryptography.SHA256]::Create() }
+    $hashBytes = $Script:_sha256.ComputeHash($bytes)
     return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
 }
 
@@ -1386,6 +1462,7 @@ function New-MachineSnapshotRecord {
     .SYNOPSIS
         Creates a machine snapshot record with observed date and state hash.
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -1572,15 +1649,30 @@ function Get-JsonFileMode {
         [string]$Path
     )
 
-    $content = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) { Read-GzipTextFile -Path $Path } else { Get-Content -Path $Path -Raw }
-    foreach ($line in ($content -split "`r?`n")) {
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $trimmed = $line.TrimStart()
-        if ($trimmed.StartsWith('[')) { return 'Array' }
-        return 'Ndjson'
+    $fileStream = [System.IO.File]::OpenRead($Path)
+    try {
+        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        } else { $fileStream }
+        try {
+            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.Encoding]::UTF8, $true)
+            try {
+                while (-not $reader.EndOfStream) {
+                    $charValue = $reader.Read()
+                    if ($charValue -lt 0) { break }
+                    $char = [char]$charValue
+                    if (-not [char]::IsWhiteSpace($char)) {
+                        if ($char -eq '[') { return 'Array' }
+                        return 'Ndjson'
+                    }
+                }
+                return 'Empty'
+            }
+            finally { $reader.Dispose() }
+        }
+        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
     }
-
-    return 'Empty'
+    finally { $fileStream.Dispose() }
 }
 
 function Write-Base64FileContent {
@@ -1699,7 +1791,9 @@ function Write-TemplatedHtml {
         [string]$OutputPath
     )
 
-    $writer = [System.IO.StreamWriter]::new($OutputPath, $false, [System.Text.UTF8Encoding]::new($false))
+    $fileStream = [System.IO.File]::Create($OutputPath)
+    $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+    $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
     try {
         $position = 0
         foreach ($segment in $Segments) {
@@ -1834,7 +1928,7 @@ function Test-GzipSupport {
 # HELPER FUNCTIONS - BLOB STORAGE REST API
 # =============================================================================
 
-function Get-BlobHeaders {
+function Get-BlobHeader {
     <#
     .SYNOPSIS
         Returns standard headers for Blob REST API calls.
@@ -1874,10 +1968,10 @@ function Get-BlobList {
     $uri = "$baseUrl/$Container`?restype=container&comp=list"
     if ($Prefix) { $uri += "&prefix=$Prefix" }
 
-    $headers = Get-BlobHeaders -StorageToken $StorageToken
+    $headers = Get-BlobHeader -StorageToken $StorageToken
 
     try {
-        $webResponse = Invoke-WebRequest -Uri $uri -Headers $headers -Method Get -UseBasicParsing
+        $webResponse = Invoke-WebRequest -Uri $uri -Headers $headers -Method Get
         $xmlContent = $webResponse.Content.TrimStart([char]0xFEFF)
         $xmlDoc = [System.Xml.XmlDocument]::new()
         $xmlDoc.LoadXml($xmlContent)
@@ -1916,7 +2010,7 @@ function Get-BlobContent {
 
     $baseUrl = "https://$AccountName.blob.core.windows.net"
     $uri = "$baseUrl/$Container/$BlobName"
-    $headers = Get-BlobHeaders -StorageToken $StorageToken
+    $headers = Get-BlobHeader -StorageToken $StorageToken
 
     $parentDir = Split-Path -Path $DestinationPath -Parent
     if (-not (Test-Path $parentDir)) { New-Item -Path $parentDir -ItemType Directory -Force | Out-Null }
@@ -1929,6 +2023,7 @@ function Set-BlobContent {
     .SYNOPSIS
         Uploads a local file as a block blob.
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -1954,14 +2049,14 @@ function Set-BlobContent {
 
     $baseUrl = "https://$AccountName.blob.core.windows.net"
     $uri = "$baseUrl/$Container/$BlobName"
-    $headers = Get-BlobHeaders -StorageToken $StorageToken
+    $headers = Get-BlobHeader -StorageToken $StorageToken
     $headers['x-ms-blob-type'] = 'BlockBlob'
     if ($AccessTier) { $headers['x-ms-access-tier'] = $AccessTier }
 
     Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -InFile $SourcePath -ContentType $ContentType
 }
 
-function Test-BlobExists {
+function Test-BlobExistence {
     <#
     .SYNOPSIS
         Checks if a blob exists. Returns $true/$false.
@@ -1983,7 +2078,7 @@ function Test-BlobExists {
 
     $baseUrl = "https://$AccountName.blob.core.windows.net"
     $uri = "$baseUrl/$Container/$BlobName"
-    $headers = Get-BlobHeaders -StorageToken $StorageToken
+    $headers = Get-BlobHeader -StorageToken $StorageToken
 
     try {
         Invoke-WebRequest -Uri $uri -Headers $headers -Method Head -ErrorAction Stop | Out-Null
@@ -1999,6 +2094,7 @@ function Remove-Blob {
     .SYNOPSIS
         Deletes a blob from storage.
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -2016,7 +2112,7 @@ function Remove-Blob {
 
     $baseUrl = "https://$AccountName.blob.core.windows.net"
     $uri = "$baseUrl/$Container/$BlobName"
-    $headers = Get-BlobHeaders -StorageToken $StorageToken
+    $headers = Get-BlobHeader -StorageToken $StorageToken
 
     try {
         Invoke-WebRequest -Uri $uri -Headers $headers -Method Delete -ErrorAction Stop | Out-Null
@@ -2032,7 +2128,7 @@ function Remove-Blob {
 # HELPER FUNCTIONS - MDE API
 # =============================================================================
 
-function Get-MdeHeaders {
+function Get-MdeHeader {
     <#
     .SYNOPSIS
         Returns standard headers for MDE API calls.
@@ -2050,7 +2146,7 @@ function Get-MdeHeaders {
     }
 }
 
-function Export-BulkVulnerabilities {
+function Export-BulkVulnerability {
     <#
     .SYNOPSIS
         Downloads bulk vulnerability export files from the MDE API.
@@ -2081,9 +2177,11 @@ function Export-BulkVulnerabilities {
     foreach ($fileUrl in $response.exportFiles) {
         # Parse URL to derive filename (matching GitHub Actions workflow pattern)
         # Expected format: https://winatp-gw-{region}.microsoft.com/api/machines/SoftwareVulnerabilitiesExport/collection/{date}/files/{index}?...%3DgroupId%3D{id}
-        $urlParts = $fileUrl.Split('/')
-        $date = $urlParts[6]
-        $groupId = $urlParts[9].Split('%3D')[-1]
+        if ($fileUrl -notmatch '/collection/([^/?]+)/.*%3DgroupId%3D([^&%? ]+)') {
+            throw "Unexpected export URL format. Cannot extract date and groupId from: $fileUrl"
+        }
+        $date    = $Matches[1]
+        $groupId = [System.Uri]::UnescapeDataString($Matches[2])
         $gzFile = Join-Path -Path $OutputPath -ChildPath "VulnExport_${groupId}_${date}.json.gz"
 
         Write-Output "  Downloading VulnExport_${groupId}_${date}..."
@@ -2431,6 +2529,28 @@ function Convert-ToYmdDate {
 # Keep the shared store helpers in this section aligned with the equivalent
 # helpers in Invoke-VulnerabilityExport.ps1 and Generate-VulnerabilityDashboard.ps1.
 
+function Get-GzipLine {
+    param([string]$Path)
+    $fs = [System.IO.File]::OpenRead($Path)
+    $gs = [System.IO.Compression.GZipStream]::new($fs, [System.IO.Compression.CompressionMode]::Decompress)
+    $lr = [System.IO.StreamReader]::new($gs, [System.Text.Encoding]::UTF8)
+    try {
+        while (-not $lr.EndOfStream) { $lr.ReadLine() }
+    }
+    finally { $lr.Dispose() }
+}
+
+function Get-OrCreateIndex {
+    param($value, $list, $indexMap)
+    if ($null -eq $value -or $value -eq '') { return -1 }
+    $key = $value.ToString()
+    if (-not $indexMap.ContainsKey($key)) {
+        $indexMap[$key] = $list.Count
+        $list.Add($key)
+    }
+    return $indexMap[$key]
+}
+
 function ConvertTo-NormalizedData {
     <#
     .SYNOPSIS
@@ -2499,17 +2619,6 @@ function ConvertTo-NormalizedData {
     $affSoftwareIndex = @{}
     $batchTitleIndex = @{}
 
-    function Get-OrCreateIndex {
-        param($value, $list, $indexMap)
-        if ($null -eq $value -or $value -eq '') { return -1 }
-        $key = $value.ToString()
-        if (-not $indexMap.ContainsKey($key)) {
-            $indexMap[$key] = $list.Count
-            $list.Add($key)
-        }
-        return $indexMap[$key]
-    }
-
     $dateValueCache = @{}
     function Get-CachedYmdDate {
         param($dateValue)
@@ -2538,18 +2647,18 @@ function ConvertTo-NormalizedData {
     $jsonFiles = @()
     $tempMergedVulnPath = $null
 
-    if (Test-VulnStoreExists -BasePath $DataPath) {
-        $tempMergedVulnPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vuln-store-" + [guid]::NewGuid().ToString('N') + ".json")
+    if (Test-VulnStoreExistence -BasePath $DataPath) {
+        $tempMergedVulnPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vuln-store-" + [guid]::NewGuid().ToString('N') + ".json.gz")
         Write-VulnCompatibilitySnapshot -BasePath $DataPath -OutputPath $tempMergedVulnPath
 
         $jsonFiles = @((Get-Item -LiteralPath $tempMergedVulnPath))
         Write-Host "  Found vulnerability current/history store to normalize..."
     }
     else {
-        $legacyFiles = @(Get-LegacyVulnSnapshotFiles -BasePath $DataPath)
+        $legacyFiles = @(Get-LegacyVulnSnapshotFile -BasePath $DataPath)
         if ($legacyFiles.Count -eq 0) { throw "No VulnExport snapshot files found in '$DataPath'." }
 
-        $tempMergedVulnPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vuln-legacy-store-" + [guid]::NewGuid().ToString('N') + ".json")
+        $tempMergedVulnPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vuln-legacy-store-" + [guid]::NewGuid().ToString('N') + ".json.gz")
         $legacyStore = Convert-LegacyVulnSnapshotsToStore -BasePath $DataPath
         Write-VulnCompatibilitySnapshotFromStore -Store $legacyStore -OutputPath $tempMergedVulnPath
 
@@ -2563,7 +2672,7 @@ function ConvertTo-NormalizedData {
 
         foreach ($file in $jsonFiles) {
             Write-Host "  Processing $($file.Name)..."
-            foreach ($line in [System.IO.File]::ReadLines($file.FullName)) {
+            foreach ($line in Get-GzipLine -Path $file.FullName) {
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
                 try { $v = $line | ConvertFrom-Json }
                 catch {
@@ -2888,7 +2997,7 @@ function Get-JSLibrary {
 
     Write-Host "  Downloading $Name..."
     try {
-        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 30
+        $response = Invoke-WebRequest -Uri $Url -TimeoutSec 30
         return $response.Content
     }
     catch {
@@ -2951,7 +3060,7 @@ function Export-ToBlobStorage {
             $blobName = "$($file.Name).gz"
 
             # Skip if this blob already exists
-            if ((-not $isCanonicalStoreFile) -and (Test-BlobExists -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken)) {
+            if ((-not $isCanonicalStoreFile) -and (Test-BlobExistence -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken)) {
                 Write-Output "  Skipping $blobName (already exists)"
                 continue
             }
@@ -2968,7 +3077,7 @@ function Export-ToBlobStorage {
         }
         else {
             $blobName = $file.Name
-            if ((-not $isCanonicalStoreFile) -and (Test-BlobExists -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken)) {
+            if ((-not $isCanonicalStoreFile) -and (Test-BlobExistence -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken)) {
                 Write-Output "  Skipping $blobName (already exists)"
                 continue
             }
@@ -3013,6 +3122,7 @@ function Export-ToSharePoint {
     Write-Warning "SharePoint export is not yet implemented."
     Write-Output "  To implement: Upload via Microsoft Graph API using Sites.ReadWrite.All permission."
     Write-Output "  The Managed Identity would need the Sites.ReadWrite.All app role on the Microsoft Graph SP."
+    $null = $DashboardPath
 }
 
 function Export-ToStaticWebApp {
@@ -3028,6 +3138,7 @@ function Export-ToStaticWebApp {
     Write-Warning "Static Web App export is not yet implemented."
     Write-Output "  To implement: Use the SWA CLI (swa deploy) with a deployment token."
     Write-Output "  Note: Azure Automation sandboxes do not have Node.js; consider a Hybrid Runbook Worker."
+    $null = $DashboardPath
 }
 
 # =============================================================================
@@ -3063,7 +3174,7 @@ try {
     Write-Output "  Acquiring tokens..."
     $storageToken = Get-PlainToken -ResourceUrl 'https://storage.azure.com/'
     $mdeToken = Get-PlainToken -ResourceUrl 'https://api.securitycenter.microsoft.com'
-    $mdeHeaders = Get-MdeHeaders -MdeToken $mdeToken
+    $mdeHeaders = Get-MdeHeader -MdeToken $mdeToken
     Write-Output "  Tokens acquired"
 
     # Test GZip support
@@ -3139,10 +3250,10 @@ try {
     Write-Output "`n--- Stage C: Export fresh MDE data ---"
 
     # Bulk vulnerability export
-    Export-BulkVulnerabilities -Headers $mdeHeaders -OutputPath $tempExports
+    Export-BulkVulnerability -Headers $mdeHeaders -OutputPath $tempExports
 
     Write-Output "Updating vulnerability current/history store..."
-    $vulnStore = Update-VulnStoreFromLegacySnapshots -BasePath $tempExports
+    $vulnStore = Update-VulnStoreFromLegacySnapshot -BasePath $tempExports
     Publish-VulnStore -BasePath $tempExports -Store $vulnStore -RemoveLegacyFiles
 
     # Machine data

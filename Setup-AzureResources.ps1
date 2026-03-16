@@ -324,6 +324,7 @@ function Invoke-ArmApi {
 }
 
 function Remove-AutomationJobSchedulesByScheduleName {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -532,7 +533,7 @@ try {
                     Write-Host "  Found existing storage account '$storageNameFinal' in resource group" -ForegroundColor Green
                 }
             }
-            catch { <# No storage accounts found, proceed with creation #> }
+            catch { $null = $_ <# No storage accounts found, proceed with creation #> }
         }
     }
 
@@ -1101,7 +1102,7 @@ try {
                         $val = if ($raw -is [string]) { $raw } elseif ($raw.value) { $raw.value } else { "$raw" }
                         if ($val) { Write-Host "  $val" -ForegroundColor Gray }
                     }
-                    catch { <# Stream detail unavailable #> }
+                    catch { $null = $_ <# Stream detail unavailable #> }
                 }
             }
         }
@@ -1119,7 +1120,7 @@ try {
                         $msg = if ($raw -is [string]) { $raw } elseif ($raw.message) { $raw.message } elseif ($raw.value) { $raw.value } else { "$raw" }
                         Write-Host "  Error: $msg" -ForegroundColor Red
                     }
-                    catch { <# Error detail unavailable #> }
+                    catch { $null = $_ <# Error detail unavailable #> }
                 }
             }
 
@@ -1136,7 +1137,7 @@ try {
                         $val = if ($raw -is [string]) { $raw } elseif ($raw.value) { $raw.value } else { "$raw" }
                         if ($val) { Write-Host "  $val" -ForegroundColor Gray }
                     }
-                    catch { <# Stream detail unavailable #> }
+                    catch { $null = $_ <# Stream detail unavailable #> }
                 }
             }
         }
