@@ -39,12 +39,15 @@ if (-not (Test-Path -Path $runbookSourcePath -PathType Leaf)) {
 
 $sharedHelpers = Get-Content -Path $sharedHelpersPath -Raw
 $runbookSource = Get-Content -Path $runbookSourcePath -Raw
+$lineEnding = if ($runbookSource.Contains("`r`n")) { "`r`n" } else { "`n" }
+$normalizedMarker = $marker -replace "`r?`n", $lineEnding
+$normalizedSharedHelpers = ($sharedHelpers -replace "`r?`n", $lineEnding).TrimEnd()
 
-if (-not $runbookSource.Contains($marker)) {
+if (-not $runbookSource.Contains($normalizedMarker)) {
     throw 'Runbook source is missing the shared helper marker.'
 }
 
-$assembled = $runbookSource.Replace($marker, $sharedHelpers.TrimEnd() + "`r`n`r`n")
+$assembled = $runbookSource.Replace($normalizedMarker, $normalizedSharedHelpers + $lineEnding + $lineEnding)
 [System.IO.File]::WriteAllText($outputPath, $assembled, [System.Text.UTF8Encoding]::new($false))
 
 Write-Host "Generated runbook: $outputPath" -ForegroundColor Green
