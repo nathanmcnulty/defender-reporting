@@ -2102,40 +2102,7 @@ function Write-Base64FileContent {
         [string]$FilePath
     )
 
-    $stream = [System.IO.File]::OpenRead($FilePath)
-    try {
-        $buffer = New-Object byte[] 12288
-        $carry = New-Object byte[] 2
-        $carryCount = 0
-
-        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-            $total = $carryCount + $read
-            $chunk = New-Object byte[] $total
-
-            if ($carryCount -gt 0) {
-                [System.Buffer]::BlockCopy($carry, 0, $chunk, 0, $carryCount)
-            }
-
-            [System.Buffer]::BlockCopy($buffer, 0, $chunk, $carryCount, $read)
-
-            $alignedLength = $total - ($total % 3)
-            if ($alignedLength -gt 0) {
-                $Writer.Write([System.Convert]::ToBase64String($chunk, 0, $alignedLength))
-            }
-
-            $carryCount = $total - $alignedLength
-            if ($carryCount -gt 0) {
-                [System.Buffer]::BlockCopy($chunk, $alignedLength, $carry, 0, $carryCount)
-            }
-        }
-
-        if ($carryCount -gt 0) {
-            $Writer.Write([System.Convert]::ToBase64String($carry, 0, $carryCount))
-        }
-    }
-    finally {
-        $stream.Dispose()
-    }
+    $Writer.Write([System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($FilePath)))
 }
 
 function Write-CombinedPayloadGzip {
