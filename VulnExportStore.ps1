@@ -6,4 +6,9 @@
 # Keep this wrapper until the broader refactor is fully validated and any
 # external callers still dot-sourcing VulnExportStore.ps1 have been updated.
 
-. (Join-Path $PSScriptRoot 'shared-helpers.ps1')
+$sharedHelpersPath = Join-Path $PSScriptRoot 'shared-helpers.ps1'
+if (-not (Test-Path -Path $sharedHelpersPath -PathType Leaf)) {
+	throw "Shared helper file not found: $sharedHelpersPath"
+}
+
+. $sharedHelpersPath

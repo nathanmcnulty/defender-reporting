@@ -455,9 +455,19 @@ try {
 
     $rgAction = if ($rgExists) { 'Update resource group tags' } else { 'Create resource group' }
     if ($PSCmdlet.ShouldProcess($ResourceGroupName, $rgAction)) {
+        $rgTags = @{}
+        if ($rgExists -and $null -ne $rg.tags) {
+            foreach ($property in $rg.tags.PSObject.Properties) {
+                $rgTags[$property.Name] = [string]$property.Value
+            }
+        }
+        foreach ($tagKey in $Script:ProvisioningTags.Keys) {
+            $rgTags[$tagKey] = $Script:ProvisioningTags[$tagKey]
+        }
+
         $rgPayload = @{
             location = if ($rgExists) { $rg.location } else { $Location }
-            tags     = $Script:ProvisioningTags
+            tags     = $rgTags
         } | ConvertTo-Json -Depth 5
 
         Invoke-ArmApi -Path $rgPath -Method PUT -Payload $rgPayload -Description "Create/update resource group" | Out-Null

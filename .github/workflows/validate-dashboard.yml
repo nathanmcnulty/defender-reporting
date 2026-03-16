@@ -52,7 +52,8 @@ jobs:
         run: |
           Write-Host "Rebuilding the generated Azure Automation runbook..."
           .\azure\Build-Runbook.ps1
-          if (-not (git diff --quiet -- azure/Invoke-DashboardPipeline.ps1)) {
+          git diff --quiet -- azure/Invoke-DashboardPipeline.ps1
+          if ($LASTEXITCODE -ne 0) {
             Write-Error "azure/Invoke-DashboardPipeline.ps1 is out of date. Run .\azure\Build-Runbook.ps1 and commit the result."
             git diff -- azure/Invoke-DashboardPipeline.ps1
             exit 1

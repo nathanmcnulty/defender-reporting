@@ -114,12 +114,6 @@ $Script:LibraryConfig = @{
     }
 }
 
-$Script:MachineCurrentFileName = 'Machines_Current.json.gz'
-$Script:MachineHistoryFileName = 'Machines_History.json.gz'
-$Script:AdvancedHuntingCurrentFileName = 'AdvancedHunting_Current.json.gz'
-$Script:VulnCurrentFileName = 'VulnExport_current.json.gz'
-$Script:VulnHistoryFileNamePattern = 'VulnHistory_{0}.json.gz'
-
 
 Set-StrictMode -Version Latest
 
@@ -3316,7 +3310,7 @@ try {
     Write-Output "========================================"
     Write-Output "  Vulnerability Dashboard Pipeline"
     Write-Output "========================================"
-    Write-Output "  Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC"
+    Write-Output "  Started: $(([datetime]::UtcNow).ToString('yyyy-MM-dd HH:mm:ss')) UTC"
     Write-MemoryUsage -Label "Start"
 
     # -----------------------------------------------------------------
@@ -3639,7 +3633,7 @@ try {
     Write-Output "  CVEs: $cveCount"
     Write-Output "  Dashboard size: ${finalSize}MB"
     Write-Output "  Export target: $Export"
-    Write-Output "  Completed: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') UTC"
+    Write-Output "  Completed: $(([datetime]::UtcNow).ToString('yyyy-MM-dd HH:mm:ss')) UTC"
 }
 catch {
     Write-Output "========================================"
