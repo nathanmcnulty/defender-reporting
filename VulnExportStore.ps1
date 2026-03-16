@@ -35,7 +35,7 @@ function Get-VulnCurrentPath {
     return Join-Path -Path $BasePath -ChildPath $Script:VulnCurrentFileName
 }
 
-function Test-VulnStoreExists {
+function Test-VulnStoreExistence {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -46,8 +46,8 @@ function Test-VulnStoreExists {
         return $true
     }
 
-        $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue)
-        return $historyFiles.Count -gt 0
+    $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue)
+    return $historyFiles.Count -gt 0
 }
 
 function Get-VulnHistoryPath {
@@ -88,7 +88,7 @@ function Get-VulnSnapshotDateFromName {
     return $match.Value
 }
 
-function Get-VulnLegacySnapshotFiles {
+function Get-VulnLegacySnapshotFile {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -249,10 +249,15 @@ function Copy-VulnRecord {
         $Record
     )
 
-    return ($Record | ConvertTo-Json -Compress -Depth 20 | ConvertFrom-Json -Depth 20)
+    $copy = [ordered]@{}
+    foreach ($prop in $Record.PSObject.Properties) {
+        $copy[$prop.Name] = $prop.Value
+    }
+    return [PSCustomObject]$copy
 }
 
 function New-ClosedVulnEntry {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -291,6 +296,7 @@ function New-ClosedVulnEntry {
 }
 
 function New-OpenVulnRecord {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -317,6 +323,7 @@ function Get-VulnHistorySeed {
 
     return [ordered]@{
         year = $Year
+        latestDate = ''
         snapshots = @()
     }
 }
@@ -574,7 +581,7 @@ function Publish-VulnStore {
     }
 }
 
-function Publish-VulnStoreFromLegacySnapshots {
+function Publish-VulnStoreFromLegacySnapshot {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -587,17 +594,17 @@ function Publish-VulnStoreFromLegacySnapshots {
         [switch]$RemoveLegacyFiles
     )
 
-    $legacyFiles = @(Get-VulnLegacySnapshotFiles -BasePath $BasePath -LegacyFilePaths $LegacyFilePaths)
+    $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath -LegacyFilePaths $LegacyFilePaths)
 
     if ($legacyFiles.Count -eq 0) {
         throw "No legacy VulnExport snapshot files found in '$BasePath'."
     }
 
-    $store = Update-VulnStoreFromLegacySnapshots -BasePath $BasePath -LegacyFilePaths $legacyFiles.FullName
+    $store = Update-VulnStoreFromLegacySnapshot -BasePath $BasePath -LegacyFilePaths $legacyFiles.FullName
     $publishResult = Publish-VulnStore -BasePath $BasePath -Store $store
 
     if ($RemoveLegacyFiles) {
-        foreach ($legacyFile in @(Get-VulnLegacySnapshotFiles -BasePath $BasePath)) {
+        foreach ($legacyFile in @(Get-VulnLegacySnapshotFile -BasePath $BasePath)) {
             Remove-Item -Path $legacyFile.FullName -Force
         }
     }
@@ -612,7 +619,7 @@ function Publish-VulnStoreFromLegacySnapshots {
     }
 }
 
-function Read-VulnStoreRows {
+function Read-VulnStoreRow {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -649,16 +656,18 @@ function Write-VulnCompatibilitySnapshotFromStore {
         [string]$OutputPath
     )
 
-    $writer = [System.IO.StreamWriter]::new($OutputPath, $false, [System.Text.UTF8Encoding]::new($false))
+    $fileStream = [System.IO.File]::Create($OutputPath)
+    $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+    $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
     try {
-        foreach ($record in @($Store.CurrentRecords)) {
+        foreach ($record in $Store.CurrentRecords) {
             if ($null -eq $record) { continue }
             $writer.WriteLine(($record | ConvertTo-Json -Compress -Depth 20))
         }
 
-        foreach ($historyDocument in @($Store.HistoryDocuments)) {
-            foreach ($snapshot in @($historyDocument.snapshots)) {
-                foreach ($entry in @($snapshot.closed)) {
+        foreach ($historyDocument in $Store.HistoryDocuments) {
+            foreach ($snapshot in $historyDocument.snapshots) {
+                foreach ($entry in $snapshot.closed) {
                     $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
                     if ($null -eq $row) { continue }
                     $writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
@@ -681,9 +690,11 @@ function Write-VulnCompatibilitySnapshot {
         [string]$OutputPath
     )
 
-    $writer = [System.IO.StreamWriter]::new($OutputPath, $false, [System.Text.UTF8Encoding]::new($false))
+    $fileStream = [System.IO.File]::Create($OutputPath)
+    $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+    $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
     try {
-        foreach ($record in Read-VulnStoreRows -BasePath $BasePath) {
+        foreach ($record in Read-VulnStoreRow -BasePath $BasePath) {
             if ($null -eq $record) { continue }
             $writer.WriteLine(($record | ConvertTo-Json -Compress -Depth 20))
         }
@@ -758,10 +769,18 @@ function Test-VulnHistoryFile {
         }
     }
 
+    $storedLatestDate = [string](Get-VulnPropertyValue -InputObject $document -Name 'latestDate')
+    if (-not [string]::IsNullOrWhiteSpace($storedLatestDate) -and $snapshotDates.Count -gt 0) {
+        $maxSnapshotDate = @($snapshotDates | Sort-Object)[-1]
+        if ($storedLatestDate -ne $maxSnapshotDate) {
+            throw "History file '$Path' latestDate '$storedLatestDate' does not match max snapshot date '$maxSnapshotDate'."
+        }
+    }
+
     return @($document.snapshots).Count
 }
 
-function Read-VulnHistoryDocuments {
+function Get-VulnHistoryDocumentList {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -795,11 +814,16 @@ function Get-VulnStoreLatestSnapshotDate {
         }
     }
 
-    foreach ($document in Read-VulnHistoryDocuments -BasePath $BasePath) {
-        foreach ($snapshot in @($document.snapshots)) {
-            $snapshotDate = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $snapshot -Name 'date')
-            if (-not [string]::IsNullOrWhiteSpace($snapshotDate)) {
-                $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $snapshotDate
+    foreach ($document in Get-VulnHistoryDocumentList -BasePath $BasePath) {
+        $docLatest = [string](Get-VulnPropertyValue -InputObject $document -Name 'latestDate')
+        if (-not [string]::IsNullOrWhiteSpace($docLatest)) {
+            $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $docLatest
+        } else {
+            foreach ($snapshot in @($document.snapshots)) {
+                $snapshotDate = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $snapshot -Name 'date')
+                if (-not [string]::IsNullOrWhiteSpace($snapshotDate)) {
+                    $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $snapshotDate
+                }
             }
         }
     }
@@ -820,7 +844,9 @@ function Add-VulnHistoryEntry {
         [string]$ClosedOn,
 
         [Parameter(Mandatory = $true)]
-        $Entry
+        $Entry,
+
+        [hashtable]$SnapshotMaps = $null
     )
 
     $year = ([datetime]$ClosedOn).Year
@@ -828,16 +854,37 @@ function Add-VulnHistoryEntry {
         $HistoryByYear[$year] = Get-VulnHistorySeed -Year $year
     }
 
-    $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $HistoryByYear[$year]
-    if (-not $snapshotMap.ContainsKey($SnapshotDate)) {
-        $HistoryByYear[$year].snapshots += [PSCustomObject]@{ date = $SnapshotDate; closed = @() }
+    if ($null -ne $SnapshotMaps) {
+        if (-not $SnapshotMaps.ContainsKey($year)) {
+            $SnapshotMaps[$year] = Get-VulnHistorySnapshotMap -HistoryDocument $HistoryByYear[$year]
+        }
+        $snapshotMap = $SnapshotMaps[$year]
+        if (-not $snapshotMap.ContainsKey($SnapshotDate)) {
+            $newSnapshot = [PSCustomObject]@{ date = $SnapshotDate; closed = @() }
+            $HistoryByYear[$year].snapshots += $newSnapshot
+            $snapshotMap[$SnapshotDate] = $newSnapshot
+        }
+    } else {
         $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $HistoryByYear[$year]
+        if (-not $snapshotMap.ContainsKey($SnapshotDate)) {
+            $HistoryByYear[$year].snapshots += [PSCustomObject]@{ date = $SnapshotDate; closed = @() }
+            $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $HistoryByYear[$year]
+        }
     }
 
     $snapshotMap[$SnapshotDate].closed += $Entry
+
+    $currentLatest = [string](Get-VulnPropertyValue -InputObject $HistoryByYear[$year] -Name 'latestDate')
+    $newLatest = Get-MaxVulnDate -Primary $currentLatest -Secondary $SnapshotDate
+    if ($HistoryByYear[$year] -is [System.Collections.IDictionary]) {
+        $HistoryByYear[$year]['latestDate'] = $newLatest
+    } else {
+        $HistoryByYear[$year] | Add-Member -NotePropertyName 'latestDate' -NotePropertyValue $newLatest -Force
+    }
 }
 
-function Update-VulnStoreFromLegacySnapshots {
+function Update-VulnStoreFromLegacySnapshot {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -847,13 +894,13 @@ function Update-VulnStoreFromLegacySnapshots {
         [string[]]$LegacyFilePaths
     )
 
-    $legacyFiles = @(Get-VulnLegacySnapshotFiles -BasePath $BasePath -LegacyFilePaths $LegacyFilePaths)
+    $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath -LegacyFilePaths $LegacyFilePaths)
 
     if ($legacyFiles.Count -eq 0) {
         throw "No legacy VulnExport snapshot files found in '$BasePath'."
     }
 
-    if (-not (Test-VulnStoreExists -BasePath $BasePath)) {
+    if (-not (Test-VulnStoreExistence -BasePath $BasePath)) {
         return (Convert-LegacyVulnSnapshotsToStore -BasePath $BasePath)
     }
 
@@ -874,9 +921,10 @@ function Update-VulnStoreFromLegacySnapshots {
     }
 
     $historyByYear = @{}
-    foreach ($document in Read-VulnHistoryDocuments -BasePath $BasePath) {
+    foreach ($document in Get-VulnHistoryDocumentList -BasePath $BasePath) {
         $historyByYear[[int]$document.year] = $document
     }
+    $snapshotMaps = @{}
 
     $latestKnownSnapshot = Get-VulnStoreLatestSnapshotDate -BasePath $BasePath
     $snapshotDates = @($legacyFiles | ForEach-Object { Get-VulnSnapshotDateFromName -Name $_.Name } | Sort-Object -Unique)
@@ -898,9 +946,16 @@ function Update-VulnStoreFromLegacySnapshots {
         }
     }
 
+    $filesByDate = @{}
+    foreach ($file in $legacyFiles) {
+        $date = Get-VulnSnapshotDateFromName -Name $file.Name
+        if (-not $filesByDate.ContainsKey($date)) { $filesByDate[$date] = [System.Collections.Generic.List[object]]::new() }
+        $filesByDate[$date].Add($file)
+    }
+
     foreach ($snapshotDate in $snapshotDates) {
         $snapshotRows = @{}
-        foreach ($file in $legacyFiles | Where-Object { (Get-VulnSnapshotDateFromName -Name $_.Name) -eq $snapshotDate }) {
+        foreach ($file in ($filesByDate[$snapshotDate] ?? @())) {
             foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $file.FullName) {
                 $id = [string](Get-VulnPropertyValue -InputObject $record -Name 'Id')
                 if ([string]::IsNullOrWhiteSpace($id)) { continue }
@@ -914,7 +969,7 @@ function Update-VulnStoreFromLegacySnapshots {
 
             $closedOn = Get-VulnPreviousDay -Date $snapshotDate
             $closedEntry = New-ClosedVulnEntry -Record $currentMap[$id].Record -Reason 'removed' -ClosedOn $closedOn
-            Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry
+            Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry -SnapshotMaps $snapshotMaps
             $currentMap.Remove($id)
         }
 
@@ -944,7 +999,7 @@ function Update-VulnStoreFromLegacySnapshots {
 
             $closedOn = Get-VulnPreviousDay -Date $snapshotDate
             $closedEntry = New-ClosedVulnEntry -Record $currentVersion.Record -Reason 'changed' -ClosedOn $closedOn -ReplacementId $id
-            Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry
+            Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry -SnapshotMaps $snapshotMaps
 
             $currentMap[$id] = [PSCustomObject]@{
                 Record = New-OpenVulnRecord -Record $record -VersionStartDate $snapshotDate
@@ -969,19 +1024,27 @@ function Convert-LegacyVulnSnapshotsToStore {
         [string]$BasePath
     )
 
-    $legacyFiles = @(Get-VulnLegacySnapshotFiles -BasePath $BasePath)
+    $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath)
     if ($legacyFiles.Count -eq 0) {
         throw "No legacy VulnExport snapshot files found in '$BasePath'."
     }
 
     $openVersions = @{}
     $historyByYear = @{}
+    $snapshotMaps = @{}
     $allSnapshotDates = @($legacyFiles | ForEach-Object { Get-VulnSnapshotDateFromName -Name $_.Name } | Sort-Object -Unique)
     $lastSnapshotDate = $allSnapshotDates[-1]
 
+    $filesByDate = @{}
+    foreach ($file in $legacyFiles) {
+        $date = Get-VulnSnapshotDateFromName -Name $file.Name
+        if (-not $filesByDate.ContainsKey($date)) { $filesByDate[$date] = [System.Collections.Generic.List[object]]::new() }
+        $filesByDate[$date].Add($file)
+    }
+
     foreach ($snapshotDate in $allSnapshotDates) {
         $snapshotRows = @{}
-        foreach ($file in $legacyFiles | Where-Object { (Get-VulnSnapshotDateFromName -Name $_.Name) -eq $snapshotDate }) {
+        foreach ($file in ($filesByDate[$snapshotDate] ?? @())) {
             foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $file.FullName) {
                 $id = [string](Get-VulnPropertyValue -InputObject $record -Name 'Id')
                 if ([string]::IsNullOrWhiteSpace($id)) { continue }
@@ -994,16 +1057,7 @@ function Convert-LegacyVulnSnapshotsToStore {
             if (-not $snapshotRows.ContainsKey($id)) {
                 $closedOn = Get-VulnPreviousDay -Date $snapshotDate
                 $closedEntry = New-ClosedVulnEntry -Record $openVersions[$id].Record -Reason 'removed' -ClosedOn $closedOn
-                $year = [datetime]$closedOn | ForEach-Object { $_.Year }
-                if (-not $historyByYear.ContainsKey($year)) {
-                    $historyByYear[$year] = Get-VulnHistorySeed -Year $year
-                }
-                $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $historyByYear[$year]
-                if (-not $snapshotMap.ContainsKey($snapshotDate)) {
-                    $historyByYear[$year].snapshots += [PSCustomObject]@{ date = $snapshotDate; closed = @() }
-                    $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $historyByYear[$year]
-                }
-                $snapshotMap[$snapshotDate].closed += $closedEntry
+                Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry -SnapshotMaps $snapshotMaps
                 $openVersions.Remove($id)
             }
         }
@@ -1034,16 +1088,7 @@ function Convert-LegacyVulnSnapshotsToStore {
 
             $closedOn = Get-VulnPreviousDay -Date $snapshotDate
             $closedEntry = New-ClosedVulnEntry -Record $openVersion.Record -Reason 'changed' -ClosedOn $closedOn -ReplacementId $id
-            $year = [datetime]$closedOn | ForEach-Object { $_.Year }
-            if (-not $historyByYear.ContainsKey($year)) {
-                $historyByYear[$year] = Get-VulnHistorySeed -Year $year
-            }
-            $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $historyByYear[$year]
-            if (-not $snapshotMap.ContainsKey($snapshotDate)) {
-                $historyByYear[$year].snapshots += [PSCustomObject]@{ date = $snapshotDate; closed = @() }
-                $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $historyByYear[$year]
-            }
-            $snapshotMap[$snapshotDate].closed += $closedEntry
+            Add-VulnHistoryEntry -HistoryByYear $historyByYear -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry -SnapshotMaps $snapshotMaps
 
             $openVersions[$id] = [PSCustomObject]@{
                 Record = New-OpenVulnRecord -Record $record -VersionStartDate $snapshotDate
