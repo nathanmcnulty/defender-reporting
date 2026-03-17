@@ -132,6 +132,267 @@ Set-StrictMode -Version Latest
 
 $Script:VulnCurrentFileName = 'VulnExport_current.json.gz'
 $Script:VulnHistoryFileNamePattern = 'VulnHistory_{0}.json.gz'
+$Script:MachineCurrentFileName = 'Machines_Current.json.gz'
+$Script:MachineHistoryFileName = 'Machines_History.json.gz'
+$Script:AdvancedHuntingCurrentFileName = 'AdvancedHunting_Current.json.gz'
+
+function Get-StoreLockName {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StoreName
+    )
+
+    $storeKey = ([System.IO.Path]::GetFullPath($BasePath) + '|' + $StoreName).ToLowerInvariant()
+    $hashBytes = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($storeKey))
+    $hash = ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+    return "Global\DefenderReporting.$hash"
+}
+
+function Invoke-WithStoreLock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StoreName,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+
+        [Parameter(Mandatory = $false)]
+        [int]$TimeoutSeconds = 300
+    )
+
+    $mutexName = Get-StoreLockName -BasePath $BasePath -StoreName $StoreName
+    $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+    $acquired = $false
+
+    try {
+        $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))
+        if (-not $acquired) {
+            throw "Timed out waiting for the '$StoreName' store lock in '$BasePath'."
+        }
+
+        return & $ScriptBlock
+    }
+    finally {
+        if ($acquired) {
+            [void]$mutex.ReleaseMutex()
+        }
+        $mutex.Dispose()
+    }
+}
+
+function Get-StoreTransactionJournalPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StoreName
+    )
+
+    return Join-Path -Path $BasePath -ChildPath (".{0}.transaction.json" -f $StoreName)
+}
+
+function Write-StoreTransactionState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $State,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $State | ConvertTo-Json -Depth 20 | Set-Content -Path $Path -Encoding utf8
+}
+
+function Read-StoreTransactionState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    return (Get-Content -Path $Path -Raw | ConvertFrom-Json -Depth 20)
+}
+
+function Remove-StoreTransactionArtifacts {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$JournalPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$TransactionRoot
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($TransactionRoot) -and (Test-Path -LiteralPath $TransactionRoot)) {
+        Remove-Item -LiteralPath $TransactionRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if (Test-Path -LiteralPath $JournalPath) {
+        Remove-Item -LiteralPath $JournalPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Restore-StoreTransaction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StoreName
+    )
+
+    $journalPath = Get-StoreTransactionJournalPath -BasePath $BasePath -StoreName $StoreName
+    $state = Read-StoreTransactionState -Path $journalPath
+    if ($null -eq $state) {
+        return
+    }
+
+    $phase = [string]$state.Phase
+    if ($phase -eq 'Committed') {
+        Remove-StoreTransactionArtifacts -JournalPath $journalPath -TransactionRoot ([string]$state.TransactionRoot)
+        return
+    }
+
+    foreach ($file in @($state.Files)) {
+        $targetPath = [string]$file.TargetPath
+        $stagePath = [string]$file.StagePath
+        $backupPath = [string]$file.BackupPath
+        $targetExisted = ($file.TargetExisted -eq $true)
+
+        if ($targetExisted -and (Test-Path -LiteralPath $backupPath -PathType Leaf)) {
+            if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
+                Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+            }
+            Move-Item -LiteralPath $backupPath -Destination $targetPath -Force
+        }
+        elseif ((-not $targetExisted) -and (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+        }
+
+        if (Test-Path -LiteralPath $stagePath -PathType Leaf) {
+            Remove-Item -LiteralPath $stagePath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    foreach ($removed in @($state.RemovedFiles)) {
+        $targetPath = [string]$removed.TargetPath
+        $backupPath = [string]$removed.BackupPath
+
+        if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+            if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
+                Remove-Item -LiteralPath $targetPath -Force -ErrorAction SilentlyContinue
+            }
+            Move-Item -LiteralPath $backupPath -Destination $targetPath -Force
+        }
+    }
+
+    Remove-StoreTransactionArtifacts -JournalPath $journalPath -TransactionRoot ([string]$state.TransactionRoot)
+}
+
+function Publish-StoreFilesTransactional {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StoreName,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$Files,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$RemovePaths
+    )
+
+    Restore-StoreTransaction -BasePath $BasePath -StoreName $StoreName
+
+    $transactionRoot = Join-Path $BasePath ('.' + $StoreName + '-transaction-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $transactionRoot -ItemType Directory -Force)
+
+    $journalPath = Get-StoreTransactionJournalPath -BasePath $BasePath -StoreName $StoreName
+    $targetPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $fileEntries = [System.Collections.Generic.List[object]]::new()
+    $removedEntries = [System.Collections.Generic.List[object]]::new()
+    $index = 0
+
+    foreach ($file in @($Files)) {
+        $targetPath = [string]$file.TargetPath
+        [void]$targetPaths.Add($targetPath)
+
+        $fileEntries.Add([PSCustomObject]@{
+            TargetPath = $targetPath
+            StagePath = [string]$file.StagePath
+            BackupPath = Join-Path $transactionRoot ('replace-' + $index + '-' + [System.IO.Path]::GetFileName($targetPath) + '.bak')
+            TargetExisted = (Test-Path -LiteralPath $targetPath -PathType Leaf)
+        })
+        $index++
+    }
+
+    $removeIndex = 0
+    foreach ($removePath in @($RemovePaths)) {
+        if ([string]::IsNullOrWhiteSpace($removePath)) { continue }
+        if ($targetPaths.Contains($removePath)) { continue }
+        if (-not (Test-Path -LiteralPath $removePath -PathType Leaf)) { continue }
+
+        $removedEntries.Add([PSCustomObject]@{
+            TargetPath = $removePath
+            BackupPath = Join-Path $transactionRoot ('remove-' + $removeIndex + '-' + [System.IO.Path]::GetFileName($removePath) + '.bak')
+        })
+        $removeIndex++
+    }
+
+    $state = [PSCustomObject]@{
+        StoreName = $StoreName
+        TransactionRoot = $transactionRoot
+        Phase = 'Prepared'
+        Files = @($fileEntries)
+        RemovedFiles = @($removedEntries)
+    }
+    Write-StoreTransactionState -State $state -Path $journalPath
+
+    try {
+        foreach ($entry in @($fileEntries)) {
+            if ($entry.TargetExisted) {
+                [System.IO.File]::Replace($entry.StagePath, $entry.TargetPath, $entry.BackupPath, $true)
+            }
+            else {
+                Move-Item -LiteralPath $entry.StagePath -Destination $entry.TargetPath -Force
+            }
+        }
+
+        foreach ($entry in @($removedEntries)) {
+            Move-Item -LiteralPath $entry.TargetPath -Destination $entry.BackupPath -Force
+        }
+
+        $state.Phase = 'Committed'
+        Write-StoreTransactionState -State $state -Path $journalPath
+        Remove-StoreTransactionArtifacts -JournalPath $journalPath -TransactionRoot $transactionRoot
+    }
+    catch {
+        Restore-StoreTransaction -BasePath $BasePath -StoreName $StoreName
+        throw
+    }
+}
 
 function Get-VulnPropertyValue {
     [CmdletBinding()]
@@ -697,50 +958,60 @@ function Publish-VulnStore {
         $Store
     )
 
-    $stageRoot = Join-Path $BasePath '.vuln-store-staging'
-    if (Test-Path -Path $stageRoot) {
-        Remove-Item -Path $stageRoot -Recurse -Force
-    }
+    return Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $BasePath -StoreName 'vuln'
 
-    New-Item -Path $stageRoot -ItemType Directory | Out-Null
+        $stageRoot = Join-Path $BasePath ('.vuln-store-staging-' + [guid]::NewGuid().ToString('N'))
+        [void](New-Item -Path $stageRoot -ItemType Directory -Force)
 
-    try {
-        $stagedCurrentPath = Get-VulnCurrentPath -BasePath $stageRoot
-        Write-VulnCurrentFile -Path $stagedCurrentPath -Records $Store.CurrentRecords
+        try {
+            $stagedCurrentPath = Get-VulnCurrentPath -BasePath $stageRoot
+            Write-VulnCurrentFile -Path $stagedCurrentPath -Records $Store.CurrentRecords
 
-        foreach ($historyDocument in @($Store.HistoryDocuments)) {
-            $historyPath = Get-VulnHistoryPath -BasePath $stageRoot -Year ([int]$historyDocument.year)
-            Write-VulnHistoryDocument -Path $historyPath -HistoryDocument $historyDocument
+            foreach ($historyDocument in @($Store.HistoryDocuments)) {
+                $historyPath = Get-VulnHistoryPath -BasePath $stageRoot -Year ([int]$historyDocument.year)
+                Write-VulnHistoryDocument -Path $historyPath -HistoryDocument $historyDocument
+            }
+
+            $currentCount = Test-VulnCurrentFile -Path $stagedCurrentPath
+            foreach ($historyFile in Get-ChildItem -Path $stageRoot -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue) {
+                [void](Test-VulnHistoryFile -Path $historyFile.FullName)
+            }
+
+            $filesToPublish = [System.Collections.Generic.List[object]]::new()
+            $filesToPublish.Add([PSCustomObject]@{
+                StagePath = $stagedCurrentPath
+                TargetPath = Get-VulnCurrentPath -BasePath $BasePath
+            })
+
+            $publishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($historyDocument in @($Store.HistoryDocuments)) {
+                $historyName = [string]::Format($Script:VulnHistoryFileNamePattern, [int]$historyDocument.year)
+                [void]$publishedHistoryNames.Add($historyName)
+                $filesToPublish.Add([PSCustomObject]@{
+                    StagePath = Join-Path $stageRoot $historyName
+                    TargetPath = Join-Path $BasePath $historyName
+                })
+            }
+
+            $historyFilesToRemove = @(
+                Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue |
+                    Where-Object { -not $publishedHistoryNames.Contains($_.Name) } |
+                    ForEach-Object { $_.FullName }
+            )
+
+            Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths $historyFilesToRemove
+
+            return [PSCustomObject]@{
+                CurrentRows = $currentCount
+                HistoryYears = @($Store.HistoryDocuments).Count
+                LatestSnapshotDate = $Store.LatestSnapshotDate
+            }
         }
-
-        $currentCount = Test-VulnCurrentFile -Path $stagedCurrentPath
-        foreach ($historyFile in Get-ChildItem -Path $stageRoot -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue) {
-            [void](Test-VulnHistoryFile -Path $historyFile.FullName)
-        }
-
-        $finalCurrentPath = Get-VulnCurrentPath -BasePath $BasePath
-        if (Test-Path -Path $finalCurrentPath) {
-            Remove-Item -Path $finalCurrentPath -Force
-        }
-
-        foreach ($existingHistory in Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue) {
-            Remove-Item -Path $existingHistory.FullName -Force
-        }
-
-        Move-Item -Path $stagedCurrentPath -Destination $finalCurrentPath -Force
-        foreach ($historyFile in Get-ChildItem -Path $stageRoot -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue) {
-            Move-Item -Path $historyFile.FullName -Destination (Join-Path $BasePath $historyFile.Name) -Force
-        }
-
-        return [PSCustomObject]@{
-            CurrentRows = $currentCount
-            HistoryYears = @($Store.HistoryDocuments).Count
-            LatestSnapshotDate = $Store.LatestSnapshotDate
-        }
-    }
-    finally {
-        if (Test-Path -Path $stageRoot) {
-            Remove-Item -Path $stageRoot -Recurse -Force
+        finally {
+            if (Test-Path -Path $stageRoot) {
+                Remove-Item -Path $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 }
@@ -790,24 +1061,28 @@ function Read-VulnStoreRow {
         [string]$BasePath
     )
 
-    $currentPath = Get-VulnCurrentPath -BasePath $BasePath
-    if (Test-Path -Path $currentPath) {
-        foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $currentPath) {
-            Write-Output $record
-        }
-    }
+    Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $BasePath -StoreName 'vuln'
 
-    $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File | Sort-Object Name)
-    foreach ($file in $historyFiles) {
-        $document = Read-VulnHistoryDocument -Path $file.FullName
-        foreach ($snapshot in @($document.snapshots)) {
-            foreach ($entry in @($snapshot.closed)) {
-                if ($null -ne $entry -and $entry.PSObject.Properties['row']) {
-                    Write-Output $entry.row
+        $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+        if (Test-Path -Path $currentPath) {
+            foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $currentPath) {
+                Write-Output $record
+            }
+        }
+
+        $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File | Sort-Object Name)
+        foreach ($file in $historyFiles) {
+            $document = Read-VulnHistoryDocument -Path $file.FullName
+            foreach ($snapshot in @($document.snapshots)) {
+                foreach ($entry in @($snapshot.closed)) {
+                    if ($null -ne $entry -and $entry.PSObject.Properties['row']) {
+                        Write-Output $entry.row
+                    }
                 }
             }
         }
-    }
+    } | Write-Output
 }
 
 function Write-VulnCompatibilitySnapshotFromStore {
@@ -1362,6 +1637,68 @@ function Get-MachineHistoryPath {
     return Join-Path -Path $BasePath -ChildPath $Script:MachineHistoryFileName
 }
 
+function Test-IsMachineHistorySegmentFileName {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return ($Name -match '^Machines_History_\d{8}T\d{6}Z_[a-f0-9]{8}\.json\.gz$')
+}
+
+function New-MachineHistorySegmentFileName {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    $timestamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+    $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    return "Machines_History_${timestamp}_${suffix}.json.gz"
+}
+
+function Get-MachineHistorySegmentFiles {
+    [CmdletBinding()]
+    [OutputType([System.IO.FileInfo[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    return [System.IO.FileInfo[]]@(
+        Get-ChildItem -Path $BasePath -Filter 'Machines_History_*.json.gz' -File -ErrorAction SilentlyContinue |
+            Where-Object { Test-IsMachineHistorySegmentFileName -Name $_.Name } |
+            Sort-Object Name
+    )
+}
+
+function Get-MachineHistorySourcePaths {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $paths = [System.Collections.Generic.List[string]]::new()
+    $historyPath = Get-MachineHistoryPath -BasePath $BasePath
+    $legacyHistoryPath = Get-LegacyCanonicalPath -Path $historyPath
+
+    if (Test-Path -Path $historyPath -PathType Leaf) {
+        $paths.Add($historyPath)
+    }
+    elseif (Test-Path -Path $legacyHistoryPath -PathType Leaf) {
+        $paths.Add($legacyHistoryPath)
+    }
+
+    foreach ($file in Get-MachineHistorySegmentFiles -BasePath $BasePath) {
+        $paths.Add($file.FullName)
+    }
+
+    return [string[]]@($paths)
+}
+
 function Get-AdvancedHuntingCurrentPath {
     [CmdletBinding()]
     param(
@@ -1476,6 +1813,15 @@ function Read-MachineRecordsFromFile {
 
         foreach ($machine in $machineList) {
             if ($null -eq $machine) { continue }
+            if ($machine.PSObject.Properties['removed']?.Value -eq $true) {
+                Write-Output ([PSCustomObject]@{
+                    id = $machine.PSObject.Properties['id']?.Value
+                    observedOn = $machine.PSObject.Properties['observedOn']?.Value
+                    removed = $true
+                    stateHash = $machine.PSObject.Properties['stateHash']?.Value
+                })
+                continue
+            }
             $record = ConvertTo-CompactMachineRecord -Machine $machine
             $stateHash = $machine.PSObject.Properties['stateHash']?.Value
             $observedOn = $machine.PSObject.Properties['observedOn']?.Value
@@ -1507,6 +1853,15 @@ function Read-MachineRecordsFromFile {
                     }
 
                     if ($null -eq $machine) { continue }
+                    if ($machine.PSObject.Properties['removed']?.Value -eq $true) {
+                        Write-Output ([PSCustomObject]@{
+                            id = $machine.PSObject.Properties['id']?.Value
+                            observedOn = $machine.PSObject.Properties['observedOn']?.Value
+                            removed = $true
+                            stateHash = $machine.PSObject.Properties['stateHash']?.Value
+                        })
+                        continue
+                    }
                     $record = ConvertTo-CompactMachineRecord -Machine $machine
                     $stateHash = $machine.PSObject.Properties['stateHash']?.Value
                     $observedOn = $machine.PSObject.Properties['observedOn']?.Value
@@ -1576,6 +1931,25 @@ function New-MachineSnapshotRecord {
     return [PSCustomObject]$snapshot
 }
 
+function New-MachineRemovalRecord {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$MachineId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ObservedOn
+    )
+
+    return [PSCustomObject]@{
+        id = $MachineId
+        observedOn = $ObservedOn
+        removed = $true
+        stateHash = 'removed'
+    }
+}
+
 function Write-NdjsonRecordsFile {
     [CmdletBinding()]
     param(
@@ -1627,16 +2001,20 @@ function Initialize-MachineHistoryStore {
     $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
     $legacyHistoryPath = Get-LegacyCanonicalPath -Path $historyPath
     $currentReadPath = if (Test-Path -Path $currentPath) { $currentPath } elseif (Test-Path -Path $legacyCurrentPath) { $legacyCurrentPath } else { $null }
-    $historyReadPath = if (Test-Path -Path $historyPath) { $historyPath } elseif (Test-Path -Path $legacyHistoryPath) { $legacyHistoryPath } else { $null }
-    $currentExists = $null -ne $currentReadPath
-    $historyExists = $null -ne $historyReadPath
+    $historySourcePaths = @(Get-MachineHistorySourcePaths -BasePath $Path)
     $legacyFiles = @(Get-ChildItem -Path $Path -Filter 'Machines_*.json' -File | Where-Object { Test-IsLegacyMachineSnapshotFileName -Name $_.Name } | Sort-Object Name)
     $currentRecords = @{}
     $migratedLegacy = $false
+    $seedSegmentPath = $null
+    $legacySegmentPaths = [System.Collections.Generic.List[string]]::new()
 
-    if ($currentExists) {
+    if ($null -ne $currentReadPath) {
         foreach ($record in Read-MachineRecordsFromFile -Path $currentReadPath) {
             if (-not $record.id) { continue }
+            if ($record.PSObject.Properties['removed']?.Value -eq $true) {
+                $currentRecords.Remove($record.id)
+                continue
+            }
             if (-not $record.PSObject.Properties['stateHash']) {
                 Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
             }
@@ -1646,21 +2024,30 @@ function Initialize-MachineHistoryStore {
             $currentRecords[$record.id] = $record
         }
     }
-    elseif ($historyExists) {
-        foreach ($record in Read-MachineRecordsFromFile -Path $historyReadPath) {
-            if (-not $record.id) { continue }
-            if (-not $record.PSObject.Properties['stateHash']) {
-                Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
+    elseif ($historySourcePaths.Count -gt 0) {
+        foreach ($sourcePath in $historySourcePaths) {
+            foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
+                if (-not $record.id) { continue }
+                if ($record.PSObject.Properties['removed']?.Value -eq $true) {
+                    $currentRecords.Remove($record.id)
+                    continue
+                }
+                if (-not $record.PSObject.Properties['stateHash']) {
+                    Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
+                }
+                if (-not $record.PSObject.Properties['observedOn']) {
+                    Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
+                }
+                $currentRecords[$record.id] = $record
             }
-            $currentRecords[$record.id] = $record
         }
     }
 
     if (($currentRecords.Count -eq 0) -and $legacyFiles.Count -gt 0) {
-        $historyRecords = [System.Collections.Generic.List[object]]::new()
-
         foreach ($file in $legacyFiles) {
             $observedOn = [regex]::Match($file.Name, '\d{4}-\d{2}-\d{2}').Value
+            $historyRecords = [System.Collections.Generic.List[object]]::new()
+
             foreach ($record in Read-MachineRecordsFromFile -Path $file.FullName) {
                 if (-not $record.id) { continue }
                 $snapshot = New-MachineSnapshotRecord -Machine $record -ObservedOn $observedOn
@@ -1670,11 +2057,14 @@ function Initialize-MachineHistoryStore {
                 }
                 $currentRecords[$snapshot.id] = $snapshot
             }
+
+            if ($historyRecords.Count -gt 0) {
+                $segmentPath = Join-Path $Path (New-MachineHistorySegmentFileName)
+                Write-NdjsonRecordsFile -Path $segmentPath -Records $historyRecords
+                $legacySegmentPaths.Add($segmentPath)
+            }
         }
 
-        if ($historyRecords.Count -gt 0) {
-            Write-NdjsonRecordsFile -Path $historyPath -Records $historyRecords
-        }
         if ($currentRecords.Count -gt 0) {
             Write-NdjsonRecordsFile -Path $currentPath -Records $currentRecords.Values
         }
@@ -1682,11 +2072,9 @@ function Initialize-MachineHistoryStore {
             Remove-Item -Path $legacyFiles.FullName -Force -ErrorAction SilentlyContinue
         }
         $migratedLegacy = $true
-        $historyExists = Test-Path -Path $historyPath
-        $currentExists = Test-Path -Path $currentPath
     }
 
-    if ((-not $historyExists) -and $currentRecords.Count -gt 0) {
+    if (($historySourcePaths.Count -eq 0) -and $legacySegmentPaths.Count -eq 0 -and $currentRecords.Count -gt 0) {
         $seedRecords = foreach ($record in $currentRecords.Values) {
             if (-not $record.PSObject.Properties['stateHash']) {
                 Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
@@ -1696,15 +2084,12 @@ function Initialize-MachineHistoryStore {
             }
             $record
         }
-        Write-NdjsonRecordsFile -Path $historyPath -Records $seedRecords
+        $seedSegmentPath = Join-Path $Path (New-MachineHistorySegmentFileName)
+        Write-NdjsonRecordsFile -Path $seedSegmentPath -Records $seedRecords
     }
 
-    if ((-not $currentExists) -and $currentRecords.Count -gt 0) {
+    if (($null -eq $currentReadPath) -and $currentRecords.Count -gt 0 -and -not (Test-Path -Path $currentPath)) {
         Write-NdjsonRecordsFile -Path $currentPath -Records $currentRecords.Values
-    }
-
-    if ($RemoveLegacyFiles -and $legacyFiles.Count -gt 0 -and $currentRecords.Count -gt 0) {
-        Remove-Item -Path $legacyFiles.FullName -Force -ErrorAction SilentlyContinue
     }
 
     if ($migratedLegacy) {
@@ -1712,11 +2097,18 @@ function Initialize-MachineHistoryStore {
         if (Test-Path -Path $legacyHistoryPath) { Remove-Item -Path $legacyHistoryPath -Force -ErrorAction SilentlyContinue }
     }
 
+    $historyOutputs = [System.Collections.Generic.List[string]]::new()
+    foreach ($sourcePath in $historySourcePaths) { $historyOutputs.Add($sourcePath) }
+    foreach ($segmentPath in $legacySegmentPaths) { $historyOutputs.Add($segmentPath) }
+    if ($seedSegmentPath) { $historyOutputs.Add($seedSegmentPath) }
+
     return @{
-        CurrentPath    = $currentPath
-        HistoryPath    = $historyPath
-        CurrentRecords = $currentRecords
-        MigratedLegacy = $migratedLegacy
+        CurrentPath      = $currentPath
+        HistoryPath      = $historyPath
+        HistoryPaths     = @($historyOutputs)
+        CurrentRecords   = $currentRecords
+        MigratedLegacy   = $migratedLegacy
+        SeedHistoryPath  = $seedSegmentPath
     }
 }
 
@@ -1756,6 +2148,32 @@ function Convert-ToYmdDate {
     catch {
         return $null
     }
+}
+
+function Get-VendorMatchKey {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Vendor
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Vendor)) {
+        return ''
+    }
+
+    $trimmed = $Vendor.Trim()
+    if ($env:DEFENDER_REPORTING_NORMALIZE_VENDOR_MATCH -ne '1') {
+        return $trimmed
+    }
+
+    $normalized = $trimmed.ToLowerInvariant()
+    $normalized = [regex]::Replace($normalized, '[^a-z0-9]+', ' ')
+    $normalized = [regex]::Replace($normalized, '\b(corporation|corp|incorporated|inc|llc|ltd|limited|company|co|gmbh|ag|plc|pte)\b', ' ')
+    $normalized = [regex]::Replace($normalized, '\s+', ' ').Trim()
+    return $normalized
 }
 
 function Get-AdvancedHuntingLastModifiedKey {
@@ -1904,13 +2322,29 @@ function Initialize-AdvancedHuntingStore {
         }
 
         if ($migratedLegacy) {
-            Write-NdjsonRecordsFile -Path $currentPath -Records $currentRecords.Values
-        }
+            $stageRoot = Join-Path $Path ('.advancedhunting-store-staging-' + [guid]::NewGuid().ToString('N'))
+            [void](New-Item -Path $stageRoot -ItemType Directory -Force)
+            try {
+                $stagedCurrentPath = Join-Path $stageRoot (Split-Path -Leaf $currentPath)
+                Write-NdjsonRecordsFile -Path $stagedCurrentPath -Records $currentRecords.Values
+                $removePaths = if ($RemoveLegacyFiles -and $currentRecords.Count -gt 0) {
+                    @($legacyFiles.FullName) + @(
+                        if (Test-Path -Path $legacyCurrentPath) { $legacyCurrentPath }
+                    )
+                }
+                else {
+                    @()
+                }
 
-        if ($RemoveLegacyFiles -and $currentRecords.Count -gt 0) {
-            Remove-Item -Path $legacyFiles.FullName -Force -ErrorAction SilentlyContinue
-            if (Test-Path -Path $legacyCurrentPath) {
-                Remove-Item -Path $legacyCurrentPath -Force -ErrorAction SilentlyContinue
+                Publish-StoreFilesTransactional -BasePath $Path -StoreName 'advancedhunting' -Files @([PSCustomObject]@{
+                    StagePath = $stagedCurrentPath
+                    TargetPath = $currentPath
+                }) -RemovePaths $removePaths
+            }
+            finally {
+                if (Test-Path -Path $stageRoot) {
+                    Remove-Item -Path $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+                }
             }
         }
     }
@@ -2015,21 +2449,41 @@ DeviceTvmSoftwareVulnerabilities
         }
     }
 
-    $store = Initialize-AdvancedHuntingStore -Path $OutputPath -RemoveLegacyFiles
-    foreach ($result in $response.Results) {
-        $cveId = $result.PSObject.Properties['CveId']?.Value
-        if ($cveId) {
-            $store.CurrentRecords[$cveId] = $result
+    return Invoke-WithStoreLock -BasePath $OutputPath -StoreName 'advancedhunting' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $OutputPath -StoreName 'advancedhunting'
+
+        $store = Initialize-AdvancedHuntingStore -Path $OutputPath -RemoveLegacyFiles
+        foreach ($result in $response.Results) {
+            $cveId = $result.PSObject.Properties['CveId']?.Value
+            if ($cveId) {
+                $store.CurrentRecords[$cveId] = $result
+            }
         }
-    }
 
-    Write-NdjsonRecordsFile -Path $store.CurrentPath -Records $store.CurrentRecords.Values
+        $stageRoot = Join-Path $OutputPath ('.advancedhunting-store-staging-' + [guid]::NewGuid().ToString('N'))
+        [void](New-Item -Path $stageRoot -ItemType Directory -Force)
 
-    return [PSCustomObject]@{
-        Success = $true
-        RecordCount = @($response.Results).Count
-        OutputFile = $store.CurrentPath
-        MigratedLegacy = $store.MigratedLegacy
+        try {
+            $stagedCurrentPath = Join-Path $stageRoot (Split-Path -Leaf $store.CurrentPath)
+            Write-NdjsonRecordsFile -Path $stagedCurrentPath -Records $store.CurrentRecords.Values
+
+            Publish-StoreFilesTransactional -BasePath $OutputPath -StoreName 'advancedhunting' -Files @([PSCustomObject]@{
+                StagePath = $stagedCurrentPath
+                TargetPath = $store.CurrentPath
+            })
+
+            return [PSCustomObject]@{
+                Success = $true
+                RecordCount = @($response.Results).Count
+                OutputFile = $store.CurrentPath
+                MigratedLegacy = $store.MigratedLegacy
+            }
+        }
+        finally {
+            if (Test-Path -Path $stageRoot) {
+                Remove-Item -Path $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
 
@@ -2049,19 +2503,7 @@ function Invoke-MdeMachineStoreRefresh {
     $url = "$BaseApiUrl/api/machines?`$filter=onboardingStatus eq 'Onboarded'"
     $pageCount = 0
     $observedOn = Get-Date -Format 'yyyy-MM-dd'
-    $store = Initialize-MachineHistoryStore -Path $OutputPath -RemoveLegacyFiles
-    $historyRecords = [System.Collections.Generic.List[object]]::new()
-
-    if (Test-Path -Path $store.HistoryPath) {
-        foreach ($record in Read-MachineRecordsFromFile -Path $store.HistoryPath) {
-            if ($null -ne $record) {
-                $historyRecords.Add($record)
-            }
-        }
-    }
-
-    $machineCount = 0
-    $changeCount = 0
+    $fetchedSnapshots = [System.Collections.Generic.List[object]]::new()
 
     do {
         $pageCount++
@@ -2069,14 +2511,7 @@ function Invoke-MdeMachineStoreRefresh {
 
         if ($response.value) {
             foreach ($machine in $response.value) {
-                $snapshot = New-MachineSnapshotRecord -Machine $machine -ObservedOn $observedOn
-                $existing = $store.CurrentRecords[$snapshot.id]
-                if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
-                    $historyRecords.Add($snapshot)
-                    $changeCount++
-                }
-                $store.CurrentRecords[$snapshot.id] = $snapshot
-                $machineCount++
+                $fetchedSnapshots.Add((New-MachineSnapshotRecord -Machine $machine -ObservedOn $observedOn))
             }
         }
 
@@ -2088,16 +2523,76 @@ function Invoke-MdeMachineStoreRefresh {
         }
     } while ($url)
 
-    Write-NdjsonRecordsFile -Path $store.HistoryPath -Records $historyRecords
-    Write-NdjsonRecordsFile -Path $store.CurrentPath -Records $store.CurrentRecords.Values
+    return Invoke-WithStoreLock -BasePath $OutputPath -StoreName 'machines' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $OutputPath -StoreName 'machines'
 
-    return [PSCustomObject]@{
-        Success = $true
-        MachineCount = $machineCount
-        ChangeCount = $changeCount
-        PageCount = $pageCount
-        OutputFiles = @($store.CurrentPath, $store.HistoryPath)
-        MigratedLegacy = $store.MigratedLegacy
+        $store = Initialize-MachineHistoryStore -Path $OutputPath -RemoveLegacyFiles
+        $changeRecords = [System.Collections.Generic.List[object]]::new()
+        $machineCount = 0
+        $nextCurrentRecords = @{}
+
+        foreach ($snapshot in $fetchedSnapshots) {
+            $existing = $store.CurrentRecords[$snapshot.id]
+            if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
+                $changeRecords.Add($snapshot)
+            }
+
+            $nextCurrentRecords[$snapshot.id] = $snapshot
+            $machineCount++
+        }
+
+        foreach ($existingId in @($store.CurrentRecords.Keys)) {
+            if (-not $nextCurrentRecords.ContainsKey($existingId)) {
+                $changeRecords.Add((New-MachineRemovalRecord -MachineId $existingId -ObservedOn $observedOn))
+            }
+        }
+
+        $store.CurrentRecords = $nextCurrentRecords
+
+        $stageRoot = Join-Path $OutputPath ('.machine-store-staging-' + [guid]::NewGuid().ToString('N'))
+        [void](New-Item -Path $stageRoot -ItemType Directory -Force)
+
+        try {
+            $stagedCurrentPath = Join-Path $stageRoot (Split-Path -Leaf $store.CurrentPath)
+            Write-NdjsonRecordsFile -Path $stagedCurrentPath -Records $store.CurrentRecords.Values
+
+            $filesToPublish = [System.Collections.Generic.List[object]]::new()
+            $filesToPublish.Add([PSCustomObject]@{
+                StagePath = $stagedCurrentPath
+                TargetPath = $store.CurrentPath
+            })
+
+            $outputFiles = [System.Collections.Generic.List[string]]::new()
+            $outputFiles.Add($store.CurrentPath)
+
+            if ($changeRecords.Count -gt 0) {
+                $historySegmentName = New-MachineHistorySegmentFileName
+                $stagedHistoryPath = Join-Path $stageRoot $historySegmentName
+                Write-NdjsonRecordsFile -Path $stagedHistoryPath -Records $changeRecords
+
+                $filesToPublish.Add([PSCustomObject]@{
+                    StagePath = $stagedHistoryPath
+                    TargetPath = Join-Path $OutputPath $historySegmentName
+                })
+                $outputFiles.Add((Join-Path $OutputPath $historySegmentName))
+            }
+
+            Publish-StoreFilesTransactional -BasePath $OutputPath -StoreName 'machines' -Files @($filesToPublish)
+
+            return [PSCustomObject]@{
+                Success = $true
+                MachineCount = $machineCount
+                ChangeCount = $changeRecords.Count
+                PageCount = $pageCount
+                OutputFiles = @($outputFiles)
+                MigratedLegacy = $store.MigratedLegacy
+            }
+        }
+        finally {
+            if (Test-Path -Path $stageRoot) {
+                Remove-Item -Path $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
 
@@ -2147,7 +2642,39 @@ function Write-Base64FileContent {
         [string]$FilePath
     )
 
-    $Writer.Write([System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($FilePath)))
+    $stream = [System.IO.File]::OpenRead($FilePath)
+    try {
+        $buffer = New-Object byte[] 12288
+        $carry = New-Object byte[] 2
+        $carryCount = 0
+
+        while (($bytesRead = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $totalCount = $carryCount + $bytesRead
+            $workBuffer = New-Object byte[] $totalCount
+
+            if ($carryCount -gt 0) {
+                [System.Array]::Copy($carry, 0, $workBuffer, 0, $carryCount)
+            }
+            [System.Array]::Copy($buffer, 0, $workBuffer, $carryCount, $bytesRead)
+
+            $encodableCount = $totalCount - ($totalCount % 3)
+            if ($encodableCount -gt 0) {
+                $Writer.Write([System.Convert]::ToBase64String($workBuffer, 0, $encodableCount))
+            }
+
+            $carryCount = $totalCount - $encodableCount
+            if ($carryCount -gt 0) {
+                [System.Array]::Copy($workBuffer, $encodableCount, $carry, 0, $carryCount)
+            }
+        }
+
+        if ($carryCount -gt 0) {
+            $Writer.Write([System.Convert]::ToBase64String($carry, 0, $carryCount))
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
 }
 
 function Write-CombinedPayloadGzip {
@@ -2244,53 +2771,65 @@ function Read-MachineData {
         [string]$Path
     )
 
-    Write-Information "Reading machine data from $Path..." -InformationAction Continue
-    $machines = @{}
+    return Invoke-WithStoreLock -BasePath $Path -StoreName 'machines' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $Path -StoreName 'machines'
 
-    $currentPath = Get-MachineCurrentPath -BasePath $Path
-    $historyPath = Get-MachineHistoryPath -BasePath $Path
-    $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
-    $legacyHistoryPath = Get-LegacyCanonicalPath -Path $historyPath
-    $currentReadPath = if (Test-Path -Path $currentPath) { $currentPath } elseif (Test-Path -Path $legacyCurrentPath) { $legacyCurrentPath } else { $null }
-    $historyReadPath = if (Test-Path -Path $historyPath) { $historyPath } elseif (Test-Path -Path $legacyHistoryPath) { $legacyHistoryPath } else { $null }
+        Write-Information "Reading machine data from $Path..." -InformationAction Continue
+        $machines = @{}
 
-    if ($null -ne $currentReadPath) {
-        Write-Information "  Using $(Split-Path -Leaf $currentReadPath)" -InformationAction Continue
-        foreach ($record in Read-MachineRecordsFromFile -Path $currentReadPath) {
-            if ($record.id) {
-                $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
-            }
-        }
-    }
-    elseif ($null -ne $historyReadPath) {
-        Write-Information "  Using $(Split-Path -Leaf $historyReadPath) to reconstruct current state" -InformationAction Continue
-        foreach ($record in Read-MachineRecordsFromFile -Path $historyReadPath) {
-            if ($record.id) {
-                $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
-            }
-        }
-    }
-    else {
-        $machineFiles = @(Get-ChildItem -Path $Path -Filter 'Machines_*.json' -File | Where-Object { Test-IsLegacyMachineSnapshotFileName -Name $_.Name } | Sort-Object Name -Descending)
+        $currentPath = Get-MachineCurrentPath -BasePath $Path
+        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
+        $currentReadPath = if (Test-Path -Path $currentPath) { $currentPath } elseif (Test-Path -Path $legacyCurrentPath) { $legacyCurrentPath } else { $null }
+        $historySourcePaths = @(Get-MachineHistorySourcePaths -BasePath $Path)
 
-        if ($machineFiles.Count -eq 0) {
-            Write-Warning 'No machine data files found. Device details may be incomplete.'
-            return @{}
-        }
-
-        Write-Information "  Found $($machineFiles.Count) legacy machine snapshot file(s)" -InformationAction Continue
-        foreach ($file in $machineFiles) {
-            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
-            foreach ($record in Read-MachineRecordsFromFile -Path $file.FullName) {
-                if ($record.id -and -not $machines.ContainsKey($record.id)) {
+        if ($null -ne $currentReadPath) {
+            Write-Information "  Using $(Split-Path -Leaf $currentReadPath)" -InformationAction Continue
+            foreach ($record in Read-MachineRecordsFromFile -Path $currentReadPath) {
+                if ($record.id) {
+                    if ($record.PSObject.Properties['removed']?.Value -eq $true) {
+                        $machines.Remove($record.id)
+                        continue
+                    }
                     $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
                 }
             }
         }
-    }
+        elseif ($historySourcePaths.Count -gt 0) {
+            Write-Information "  Reconstructing current state from $($historySourcePaths.Count) machine history source file(s)" -InformationAction Continue
+            foreach ($sourcePath in $historySourcePaths) {
+                foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
+                    if ($record.id) {
+                        if ($record.PSObject.Properties['removed']?.Value -eq $true) {
+                            $machines.Remove($record.id)
+                            continue
+                        }
+                        $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
+                    }
+                }
+            }
+        }
+        else {
+            $machineFiles = @(Get-ChildItem -Path $Path -Filter 'Machines_*.json' -File | Where-Object { Test-IsLegacyMachineSnapshotFileName -Name $_.Name } | Sort-Object Name -Descending)
 
-    Write-Information "  Loaded $($machines.Count) unique machines" -InformationAction Continue
-    return $machines
+            if ($machineFiles.Count -eq 0) {
+                Write-Warning 'No machine data files found. Device details may be incomplete.'
+                return @{}
+            }
+
+            Write-Information "  Found $($machineFiles.Count) legacy machine snapshot file(s)" -InformationAction Continue
+            foreach ($file in $machineFiles) {
+                Write-Information "  Processing $($file.Name)..." -InformationAction Continue
+                foreach ($record in Read-MachineRecordsFromFile -Path $file.FullName) {
+                    if ($record.id -and -not $machines.ContainsKey($record.id)) {
+                        $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
+                    }
+                }
+            }
+        }
+
+        Write-Information "  Loaded $($machines.Count) unique machines" -InformationAction Continue
+        return $machines
+    }
 }
 
 function Read-AdvancedHuntingData {
@@ -2301,64 +2840,68 @@ function Read-AdvancedHuntingData {
         [string]$Path
     )
 
-    Write-Information "Reading Advanced Hunting data from $Path..." -InformationAction Continue
+    return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
 
-    $ahData = @{}
-    $parseErrors = 0
-    $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
-    $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
+        Write-Information "Reading Advanced Hunting data from $Path..." -InformationAction Continue
 
-    if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
-        $currentPath = $legacyCurrentPath
-    }
+        $ahData = @{}
+        $parseErrors = 0
+        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
+        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
 
-    if (Test-Path -Path $currentPath) {
-        Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
-        $sourceFiles = @(Get-Item -Path $currentPath)
-    }
-    else {
-        $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
-            Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
-            Sort-Object Name -Descending)
-
-        if ($sourceFiles.Count -eq 0) {
-            Write-Warning 'No Advanced Hunting data files found. CVE enrichment will be skipped.'
-            return @{}
+        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
+            $currentPath = $legacyCurrentPath
         }
 
-        Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
-    }
+        if (Test-Path -Path $currentPath) {
+            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
+            $sourceFiles = @(Get-Item -Path $currentPath)
+        }
+        else {
+            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
+                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
+                Sort-Object Name -Descending)
 
-    foreach ($file in $sourceFiles) {
-        Write-Information "  Processing $($file.Name)..." -InformationAction Continue
-        foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
-            try {
-                $cveId = $record.CveId
-                if ($cveId -and -not $ahData.ContainsKey($cveId)) {
-                    $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
-                    $ahData[$cveId] = @{
-                        PublishedDate = Convert-ToYmdDate -DateValue $pdRaw
-                        VulnerabilityDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
-                        EpssScore = $record.PSObject.Properties['EpssScore']?.Value
-                        AffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
+            if ($sourceFiles.Count -eq 0) {
+                Write-Warning 'No Advanced Hunting data files found. CVE enrichment will be skipped.'
+                return @{}
+            }
+
+            Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
+        }
+
+        foreach ($file in $sourceFiles) {
+            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
+            foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
+                try {
+                    $cveId = $record.CveId
+                    if ($cveId -and -not $ahData.ContainsKey($cveId)) {
+                        $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
+                        $ahData[$cveId] = @{
+                            PublishedDate = Convert-ToYmdDate -DateValue $pdRaw
+                            VulnerabilityDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
+                            EpssScore = $record.PSObject.Properties['EpssScore']?.Value
+                            AffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
+                        }
+                    }
+                }
+                catch {
+                    $parseErrors++
+                    if ($parseErrors -le 5) {
+                        Write-Warning "Failed to process Advanced Hunting record in $($file.Name): $_"
                     }
                 }
             }
-            catch {
-                $parseErrors++
-                if ($parseErrors -le 5) {
-                    Write-Warning "Failed to process Advanced Hunting record in $($file.Name): $_"
-                }
-            }
         }
-    }
 
-    if ($parseErrors -gt 0) {
-        Write-Warning "Total parse errors: $parseErrors"
-    }
+        if ($parseErrors -gt 0) {
+            Write-Warning "Total parse errors: $parseErrors"
+        }
 
-    Write-Information "  Loaded enrichment data for $($ahData.Count) unique CVEs" -InformationAction Continue
-    return $ahData
+        Write-Information "  Loaded enrichment data for $($ahData.Count) unique CVEs" -InformationAction Continue
+        return $ahData
+    }
 }
 
 function Convert-CveUrl {
@@ -2487,70 +3030,73 @@ function ConvertTo-NormalizedData {
 
     $firstLastSwappedCount = 0
     $processedCount = 0
-    $parseErrors = 0
     $hasNoTags = $false
     $vulnWriter = $null
     $isFirstVuln = $true
 
-    $jsonFiles = @()
-    $tempMergedVulnPath = $null
+    function Get-NormalizationSourceRows {
+        if (Test-VulnStoreExistence -BasePath $DataPath) {
+            Write-Information '  Found vulnerability current/history store to normalize...' -InformationAction Continue
+            foreach ($record in Read-VulnStoreRow -BasePath $DataPath) {
+                if ($null -ne $record) {
+                    Write-Output $record
+                }
+            }
+            return
+        }
 
-    if (Test-VulnStoreExistence -BasePath $DataPath) {
-        $tempMergedVulnPath = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-store-' + [guid]::NewGuid().ToString('N') + '.json.gz')
-        Write-VulnCompatibilitySnapshot -BasePath $DataPath -OutputPath $tempMergedVulnPath
-
-        $jsonFiles = @((Get-Item -LiteralPath $tempMergedVulnPath))
-        Write-Information '  Found vulnerability current/history store to normalize...' -InformationAction Continue
-    }
-    else {
         $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $DataPath)
         if ($legacyFiles.Count -eq 0) { throw "No VulnExport snapshot files found in '$DataPath'." }
 
-        $tempMergedVulnPath = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-legacy-store-' + [guid]::NewGuid().ToString('N') + '.json.gz')
         $legacyStore = Convert-LegacyVulnSnapshotsToStore -BasePath $DataPath
-        Write-VulnCompatibilitySnapshotFromStore -Store $legacyStore -OutputPath $tempMergedVulnPath
+        Write-Information "  Found $($legacyFiles.Count) legacy export file(s); canonicalizing in memory for normalization..." -InformationAction Continue
 
-        $jsonFiles = @((Get-Item -LiteralPath $tempMergedVulnPath))
-        Write-Information "  Found $($legacyFiles.Count) legacy export file(s); canonicalizing for normalization..." -InformationAction Continue
+        foreach ($record in @($legacyStore.CurrentRecords)) {
+            if ($null -ne $record) {
+                Write-Output $record
+            }
+        }
+
+        foreach ($historyDocument in @($legacyStore.HistoryDocuments)) {
+            foreach ($snapshot in @($historyDocument.snapshots)) {
+                foreach ($entry in @($snapshot.closed)) {
+                    $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
+                    if ($null -ne $row) {
+                        Write-Output $row
+                    }
+                }
+            }
+        }
     }
 
     try {
         $vulnWriter = [System.IO.StreamWriter]::new($VulnOutputPath, $false, [System.Text.UTF8Encoding]::new($false))
         $vulnWriter.Write('[')
 
-        foreach ($file in $jsonFiles) {
-            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
-            foreach ($line in Get-GzipLine -Path $file.FullName) {
-                if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                try { $v = $line | ConvertFrom-Json }
-                catch {
-                    $parseErrors++
-                    if ($parseErrors -le 5) { Write-Warning "Parse error in $($file.Name): $_" }
-                    continue
-                }
-                if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { continue }
-                $processedCount++
+        foreach ($v in Get-NormalizationSourceRows) {
+            if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { continue }
+            $processedCount++
 
-                $deviceId = [string]$v.DeviceId
-                $machine = $Machines[$deviceId]
-                $fallbackDeviceName = $v.PSObject.Properties['DeviceName']?.Value
-                $fallbackGroupName = $v.PSObject.Properties['RbacGroupName']?.Value
-                $fallbackPlatform = $v.PSObject.Properties['OSPlatform']?.Value
-                $fallbackOsVersion = $v.PSObject.Properties['OSVersion']?.Value
-                $deviceKey = if ($machine) {
+            $deviceId = [string]$v.DeviceId
+            $machine = $Machines[$deviceId]
+            $fallbackDeviceName = $v.PSObject.Properties['DeviceName']?.Value
+            $fallbackGroupName = $v.PSObject.Properties['RbacGroupName']?.Value
+            $fallbackPlatform = $v.PSObject.Properties['OSPlatform']?.Value
+            $fallbackOsVersion = $v.PSObject.Properties['OSVersion']?.Value
+            $deviceKey = if ($machine) {
+                $deviceId
+            }
+            else {
+                @(
                     $deviceId
-                }
-                else {
-                    @(
-                        $deviceId
-                        [string]$fallbackDeviceName
-                        [string]$fallbackGroupName
-                        [string]$fallbackPlatform
-                        [string]$fallbackOsVersion
-                    ) -join '|'
-                }
+                    [string]$fallbackDeviceName
+                    [string]$fallbackGroupName
+                    [string]$fallbackPlatform
+                    [string]$fallbackOsVersion
+                ) -join '|'
+            }
 
-                if (-not $deviceIndex.ContainsKey($deviceKey)) {
+            if (-not $deviceIndex.ContainsKey($deviceKey)) {
                     # When machine enrichment is missing, vulnerability exports can still carry
                     # row-specific device metadata. Keep distinct fallback variants instead of
                     # collapsing everything to the first row seen for a DeviceId.
@@ -2602,51 +3148,51 @@ function ConvertTo-NormalizedData {
                         t = $tagIndices
                         m = $machineInfo
                     })
-                }
-                $devIdx = $deviceIndex[$deviceKey]
+            }
+            $devIdx = $deviceIndex[$deviceKey]
 
-                $vendorIdx = Get-OrCreateIndex -value $v.PSObject.Properties['SoftwareVendor']?.Value -list $lookups.vendors -indexMap $vendorIndex
+            $vendorIdx = Get-OrCreateIndex -value $v.PSObject.Properties['SoftwareVendor']?.Value -list $lookups.vendors -indexMap $vendorIndex
 
-                $softwareVendor = $v.PSObject.Properties['SoftwareVendor']?.Value ?? ''
-                $softwareName = $v.PSObject.Properties['SoftwareName']?.Value ?? ''
-                $recommendationReference = $v.PSObject.Properties['RecommendationReference']?.Value ?? ''
-                $softwareKey = "$softwareVendor|$softwareName|$recommendationReference"
-                if (-not $softwareIndex.ContainsKey($softwareKey)) {
-                    $softwareIndex[$softwareKey] = $lookups.software.Count
-                    $lookups.software.Add([PSCustomObject]@{
-                        v = $vendorIdx
-                        n = $softwareName
-                        r = $recommendationReference
-                    })
-                }
-                $swIdx = $softwareIndex[$softwareKey]
+            $softwareVendor = $v.PSObject.Properties['SoftwareVendor']?.Value ?? ''
+            $softwareName = $v.PSObject.Properties['SoftwareName']?.Value ?? ''
+            $recommendationReference = $v.PSObject.Properties['RecommendationReference']?.Value ?? ''
+            $softwareKey = "$softwareVendor|$softwareName|$recommendationReference"
+            if (-not $softwareIndex.ContainsKey($softwareKey)) {
+                $softwareIndex[$softwareKey] = $lookups.software.Count
+                $lookups.software.Add([PSCustomObject]@{
+                    v = $vendorIdx
+                    n = $softwareName
+                    r = $recommendationReference
+                })
+            }
+            $swIdx = $softwareIndex[$softwareKey]
 
-                $cveId = $v.CveId
-                $cvssScore = $v.PSObject.Properties['CvssScore']?.Value
-                $sevLevel = $v.PSObject.Properties['VulnerabilitySeverityLevel']?.Value
-                $sevIdx = switch ($sevLevel) {
-                    'Critical' { 0 }
-                    'High' { 1 }
-                    'Medium' { 2 }
-                    'Low' { 3 }
-                    default { -1 }
-                }
+            $cveId = $v.CveId
+            $cvssScore = $v.PSObject.Properties['CvssScore']?.Value
+            $sevLevel = $v.PSObject.Properties['VulnerabilitySeverityLevel']?.Value
+            $sevIdx = switch ($sevLevel) {
+                'Critical' { 0 }
+                'High' { 1 }
+                'Medium' { 2 }
+                'Low' { 3 }
+                default { -1 }
+            }
 
-                $exploitabilityLevel = $v.PSObject.Properties['ExploitabilityLevel']?.Value
-                $expIdx = Get-OrCreateIndex -value $exploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
+            $exploitabilityLevel = $v.PSObject.Properties['ExploitabilityLevel']?.Value
+            $expIdx = Get-OrCreateIndex -value $exploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
 
-                $cveBatchUrl = Convert-CveUrl -Url $v.PSObject.Properties['CveBatchUrl']?.Value
-                $btValue = $v.PSObject.Properties['CveBatchTitle']?.Value
-                $cveKey = @(
-                    [string]$cveId,
-                    [string]$cvssScore,
-                    [string]$sevLevel,
-                    [string]$exploitabilityLevel,
-                    [string]$cveBatchUrl,
-                    [string]$btValue
-                ) -join '|'
+            $cveBatchUrl = Convert-CveUrl -Url $v.PSObject.Properties['CveBatchUrl']?.Value
+            $btValue = $v.PSObject.Properties['CveBatchTitle']?.Value
+            $cveKey = @(
+                [string]$cveId,
+                [string]$cvssScore,
+                [string]$sevLevel,
+                [string]$exploitabilityLevel,
+                [string]$cveBatchUrl,
+                [string]$btValue
+            ) -join '|'
 
-                if (-not $cveIndex.ContainsKey($cveKey)) {
+            if (-not $cveIndex.ContainsKey($cveKey)) {
                     $ahData = $AdvancedHuntingData[$cveId]
                     $publishedDate = $null
                     $vulnDescription = $null
@@ -2680,92 +3226,91 @@ function ConvertTo-NormalizedData {
                         ep = $epssScore
                         as = $affSoftwareIndices
                     })
-                }
-                $cveIdx = $cveIndex[$cveKey]
+            }
+            $cveIdx = $cveIndex[$cveKey]
 
-                $recUpdate = $v.PSObject.Properties['RecommendedSecurityUpdate']?.Value
-                $recUpdateId = $v.PSObject.Properties['RecommendedSecurityUpdateId']?.Value
-                $recUpdateUrl = $v.PSObject.Properties['RecommendedSecurityUpdateUrl']?.Value
-                $updateName = if ($recUpdate -and $recUpdate -ne '--') { $recUpdate } else { $null }
-                if ($null -eq $updateName -or $updateName -eq '') {
-                    $updIdx = -1
+            $recUpdate = $v.PSObject.Properties['RecommendedSecurityUpdate']?.Value
+            $recUpdateId = $v.PSObject.Properties['RecommendedSecurityUpdateId']?.Value
+            $recUpdateUrl = $v.PSObject.Properties['RecommendedSecurityUpdateUrl']?.Value
+            $updateName = if ($recUpdate -and $recUpdate -ne '--') { $recUpdate } else { $null }
+            if ($null -eq $updateName -or $updateName -eq '') {
+                $updIdx = -1
+            }
+            else {
+                $updateKey = @(
+                    [string]$updateName,
+                    [string]$recUpdateId,
+                    [string]$recUpdateUrl
+                ) -join '|'
+                if ($updateIndex.ContainsKey($updateKey)) {
+                    $updIdx = $updateIndex[$updateKey]
                 }
                 else {
-                    $updateKey = @(
-                        [string]$updateName,
-                        [string]$recUpdateId,
-                        [string]$recUpdateUrl
-                    ) -join '|'
-                    if ($updateIndex.ContainsKey($updateKey)) {
-                        $updIdx = $updateIndex[$updateKey]
-                    }
-                    else {
-                        $updIdx = $lookups.updates.Count
-                        $updateIndex[$updateKey] = $updIdx
-                        $lookups.updates.Add([PSCustomObject]@{
-                            n = $updateName
-                            id = $recUpdateId
-                            url = $recUpdateUrl
-                        })
-                    }
+                    $updIdx = $lookups.updates.Count
+                    $updateIndex[$updateKey] = $updIdx
+                    $lookups.updates.Add([PSCustomObject]@{
+                        n = $updateName
+                        id = $recUpdateId
+                        url = $recUpdateUrl
+                    })
                 }
-
-                $seenWindow = Get-NormalizedVulnSeenWindow `
-                    -FirstSeenValue $v.PSObject.Properties['FirstSeenTimestamp']?.Value `
-                    -LastSeenValue $v.PSObject.Properties['LastSeenTimestamp']?.Value
-                $firstSeen = if ($seenWindow.FirstSeenTimestamp) { Get-CachedYmdDate -dateValue $seenWindow.FirstSeenTimestamp } else { $null }
-                $lastSeen = if ($seenWindow.LastSeenTimestamp) { Get-CachedYmdDate -dateValue $seenWindow.LastSeenTimestamp } else { $null }
-                if ($seenWindow.WasReordered) {
-                    $firstLastSwappedCount++
-                }
-
-                if (-not $firstSeen) { $firstSeen = '' }
-                if (-not $lastSeen) { $lastSeen = '' }
-                $firstSeenIdx = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
-                $lastSeenIdx = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
-
-                $versionStr = $v.PSObject.Properties['SoftwareVersion']?.Value
-                $versionIdx = Get-OrCreateIndex -value $versionStr -list $lookups.versions -indexMap $versionIndex
-
-                $rawDiskPaths = $v.PSObject.Properties['DiskPaths']?.Value
-                $rawRegPaths = $v.PSObject.Properties['RegistryPaths']?.Value
-                $diskPathIndices = $null
-                $regPathIndices = $null
-                if ($rawDiskPaths -and $rawDiskPaths.Count -gt 0) {
-                    $diskPathIndices = [System.Collections.Generic.List[int]]::new()
-                    foreach ($dp in $rawDiskPaths) {
-                        $dpIdx = Get-OrCreateIndex -value $dp -list $lookups.diskPaths -indexMap $diskPathIndex
-                        if ($dpIdx -ge 0) { $diskPathIndices.Add($dpIdx) }
-                    }
-                }
-                if ($rawRegPaths -and $rawRegPaths.Count -gt 0) {
-                    $regPathIndices = [System.Collections.Generic.List[int]]::new()
-                    foreach ($rp in $rawRegPaths) {
-                        $rpIdx = Get-OrCreateIndex -value $rp -list $lookups.regPaths -indexMap $regPathIndex
-                        if ($rpIdx -ge 0) { $regPathIndices.Add($rpIdx) }
-                    }
-                }
-
-                $secUpdateAvail = $v.PSObject.Properties['SecurityUpdateAvailable']?.Value
-                $compactRecord = @(
-                    $devIdx,
-                    $cveIdx,
-                    $swIdx,
-                    $versionIdx,
-                    $firstSeenIdx,
-                    $lastSeenIdx,
-                    [int]($secUpdateAvail -eq $true),
-                    $updIdx,
-                    $diskPathIndices,
-                    $regPathIndices
-                )
-
-                if (-not $isFirstVuln) {
-                    $vulnWriter.Write(',')
-                }
-                $vulnWriter.Write(($compactRecord | ConvertTo-Json -Compress -Depth 5))
-                $isFirstVuln = $false
             }
+
+            $seenWindow = Get-NormalizedVulnSeenWindow `
+                -FirstSeenValue $v.PSObject.Properties['FirstSeenTimestamp']?.Value `
+                -LastSeenValue $v.PSObject.Properties['LastSeenTimestamp']?.Value
+            $firstSeen = if ($seenWindow.FirstSeenTimestamp) { Get-CachedYmdDate -dateValue $seenWindow.FirstSeenTimestamp } else { $null }
+            $lastSeen = if ($seenWindow.LastSeenTimestamp) { Get-CachedYmdDate -dateValue $seenWindow.LastSeenTimestamp } else { $null }
+            if ($seenWindow.WasReordered) {
+                $firstLastSwappedCount++
+            }
+
+            if (-not $firstSeen) { $firstSeen = '' }
+            if (-not $lastSeen) { $lastSeen = '' }
+            $firstSeenIdx = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
+            $lastSeenIdx = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
+
+            $versionStr = $v.PSObject.Properties['SoftwareVersion']?.Value
+            $versionIdx = Get-OrCreateIndex -value $versionStr -list $lookups.versions -indexMap $versionIndex
+
+            $rawDiskPaths = $v.PSObject.Properties['DiskPaths']?.Value
+            $rawRegPaths = $v.PSObject.Properties['RegistryPaths']?.Value
+            $diskPathIndices = $null
+            $regPathIndices = $null
+            if ($rawDiskPaths -and $rawDiskPaths.Count -gt 0) {
+                $diskPathIndices = [System.Collections.Generic.List[int]]::new()
+                foreach ($dp in $rawDiskPaths) {
+                    $dpIdx = Get-OrCreateIndex -value $dp -list $lookups.diskPaths -indexMap $diskPathIndex
+                    if ($dpIdx -ge 0) { $diskPathIndices.Add($dpIdx) }
+                }
+            }
+            if ($rawRegPaths -and $rawRegPaths.Count -gt 0) {
+                $regPathIndices = [System.Collections.Generic.List[int]]::new()
+                foreach ($rp in $rawRegPaths) {
+                    $rpIdx = Get-OrCreateIndex -value $rp -list $lookups.regPaths -indexMap $regPathIndex
+                    if ($rpIdx -ge 0) { $regPathIndices.Add($rpIdx) }
+                }
+            }
+
+            $secUpdateAvail = $v.PSObject.Properties['SecurityUpdateAvailable']?.Value
+            $compactRecord = @(
+                $devIdx,
+                $cveIdx,
+                $swIdx,
+                $versionIdx,
+                $firstSeenIdx,
+                $lastSeenIdx,
+                [int]($secUpdateAvail -eq $true),
+                $updIdx,
+                $diskPathIndices,
+                $regPathIndices
+            )
+
+            if (-not $isFirstVuln) {
+                $vulnWriter.Write(',')
+            }
+            $vulnWriter.Write(($compactRecord | ConvertTo-Json -Compress -Depth 5))
+            $isFirstVuln = $false
         }
 
         $vulnWriter.Write(']')
@@ -2774,12 +3319,8 @@ function ConvertTo-NormalizedData {
         if ($vulnWriter) {
             $vulnWriter.Dispose()
         }
-        if ($tempMergedVulnPath -and (Test-Path -LiteralPath $tempMergedVulnPath)) {
-            Remove-Item -LiteralPath $tempMergedVulnPath -Force
-        }
     }
 
-    if ($parseErrors -gt 0) { Write-Warning "Parse errors: $parseErrors" }
     if ($processedCount -eq 0) { throw 'No onboarded vulnerabilities found after streaming all export files.' }
     Write-Information "  Loaded $processedCount onboarded vulnerability records" -InformationAction Continue
 
@@ -2797,7 +3338,7 @@ function ConvertTo-NormalizedData {
 
     $datasetVendors = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($vendor in $lookups.vendors) {
-        [void]$datasetVendors.Add($vendor)
+        [void]$datasetVendors.Add((Get-VendorMatchKey -Vendor $vendor))
     }
 
     foreach ($cve in $lookups.cves) {
@@ -2807,7 +3348,7 @@ function ConvertTo-NormalizedData {
                 $swStr = $lookups.affSoftware[$asIdx]
                 $separatorIndex = $swStr.IndexOf(':')
                 $swVendor = if ($separatorIndex -ge 0) { $swStr.Substring(0, $separatorIndex) } else { $swStr }
-                if ($datasetVendors.Contains($swVendor)) {
+                if ($datasetVendors.Contains((Get-VendorMatchKey -Vendor $swVendor))) {
                     $filteredIndices.Add($asIdx)
                 }
             }
@@ -3556,6 +4097,7 @@ try {
     Write-Output "  Vulns JSON file: ${vulnsFileSize}KB"
 
     Write-Output "  Compressing embedded data..."
+    $normalizedQuality = $normalizedResult['Quality']
     Write-CombinedPayloadGzip -Lookups $normalizedResult.Lookups -VulnsPath $normalizedResult.VulnsPath -OutputPath $tempPayloadPath
     $normalizedResult = $null
     [GC]::Collect()
@@ -3565,8 +4107,26 @@ try {
     Write-Output "  Compressed: ${compressedSize}KB"
 
     $lookupsJsonEscaped = ""
-    $dataQualitySectionHtml = ""
-    $dataQualityMetaScript = ""
+    $generatedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
+    $dataQualitySectionHtml = @"
+    <section class="data-quality-panel" aria-label="Data quality summary">
+        <h2>Data Quality</h2>
+        <div class="data-quality-grid">
+            <div class="data-quality-item"><div class="data-quality-label">Records</div><div class="data-quality-value" id="dqTotalRecords">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Unique Devices</div><div class="data-quality-value" id="dqUniqueDevices">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Unique CVEs</div><div class="data-quality-value" id="dqUniqueCves">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Missing Published Date</div><div class="data-quality-value" id="dqMissingPublished">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Non-YMD Published Date</div><div class="data-quality-value" id="dqNonYmdPublished">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Inverted Seen Ranges</div><div class="data-quality-value" id="dqInvertedRanges">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Corrected Seen Ranges</div><div class="data-quality-value" id="dqCorrectedRanges">0</div></div>
+        </div>
+    </section>
+"@
+    $dataQualityMeta = @{
+        firstLastSwapped = if ($normalizedQuality) { [int]$normalizedQuality.FirstLastSwappedCount } else { 0 }
+        generatedOnUtc = $generatedOnUtc
+    }
+    $dataQualityMetaScript = '<script id="dataQualityMeta" type="application/json">' + ($dataQualityMeta | ConvertTo-Json -Compress) + '</script>'
     Write-MemoryUsage -Label "Post-Compress"
 
     # Step 8: Assemble final HTML

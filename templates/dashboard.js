@@ -89,7 +89,11 @@ function getDeviceGroupName(device) {
 }
 
 function getDeviceNameFilterValue(deviceLike) {
-    return deviceLike.DeviceId || deviceLike.deviceId || deviceLike.DeviceName || deviceLike.deviceName;
+    return getDeviceIdentityKey(deviceLike);
+}
+
+function getDeviceIdentityKey(deviceLike) {
+    return deviceLike.DeviceId || deviceLike.deviceId || deviceLike.DeviceName || deviceLike.deviceName || '';
 }
 
 // Table sort state
@@ -1490,7 +1494,7 @@ function buildCascadingFilterCountMaps() {
         CASCADING_FILTER_IDS.forEach(targetFilterId => {
             if (!matchesFiltersForFacetCount(v, targetFilterId)) return;
 
-            const deviceKey = v.DeviceId || v.DeviceName;
+            const deviceKey = getDeviceIdentityKey(v);
             CASCADING_FILTER_CONFIG[targetFilterId].getValuesForVuln(v).forEach(value => {
                 if (!deviceSetsByFilter[targetFilterId].has(value)) {
                     deviceSetsByFilter[targetFilterId].set(value, new Set());
@@ -1662,7 +1666,8 @@ function updateDataQualitySummary() {
     let invertedRanges = 0;
 
     vulnerabilityData.forEach(v => {
-        if (v.DeviceId) uniqueDevices.add(v.DeviceId);
+        const deviceKey = getDeviceIdentityKey(v);
+        if (deviceKey) uniqueDevices.add(deviceKey);
         if (v.CveId) uniqueCves.add(v.CveId);
 
         const publishedDate = v.PublishedDate;
@@ -1992,15 +1997,17 @@ function renderChart() {
         sweepTotal++;
         const sev = v.VulnerabilitySeverityLevel;
         if (sweepSeverity[sev] !== undefined) sweepSeverity[sev]++;
-        deviceActive.set(v.DeviceName, (deviceActive.get(v.DeviceName) || 0) + 1);
+        const deviceKey = getDeviceIdentityKey(v);
+        deviceActive.set(deviceKey, (deviceActive.get(deviceKey) || 0) + 1);
     };
     const processEnd = (v) => {
         if (sweepTotal > 0) sweepTotal--;
         const sev = v.VulnerabilitySeverityLevel;
         if (sweepSeverity[sev] !== undefined && sweepSeverity[sev] > 0) sweepSeverity[sev]--;
-        const dc = deviceActive.get(v.DeviceName);
-        if (dc <= 1) deviceActive.delete(v.DeviceName);
-        else deviceActive.set(v.DeviceName, dc - 1);
+        const deviceKey = getDeviceIdentityKey(v);
+        const dc = deviceActive.get(deviceKey);
+        if (dc <= 1) deviceActive.delete(deviceKey);
+        else deviceActive.set(deviceKey, dc - 1);
     };
     
     // Process events before the visible date range to establish initial state
@@ -2228,7 +2235,7 @@ function getRemediationTableData() {
             };
         }
 
-        remediationMap[key].devices.add(v.DeviceId);
+        remediationMap[key].devices.add(getDeviceIdentityKey(v));
         remediationMap[key].vulnerabilities.add(v.CveId);
 
         if (v.ExploitabilityLevel === 'ExploitIsVerified' || v.ExploitabilityLevel === 'ExploitIsPublic' || v.ExploitabilityLevel === 'ExploitIsInKit') {
@@ -2271,7 +2278,7 @@ function getRemediationDetailsData() {
             };
         }
 
-        remediationByDate[key].devices.add(v.DeviceName);
+        remediationByDate[key].devices.add(getDeviceIdentityKey(v));
         remediationByDate[key].vulnerabilities.add(v.CveId);
         remediationByDate[key].details.push(v);
     });
@@ -2298,7 +2305,7 @@ function getImpactAnalysisData() {
             };
         }
 
-        remediationMap[remediation].devices.add(v.DeviceName);
+        remediationMap[remediation].devices.add(getDeviceIdentityKey(v));
         remediationMap[remediation].vulnerabilities.push(v);
     });
 
@@ -2521,7 +2528,7 @@ function renderRemediationChart() {
         vulnsOnDate.forEach(v => {
             const severity = v.VulnerabilitySeverityLevel;
             remediationsOnDate.add(v._index);
-            devicesOnDate.add(v.DeviceName);
+            devicesOnDate.add(getDeviceIdentityKey(v));
             if (severityRemediations[severity] !== undefined) severityRemediations[severity]++;
         });
         
@@ -3141,7 +3148,7 @@ function renderImpactAnalysisTable() {
 
     impactAnalysisAllData = top25.map((item, index) => {
         const cveIds = new Set(item.vulnerabilities.map(v => v.CveId));
-        const devices = new Set(item.vulnerabilities.map(v => v.DeviceName));
+        const devices = new Set(item.vulnerabilities.map(v => getDeviceIdentityKey(v)));
         return {
             rank: index + 1,
             name: item.name,
@@ -3389,9 +3396,10 @@ function renderDevicesByRemediationTable() {
                 };
             }
 
-            if (!remediationByKey[key].devices.has(v.DeviceId)) {
-                remediationByKey[key].devices.set(v.DeviceId, {
-                    DeviceId: v.DeviceId,
+            const deviceKey = getDeviceIdentityKey(v);
+            if (!remediationByKey[key].devices.has(deviceKey)) {
+                remediationByKey[key].devices.set(deviceKey, {
+                    DeviceId: deviceKey,
                     DeviceName: v.DeviceName,
                     IpAddress: v.MachineInfo?.ip || '',
                     MachineTags: v.MachineTags || [],
@@ -3875,7 +3883,7 @@ function renderRemediationsByDeviceTable() {
         const deviceCveDetails = {};
 
         filteredData.forEach(v => {
-            const deviceId = v.DeviceId;
+            const deviceId = getDeviceIdentityKey(v);
 
             if (!deviceByKey[deviceId]) {
                 deviceByKey[deviceId] = {
@@ -4383,7 +4391,7 @@ function groupDevicesByCveSignature(details) {
     const deviceMap = new Map();
     for (let i = 0; i < details.length; i++) {
         const d = details[i];
-        const key = d.DeviceId || d.DeviceName;
+        const key = getDeviceIdentityKey(d);
         let dev = deviceMap.get(key);
         if (!dev) {
             dev = {
@@ -4423,10 +4431,10 @@ function groupDevicesByCveSignature(details) {
     }
 
     // Find CVEs shared by ALL devices vs CVEs unique to some devices
-    const allDeviceKeys = devices.map(d => d.DeviceId || d.DeviceName);
+    const allDeviceKeys = devices.map(d => getDeviceIdentityKey(d));
     const cveCounts = new Map(); // cveId -> Set of device keys that have it
     for (const dev of devices) {
-        const devKey = dev.DeviceId || dev.DeviceName;
+        const devKey = getDeviceIdentityKey(dev);
         for (const cveId of dev.cveIds) {
             if (!cveCounts.has(cveId)) cveCounts.set(cveId, new Set());
             cveCounts.get(cveId).add(devKey);
@@ -4571,7 +4579,7 @@ function buildModalGroupCache(details) {
     return {
         groups: groupDevicesByCveSignature(details),
         includeEvidenceColumn: hasAnyEvidence(details),
-        totalDevices: new Set(details.map(d => d.DeviceId || d.DeviceName)).size,
+        totalDevices: new Set(details.map(d => getDeviceIdentityKey(d))).size,
         totalCves: new Set(details.map(d => d.CveId)).size
     };
 }
@@ -4740,7 +4748,7 @@ function showImpactAnalysisDetails(item) {
     // Group vulnerabilities by device (using DeviceId as key)
     const deviceMap = {};
     item.vulnerabilities.forEach(v => {
-        const deviceKey = v.DeviceId || v.DeviceName;
+        const deviceKey = getDeviceIdentityKey(v);
         if (!deviceMap[deviceKey]) {
             deviceMap[deviceKey] = {
                 name: v.DeviceName,
@@ -5397,6 +5405,7 @@ async function exportToPDF() {
     await new Promise(resolve => setTimeout(resolve, 100));
     
     button.textContent = '📄 Generating PDF...';
+    document.body.classList.add('pdf-export-active');
     
     try {
         const fileName = `Vulnerability_Dashboard_${reportName.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`;
@@ -5509,17 +5518,12 @@ async function exportToPDF() {
         docDefinition.content.push(...filterContent);
         
         pdfMake.createPdf(docDefinition).download(fileName);
-        
-        restoreReportState(selectedReport, wasExpanded);
-        
-        button.disabled = false;
-        button.textContent = '📄 Export to PDF';
     } catch (err) {
         console.error('PDF generation failed:', err);
         alert('Failed to generate PDF: ' + err.message);
-        
+    } finally {
+        document.body.classList.remove('pdf-export-active');
         restoreReportState(selectedReport, wasExpanded);
-        
         button.disabled = false;
         button.textContent = '📄 Export to PDF';
     }
