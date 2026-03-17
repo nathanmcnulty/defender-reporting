@@ -2373,18 +2373,36 @@ function ConvertTo-NormalizedData {
                 if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { continue }
                 $processedCount++
 
-                $deviceId = $v.DeviceId
-                if (-not $deviceIndex.ContainsKey($deviceId)) {
-                    $machine = $Machines[$deviceId]
+                $deviceId = [string]$v.DeviceId
+                $machine = $Machines[$deviceId]
+                $fallbackDeviceName = $v.PSObject.Properties['DeviceName']?.Value
+                $fallbackGroupName = $v.PSObject.Properties['RbacGroupName']?.Value
+                $fallbackPlatform = $v.PSObject.Properties['OSPlatform']?.Value
+                $fallbackOsVersion = $v.PSObject.Properties['OSVersion']?.Value
+                $deviceKey = if ($machine) {
+                    $deviceId
+                }
+                else {
+                    @(
+                        $deviceId
+                        [string]$fallbackDeviceName
+                        [string]$fallbackGroupName
+                        [string]$fallbackPlatform
+                        [string]$fallbackOsVersion
+                    ) -join '|'
+                }
 
-                    $groupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $v.PSObject.Properties['RbacGroupName']?.Value }
+                if (-not $deviceIndex.ContainsKey($deviceKey)) {
+                    # When machine enrichment is missing, vulnerability exports can still carry
+                    # row-specific device metadata. Keep distinct fallback variants instead of
+                    # collapsing everything to the first row seen for a DeviceId.
+                    $groupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $fallbackGroupName }
                     if ([string]::IsNullOrWhiteSpace([string]$groupName)) {
-                        $fallbackGroupName = $v.PSObject.Properties['RbacGroupName']?.Value
                         $groupName = if ([string]::IsNullOrWhiteSpace([string]$fallbackGroupName)) { '(none)' } else { $fallbackGroupName }
                     }
                     $groupIdx = Get-OrCreateIndex -value $groupName -list $lookups.groups -indexMap $groupIndex
 
-                    $osPlat = if ($machine) { $machine.PSObject.Properties['osPlatform']?.Value } else { $v.PSObject.Properties['OSPlatform']?.Value }
+                    $osPlat = if ($machine) { $machine.PSObject.Properties['osPlatform']?.Value } else { $fallbackPlatform }
                     $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
 
                     $machineTags = if ($machine -and $machine.PSObject.Properties['machineTags']?.Value) { $machine.machineTags }
@@ -2397,7 +2415,7 @@ function ConvertTo-NormalizedData {
                     }
                     if ($tagIndices.Count -eq 0) { $hasNoTags = $true }
 
-                    $deviceIndex[$deviceId] = $lookups.devices.Count
+                    $deviceIndex[$deviceKey] = $lookups.devices.Count
 
                     $machineInfo = $null
                     if ($machine) {
@@ -2419,15 +2437,15 @@ function ConvertTo-NormalizedData {
 
                     $lookups.devices.Add([PSCustomObject]@{
                         id = $deviceId
-                        n = if ($machine) { $machine.PSObject.Properties['computerDnsName']?.Value } elseif ($v.PSObject.Properties['DeviceName']?.Value) { $v.PSObject.Properties['DeviceName']?.Value } else { '(no machine data)' }
+                        n = if ($machine) { $machine.PSObject.Properties['computerDnsName']?.Value } elseif ($fallbackDeviceName) { $fallbackDeviceName } else { '(no machine data)' }
                         g = $groupIdx
                         o = $platIdx
-                        ov = if ($machine) { $machine.PSObject.Properties['osVersion']?.Value } else { $v.PSObject.Properties['OSVersion']?.Value }
+                        ov = if ($machine) { $machine.PSObject.Properties['osVersion']?.Value } else { $fallbackOsVersion }
                         t = $tagIndices
                         m = $machineInfo
                     })
                 }
-                $devIdx = $deviceIndex[$deviceId]
+                $devIdx = $deviceIndex[$deviceKey]
 
                 $vendorIdx = Get-OrCreateIndex -value $v.PSObject.Properties['SoftwareVendor']?.Value -list $lookups.vendors -indexMap $vendorIndex
 
