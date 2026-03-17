@@ -48,6 +48,6 @@ if (-not $runbookSource.Contains($normalizedMarker)) {
 }
 
 $assembled = $runbookSource.Replace($normalizedMarker, $normalizedSharedHelpers + $lineEnding + $lineEnding)
-[System.IO.File]::WriteAllText($outputPath, $assembled, [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText($outputPath, $assembled, [System.Text.UTF8Encoding]::new($true))
 
 Write-Host "Generated runbook: $outputPath" -ForegroundColor Green

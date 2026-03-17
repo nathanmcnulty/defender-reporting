@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Unified Azure Automation runbook for the Defender vulnerability dashboard pipeline.
 
@@ -649,7 +649,7 @@ try {
     Write-Output "  Acquiring tokens..."
     $storageToken = Get-PlainToken -ResourceUrl 'https://storage.azure.com/'
     $mdeToken = Get-PlainToken -ResourceUrl 'https://api.securitycenter.microsoft.com'
-    $mdeHeaders = New-MdeHeaders -AccessToken $mdeToken
+    $mdeHeaders = Get-MdeHeaderCollection -AccessToken $mdeToken
     Write-Output "  Tokens acquired"
 
     # Test GZip support
