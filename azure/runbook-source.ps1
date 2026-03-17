@@ -830,6 +830,7 @@ try {
     Write-Output "  Vulns JSON file: ${vulnsFileSize}KB"
 
     Write-Output "  Compressing embedded data..."
+    $normalizedQuality = $normalizedResult['Quality']
     Write-CombinedPayloadGzip -Lookups $normalizedResult.Lookups -VulnsPath $normalizedResult.VulnsPath -OutputPath $tempPayloadPath
     $normalizedResult = $null
     [GC]::Collect()
@@ -839,8 +840,26 @@ try {
     Write-Output "  Compressed: ${compressedSize}KB"
 
     $lookupsJsonEscaped = ""
-    $dataQualitySectionHtml = ""
-    $dataQualityMetaScript = ""
+    $generatedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
+    $dataQualitySectionHtml = @"
+    <section class="data-quality-panel" aria-label="Data quality summary">
+        <h2>Data Quality</h2>
+        <div class="data-quality-grid">
+            <div class="data-quality-item"><div class="data-quality-label">Records</div><div class="data-quality-value" id="dqTotalRecords">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Unique Devices</div><div class="data-quality-value" id="dqUniqueDevices">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Unique CVEs</div><div class="data-quality-value" id="dqUniqueCves">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Missing Published Date</div><div class="data-quality-value" id="dqMissingPublished">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Non-YMD Published Date</div><div class="data-quality-value" id="dqNonYmdPublished">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Inverted Seen Ranges</div><div class="data-quality-value" id="dqInvertedRanges">0</div></div>
+            <div class="data-quality-item"><div class="data-quality-label">Corrected Seen Ranges</div><div class="data-quality-value" id="dqCorrectedRanges">0</div></div>
+        </div>
+    </section>
+"@
+    $dataQualityMeta = @{
+        firstLastSwapped = if ($normalizedQuality) { [int]$normalizedQuality.FirstLastSwappedCount } else { 0 }
+        generatedOnUtc = $generatedOnUtc
+    }
+    $dataQualityMetaScript = '<script id="dataQualityMeta" type="application/json">' + ($dataQualityMeta | ConvertTo-Json -Compress) + '</script>'
     Write-MemoryUsage -Label "Post-Compress"
 
     # Step 8: Assemble final HTML
