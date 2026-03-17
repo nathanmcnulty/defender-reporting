@@ -220,6 +220,37 @@ function Get-MinVulnDate {
     return $Secondary
 }
 
+function Get-NormalizedVulnSeenWindow {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$FirstSeenValue,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$LastSeenValue
+    )
+
+    $firstSeen = Convert-VulnToYmdDate -DateValue $FirstSeenValue
+    $lastSeen = Convert-VulnToYmdDate -DateValue $LastSeenValue
+    $wasReordered = $false
+
+    if ($firstSeen -and $lastSeen -and [datetime]$firstSeen -gt [datetime]$lastSeen) {
+        $temp = $firstSeen
+        $firstSeen = $lastSeen
+        $lastSeen = $temp
+        $wasReordered = $true
+    }
+
+    return [PSCustomObject]@{
+        FirstSeenTimestamp = $firstSeen
+        LastSeenTimestamp = $lastSeen
+        WasReordered = $wasReordered
+    }
+}
+
 function Get-VulnCanonicalRowSignature {
     [CmdletBinding()]
     param(
@@ -288,10 +319,11 @@ function New-ClosedVulnEntry {
     )
 
     $row = Copy-VulnRecord -Record $Record
-    $firstSeen = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $row -Name 'FirstSeenTimestamp')
-    $lastSeen = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $row -Name 'LastSeenTimestamp')
-    $boundedLastSeen = if ($lastSeen) { Get-MinVulnDate -Primary $lastSeen -Secondary $ClosedOn } else { $ClosedOn }
-    $boundedFirstSeen = if ($firstSeen) { Get-MinVulnDate -Primary $firstSeen -Secondary $boundedLastSeen } else { $boundedLastSeen }
+    $seenWindow = Get-NormalizedVulnSeenWindow `
+        -FirstSeenValue (Get-VulnPropertyValue -InputObject $row -Name 'FirstSeenTimestamp') `
+        -LastSeenValue (Get-VulnPropertyValue -InputObject $row -Name 'LastSeenTimestamp')
+    $boundedLastSeen = if ($seenWindow.LastSeenTimestamp) { Get-MinVulnDate -Primary $seenWindow.LastSeenTimestamp -Secondary $ClosedOn } else { $ClosedOn }
+    $boundedFirstSeen = if ($seenWindow.FirstSeenTimestamp) { Get-MinVulnDate -Primary $seenWindow.FirstSeenTimestamp -Secondary $boundedLastSeen } else { $boundedLastSeen }
     $row.FirstSeenTimestamp = $boundedFirstSeen
     $row.LastSeenTimestamp = $boundedLastSeen
 
@@ -319,10 +351,11 @@ function New-OpenVulnRecord {
     )
 
     $open = Copy-VulnRecord -Record $Record
-    $normalizedFirstSeen = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $open -Name 'FirstSeenTimestamp')
-    $normalizedLastSeen = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $open -Name 'LastSeenTimestamp')
-    $open.FirstSeenTimestamp = if ($normalizedFirstSeen) { Get-MaxVulnDate -Primary $normalizedFirstSeen -Secondary $VersionStartDate } else { $VersionStartDate }
-    $open.LastSeenTimestamp = if ($normalizedLastSeen) { $normalizedLastSeen } else { $open.FirstSeenTimestamp }
+    $seenWindow = Get-NormalizedVulnSeenWindow `
+        -FirstSeenValue (Get-VulnPropertyValue -InputObject $open -Name 'FirstSeenTimestamp') `
+        -LastSeenValue (Get-VulnPropertyValue -InputObject $open -Name 'LastSeenTimestamp')
+    $open.FirstSeenTimestamp = if ($seenWindow.FirstSeenTimestamp) { Get-MaxVulnDate -Primary $seenWindow.FirstSeenTimestamp -Secondary $VersionStartDate } else { $VersionStartDate }
+    $open.LastSeenTimestamp = if ($seenWindow.LastSeenTimestamp) { Get-MaxVulnDate -Primary $seenWindow.LastSeenTimestamp -Secondary $open.FirstSeenTimestamp } else { $open.FirstSeenTimestamp }
     return $open
 }
 
@@ -2255,6 +2288,14 @@ function Get-OrCreateIndex {
     return $indexMap[$key]
 }
 
+function Get-CaseSensitiveIndexMap {
+    [CmdletBinding()]
+    [OutputType([System.Collections.Generic.Dictionary[string, int]])]
+    param()
+
+    return [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal)
+}
+
 function ConvertTo-NormalizedData {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -2293,21 +2334,21 @@ function ConvertTo-NormalizedData {
         cves = [System.Collections.Generic.List[PSObject]]::new()
     }
 
-    $vendorIndex = @{}
-    $exploitIndex = @{}
-    $groupIndex = @{}
-    $platformIndex = @{}
-    $tagIndex = @{}
-    $updateIndex = @{}
-    $deviceIndex = @{}
-    $softwareIndex = @{}
-    $cveIndex = @{}
-    $versionIndex = @{}
-    $dateIndex = @{}
-    $diskPathIndex = @{}
-    $regPathIndex = @{}
-    $affSoftwareIndex = @{}
-    $batchTitleIndex = @{}
+    $vendorIndex = Get-CaseSensitiveIndexMap
+    $exploitIndex = Get-CaseSensitiveIndexMap
+    $groupIndex = Get-CaseSensitiveIndexMap
+    $platformIndex = Get-CaseSensitiveIndexMap
+    $tagIndex = Get-CaseSensitiveIndexMap
+    $updateIndex = Get-CaseSensitiveIndexMap
+    $deviceIndex = Get-CaseSensitiveIndexMap
+    $softwareIndex = Get-CaseSensitiveIndexMap
+    $cveIndex = Get-CaseSensitiveIndexMap
+    $versionIndex = Get-CaseSensitiveIndexMap
+    $dateIndex = Get-CaseSensitiveIndexMap
+    $diskPathIndex = Get-CaseSensitiveIndexMap
+    $regPathIndex = Get-CaseSensitiveIndexMap
+    $affSoftwareIndex = Get-CaseSensitiveIndexMap
+    $batchTitleIndex = Get-CaseSensitiveIndexMap
 
     $dateValueCache = @{}
     function Get-CachedYmdDate {
@@ -2451,13 +2492,14 @@ function ConvertTo-NormalizedData {
 
                 $softwareVendor = $v.PSObject.Properties['SoftwareVendor']?.Value ?? ''
                 $softwareName = $v.PSObject.Properties['SoftwareName']?.Value ?? ''
-                $softwareKey = "$softwareVendor|$softwareName"
+                $recommendationReference = $v.PSObject.Properties['RecommendationReference']?.Value ?? ''
+                $softwareKey = "$softwareVendor|$softwareName|$recommendationReference"
                 if (-not $softwareIndex.ContainsKey($softwareKey)) {
                     $softwareIndex[$softwareKey] = $lookups.software.Count
                     $lookups.software.Add([PSCustomObject]@{
                         v = $vendorIdx
                         n = $softwareName
-                        r = $v.PSObject.Properties['RecommendationReference']?.Value
+                        r = $recommendationReference
                     })
                 }
                 $swIdx = $softwareIndex[$softwareKey]
@@ -2551,15 +2593,12 @@ function ConvertTo-NormalizedData {
                     }
                 }
 
-                $firstSeenTs = $v.PSObject.Properties['FirstSeenTimestamp']?.Value
-                $lastSeenTs = $v.PSObject.Properties['LastSeenTimestamp']?.Value
-                $firstSeen = Get-CachedYmdDate -dateValue $firstSeenTs
-                $lastSeen = Get-CachedYmdDate -dateValue $lastSeenTs
-
-                if ($firstSeen -and $lastSeen -and $firstSeen -gt $lastSeen) {
-                    $temp = $firstSeen
-                    $firstSeen = $lastSeen
-                    $lastSeen = $temp
+                $seenWindow = Get-NormalizedVulnSeenWindow `
+                    -FirstSeenValue $v.PSObject.Properties['FirstSeenTimestamp']?.Value `
+                    -LastSeenValue $v.PSObject.Properties['LastSeenTimestamp']?.Value
+                $firstSeen = if ($seenWindow.FirstSeenTimestamp) { Get-CachedYmdDate -dateValue $seenWindow.FirstSeenTimestamp } else { $null }
+                $lastSeen = if ($seenWindow.LastSeenTimestamp) { Get-CachedYmdDate -dateValue $seenWindow.LastSeenTimestamp } else { $null }
+                if ($seenWindow.WasReordered) {
                     $firstLastSwappedCount++
                 }
 
