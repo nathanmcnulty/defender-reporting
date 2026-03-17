@@ -1,0 +1,107 @@
+name: Export Dashboard PDFs
+
+on:
+  workflow_dispatch:
+  # Uncomment to run automatically (example: every Monday at 6 AM UTC after the daily dashboard update):
+  # schedule:
+  #   - cron: '0 6 * * 1'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  export-pdfs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check whether PDF export is needed
+        id: freshness
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const artifactPrefix = 'vulnerability-reports';
+            const htmlPath = 'VulnerabilityDashboard.html';
+            const branchName = context.ref.replace('refs/heads/', '');
+
+            const commitResponse = await github.rest.repos.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              path: htmlPath,
+              per_page: 1,
+              sha: context.sha,
+            });
+
+            if (!commitResponse.data.length) {
+              throw new Error(`No commit history found for ${htmlPath}.`);
+            }
+
+            const htmlUpdatedAt =
+              commitResponse.data[0].commit.committer?.date ??
+              commitResponse.data[0].commit.author?.date;
+
+            const artifacts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+              }
+            );
+
+            const latestArtifact = artifacts
+              .filter(artifact =>
+                !artifact.expired &&
+                artifact.name.startsWith(artifactPrefix) &&
+                (!artifact.workflow_run?.head_branch || artifact.workflow_run.head_branch === branchName)
+              )
+              .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0];
+
+            let shouldExport = true;
+            let reason = `Exporting PDFs because no previous ${artifactPrefix} artifact was found.`;
+
+            if (latestArtifact) {
+              const artifactCreatedAt = latestArtifact.created_at;
+
+              if (Date.parse(htmlUpdatedAt) > Date.parse(artifactCreatedAt)) {
+                reason = `Exporting PDFs because ${htmlPath} changed at ${htmlUpdatedAt}, which is newer than the latest PDF artifact from ${artifactCreatedAt}.`;
+              }
+              else {
+                shouldExport = false;
+                reason = `Skipping PDF export because ${htmlPath} changed at ${htmlUpdatedAt}, which is not newer than the latest PDF artifact from ${artifactCreatedAt}.`;
+              }
+            }
+
+            core.info(reason);
+            core.setOutput('should_export', shouldExport ? 'true' : 'false');
+            core.setOutput('reason', reason);
+
+      - name: Report export decision
+        run: echo "${{ steps.freshness.outputs.reason }}"
+
+      - name: Setup Node.js
+        if: steps.freshness.outputs.should_export == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright
+        if: steps.freshness.outputs.should_export == 'true'
+        run: |
+          npm install --no-save playwright
+          npx playwright install chromium --with-deps
+
+      - name: Export reports to PDF
+        if: steps.freshness.outputs.should_export == 'true'
+        run: node .github/scripts/export-pdf-reports.js
+
+      - name: Upload PDF reports
+        if: steps.freshness.outputs.should_export == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulnerability-reports-${{ github.run_number }}
+          path: reports/*.pdf
+          retention-days: 30
