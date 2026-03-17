@@ -45,6 +45,7 @@ function Get-VulnCurrentPath {
 
 function Test-VulnStoreExistence {
     [CmdletBinding()]
+    [OutputType([bool])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$BasePath
@@ -98,6 +99,7 @@ function Get-VulnSnapshotDateFromName {
 
 function Get-VulnLegacySnapshotFile {
     [CmdletBinding()]
+    [OutputType([System.IO.FileInfo[]])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$BasePath,
@@ -107,7 +109,7 @@ function Get-VulnLegacySnapshotFile {
     )
 
     if ($null -ne $LegacyFilePaths -and $LegacyFilePaths.Count -gt 0) {
-        return @(
+        return [System.IO.FileInfo[]]@(
             $LegacyFilePaths |
                 ForEach-Object {
                     if (Test-Path -LiteralPath $_ -PathType Leaf) {
@@ -119,7 +121,7 @@ function Get-VulnLegacySnapshotFile {
         )
     }
 
-    return @(
+    return [System.IO.FileInfo[]]@(
         Get-ChildItem -Path $BasePath -Filter 'VulnExport_*' -File -ErrorAction SilentlyContinue |
             Where-Object { Test-IsLegacyVulnSnapshotFileName -Name $_.Name } |
             Sort-Object Name
@@ -182,6 +184,7 @@ function Get-VulnPreviousDay {
 
 function Get-MaxVulnDate {
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [Parameter(Mandatory = $false)]
         [AllowNull()]
@@ -200,6 +203,7 @@ function Get-MaxVulnDate {
 
 function Get-MinVulnDate {
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [Parameter(Mandatory = $false)]
         [AllowNull()]
@@ -324,6 +328,7 @@ function New-OpenVulnRecord {
 
 function Get-VulnHistorySeed {
     [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
     param(
         [Parameter(Mandatory = $true)]
         [int]$Year
@@ -338,6 +343,7 @@ function Get-VulnHistorySeed {
 
 function Get-VulnHistorySnapshotMap {
     [CmdletBinding()]
+    [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)]
         $HistoryDocument
@@ -790,6 +796,7 @@ function Test-VulnHistoryFile {
 
 function Get-VulnHistoryDocumentList {
     [CmdletBinding()]
+    [OutputType([object[]])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$BasePath
@@ -1146,6 +1153,7 @@ function ConvertTo-CompactMachineRecord {
 
 function Get-NormalizedMachineTag {
     [CmdletBinding()]
+    [OutputType([string[]])]
     param(
         [Parameter(Mandatory = $false)]
         [AllowNull()]
@@ -1155,7 +1163,7 @@ function Get-NormalizedMachineTag {
     $tagList = [System.Collections.Generic.List[string]]::new()
 
     if ($null -eq $Tags) {
-        return @()
+        return [string[]]@()
     }
 
     if ($Tags -is [string]) {
@@ -1178,10 +1186,10 @@ function Get-NormalizedMachineTag {
     }
 
     if ($tagList.Count -eq 0) {
-        return @()
+        return [string[]]@()
     }
 
-    return @($tagList | Sort-Object -Unique)
+    return [string[]]@($tagList | Sort-Object -Unique)
 }
 
 function Get-MachineCurrentPath {
@@ -1216,6 +1224,7 @@ function Get-AdvancedHuntingCurrentPath {
 
 function Get-LegacyCanonicalPath {
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
@@ -1264,6 +1273,7 @@ function Read-TextFileContent {
 
 function Get-JsonFileMode {
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
@@ -1453,6 +1463,7 @@ function Write-NdjsonRecordsFile {
 
 function Initialize-MachineHistoryStore {
     [CmdletBinding()]
+    [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path,
@@ -1469,8 +1480,6 @@ function Initialize-MachineHistoryStore {
     $historyReadPath = if (Test-Path -Path $historyPath) { $historyPath } elseif (Test-Path -Path $legacyHistoryPath) { $legacyHistoryPath } else { $null }
     $currentExists = $null -ne $currentReadPath
     $historyExists = $null -ne $historyReadPath
-    $currentItem = if ($currentExists) { Get-Item -Path $currentReadPath } else { $null }
-    $historyItem = if ($historyExists) { Get-Item -Path $historyReadPath } else { $null }
     $legacyFiles = @(Get-ChildItem -Path $Path -Filter 'Machines_*.json' -File | Where-Object { Test-IsLegacyMachineSnapshotFileName -Name $_.Name } | Sort-Object Name)
     $currentRecords = @{}
     $migratedLegacy = $false
@@ -1687,6 +1696,7 @@ function Read-AdvancedHuntingRecordsFromFile {
 
 function Initialize-AdvancedHuntingStore {
     [CmdletBinding()]
+    [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path,
@@ -1764,8 +1774,9 @@ function Initialize-AdvancedHuntingStore {
 
 # Shared MDE export helpers used by local export, generator refresh, and the Azure runbook.
 
-function New-MdeHeaders {
+function Get-MdeHeaderCollection {
     [CmdletBinding()]
+    [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$AccessToken
@@ -1944,6 +1955,7 @@ function Invoke-MdeMachineStoreRefresh {
 
 function Get-JSLibrary {
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Url,
@@ -1955,11 +1967,11 @@ function Get-JSLibrary {
         [bool]$Critical = $false
     )
 
-    Write-Host "Downloading $Name library..." -ForegroundColor Cyan
+    Write-Information "Downloading $Name library..." -InformationAction Continue
 
     try {
         $response = Invoke-WebRequest -Uri $Url -TimeoutSec 30
-        Write-Host "  $Name downloaded successfully" -ForegroundColor Green
+        Write-Information "  $Name downloaded successfully" -InformationAction Continue
         return $response.Content
     }
     catch {
@@ -1970,7 +1982,7 @@ function Get-JSLibrary {
         }
 
         Write-Warning $errorMessage
-        Write-Host "  Using fallback for $Name (PDF export may not work)" -ForegroundColor Yellow
+        Write-Warning "Using fallback for $Name (PDF export may not work)"
         return "// $Name failed to load - functionality may be limited"
     }
 }
@@ -2076,12 +2088,13 @@ function Write-TemplatedHtml {
 
 function Read-MachineData {
     [CmdletBinding()]
+    [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
     )
 
-    Write-Host "Reading machine data from $Path..." -ForegroundColor Cyan
+    Write-Information "Reading machine data from $Path..." -InformationAction Continue
     $machines = @{}
 
     $currentPath = Get-MachineCurrentPath -BasePath $Path
@@ -2092,7 +2105,7 @@ function Read-MachineData {
     $historyReadPath = if (Test-Path -Path $historyPath) { $historyPath } elseif (Test-Path -Path $legacyHistoryPath) { $legacyHistoryPath } else { $null }
 
     if ($null -ne $currentReadPath) {
-        Write-Host "  Using $(Split-Path -Leaf $currentReadPath)" -ForegroundColor Gray
+        Write-Information "  Using $(Split-Path -Leaf $currentReadPath)" -InformationAction Continue
         foreach ($record in Read-MachineRecordsFromFile -Path $currentReadPath) {
             if ($record.id) {
                 $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
@@ -2100,7 +2113,7 @@ function Read-MachineData {
         }
     }
     elseif ($null -ne $historyReadPath) {
-        Write-Host "  Using $(Split-Path -Leaf $historyReadPath) to reconstruct current state" -ForegroundColor Gray
+        Write-Information "  Using $(Split-Path -Leaf $historyReadPath) to reconstruct current state" -InformationAction Continue
         foreach ($record in Read-MachineRecordsFromFile -Path $historyReadPath) {
             if ($record.id) {
                 $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
@@ -2115,9 +2128,9 @@ function Read-MachineData {
             return @{}
         }
 
-        Write-Host "  Found $($machineFiles.Count) legacy machine snapshot file(s)" -ForegroundColor Gray
+        Write-Information "  Found $($machineFiles.Count) legacy machine snapshot file(s)" -InformationAction Continue
         foreach ($file in $machineFiles) {
-            Write-Host "  Processing $($file.Name)..." -ForegroundColor Gray
+            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
             foreach ($record in Read-MachineRecordsFromFile -Path $file.FullName) {
                 if ($record.id -and -not $machines.ContainsKey($record.id)) {
                     $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
@@ -2126,18 +2139,19 @@ function Read-MachineData {
         }
     }
 
-    Write-Host "  Loaded $($machines.Count) unique machines" -ForegroundColor Green
+    Write-Information "  Loaded $($machines.Count) unique machines" -InformationAction Continue
     return $machines
 }
 
 function Read-AdvancedHuntingData {
     [CmdletBinding()]
+    [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
     )
 
-    Write-Host "Reading Advanced Hunting data from $Path..." -ForegroundColor Cyan
+    Write-Information "Reading Advanced Hunting data from $Path..." -InformationAction Continue
 
     $ahData = @{}
     $parseErrors = 0
@@ -2149,7 +2163,7 @@ function Read-AdvancedHuntingData {
     }
 
     if (Test-Path -Path $currentPath) {
-        Write-Host "  Using $(Split-Path -Leaf $currentPath)" -ForegroundColor Gray
+        Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
         $sourceFiles = @(Get-Item -Path $currentPath)
     }
     else {
@@ -2158,15 +2172,15 @@ function Read-AdvancedHuntingData {
             Sort-Object Name -Descending)
 
         if ($sourceFiles.Count -eq 0) {
-            Write-Host '  No Advanced Hunting data files found. CVE enrichment will be skipped.' -ForegroundColor Yellow
+            Write-Warning 'No Advanced Hunting data files found. CVE enrichment will be skipped.'
             return @{}
         }
 
-        Write-Host "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -ForegroundColor Gray
+        Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
     }
 
     foreach ($file in $sourceFiles) {
-        Write-Host "  Processing $($file.Name)..." -ForegroundColor Gray
+        Write-Information "  Processing $($file.Name)..." -InformationAction Continue
         foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
             try {
                 $cveId = $record.CveId
@@ -2190,15 +2204,16 @@ function Read-AdvancedHuntingData {
     }
 
     if ($parseErrors -gt 0) {
-        Write-Host "  Total parse errors: $parseErrors" -ForegroundColor Yellow
+        Write-Warning "Total parse errors: $parseErrors"
     }
 
-    Write-Host "  Loaded enrichment data for $($ahData.Count) unique CVEs" -ForegroundColor Green
+    Write-Information "  Loaded enrichment data for $($ahData.Count) unique CVEs" -InformationAction Continue
     return $ahData
 }
 
 function Convert-CveUrl {
     [CmdletBinding()]
+    [OutputType([string])]
     param(
         [Parameter(Mandatory = $false)]
         [AllowNull()]
@@ -2242,6 +2257,7 @@ function Get-OrCreateIndex {
 
 function ConvertTo-NormalizedData {
     [CmdletBinding()]
+    [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$DataPath,
@@ -2256,7 +2272,7 @@ function ConvertTo-NormalizedData {
         [hashtable]$AdvancedHuntingData = @{}
     )
 
-    Write-Host '  Normalizing data structure...' -ForegroundColor Gray
+    Write-Information '  Normalizing data structure...' -InformationAction Continue
 
     $lookups = @{
         vendors = [System.Collections.Generic.List[string]]::new()
@@ -2326,7 +2342,7 @@ function ConvertTo-NormalizedData {
         Write-VulnCompatibilitySnapshot -BasePath $DataPath -OutputPath $tempMergedVulnPath
 
         $jsonFiles = @((Get-Item -LiteralPath $tempMergedVulnPath))
-        Write-Host '  Found vulnerability current/history store to normalize...' -ForegroundColor Gray
+        Write-Information '  Found vulnerability current/history store to normalize...' -InformationAction Continue
     }
     else {
         $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $DataPath)
@@ -2337,7 +2353,7 @@ function ConvertTo-NormalizedData {
         Write-VulnCompatibilitySnapshotFromStore -Store $legacyStore -OutputPath $tempMergedVulnPath
 
         $jsonFiles = @((Get-Item -LiteralPath $tempMergedVulnPath))
-        Write-Host "  Found $($legacyFiles.Count) legacy export file(s); canonicalizing for normalization..." -ForegroundColor Gray
+        Write-Information "  Found $($legacyFiles.Count) legacy export file(s); canonicalizing for normalization..." -InformationAction Continue
     }
 
     try {
@@ -2345,7 +2361,7 @@ function ConvertTo-NormalizedData {
         $vulnWriter.Write('[')
 
         foreach ($file in $jsonFiles) {
-            Write-Host "  Processing $($file.Name)..." -ForegroundColor Gray
+            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
             foreach ($line in Get-GzipLine -Path $file.FullName) {
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
                 try { $v = $line | ConvertFrom-Json }
@@ -2589,9 +2605,9 @@ function ConvertTo-NormalizedData {
         }
     }
 
-    if ($parseErrors -gt 0) { Write-Host "  Parse errors: $parseErrors" -ForegroundColor Yellow }
+    if ($parseErrors -gt 0) { Write-Warning "Parse errors: $parseErrors" }
     if ($processedCount -eq 0) { throw 'No onboarded vulnerabilities found after streaming all export files.' }
-    Write-Host "  Loaded $processedCount onboarded vulnerability records" -ForegroundColor Green
+    Write-Information "  Loaded $processedCount onboarded vulnerability records" -InformationAction Continue
 
     $noTagsLabel = '(No Tags)'
     if ($hasNoTags -and -not $tagIndex.ContainsKey($noTagsLabel)) {
@@ -2600,7 +2616,7 @@ function ConvertTo-NormalizedData {
     }
     $noTagsIdx = if ($tagIndex.ContainsKey($noTagsLabel)) { $tagIndex[$noTagsLabel] } else { -1 }
 
-    Write-Host "  Normalized: $($lookups.devices.Count) devices, $($lookups.cves.Count) CVEs, $($lookups.software.Count) software, $($lookups.vendors.Count) vendors" -ForegroundColor Gray
+    Write-Information "  Normalized: $($lookups.devices.Count) devices, $($lookups.cves.Count) CVEs, $($lookups.software.Count) software, $($lookups.vendors.Count) vendors" -InformationAction Continue
     if ($firstLastSwappedCount -gt 0) {
         Write-Warning "  Corrected $firstLastSwappedCount record(s) with FirstSeenTimestamp > LastSeenTimestamp"
     }

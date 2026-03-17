@@ -3,13 +3,9 @@
 on:
   pull_request:
     paths:
-      - 'Generate-VulnerabilityDashboard.ps1'
-      - 'Invoke-VulnerabilityExport.ps1'
-      - 'shared-helpers.ps1'
-      - 'VulnExportStore.ps1'
-      - 'azure/Build-Runbook.ps1'
-      - 'azure/runbook-source.ps1'
-      - 'azure/Invoke-DashboardPipeline.ps1'
+      - '*.ps1'
+      - '**/*.ps1'
+      - 'PSScriptAnalyzerSettings.psd1'
       - 'Validate-DashboardReports.ps1'
       - 'templates/**'
       - 'exports/**'
@@ -21,13 +17,9 @@ on:
       - main
       - 'test/**'
     paths:
-      - 'Generate-VulnerabilityDashboard.ps1'
-      - 'Invoke-VulnerabilityExport.ps1'
-      - 'shared-helpers.ps1'
-      - 'VulnExportStore.ps1'
-      - 'azure/Build-Runbook.ps1'
-      - 'azure/runbook-source.ps1'
-      - 'azure/Invoke-DashboardPipeline.ps1'
+      - '*.ps1'
+      - '**/*.ps1'
+      - 'PSScriptAnalyzerSettings.psd1'
       - 'Validate-DashboardReports.ps1'
       - 'templates/**'
       - 'exports/**'
@@ -46,6 +38,22 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Lint PowerShell scripts
+        shell: pwsh
+        run: |
+          Install-Module -Name PSScriptAnalyzer -Force -AllowClobber -Scope CurrentUser
+          $settingsPath = Join-Path $PWD 'PSScriptAnalyzerSettings.psd1'
+          $scriptPaths = Get-ChildItem -Path $PWD -Recurse -Filter *.ps1 -File | Select-Object -ExpandProperty FullName
+          $results = foreach ($scriptPath in $scriptPaths) {
+            Invoke-ScriptAnalyzer -Path $scriptPath -Settings $settingsPath
+          }
+          if ($results) {
+            $results |
+              Sort-Object Path, Line, RuleName |
+              Format-Table Path, RuleName, Severity, Line, Message -Wrap -AutoSize
+            throw "PSScriptAnalyzer found $($results.Count) issue(s) across repo PowerShell scripts."
+          }
 
       - name: Rebuild generated runbook
         shell: pwsh
