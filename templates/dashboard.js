@@ -478,6 +478,12 @@ self.onmessage = function(e) {
         }
         return datePart;
     }
+    function getLookupValue(lookup, index) {
+        if (!lookup || index == null || index < 0 || index >= lookup.length) {
+            return null;
+        }
+        return lookup[index];
+    }
     var result = new Array(rawVulns.length);
     for (var i = 0; i < rawVulns.length; i++) {
         var v = rawVulns[i];
@@ -495,7 +501,7 @@ self.onmessage = function(e) {
             tagNames = [];
         }
 
-        var vendorName = lookups.vendors[software.v];
+        var vendorName = getLookupValue(lookups.vendors, software.v);
         var softwareName = software.n;
         var updateObj = v[7] >= 0 ? lookups.updates[v[7]] : null;
         var updateName = updateObj ? (updateObj.n || updateObj) : null;
@@ -534,14 +540,14 @@ self.onmessage = function(e) {
         result[i] = {
             DeviceId: device.id,
             DeviceName: device.n,
-            RbacGroupName: (lookups.groups[device.g] && String(lookups.groups[device.g]).trim() !== '') ? lookups.groups[device.g] : '(none)',
-            OSPlatform: lookups.platforms[device.o],
+            RbacGroupName: (getLookupValue(lookups.groups, device.g) && String(getLookupValue(lookups.groups, device.g)).trim() !== '') ? getLookupValue(lookups.groups, device.g) : '(none)',
+            OSPlatform: getLookupValue(lookups.platforms, device.o),
             OSVersion: device.ov,
             MachineTags: tagNames,
             MachineInfo: device.m || null,
             CveId: cve.id,
             CvssScore: cve.sc,
-            VulnerabilitySeverityLevel: lookups.severities[cve.sv],
+            VulnerabilitySeverityLevel: getLookupValue(lookups.severities, cve.sv),
             ExploitabilityLevel: cve.ex >= 0 ? lookups.exploitLevels[cve.ex] : null,
             CveBatchUrl: cve.u,
             CveBatchTitle: batchTitle,
@@ -779,8 +785,8 @@ function denormalizeVuln(v, index) {
         // Device info
         DeviceId: device.id,
         DeviceName: device.n,
-        RbacGroupName: (lookups.groups[device.g] && String(lookups.groups[device.g]).trim() !== '') ? lookups.groups[device.g] : '(none)',
-        OSPlatform: lookups.platforms[device.o],
+        RbacGroupName: (getLookupValue(lookups.groups, device.g) && String(getLookupValue(lookups.groups, device.g)).trim() !== '') ? getLookupValue(lookups.groups, device.g) : '(none)',
+        OSPlatform: getLookupValue(lookups.platforms, device.o),
         OSVersion: device.ov,
         MachineTags: tagNames,
         MachineInfo: device.m || null,
@@ -788,7 +794,7 @@ function denormalizeVuln(v, index) {
         // CVE info
         CveId: cve.id,
         CvssScore: cve.sc,
-        VulnerabilitySeverityLevel: lookups.severities[cve.sv],
+        VulnerabilitySeverityLevel: getLookupValue(lookups.severities, cve.sv),
         ExploitabilityLevel: cve.ex >= 0 ? lookups.exploitLevels[cve.ex] : null,
         CveBatchUrl: cve.u,
         CveBatchTitle: batchTitle,
@@ -798,7 +804,7 @@ function denormalizeVuln(v, index) {
         AffectedSoftware: affSoftware,
         
         // Software info
-        SoftwareVendor: lookups.vendors[software.v],
+        SoftwareVendor: getLookupValue(lookups.vendors, software.v),
         SoftwareName: software.n,
         SoftwareVersion: version,
         RecommendationReference: software.r,
@@ -1805,6 +1811,13 @@ function formatDateYMD(dateStr) {
         return slash[2] + '-' + slash[0].padStart(2, '0') + '-' + slash[1].padStart(2, '0');
     }
     return datePart;
+}
+
+function getLookupValue(lookup, index) {
+    if (!lookup || index == null || index < 0 || index >= lookup.length) {
+        return null;
+    }
+    return lookup[index];
 }
 
 /**
