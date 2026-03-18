@@ -733,8 +733,8 @@ try {
     }
 
     Write-Output "Updating vulnerability current/history store..."
-    $vulnStore = Update-VulnStoreFromLegacySnapshot -BasePath $tempExports
-    Publish-VulnStore -BasePath $tempExports -Store $vulnStore
+    $vulnStore = Publish-VulnStoreFromLegacySnapshot -BasePath $tempExports -RemoveLegacyFiles
+    Write-Output "  Saved vulnerability current/history store with $($vulnStore.CurrentRows) current row(s) across $($vulnStore.HistoryYears) history year file(s)"
 
     # Machine data
     Write-Output 'Exporting machine data from MDE API...'
