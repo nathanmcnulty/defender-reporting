@@ -418,7 +418,7 @@ function Set-BlobContent {
         $headers['x-ms-access-tier'] = $AccessTier
     }
 
-    Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -InFile $SourcePath -ContentType $ContentType
+    [void](Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -InFile $SourcePath -ContentType $ContentType)
 }
 
 function Test-BlobExistence {
