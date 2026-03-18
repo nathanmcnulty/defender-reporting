@@ -17,9 +17,10 @@ This page covers the Azure-specific parts of the project: permissions, authentic
 ## Prerequisites
 
 - PowerShell module: `Az.Accounts`
-- PowerShell module: `Microsoft.Graph.Authentication` for MDE permission assignment
 - An authenticated Azure session via `Connect-AzAccount`
 - Application Administrator in Entra ID if you want the script to grant MDE app roles automatically
+
+`Setup-AzureResources.ps1` uses `Get-AzAccessToken` plus native Microsoft Graph REST calls first. If the Az-issued Graph token does not contain the required delegated scopes, the script falls back to `Microsoft.Graph.Authentication` when that module is installed. If neither path is available, the script fails fast with guidance.
 
 ## Basic provisioning
 
@@ -65,14 +66,26 @@ These scripts rely on application permissions on the WindowsDefenderATP service 
 - `Machine.Read.All`
 - `AdvancedQuery.Read.All` for Advanced Hunting enrichment
 
-If you want to assign those roles to a managed identity or service principal manually, this repo's original helper snippet still works:
+If you want to assign those roles to a managed identity or service principal manually, this Az-only helper snippet works:
 
 ```powershell
 $MI = "34634404-8c0b-4141-a9dd-195fa6e6a51f"
 
-Connect-MgGraph -Scopes "AppRoleAssignment.ReadWrite.All"
+$token = (Get-AzAccessToken -ResourceUrl 'https://graph.microsoft.com/' -AsSecureString).Token
+$ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($token)
+try {
+    $graphToken = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+}
+finally {
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+}
 
-$MdeSp = (Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq 'fc780465-2017-40d4-a0c5-307022471b92'").value
+$headers = @{
+    Authorization = "Bearer $graphToken"
+    'Content-Type' = 'application/json'
+}
+
+$MdeSp = (Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq 'fc780465-2017-40d4-a0c5-307022471b92'" -Headers $headers).value
 if ($null -eq $MdeSp) { Write-Output "The MDE workspace has not been provisioned. Please go to https://security.microsoft.com/securitysettings/endpoints/integration to provision"; exit }
 
 "Vulnerability.Read.All","Machine.Read.All","AdvancedQuery.Read.All" | ForEach-Object {
@@ -83,7 +96,7 @@ if ($null -eq $MdeSp) { Write-Output "The MDE workspace has not been provisioned
     "resourceId" = $MdeSp.Id
     "appRoleId" = $AppRole.Id
    }
-   Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$MI/appRoleAssignments" -Body ($body | ConvertTo-Json) -ContentType "application/json"
+   Invoke-RestMethod -Method POST -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$MI/appRoleAssignments" -Headers $headers -Body ($body | ConvertTo-Json -Depth 5)
 }
 ```
 
