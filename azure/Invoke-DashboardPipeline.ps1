@@ -1528,7 +1528,7 @@ function Publish-VulnStoreFromLegacySnapshot {
         throw "No legacy VulnExport snapshot files found in '$BasePath'."
     }
 
-    $publishResult = Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
+    $publishOutput = @(Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
         Restore-StoreTransaction -BasePath $BasePath -StoreName 'vuln'
 
         $storeExists = Test-VulnStoreExistence -BasePath $BasePath
@@ -1733,6 +1733,22 @@ function Publish-VulnStoreFromLegacySnapshot {
                 Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
+    })
+
+    $publishResult = $null
+    foreach ($item in $publishOutput) {
+        if ($null -ne $item -and $item.PSObject.Properties.Match('MigratedLegacy').Count -gt 0) {
+            $publishResult = $item
+            continue
+        }
+
+        if ($null -ne $item) {
+            Write-Host ([string]$item)
+        }
+    }
+
+    if ($null -eq $publishResult) {
+        throw 'Publish-VulnStoreFromLegacySnapshot did not return a publish result.'
     }
 
     if ($RemoveLegacyFiles) {
@@ -1741,8 +1757,14 @@ function Publish-VulnStoreFromLegacySnapshot {
         }
     }
 
-    $publishResult.RemovedLegacyFiles = ($RemoveLegacyFiles -eq $true)
-    return $publishResult
+    return [PSCustomObject]@{
+        DownloadedFiles = $publishResult.DownloadedFiles
+        CurrentRows = $publishResult.CurrentRows
+        HistoryYears = $publishResult.HistoryYears
+        LatestSnapshotDate = $publishResult.LatestSnapshotDate
+        MigratedLegacy = $publishResult.MigratedLegacy
+        RemovedLegacyFiles = ($RemoveLegacyFiles -eq $true)
+    }
 }
 
 function Read-VulnStoreRow {
@@ -4448,7 +4470,7 @@ function Set-BlobContent {
         $headers['x-ms-access-tier'] = $AccessTier
     }
 
-    Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -InFile $SourcePath -ContentType $ContentType
+    [void](Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -InFile $SourcePath -ContentType $ContentType)
 }
 
 function Test-BlobExistence {
