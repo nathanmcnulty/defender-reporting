@@ -135,6 +135,7 @@ $Script:VulnHistoryFileNamePattern = 'VulnHistory_{0}.json.gz'
 $Script:MachineCurrentFileName = 'Machines_Current.json.gz'
 $Script:MachineHistoryFileName = 'Machines_History.json.gz'
 $Script:AdvancedHuntingCurrentFileName = 'AdvancedHunting_Current.json.gz'
+$Script:VulnDiskPartitionCount = 64
 
 function Get-StoreLockName {
     [CmdletBinding()]
@@ -841,7 +842,7 @@ function Write-GzipTextFile {
     }
 }
 
-function Read-VulnNdjsonRecordsFromPath {
+function Read-VulnNdjsonLinesFromPath {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -863,11 +864,7 @@ function Read-VulnNdjsonRecordsFromPath {
                 while (-not $reader.EndOfStream) {
                     $line = $reader.ReadLine()
                     if ([string]::IsNullOrWhiteSpace($line)) { continue }
-
-                    $record = $line | ConvertFrom-Json -Depth 20
-                    if ($null -ne $record) {
-                        Write-Output $record
-                    }
+                    Write-Output $line
                 }
             }
             finally {
@@ -882,6 +879,21 @@ function Read-VulnNdjsonRecordsFromPath {
     }
     finally {
         $fileStream.Dispose()
+    }
+}
+
+function Read-VulnNdjsonRecordsFromPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    foreach ($line in Read-VulnNdjsonLinesFromPath -Path $Path) {
+        $record = $line | ConvertFrom-Json -Depth 20
+        if ($null -ne $record) {
+            Write-Output $record
+        }
     }
 }
 
@@ -904,6 +916,40 @@ function Write-VulnCurrentFile {
                 foreach ($record in $Records) {
                     if ($null -eq $record) { continue }
                     $writer.WriteLine(($record | ConvertTo-Json -Compress -Depth 20))
+                }
+            }
+            finally {
+                $writer.Dispose()
+            }
+        }
+        finally {
+            $gzipStream.Dispose()
+        }
+    }
+    finally {
+        $fileStream.Dispose()
+    }
+}
+
+function Write-VulnCurrentFileFromJsonLines {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IEnumerable]$JsonLines
+    )
+
+    $fileStream = [System.IO.File]::Create($Path)
+    try {
+        $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+        try {
+            $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
+            try {
+                foreach ($jsonLine in $JsonLines) {
+                    if ([string]::IsNullOrWhiteSpace([string]$jsonLine)) { continue }
+                    $writer.WriteLine([string]$jsonLine)
                 }
             }
             finally {
@@ -946,6 +992,372 @@ function Write-VulnHistoryDocument {
 
     $json = $HistoryDocument | ConvertTo-Json -Compress -Depth 100
     Write-GzipTextFile -Path $Path -Content $json
+}
+
+function Get-VulnHistoryDocumentLatestDate {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $HistoryDocument
+    )
+
+    $latestDate = [string](Get-VulnPropertyValue -InputObject $HistoryDocument -Name 'latestDate')
+    if (-not [string]::IsNullOrWhiteSpace($latestDate)) {
+        return $latestDate
+    }
+
+    foreach ($snapshot in @($HistoryDocument.snapshots)) {
+        $snapshotDate = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $snapshot -Name 'date')
+        if (-not [string]::IsNullOrWhiteSpace($snapshotDate)) {
+            $latestDate = Get-MaxVulnDate -Primary $latestDate -Secondary $snapshotDate
+        }
+    }
+
+    return $latestDate
+}
+
+function Add-VulnHistoryEntryToAppendStore {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$AppendStateByYear,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ScratchRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SnapshotDate,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ClosedOn,
+
+        [Parameter(Mandatory = $true)]
+        $Entry
+    )
+
+    $year = ([datetime]$ClosedOn).Year
+    if (-not $AppendStateByYear.ContainsKey($year)) {
+        $appendPath = Join-Path -Path $ScratchRoot -ChildPath ("VulnHistory_{0}.append.ndjson" -f $year)
+        $AppendStateByYear[$year] = [PSCustomObject]@{
+            AppendPath = $appendPath
+            Writer = [System.IO.StreamWriter]::new($appendPath, $true, [System.Text.UTF8Encoding]::new($false))
+            LatestDate = ''
+        }
+    }
+
+    $state = $AppendStateByYear[$year]
+    $entryJson = $Entry | ConvertTo-Json -Compress -Depth 100
+    $state.Writer.WriteLine($SnapshotDate + "`t" + $entryJson)
+    $state.LatestDate = Get-MaxVulnDate -Primary ([string]$state.LatestDate) -Secondary $SnapshotDate
+}
+
+function Close-VulnHistoryAppendStore {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$AppendStateByYear
+    )
+
+    foreach ($year in @($AppendStateByYear.Keys)) {
+        $state = $AppendStateByYear[$year]
+        if ($null -ne $state -and $null -ne $state.Writer) {
+            $state.Writer.Dispose()
+            $state.Writer = $null
+        }
+    }
+}
+
+function Write-VulnHistoryDocumentFromAppendFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Year,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $ExistingDocument,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [string]$AppendPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$LatestDate
+    )
+
+    $fileStream = [System.IO.File]::Create($Path)
+    try {
+        $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+        try {
+            $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
+            try {
+                $writer.Write('{"year":')
+                $writer.Write($Year)
+                $writer.Write(',"latestDate":')
+                $writer.Write(($LatestDate | ConvertTo-Json -Compress))
+                $writer.Write(',"snapshots":[')
+
+                $hasWrittenSnapshot = $false
+                foreach ($snapshot in @($ExistingDocument?.snapshots)) {
+                    if ($null -eq $snapshot) { continue }
+                    if ($hasWrittenSnapshot) { $writer.Write(',') }
+                    $writer.Write(($snapshot | ConvertTo-Json -Compress -Depth 100))
+                    $hasWrittenSnapshot = $true
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($AppendPath) -and (Test-Path -LiteralPath $AppendPath -PathType Leaf)) {
+                    $currentSnapshotDate = $null
+                    $wroteClosedEntry = $false
+
+                    foreach ($appendLine in Read-VulnNdjsonLinesFromPath -Path $AppendPath) {
+                        $tabIndex = $appendLine.IndexOf("`t")
+                        if ($tabIndex -lt 10) {
+                            throw "Invalid vulnerability history append line in '$AppendPath'."
+                        }
+
+                        $snapshotDate = $appendLine.Substring(0, $tabIndex)
+                        $entryJson = $appendLine.Substring($tabIndex + 1)
+
+                        if ($currentSnapshotDate -ne $snapshotDate) {
+                            if (-not [string]::IsNullOrWhiteSpace($currentSnapshotDate)) {
+                                $writer.Write(']}')
+                                $hasWrittenSnapshot = $true
+                            }
+
+                            if ($hasWrittenSnapshot) { $writer.Write(',') }
+                            $writer.Write('{"date":')
+                            $writer.Write(($snapshotDate | ConvertTo-Json -Compress))
+                            $writer.Write(',"closed":[')
+                            $currentSnapshotDate = $snapshotDate
+                            $wroteClosedEntry = $false
+                        }
+
+                        if ($wroteClosedEntry) { $writer.Write(',') }
+                        $writer.Write($entryJson)
+                        $wroteClosedEntry = $true
+                    }
+
+                    if (-not [string]::IsNullOrWhiteSpace($currentSnapshotDate)) {
+                        $writer.Write(']}')
+                    }
+                }
+
+                $writer.Write(']}')
+            }
+            finally {
+                $writer.Dispose()
+            }
+        }
+        finally {
+            $gzipStream.Dispose()
+        }
+    }
+    finally {
+        $fileStream.Dispose()
+    }
+}
+
+function Get-VulnPartitionIndex {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Id,
+
+        [Parameter(Mandatory = $false)]
+        [int]$PartitionCount = $Script:VulnDiskPartitionCount
+    )
+
+    $hash = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($Id))
+    return ([int]$hash[0]) % $PartitionCount
+}
+
+function Get-VulnPartitionFilePath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Prefix,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Index
+    )
+
+    return Join-Path -Path $Root -ChildPath ("{0}-{1:D2}.ndjson" -f $Prefix, $Index)
+}
+
+function Partition-VulnJsonLinesToFiles {
+    [CmdletBinding()]
+    [OutputType([int[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$InputPaths,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Prefix,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$OnboardedOnly,
+
+        [Parameter(Mandatory = $false)]
+        [int]$PartitionCount = $Script:VulnDiskPartitionCount
+    )
+
+    [void](New-Item -Path $OutputRoot -ItemType Directory -Force)
+
+    $writers = @{}
+    $writtenIndexes = [System.Collections.Generic.HashSet[int]]::new()
+    try {
+        foreach ($inputPath in @($InputPaths)) {
+            if ([string]::IsNullOrWhiteSpace($inputPath) -or -not (Test-Path -LiteralPath $inputPath -PathType Leaf)) { continue }
+
+            foreach ($jsonLine in Read-VulnNdjsonLinesFromPath -Path $inputPath) {
+                $record = $jsonLine | ConvertFrom-Json -Depth 20
+                $id = [string](Get-VulnPropertyValue -InputObject $record -Name 'Id')
+                if ([string]::IsNullOrWhiteSpace($id)) { continue }
+                if ($OnboardedOnly -and (Get-VulnPropertyValue -InputObject $record -Name 'IsOnboarded') -ne $true) { continue }
+
+                $partitionIndex = Get-VulnPartitionIndex -Id $id -PartitionCount $PartitionCount
+                if (-not $writers.ContainsKey($partitionIndex)) {
+                    $partitionPath = Get-VulnPartitionFilePath -Root $OutputRoot -Prefix $Prefix -Index $partitionIndex
+                    $writers[$partitionIndex] = [System.IO.StreamWriter]::new($partitionPath, $true, [System.Text.UTF8Encoding]::new($false))
+                }
+
+                $writers[$partitionIndex].WriteLine($jsonLine)
+                [void]$writtenIndexes.Add($partitionIndex)
+            }
+        }
+    }
+    finally {
+        foreach ($writer in @($writers.Values)) {
+            if ($null -ne $writer) {
+                $writer.Dispose()
+            }
+        }
+    }
+
+    return @($writtenIndexes | Sort-Object)
+}
+
+function Read-VulnPartitionMapFile {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $rows = @{}
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $rows
+    }
+
+    foreach ($jsonLine in Read-VulnNdjsonLinesFromPath -Path $Path) {
+        $record = $jsonLine | ConvertFrom-Json -Depth 20
+        $id = [string](Get-VulnPropertyValue -InputObject $record -Name 'Id')
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+
+        $versionStartDate = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $record -Name 'FirstSeenTimestamp')
+        $rows[$id] = [PSCustomObject]@{
+            Json = $jsonLine
+            Signature = Get-VulnCanonicalRowSignature -Row $record
+            VersionStartDate = $versionStartDate
+        }
+    }
+
+    return $rows
+}
+
+function Write-VulnPartitionMapFile {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$RowsById
+    )
+
+    if ($RowsById.Count -eq 0) {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        }
+        return 0
+    }
+
+    $writer = [System.IO.StreamWriter]::new($Path, $false, [System.Text.UTF8Encoding]::new($false))
+    try {
+        $rowCount = 0
+        foreach ($id in @($RowsById.Keys | Sort-Object)) {
+            $writer.WriteLine([string]$RowsById[$id].Json)
+            $rowCount++
+        }
+        return $rowCount
+    }
+    finally {
+        $writer.Dispose()
+    }
+}
+
+function Write-VulnCurrentFileFromPartitionFiles {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PartitionRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PartitionPrefix,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [int]$PartitionCount = $Script:VulnDiskPartitionCount
+    )
+
+    $fileStream = [System.IO.File]::Create($OutputPath)
+    try {
+        $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+        try {
+            $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
+            try {
+                $rowCount = 0
+                for ($partitionIndex = 0; $partitionIndex -lt $PartitionCount; $partitionIndex++) {
+                    $partitionPath = Get-VulnPartitionFilePath -Root $PartitionRoot -Prefix $PartitionPrefix -Index $partitionIndex
+                    if (-not (Test-Path -LiteralPath $partitionPath -PathType Leaf)) { continue }
+
+                    foreach ($jsonLine in Read-VulnNdjsonLinesFromPath -Path $partitionPath) {
+                        $writer.WriteLine($jsonLine)
+                        $rowCount++
+                    }
+                }
+
+                return $rowCount
+            }
+            finally {
+                $writer.Dispose()
+            }
+        }
+        finally {
+            $gzipStream.Dispose()
+        }
+    }
+    finally {
+        $fileStream.Dispose()
+    }
 }
 
 function Publish-VulnStore {
@@ -1035,8 +1447,196 @@ function Publish-VulnStoreFromLegacySnapshot {
         throw "No legacy VulnExport snapshot files found in '$BasePath'."
     }
 
-    $store = Update-VulnStoreFromLegacySnapshot -BasePath $BasePath -LegacyFilePaths $legacyFiles.FullName
-    $publishResult = Publish-VulnStore -BasePath $BasePath -Store $store
+    $publishResult = Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $BasePath -StoreName 'vuln'
+
+        $storeExists = Test-VulnStoreExistence -BasePath $BasePath
+        $partitionCount = $Script:VulnDiskPartitionCount
+        $latestKnownSnapshot = if ($storeExists) { Get-VulnStoreLatestSnapshotDate -BasePath $BasePath } else { $null }
+        $snapshotDates = @($legacyFiles | ForEach-Object { Get-VulnSnapshotDateFromName -Name $_.Name } | Sort-Object -Unique)
+
+        if (-not [string]::IsNullOrWhiteSpace($latestKnownSnapshot)) {
+            $staleDates = @($snapshotDates | Where-Object { ([datetime]$_) -le ([datetime]$latestKnownSnapshot) })
+            if ($staleDates.Count -gt 0) {
+                Write-Verbose "Skipping legacy snapshot dates already represented in the current store. StoreLatest=$latestKnownSnapshot Incoming=$($staleDates -join ', ')"
+                $snapshotDates = @($snapshotDates | Where-Object { ([datetime]$_) -gt ([datetime]$latestKnownSnapshot) })
+            }
+        }
+
+        if ($snapshotDates.Count -eq 0 -and $storeExists) {
+            $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+            $currentRows = if (Test-Path -LiteralPath $currentPath -PathType Leaf) { Test-VulnCurrentFile -Path $currentPath } else { 0 }
+            $historyYears = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue).Count
+
+            return [PSCustomObject]@{
+                DownloadedFiles = $legacyFiles.Count
+                CurrentRows = $currentRows
+                HistoryYears = $historyYears
+                LatestSnapshotDate = $latestKnownSnapshot
+                MigratedLegacy = $false
+                RemovedLegacyFiles = $false
+            }
+        }
+
+        $filesByDate = @{}
+        foreach ($file in $legacyFiles) {
+            $date = Get-VulnSnapshotDateFromName -Name $file.Name
+            if ($date -notin $snapshotDates) { continue }
+            if (-not $filesByDate.ContainsKey($date)) {
+                $filesByDate[$date] = [System.Collections.Generic.List[object]]::new()
+            }
+            $filesByDate[$date].Add($file)
+        }
+
+        $stageRoot = Join-Path $BasePath ('.vuln-store-staging-' + [guid]::NewGuid().ToString('N'))
+        [void](New-Item -Path $stageRoot -ItemType Directory -Force)
+
+        $historyAppendState = @{}
+        try {
+            $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+            $currentPartitionRoot = Join-Path $stageRoot 'current-partitions'
+            [void](New-Item -Path $currentPartitionRoot -ItemType Directory -Force)
+            if ($storeExists -and (Test-Path -LiteralPath $currentPath -PathType Leaf)) {
+                [void](Partition-VulnJsonLinesToFiles -InputPaths @($currentPath) -OutputRoot $currentPartitionRoot -Prefix 'current' -PartitionCount $partitionCount)
+            }
+
+            foreach ($snapshotDate in $snapshotDates) {
+                $closedOn = Get-VulnPreviousDay -Date $snapshotDate
+                $snapshotPartitionRoot = Join-Path $stageRoot ('snapshot-' + $snapshotDate)
+                [void](New-Item -Path $snapshotPartitionRoot -ItemType Directory -Force)
+
+                try {
+                    [void](Partition-VulnJsonLinesToFiles `
+                        -InputPaths @(($filesByDate[$snapshotDate] ?? @()) | ForEach-Object { $_.FullName }) `
+                        -OutputRoot $snapshotPartitionRoot `
+                        -Prefix 'snapshot' `
+                        -OnboardedOnly `
+                        -PartitionCount $partitionCount)
+
+                    for ($partitionIndex = 0; $partitionIndex -lt $partitionCount; $partitionIndex++) {
+                        $currentPartitionPath = Get-VulnPartitionFilePath -Root $currentPartitionRoot -Prefix 'current' -Index $partitionIndex
+                        $snapshotPartitionPath = Get-VulnPartitionFilePath -Root $snapshotPartitionRoot -Prefix 'snapshot' -Index $partitionIndex
+
+                        if (-not (Test-Path -LiteralPath $currentPartitionPath -PathType Leaf) -and -not (Test-Path -LiteralPath $snapshotPartitionPath -PathType Leaf)) {
+                            continue
+                        }
+
+                        $currentMap = Read-VulnPartitionMapFile -Path $currentPartitionPath
+                        $snapshotRows = Read-VulnPartitionMapFile -Path $snapshotPartitionPath
+
+                        foreach ($id in @($currentMap.Keys)) {
+                            if ($snapshotRows.ContainsKey($id)) { continue }
+
+                            $closedEntry = New-ClosedVulnEntry -Record ($currentMap[$id].Json | ConvertFrom-Json -Depth 20) -Reason 'removed' -ClosedOn $closedOn
+                            Add-VulnHistoryEntryToAppendStore -AppendStateByYear $historyAppendState -ScratchRoot $stageRoot -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry
+                        }
+
+                        foreach ($id in @($snapshotRows.Keys)) {
+                            $incomingVersion = $snapshotRows[$id]
+                            $incomingRecord = $incomingVersion.Json | ConvertFrom-Json -Depth 20
+                            $existing = $currentMap[$id]
+                            $versionStartDate = if ($null -eq $existing -or [string]::IsNullOrWhiteSpace([string]$existing.VersionStartDate)) {
+                                $snapshotDate
+                            }
+                            else {
+                                [string]$existing.VersionStartDate
+                            }
+
+                            if ($null -ne $existing -and [string]$existing.Signature -ne [string]$incomingVersion.Signature) {
+                                $closedEntry = New-ClosedVulnEntry -Record ($existing.Json | ConvertFrom-Json -Depth 20) -Reason 'changed' -ClosedOn $closedOn -ReplacementId $id
+                                Add-VulnHistoryEntryToAppendStore -AppendStateByYear $historyAppendState -ScratchRoot $stageRoot -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry
+                                $versionStartDate = $snapshotDate
+                            }
+
+                            $openRecord = New-OpenVulnRecord -Record $incomingRecord -VersionStartDate $versionStartDate
+                            $snapshotRows[$id] = [PSCustomObject]@{
+                                Json = $openRecord | ConvertTo-Json -Compress -Depth 20
+                                Signature = [string]$incomingVersion.Signature
+                                VersionStartDate = $versionStartDate
+                            }
+                        }
+
+                        [void](Write-VulnPartitionMapFile -Path $currentPartitionPath -RowsById $snapshotRows)
+                    }
+                }
+                finally {
+                    if (Test-Path -LiteralPath $snapshotPartitionRoot) {
+                        Remove-Item -LiteralPath $snapshotPartitionRoot -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+
+            Close-VulnHistoryAppendStore -AppendStateByYear $historyAppendState
+
+            $stagedCurrentPath = Get-VulnCurrentPath -BasePath $stageRoot
+            [void](Write-VulnCurrentFileFromPartitionFiles -PartitionRoot $currentPartitionRoot -PartitionPrefix 'current' -OutputPath $stagedCurrentPath -PartitionCount $partitionCount)
+            $currentCount = Test-VulnCurrentFile -Path $stagedCurrentPath
+
+            $filesToPublish = [System.Collections.Generic.List[object]]::new()
+            $filesToPublish.Add([PSCustomObject]@{
+                StagePath = $stagedCurrentPath
+                TargetPath = Get-VulnCurrentPath -BasePath $BasePath
+            })
+
+            $existingHistoryFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue)
+            $existingHistoryByYear = @{}
+            foreach ($historyFile in $existingHistoryFiles) {
+                $yearMatch = [regex]::Match($historyFile.Name, '\d{4}')
+                if ($yearMatch.Success) {
+                    $existingHistoryByYear[[int]$yearMatch.Value] = $historyFile.FullName
+                }
+            }
+
+            $touchedYears = @($historyAppendState.Keys | ForEach-Object { [int]$_ } | Sort-Object)
+            foreach ($year in $touchedYears) {
+                $appendState = $historyAppendState[$year]
+                $existingDocument = if ($existingHistoryByYear.ContainsKey($year)) {
+                    Read-VulnHistoryDocument -Path $existingHistoryByYear[$year]
+                }
+                else {
+                    $null
+                }
+
+                $finalLatestDate = Get-MaxVulnDate `
+                    -Primary (if ($null -ne $existingDocument) { Get-VulnHistoryDocumentLatestDate -HistoryDocument $existingDocument } else { $null }) `
+                    -Secondary ([string]$appendState.LatestDate)
+                $historyStagePath = Get-VulnHistoryPath -BasePath $stageRoot -Year $year
+                Write-VulnHistoryDocumentFromAppendFile `
+                    -Path $historyStagePath `
+                    -Year $year `
+                    -ExistingDocument $existingDocument `
+                    -AppendPath ([string]$appendState.AppendPath) `
+                    -LatestDate $finalLatestDate
+                [void](Test-VulnHistoryFile -Path $historyStagePath)
+
+                $filesToPublish.Add([PSCustomObject]@{
+                    StagePath = $historyStagePath
+                    TargetPath = Get-VulnHistoryPath -BasePath $BasePath -Year $year
+                })
+            }
+
+            Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish)
+
+            $finalHistoryYears = [System.Collections.Generic.HashSet[int]]::new()
+            foreach ($year in $existingHistoryByYear.Keys) { [void]$finalHistoryYears.Add([int]$year) }
+            foreach ($year in $touchedYears) { [void]$finalHistoryYears.Add([int]$year) }
+
+            return [PSCustomObject]@{
+                DownloadedFiles = $legacyFiles.Count
+                CurrentRows = $currentCount
+                HistoryYears = $finalHistoryYears.Count
+                LatestSnapshotDate = if ($snapshotDates.Count -gt 0) { $snapshotDates[-1] } else { $latestKnownSnapshot }
+                MigratedLegacy = $true
+                RemovedLegacyFiles = $false
+            }
+        }
+        finally {
+            Close-VulnHistoryAppendStore -AppendStateByYear $historyAppendState
+            if (Test-Path -LiteralPath $stageRoot) {
+                Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 
     if ($RemoveLegacyFiles) {
         foreach ($legacyFile in @(Get-VulnLegacySnapshotFile -BasePath $BasePath)) {
@@ -1044,14 +1644,8 @@ function Publish-VulnStoreFromLegacySnapshot {
         }
     }
 
-    return [PSCustomObject]@{
-        DownloadedFiles = $legacyFiles.Count
-        CurrentRows = $publishResult.CurrentRows
-        HistoryYears = $publishResult.HistoryYears
-        LatestSnapshotDate = $publishResult.LatestSnapshotDate
-        MigratedLegacy = $true
-        RemovedLegacyFiles = ($RemoveLegacyFiles -eq $true)
-    }
+    $publishResult.RemovedLegacyFiles = ($RemoveLegacyFiles -eq $true)
+    return $publishResult
 }
 
 function Read-VulnStoreRow {
@@ -1254,17 +1848,11 @@ function Get-VulnStoreLatestSnapshotDate {
         }
     }
 
-    foreach ($document in Get-VulnHistoryDocumentList -BasePath $BasePath) {
-        $docLatest = [string](Get-VulnPropertyValue -InputObject $document -Name 'latestDate')
+    foreach ($file in Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name) {
+        $document = Read-VulnHistoryDocument -Path $file.FullName
+        $docLatest = Get-VulnHistoryDocumentLatestDate -HistoryDocument $document
         if (-not [string]::IsNullOrWhiteSpace($docLatest)) {
             $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $docLatest
-        } else {
-            foreach ($snapshot in @($document.snapshots)) {
-                $snapshotDate = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $snapshot -Name 'date')
-                if (-not [string]::IsNullOrWhiteSpace($snapshotDate)) {
-                    $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $snapshotDate
-                }
-            }
         }
     }
 
@@ -4000,8 +4588,8 @@ try {
     }
 
     Write-Output "Updating vulnerability current/history store..."
-    $vulnStore = Update-VulnStoreFromLegacySnapshot -BasePath $tempExports
-    Publish-VulnStore -BasePath $tempExports -Store $vulnStore
+    $vulnStore = Publish-VulnStoreFromLegacySnapshot -BasePath $tempExports -RemoveLegacyFiles
+    Write-Output "  Saved vulnerability current/history store with $($vulnStore.CurrentRows) current row(s) across $($vulnStore.HistoryYears) history year file(s)"
 
     # Machine data
     Write-Output 'Exporting machine data from MDE API...'
