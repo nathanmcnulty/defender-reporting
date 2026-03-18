@@ -16,7 +16,9 @@
     end-to-end to validate the setup. Use -SkipValidation to skip this step.
     
     Optionally assigns MDE API app role permissions to the Managed Identity
-    via Microsoft Graph (requires the Microsoft.Graph.Authentication module).
+    via Microsoft Graph. The script uses Get-AzAccessToken plus native Graph
+    REST calls first, and falls back to Microsoft.Graph.Authentication only
+    when the Az-issued Graph token lacks the required delegated scopes.
 
 .PARAMETER SubscriptionId
     Azure subscription ID. Defaults to the current Az context subscription.
@@ -83,7 +85,8 @@
     
     Prerequisites:
     - Az.Accounts PowerShell module (for Invoke-AzRestMethod)
-    - Microsoft.Graph.Authentication module (for MDE app role assignment, optional)
+    - Microsoft.Graph.Authentication module (optional fallback when the Az-issued
+      Microsoft Graph token lacks the required delegated scopes)
     - Authenticated Azure session (Connect-AzAccount)
     
     MDE API app role assignment requires the Application Administrator role in 
@@ -222,6 +225,8 @@ $Script:RuntimeEnvName = 'PowerShell-74-AzAccounts'
 
 $Script:StorageBlobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 $Script:MdeAppId = 'fc780465-2017-40d4-a0c5-307022471b92'
+$Script:GraphApiBaseUrl = 'https://graph.microsoft.com'
+$Script:AzPowerShellGraphAppName = 'Microsoft Azure PowerShell'
 
 $Script:MdeAppRoles = @(
     'Machine.Read.All',
@@ -398,6 +403,258 @@ function Get-ArmToken {
     $ssPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResponse.Token)
     try { return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ssPtr) }
     finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ssPtr) }
+}
+
+function Get-JwtPayload {
+    <#
+    .SYNOPSIS
+        Decodes the payload segment from a JWT bearer token.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Token
+    )
+
+    $parts = $Token.Split('.')
+    if ($parts.Count -lt 2) {
+        throw "Token is not a valid JWT."
+    }
+
+    $payload = $parts[1].Replace('-', '+').Replace('_', '/')
+    switch ($payload.Length % 4) {
+        2 { $payload += '==' }
+        3 { $payload += '=' }
+        0 { }
+        default { throw "JWT payload is not valid Base64Url." }
+    }
+
+    $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload))
+    return $json | ConvertFrom-Json
+}
+
+function Get-GrantedScopesFromToken {
+    <#
+    .SYNOPSIS
+        Returns delegated scopes from a JWT's scp claim.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$AccessToken
+    )
+
+    $payload = Get-JwtPayload -Token $AccessToken
+    $scopeClaim = if ($payload.PSObject.Properties['scp']) { [string]$payload.scp } else { '' }
+    if ([string]::IsNullOrWhiteSpace($scopeClaim)) {
+        return @()
+    }
+
+    return @(
+        $scopeClaim -split '\s+' |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Sort-Object -Unique
+    )
+}
+
+function Test-GraphScopeRequirement {
+    <#
+    .SYNOPSIS
+        Checks whether a granted scope set satisfies the requested requirements.
+    #>
+    [CmdletBinding()]
+    param(
+        [string[]]$GrantedScopes = @(),
+        [string[]]$RequiredAllScopes = @(),
+        [string[]]$RequiredAnyScopeSets = @()
+    )
+
+    $grantedSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($scope in @($GrantedScopes)) {
+        if (-not [string]::IsNullOrWhiteSpace($scope)) {
+            [void]$grantedSet.Add($scope)
+        }
+    }
+
+    $missingRequirements = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($scope in @($RequiredAllScopes)) {
+        if (-not $grantedSet.Contains($scope)) {
+            $missingRequirements.Add($scope)
+        }
+    }
+
+    foreach ($scopeSet in @($RequiredAnyScopeSets)) {
+        $candidateScopes = @(
+            ([string]$scopeSet -split '\|') |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
+        if ($candidateScopes.Count -eq 0) {
+            continue
+        }
+
+        $isSatisfied = $false
+        foreach ($candidate in $candidateScopes) {
+            if ($grantedSet.Contains($candidate)) {
+                $isSatisfied = $true
+                break
+            }
+        }
+
+        if (-not $isSatisfied) {
+            $missingRequirements.Add(($candidateScopes -join ' or '))
+        }
+    }
+
+    return [PSCustomObject]@{
+        IsSatisfied         = ($missingRequirements.Count -eq 0)
+        MissingRequirements = @($missingRequirements)
+    }
+}
+
+function Get-GraphApiContext {
+    <#
+    .SYNOPSIS
+        Creates a Graph API context using Az-issued tokens first, then falls back
+        to Microsoft.Graph.Authentication when the Az token lacks required scopes.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Scenario,
+
+        [string[]]$RequiredAllScopes = @(),
+
+        [string[]]$RequiredAnyScopeSets = @(),
+
+        [string[]]$FallbackScopes = @()
+    )
+
+    $graphToken = Get-ArmToken -ResourceUrl $Script:GraphApiBaseUrl
+    $grantedScopes = Get-GrantedScopesFromToken -AccessToken $graphToken
+    $scopeStatus = Test-GraphScopeRequirement -GrantedScopes $grantedScopes -RequiredAllScopes $RequiredAllScopes -RequiredAnyScopeSets $RequiredAnyScopeSets
+
+    if ($scopeStatus.IsSatisfied) {
+        Write-Host "  Using Az-issued Microsoft Graph token for $Scenario" -ForegroundColor Green
+        return [PSCustomObject]@{
+            Mode         = 'AzToken'
+            AccessToken  = $graphToken
+            GrantedScopes = $grantedScopes
+        }
+    }
+
+    $requiredScopeList = @($FallbackScopes | Sort-Object -Unique)
+    $missingText = if ($scopeStatus.MissingRequirements.Count -gt 0) {
+        $scopeStatus.MissingRequirements -join ', '
+    }
+    else {
+        'unknown'
+    }
+
+    Write-Host "  Az-issued Microsoft Graph token is missing required delegated scopes for $Scenario." -ForegroundColor Yellow
+    Write-Host "  Missing requirements: $missingText" -ForegroundColor Yellow
+
+    if (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication) {
+        Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
+        if ($requiredScopeList.Count -eq 0) {
+            throw "Fallback scopes were not provided for Graph scenario '$Scenario'."
+        }
+
+        Write-Host "  Falling back to Microsoft.Graph.Authentication..." -ForegroundColor Gray
+        Connect-MgGraph -Scopes $requiredScopeList -NoWelcome -ErrorAction Stop
+        return [PSCustomObject]@{
+            Mode          = 'MgGraph'
+            RequestedScopes = $requiredScopeList
+        }
+    }
+
+    $scopeHint = $requiredScopeList -join ', '
+    throw @"
+Microsoft Graph delegated permissions are missing for $Scenario.
+Az issued a Graph token without the required delegated scopes.
+Missing requirements: $missingText
+
+To continue, either:
+  1. install the fallback module and re-run:
+     Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
+  2. have an Entra admin grant these delegated Microsoft Graph permissions to the '$($Script:AzPowerShellGraphAppName)' enterprise application, then re-run:
+     $scopeHint
+
+The signed-in user still needs the appropriate Entra role, such as Application Administrator.
+"@
+}
+
+function Invoke-GraphApi {
+    <#
+    .SYNOPSIS
+        Wrapper for Microsoft Graph REST calls using either Az tokens or the
+        Microsoft.Graph.Authentication fallback session.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        $Context,
+
+        [Parameter(Mandatory)]
+        [string]$Uri,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('GET', 'POST', 'PATCH', 'PUT', 'DELETE')]
+        [string]$Method,
+
+        $Body,
+
+        [string]$Description = 'Microsoft Graph API call'
+    )
+
+    $requestUri = if ($Uri -match '^https?://') { $Uri } else { "$($Script:GraphApiBaseUrl)$Uri" }
+
+    try {
+        if ($Context.Mode -eq 'AzToken') {
+            $headers = @{
+                Authorization = "Bearer $($Context.AccessToken)"
+            }
+
+            $invokeParams = @{
+                Uri         = $requestUri
+                Method      = $Method
+                Headers     = $headers
+                ErrorAction = 'Stop'
+            }
+
+            if ($null -ne $Body) {
+                $invokeParams.ContentType = 'application/json'
+                $invokeParams.Body = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 20 }
+            }
+
+            return Invoke-RestMethod @invokeParams
+        }
+
+        if ($Context.Mode -eq 'MgGraph') {
+            $invokeParams = @{
+                Uri         = $Uri
+                Method      = $Method
+                ErrorAction = 'Stop'
+            }
+
+            if ($null -ne $Body) {
+                $invokeParams.Body = $Body
+            }
+
+            return Invoke-MgGraphRequest @invokeParams
+        }
+
+        throw "Unsupported Graph context mode '$($Context.Mode)'."
+    }
+    catch {
+        $errorDetail = $_.Exception.Message
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+            $errorDetail = $_.ErrorDetails.Message
+        }
+
+        throw "$Description failed: $errorDetail"
+    }
 }
 
 # =============================================================================
@@ -987,78 +1244,71 @@ try {
         Write-Host "  This requires the Application Administrator role in Entra ID." -ForegroundColor Yellow
         Write-Host "  (These are app role assignments on WindowsDefenderATP, not Graph API permissions)" -ForegroundColor Yellow
 
-        # Check if Microsoft.Graph.Authentication is available
-        if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
-            Write-Warning "Microsoft.Graph.Authentication module not found. Install it with:"
-            Write-Host "  Install-Module Microsoft.Graph.Authentication -Scope CurrentUser" -ForegroundColor Yellow
-            Write-Host "  Then re-run this script, or assign MDE permissions manually." -ForegroundColor Yellow
+        try {
+            $mdeGraphContext = Get-GraphApiContext `
+                -Scenario 'MDE app role assignment' `
+                -RequiredAllScopes @('AppRoleAssignment.ReadWrite.All') `
+                -RequiredAnyScopeSets @('Application.Read.All|Application.ReadWrite.All') `
+                -FallbackScopes @('Application.Read.All', 'AppRoleAssignment.ReadWrite.All')
+
+            # Find the WindowsDefenderATP service principal
+            Write-Host "  Looking up WindowsDefenderATP service principal..." -ForegroundColor Gray
+            $mdeSpResponse = Invoke-GraphApi -Context $mdeGraphContext -Method GET -Uri "/v1.0/servicePrincipals?`$filter=appId eq '$($Script:MdeAppId)'" -Description "Look up WindowsDefenderATP service principal"
+            $mdeSp = $mdeSpResponse.value | Select-Object -First 1
+
+            if (-not $mdeSp) {
+                throw "WindowsDefenderATP service principal not found in tenant. Ensure Microsoft Defender for Endpoint is enabled."
+            }
+
+            $mdeSpObjectId = $mdeSp.id
+            Write-Host "  Found MDE SP: $mdeSpObjectId" -ForegroundColor Gray
+
+            # Assign each required app role
+            foreach ($roleName in $Script:MdeAppRoles) {
+                $appRole = $mdeSp.appRoles | Where-Object { $_.value -eq $roleName }
+                if (-not $appRole) {
+                    Write-Warning "App role '$roleName' not found on WindowsDefenderATP SP. Skipping."
+                    continue
+                }
+
+                Write-Host "  Assigning $roleName..." -ForegroundColor Gray
+
+                $body = @{
+                    principalId = $miPrincipalId
+                    resourceId  = $mdeSpObjectId
+                    appRoleId   = $appRole.id
+                }
+
+                try {
+                    Invoke-GraphApi -Context $mdeGraphContext -Method POST -Uri "/v1.0/servicePrincipals/$miPrincipalId/appRoleAssignments" -Body $body -Description "Assign MDE app role '$roleName'" | Out-Null
+                    Write-Host "    $roleName assigned" -ForegroundColor Green
+                }
+                catch {
+                    if ($_.Exception.Message -match 'Permission being assigned already exists') {
+                        Write-Host "    $roleName already assigned" -ForegroundColor Green
+                    }
+                    else {
+                        Write-Warning "Failed to assign $roleName`: $_"
+                    }
+                }
+            }
+
+            # Poll to verify at least one role assignment exists
+            Wait-WithPolling -Description "MDE app role propagation" -IntervalSeconds 5 -TimeoutSeconds 30 -Condition {
+                $assignments = Invoke-GraphApi -Context $mdeGraphContext -Method GET -Uri "/v1.0/servicePrincipals/$miPrincipalId/appRoleAssignments" -Description "Check MDE app role assignments"
+                $mdeAssignments = $assignments.value | Where-Object { $_.resourceId -eq $mdeSpObjectId }
+                return ($mdeAssignments.Count -ge $Script:MdeAppRoles.Count)
+            } | Out-Null
+
+            Write-Host "  MDE app roles assigned successfully" -ForegroundColor Green
         }
-        else {
-            try {
-                Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
-
-                # Connect to Graph with required scopes
-                Write-Host "  Connecting to Microsoft Graph..." -ForegroundColor Gray
-                Connect-MgGraph -Scopes "Application.Read.All", "AppRoleAssignment.ReadWrite.All" -NoWelcome -ErrorAction Stop
-
-                # Find the WindowsDefenderATP service principal
-                Write-Host "  Looking up WindowsDefenderATP service principal..." -ForegroundColor Gray
-                $mdeSpResponse = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/servicePrincipals?`$filter=appId eq '$($Script:MdeAppId)'" -ErrorAction Stop
-                $mdeSp = $mdeSpResponse.value | Select-Object -First 1
-
-                if (-not $mdeSp) {
-                    throw "WindowsDefenderATP service principal not found in tenant. Ensure Microsoft Defender for Endpoint is enabled."
-                }
-
-                $mdeSpObjectId = $mdeSp.id
-                Write-Host "  Found MDE SP: $mdeSpObjectId" -ForegroundColor Gray
-
-                # Assign each required app role
-                foreach ($roleName in $Script:MdeAppRoles) {
-                    $appRole = $mdeSp.appRoles | Where-Object { $_.value -eq $roleName }
-                    if (-not $appRole) {
-                        Write-Warning "App role '$roleName' not found on WindowsDefenderATP SP. Skipping."
-                        continue
-                    }
-
-                    Write-Host "  Assigning $roleName..." -ForegroundColor Gray
-
-                    $body = @{
-                        principalId = $miPrincipalId
-                        resourceId  = $mdeSpObjectId
-                        appRoleId   = $appRole.id
-                    }
-
-                    try {
-                        Invoke-MgGraphRequest -Method POST -Uri "/v1.0/servicePrincipals/$miPrincipalId/appRoleAssignments" -Body $body -ErrorAction Stop | Out-Null
-                        Write-Host "    $roleName assigned" -ForegroundColor Green
-                    }
-                    catch {
-                        if ($_.Exception.Message -match 'Permission being assigned already exists') {
-                            Write-Host "    $roleName already assigned" -ForegroundColor Green
-                        }
-                        else {
-                            Write-Warning "Failed to assign $roleName`: $_"
-                        }
-                    }
-                }
-
-                # Poll to verify at least one role assignment exists
-                Wait-WithPolling -Description "MDE app role propagation" -IntervalSeconds 5 -TimeoutSeconds 30 -Condition {
-                    $assignments = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/servicePrincipals/$miPrincipalId/appRoleAssignments" -ErrorAction SilentlyContinue
-                    $mdeAssignments = $assignments.value | Where-Object { $_.resourceId -eq $mdeSpObjectId }
-                    return ($mdeAssignments.Count -ge $Script:MdeAppRoles.Count)
-                } | Out-Null
-
-                Write-Host "  MDE app roles assigned successfully" -ForegroundColor Green
-            }
-            catch {
-                Write-Warning "MDE permission assignment failed: $_"
-                Write-Host "`n  To assign manually, run:" -ForegroundColor Yellow
-                Write-Host "  1. Connect-MgGraph -Scopes 'Application.Read.All','AppRoleAssignment.ReadWrite.All'" -ForegroundColor Yellow
-                Write-Host "  2. Assign Machine.Read.All, Vulnerability.Read.All, AdvancedQuery.Read.All" -ForegroundColor Yellow
-                Write-Host "     on the WindowsDefenderATP SP to principal: $miPrincipalId" -ForegroundColor Yellow
-            }
+        catch {
+            Write-Warning "MDE permission assignment failed: $_"
+            Write-Host "`n  To assign manually, run:" -ForegroundColor Yellow
+            Write-Host "  1. Acquire a Graph token with Application.Read.All and AppRoleAssignment.ReadWrite.All" -ForegroundColor Yellow
+            Write-Host "     or use Connect-MgGraph -Scopes 'Application.Read.All','AppRoleAssignment.ReadWrite.All'" -ForegroundColor Yellow
+            Write-Host "  2. Assign Machine.Read.All, Vulnerability.Read.All, AdvancedQuery.Read.All" -ForegroundColor Yellow
+            Write-Host "     on the WindowsDefenderATP SP to principal: $miPrincipalId" -ForegroundColor Yellow
         }
     }
     else {
@@ -1188,23 +1438,11 @@ try {
         # -----------------------------------------------------------------
         Write-Host "Step 15: Resolving security group '$SecurityGroup'..." -ForegroundColor Cyan
 
-        if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
-            Write-Host "  Microsoft.Graph.Authentication module is required but not installed." -ForegroundColor Yellow
-            $installChoice = Read-Host "  Install it now? (Y/n)"
-            if ($installChoice -match '^[Nn]') {
-                throw "Microsoft.Graph.Authentication module is required for Container App deployment. Install it with: Install-Module Microsoft.Graph.Authentication -Scope CurrentUser"
-            }
-            Write-Host "  Installing Microsoft.Graph.Authentication..." -ForegroundColor Gray
-            Install-Module Microsoft.Graph.Authentication -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-            Write-Host "  Module installed" -ForegroundColor Green
-        }
-
-        Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
-
-        # Connect to Graph with required scopes (reuses existing session if compatible)
-        $requiredScopes = @('Application.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All', 'Group.Read.All')
-        Write-Host "  Connecting to Microsoft Graph..." -ForegroundColor Gray
-        Connect-MgGraph -Scopes $requiredScopes -NoWelcome -ErrorAction Stop
+        $containerGraphContext = Get-GraphApiContext `
+            -Scenario 'Container App Entra configuration' `
+            -RequiredAllScopes @('AppRoleAssignment.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All') `
+            -RequiredAnyScopeSets @('Application.ReadWrite.All', 'Group.Read.All|Group.ReadWrite.All') `
+            -FallbackScopes @('Application.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All', 'Group.Read.All')
 
         $securityGroupId = $null
         $securityGroupName = $null
@@ -1213,7 +1451,7 @@ try {
             # Input is a GUID, verify it exists
             Write-Host "  Verifying group by Object ID: $SecurityGroup..." -ForegroundColor Gray
             try {
-                $groupResult = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/groups/$SecurityGroup" -ErrorAction Stop
+                $groupResult = Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/groups/$SecurityGroup" -Description "Look up security group by Object ID"
                 $securityGroupId = $groupResult.id
                 $securityGroupName = $groupResult.displayName
                 Write-Host "  Found group: '$securityGroupName' ($securityGroupId)" -ForegroundColor Green
@@ -1226,7 +1464,7 @@ try {
             # Input is a display name, search for it
             Write-Host "  Searching for group by display name: '$SecurityGroup'..." -ForegroundColor Gray
             $encodedName = [System.Uri]::EscapeDataString($SecurityGroup)
-            $searchResult = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/groups?`$filter=displayName eq '$encodedName'&`$select=id,displayName,securityEnabled" -ErrorAction Stop
+            $searchResult = Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/groups?`$filter=displayName eq '$encodedName'&`$select=id,displayName,securityEnabled" -Description "Search security group by display name"
 
             if (-not $searchResult.value -or $searchResult.value.Count -eq 0) {
                 throw "No Entra ID group found with display name '$SecurityGroup'. Check the name or provide the Object ID (GUID) instead."
@@ -1522,20 +1760,20 @@ exec caddy file-server --root /data --listen :80
                 }
             )
         }
-        $appResult = Invoke-MgGraphRequest -Method POST -Uri '/v1.0/applications' -Body $appBody -ErrorAction Stop
+        $appResult = Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri '/v1.0/applications' -Body $appBody -Description 'Create Entra app registration'
         $appClientId = $appResult.appId
         Write-Host "  App registration created: $appClientId" -ForegroundColor Green
 
         # Create service principal for the app
         Write-Host "  Creating service principal..." -ForegroundColor Gray
         $spBody = @{ appId = $appClientId }
-        $spResult = Invoke-MgGraphRequest -Method POST -Uri '/v1.0/servicePrincipals' -Body $spBody -ErrorAction Stop
+        $spResult = Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri '/v1.0/servicePrincipals' -Body $spBody -Description 'Create service principal'
         $spObjectId = $spResult.id
         Write-Host "  Service principal created: $spObjectId" -ForegroundColor Green
 
         # Grant admin consent for the delegated permissions (prevents user consent prompt)
         Write-Host "  Granting admin consent for openid, email, profile..." -ForegroundColor Gray
-        $msgraphSp = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/servicePrincipals?`$filter=appId eq '$msGraphResourceAppId'&`$select=id" -ErrorAction Stop
+        $msgraphSp = Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/servicePrincipals?`$filter=appId eq '$msGraphResourceAppId'&`$select=id" -Description 'Look up Microsoft Graph service principal'
         $msgraphSpId = $msgraphSp.value[0].id
 
         $oauth2Body = @{
@@ -1546,7 +1784,7 @@ exec caddy file-server --root /data --listen :80
             scope       = 'openid email profile'
         }
         try {
-            Invoke-MgGraphRequest -Method POST -Uri '/v1.0/oauth2PermissionGrants' -Body $oauth2Body -ErrorAction Stop | Out-Null
+            Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri '/v1.0/oauth2PermissionGrants' -Body $oauth2Body -Description 'Grant delegated admin consent' | Out-Null
             Write-Host "  Admin consent granted" -ForegroundColor Green
         }
         catch {
@@ -1567,7 +1805,7 @@ exec caddy file-server --root /data --listen :80
                     Write-Host "  Verifying consent..." -ForegroundColor Gray
                     
                     # Check if the permission grant now exists
-                    $existingGrants = Invoke-MgGraphRequest -Method GET -Uri "/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$spObjectId' and resourceId eq '$msgraphSpId'" -ErrorAction SilentlyContinue
+                    $existingGrants = Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$spObjectId' and resourceId eq '$msgraphSpId'" -Description 'Verify delegated admin consent'
                     
                     if ($existingGrants.value -and $existingGrants.value.Count -gt 0) {
                         Write-Host "  Admin consent verified successfully" -ForegroundColor Green
@@ -1588,7 +1826,7 @@ exec caddy file-server --root /data --listen :80
         # Require assignment (restricts access to assigned users/groups only)
         Write-Host "  Enabling assignment requirement (group-restricted access)..." -ForegroundColor Gray
         $spPatchBody = @{ appRoleAssignmentRequired = $true }
-        Invoke-MgGraphRequest -Method PATCH -Uri "/v1.0/servicePrincipals/$spObjectId" -Body $spPatchBody -ErrorAction Stop
+        Invoke-GraphApi -Context $containerGraphContext -Method PATCH -Uri "/v1.0/servicePrincipals/$spObjectId" -Body $spPatchBody -Description 'Require app role assignment' | Out-Null
 
         # Assign the security group for default access
         Write-Host "  Assigning security group '$securityGroupName' to the app..." -ForegroundColor Gray
@@ -1598,7 +1836,7 @@ exec caddy file-server --root /data --listen :80
             appRoleId   = '00000000-0000-0000-0000-000000000000'
         }
         try {
-            Invoke-MgGraphRequest -Method POST -Uri "/v1.0/servicePrincipals/$spObjectId/appRoleAssignments" -Body $assignmentBody -ErrorAction Stop | Out-Null
+            Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri "/v1.0/servicePrincipals/$spObjectId/appRoleAssignments" -Body $assignmentBody -Description 'Assign security group to app' | Out-Null
             Write-Host "  Security group assigned" -ForegroundColor Green
         }
         catch {
