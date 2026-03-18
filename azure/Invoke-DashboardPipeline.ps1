@@ -813,6 +813,56 @@ function Read-GzipTextFile {
     }
 }
 
+function Read-GzipTextFilePrefix {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxChars = 4096
+    )
+
+    $fileStream = [System.IO.File]::OpenRead($Path)
+    try {
+        $header = New-Object byte[] 2
+        $bytesRead = $fileStream.Read($header, 0, $header.Length)
+        $fileStream.Position = 0
+
+        $contentStream = if (($bytesRead -eq 2) -and $header[0] -eq 0x1f -and $header[1] -eq 0x8b) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        }
+        else {
+            $fileStream
+        }
+
+        try {
+            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
+            try {
+                $buffer = New-Object char[] $MaxChars
+                $charsRead = $reader.Read($buffer, 0, $buffer.Length)
+                if ($charsRead -le 0) {
+                    return ''
+                }
+
+                return [string]::new($buffer, 0, $charsRead)
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            if ($contentStream -ne $fileStream) {
+                $contentStream.Dispose()
+            }
+        }
+    }
+    finally {
+        $fileStream.Dispose()
+    }
+}
+
 function Write-GzipTextFile {
     [CmdletBinding()]
     param(
@@ -995,6 +1045,24 @@ function Write-VulnHistoryDocument {
 
     $json = $HistoryDocument | ConvertTo-Json -Compress -Depth 100
     Write-GzipTextFile -Path $Path -Content $json
+}
+
+function Get-VulnHistoryFileLatestDate {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $prefix = Read-GzipTextFilePrefix -Path $Path -MaxChars 4096
+    $latestMatch = [regex]::Match($prefix, '"latestDate"\s*:\s*"(?<date>\d{4}-\d{2}-\d{2})"')
+    if ($latestMatch.Success) {
+        return $latestMatch.Groups['date'].Value
+    }
+
+    $document = Read-VulnHistoryDocument -Path $Path
+    return (Get-VulnHistoryDocumentLatestDate -HistoryDocument $document)
 }
 
 function Get-VulnHistoryDocumentLatestDate {
@@ -1400,7 +1468,7 @@ function Publish-VulnStore {
 
             $currentCount = Test-VulnCurrentFile -Path $stagedCurrentPath
             foreach ($historyFile in Get-ChildItem -Path $stageRoot -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue) {
-                [void](Test-VulnHistoryFile -Path $historyFile.FullName)
+                [void](Test-VulnHistoryFileLightweight -Path $historyFile.FullName)
             }
 
             $filesToPublish = [System.Collections.Generic.List[object]]::new()
@@ -1513,14 +1581,21 @@ function Publish-VulnStoreFromLegacySnapshot {
                 [void](Split-VulnJsonPartition -InputPaths @($currentPath) -OutputRoot $currentPartitionRoot -Prefix 'current' -PartitionCount $partitionCount)
             }
 
+            Write-Output ("  Canonicalizing {0} new snapshot date(s) across {1} file(s) using {2} disk partition(s)..." -f $snapshotDates.Count, $legacyFiles.Count, $partitionCount)
             foreach ($snapshotDate in $snapshotDates) {
                 $closedOn = Get-VulnPreviousDay -Date $snapshotDate
                 $snapshotPartitionRoot = Join-Path $stageRoot ('snapshot-' + $snapshotDate)
                 [void](New-Item -Path $snapshotPartitionRoot -ItemType Directory -Force)
+                $snapshotFilesForDate = @($filesByDate[$snapshotDate] ?? @())
+                $snapshotIndex = [array]::IndexOf($snapshotDates, $snapshotDate) + 1
+                Write-Output ("  [{0}/{1}] Processing snapshot date {2} from {3} file(s)..." -f $snapshotIndex, $snapshotDates.Count, $snapshotDate, $snapshotFilesForDate.Count)
+                if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+                    Write-MemoryUsage -Label ("VulnStore " + $snapshotDate + " Start")
+                }
 
                 try {
                     [void](Split-VulnJsonPartition `
-                        -InputPaths @(($filesByDate[$snapshotDate] ?? @()) | ForEach-Object { $_.FullName }) `
+                        -InputPaths @($snapshotFilesForDate | ForEach-Object { $_.FullName }) `
                         -OutputRoot $snapshotPartitionRoot `
                         -Prefix 'snapshot' `
                         -OnboardedOnly `
@@ -1573,6 +1648,9 @@ function Publish-VulnStoreFromLegacySnapshot {
                     }
                 }
                 finally {
+                    if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+                        Write-MemoryUsage -Label ("VulnStore " + $snapshotDate + " End")
+                    }
                     if (Test-Path -LiteralPath $snapshotPartitionRoot) {
                         Remove-Item -LiteralPath $snapshotPartitionRoot -Recurse -Force -ErrorAction SilentlyContinue
                     }
@@ -1626,7 +1704,7 @@ function Publish-VulnStoreFromLegacySnapshot {
                     -ExistingDocument $existingDocument `
                     -AppendPath ([string]$appendState.AppendPath) `
                     -LatestDate $finalLatestDate
-                [void](Test-VulnHistoryFile -Path $historyStagePath)
+                [void](Test-VulnHistoryFileLightweight -Path $historyStagePath)
 
                 $filesToPublish.Add([PSCustomObject]@{
                     StagePath = $historyStagePath
@@ -1832,6 +1910,77 @@ function Test-VulnHistoryFile {
     return @($document.snapshots).Count
 }
 
+function Test-VulnHistoryFileLightweight {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fileStream = [System.IO.File]::OpenRead($Path)
+    try {
+        $header = New-Object byte[] 2
+        $bytesRead = $fileStream.Read($header, 0, $header.Length)
+        $fileStream.Position = 0
+
+        $contentStream = if (($bytesRead -eq 2) -and $header[0] -eq 0x1f -and $header[1] -eq 0x8b) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        }
+        else {
+            $fileStream
+        }
+
+        try {
+            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
+            try {
+                $prefixBuilder = [System.Text.StringBuilder]::new()
+                $buffer = New-Object char[] 8192
+                $totalChars = 0
+
+                while (($charsRead = $reader.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    if ($prefixBuilder.Length -lt 4096) {
+                        $charsToKeep = [Math]::Min(4096 - $prefixBuilder.Length, $charsRead)
+                        [void]$prefixBuilder.Append($buffer, 0, $charsToKeep)
+                    }
+                    $totalChars += $charsRead
+                }
+
+                if ($totalChars -eq 0) {
+                    throw "History file '$Path' is empty."
+                }
+
+                $prefix = $prefixBuilder.ToString()
+                if ($prefix -notmatch '^\s*\{') {
+                    throw "History file '$Path' does not begin with a JSON object."
+                }
+                if ($prefix -notmatch '"year"\s*:') {
+                    throw "History file '$Path' is missing 'year'."
+                }
+                if ($prefix -notmatch '"latestDate"\s*:') {
+                    throw "History file '$Path' is missing 'latestDate'."
+                }
+                if ($prefix -notmatch '"snapshots"\s*:') {
+                    throw "History file '$Path' is missing 'snapshots'."
+                }
+
+                return $totalChars
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            if ($contentStream -ne $fileStream) {
+                $contentStream.Dispose()
+            }
+        }
+    }
+    finally {
+        $fileStream.Dispose()
+    }
+}
+
 function Get-VulnHistoryDocumentList {
     [CmdletBinding()]
     [OutputType([object[]])]
@@ -1868,8 +2017,7 @@ function Get-VulnStoreLatestSnapshotDate {
     }
 
     foreach ($file in Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name) {
-        $document = Read-VulnHistoryDocument -Path $file.FullName
-        $docLatest = Get-VulnHistoryDocumentLatestDate -HistoryDocument $document
+        $docLatest = Get-VulnHistoryFileLatestDate -Path $file.FullName
         if (-not [string]::IsNullOrWhiteSpace($docLatest)) {
             $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $docLatest
         }
