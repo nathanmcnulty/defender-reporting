@@ -232,6 +232,8 @@ function Read-StoreTransactionState {
 }
 
 function Remove-StoreTransactionArtifacts {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -931,7 +933,8 @@ function Write-VulnCurrentFile {
     }
 }
 
-function Write-VulnCurrentFileFromJsonLines {
+function Write-VulnCurrentFileFromNdjson {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -1102,8 +1105,15 @@ function Write-VulnHistoryDocumentFromAppendFile {
                 $writer.Write(($LatestDate | ConvertTo-Json -Compress))
                 $writer.Write(',"snapshots":[')
 
+                $existingSnapshots = if ($null -ne $ExistingDocument) {
+                    @($ExistingDocument.snapshots)
+                }
+                else {
+                    @()
+                }
+
                 $hasWrittenSnapshot = $false
-                foreach ($snapshot in @($ExistingDocument?.snapshots)) {
+                foreach ($snapshot in $existingSnapshots) {
                     if ($null -eq $snapshot) { continue }
                     if ($hasWrittenSnapshot) { $writer.Write(',') }
                     $writer.Write(($snapshot | ConvertTo-Json -Compress -Depth 100))
@@ -1194,7 +1204,7 @@ function Get-VulnPartitionFilePath {
     return Join-Path -Path $Root -ChildPath ("{0}-{1:D2}.ndjson" -f $Prefix, $Index)
 }
 
-function Partition-VulnJsonLinesToFiles {
+function Split-VulnJsonPartition {
     [CmdletBinding()]
     [OutputType([int[]])]
     param(
@@ -1311,7 +1321,8 @@ function Write-VulnPartitionMapFile {
     }
 }
 
-function Write-VulnCurrentFileFromPartitionFiles {
+function Write-VulnCurrentFileFromPartition {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
     [CmdletBinding()]
     [OutputType([int])]
     param(
@@ -1370,6 +1381,8 @@ function Publish-VulnStore {
         $Store
     )
 
+    $storeToPublish = $Store
+
     return Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
         Restore-StoreTransaction -BasePath $BasePath -StoreName 'vuln'
 
@@ -1378,9 +1391,9 @@ function Publish-VulnStore {
 
         try {
             $stagedCurrentPath = Get-VulnCurrentPath -BasePath $stageRoot
-            Write-VulnCurrentFile -Path $stagedCurrentPath -Records $Store.CurrentRecords
+            Write-VulnCurrentFile -Path $stagedCurrentPath -Records $storeToPublish.CurrentRecords
 
-            foreach ($historyDocument in @($Store.HistoryDocuments)) {
+            foreach ($historyDocument in @($storeToPublish.HistoryDocuments)) {
                 $historyPath = Get-VulnHistoryPath -BasePath $stageRoot -Year ([int]$historyDocument.year)
                 Write-VulnHistoryDocument -Path $historyPath -HistoryDocument $historyDocument
             }
@@ -1397,7 +1410,7 @@ function Publish-VulnStore {
             })
 
             $publishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($historyDocument in @($Store.HistoryDocuments)) {
+            foreach ($historyDocument in @($storeToPublish.HistoryDocuments)) {
                 $historyName = [string]::Format($Script:VulnHistoryFileNamePattern, [int]$historyDocument.year)
                 [void]$publishedHistoryNames.Add($historyName)
                 $filesToPublish.Add([PSCustomObject]@{
@@ -1416,8 +1429,8 @@ function Publish-VulnStore {
 
             return [PSCustomObject]@{
                 CurrentRows = $currentCount
-                HistoryYears = @($Store.HistoryDocuments).Count
-                LatestSnapshotDate = $Store.LatestSnapshotDate
+                HistoryYears = @($storeToPublish.HistoryDocuments).Count
+                LatestSnapshotDate = $storeToPublish.LatestSnapshotDate
             }
         }
         finally {
@@ -1497,7 +1510,7 @@ function Publish-VulnStoreFromLegacySnapshot {
             $currentPartitionRoot = Join-Path $stageRoot 'current-partitions'
             [void](New-Item -Path $currentPartitionRoot -ItemType Directory -Force)
             if ($storeExists -and (Test-Path -LiteralPath $currentPath -PathType Leaf)) {
-                [void](Partition-VulnJsonLinesToFiles -InputPaths @($currentPath) -OutputRoot $currentPartitionRoot -Prefix 'current' -PartitionCount $partitionCount)
+                [void](Split-VulnJsonPartition -InputPaths @($currentPath) -OutputRoot $currentPartitionRoot -Prefix 'current' -PartitionCount $partitionCount)
             }
 
             foreach ($snapshotDate in $snapshotDates) {
@@ -1506,7 +1519,7 @@ function Publish-VulnStoreFromLegacySnapshot {
                 [void](New-Item -Path $snapshotPartitionRoot -ItemType Directory -Force)
 
                 try {
-                    [void](Partition-VulnJsonLinesToFiles `
+                    [void](Split-VulnJsonPartition `
                         -InputPaths @(($filesByDate[$snapshotDate] ?? @()) | ForEach-Object { $_.FullName }) `
                         -OutputRoot $snapshotPartitionRoot `
                         -Prefix 'snapshot' `
@@ -1569,7 +1582,7 @@ function Publish-VulnStoreFromLegacySnapshot {
             Close-VulnHistoryAppendStore -AppendStateByYear $historyAppendState
 
             $stagedCurrentPath = Get-VulnCurrentPath -BasePath $stageRoot
-            [void](Write-VulnCurrentFileFromPartitionFiles -PartitionRoot $currentPartitionRoot -PartitionPrefix 'current' -OutputPath $stagedCurrentPath -PartitionCount $partitionCount)
+            [void](Write-VulnCurrentFileFromPartition -PartitionRoot $currentPartitionRoot -PartitionPrefix 'current' -OutputPath $stagedCurrentPath -PartitionCount $partitionCount)
             $currentCount = Test-VulnCurrentFile -Path $stagedCurrentPath
 
             $filesToPublish = [System.Collections.Generic.List[object]]::new()
@@ -1596,9 +1609,15 @@ function Publish-VulnStoreFromLegacySnapshot {
                 else {
                     $null
                 }
+                $existingLatestDate = if ($null -ne $existingDocument) {
+                    Get-VulnHistoryDocumentLatestDate -HistoryDocument $existingDocument
+                }
+                else {
+                    $null
+                }
 
                 $finalLatestDate = Get-MaxVulnDate `
-                    -Primary (if ($null -ne $existingDocument) { Get-VulnHistoryDocumentLatestDate -HistoryDocument $existingDocument } else { $null }) `
+                    -Primary $existingLatestDate `
                     -Secondary ([string]$appendState.LatestDate)
                 $historyStagePath = Get-VulnHistoryPath -BasePath $stageRoot -Year $year
                 Write-VulnHistoryDocumentFromAppendFile `
@@ -2237,6 +2256,7 @@ function Test-IsMachineHistorySegmentFileName {
 }
 
 function New-MachineHistorySegmentFileName {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     [OutputType([string])]
     param()
@@ -2247,6 +2267,7 @@ function New-MachineHistorySegmentFileName {
 }
 
 function Get-MachineHistorySegmentFiles {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
     [CmdletBinding()]
     [OutputType([System.IO.FileInfo[]])]
     param(
@@ -2262,6 +2283,7 @@ function Get-MachineHistorySegmentFiles {
 }
 
 function Get-MachineHistorySourcePaths {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
     [CmdletBinding()]
     [OutputType([string[]])]
     param(
@@ -3562,6 +3584,7 @@ function ConvertTo-NormalizedData {
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
+    $normalizationDataPath = $DataPath
 
     $lookups = @{
         vendors = [System.Collections.Generic.List[string]]::new()
@@ -3623,9 +3646,13 @@ function ConvertTo-NormalizedData {
     $isFirstVuln = $true
 
     function Get-NormalizationSourceRows {
-        if (Test-VulnStoreExistence -BasePath $DataPath) {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+        [CmdletBinding()]
+        param()
+
+        if (Test-VulnStoreExistence -BasePath $normalizationDataPath) {
             Write-Information '  Found vulnerability current/history store to normalize...' -InformationAction Continue
-            foreach ($record in Read-VulnStoreRow -BasePath $DataPath) {
+            foreach ($record in Read-VulnStoreRow -BasePath $normalizationDataPath) {
                 if ($null -ne $record) {
                     Write-Output $record
                 }
@@ -3633,10 +3660,10 @@ function ConvertTo-NormalizedData {
             return
         }
 
-        $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $DataPath)
-        if ($legacyFiles.Count -eq 0) { throw "No VulnExport snapshot files found in '$DataPath'." }
+        $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $normalizationDataPath)
+        if ($legacyFiles.Count -eq 0) { throw "No VulnExport snapshot files found in '$normalizationDataPath'." }
 
-        $legacyStore = Convert-LegacyVulnSnapshotsToStore -BasePath $DataPath
+        $legacyStore = Convert-LegacyVulnSnapshotsToStore -BasePath $normalizationDataPath
         Write-Information "  Found $($legacyFiles.Count) legacy export file(s); canonicalizing in memory for normalization..." -InformationAction Continue
 
         foreach ($record in @($legacyStore.CurrentRecords)) {
