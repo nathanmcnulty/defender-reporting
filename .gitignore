@@ -1,9 +1,2 @@
-
-# Credentials
 .github/copilot-instructions.md
-dashboard-app
-
-# Local validation artifacts
-validate-output.json
-sample-reports/dashboard-audit.json
-tests/local/
+/dashboard-app
