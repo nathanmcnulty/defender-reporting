@@ -518,17 +518,13 @@ function Export-ToBlobStorage {
 
     # Upload new export files (compressed)
     $exportFiles = Get-ChildItem -Path $ExportsPath -File | Where-Object { $_.Extension -in @('.json', '.gz') }
+    $canonicalStoreFileNames = @(Get-CanonicalExportStoreFileNames -BasePath $ExportsPath)
+    $canonicalStoreFileNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($canonicalStoreFileName in $canonicalStoreFileNames) {
+        [void]$canonicalStoreFileNameSet.Add($canonicalStoreFileName)
+    }
     foreach ($file in $exportFiles) {
-        $isCanonicalStoreFile = $file.Name -in @($Script:MachineCurrentFileName, $Script:MachineHistoryFileName, $Script:AdvancedHuntingCurrentFileName, $Script:VulnCurrentFileName)
-        if ($file.Name -like 'VulnHistory_*.json.gz') {
-            $isCanonicalStoreFile = $true
-        }
-        if ($file.Name -like 'VulnHistoryRows_*.json.gz') {
-            $isCanonicalStoreFile = $true
-        }
-        if ($file.Name -match '^Machines_History_(?:\d{4}Q[1-4]|\d{8}T\d{6}Z_[a-f0-9]{8})\.json\.gz$') {
-            $isCanonicalStoreFile = $true
-        }
+        $isCanonicalStoreFile = $canonicalStoreFileNameSet.Contains($file.Name)
         if ($UseGzip) {
             if ($file.Extension -eq '.gz') {
                 $blobName = $file.Name
@@ -572,25 +568,6 @@ function Export-ToBlobStorage {
         Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $legacyBlob -StorageToken $StorageToken
     }
 
-    $canonicalMachineHistoryBlobNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($file in @(
-        Get-ChildItem -Path $ExportsPath -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^Machines_History_\d{4}Q[1-4]\.json\.gz$' }
-    )) {
-        [void]$canonicalMachineHistoryBlobNames.Add($file.Name)
-    }
-
-    foreach ($blobName in @(
-        Get-BlobList -AccountName $AccountName -Container $Script:BlobContainers.Exports -StorageToken $StorageToken |
-            Where-Object {
-                $_ -match '^Machines_History(?:_\d{4}Q[1-4]|_\d{8}T\d{6}Z_[a-f0-9]{8})?\.json\.gz$' -and
-                -not $canonicalMachineHistoryBlobNames.Contains($_)
-            }
-    )) {
-        Write-Output "  Removing stale machine history blob $blobName..."
-        Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken
-    }
-
     foreach ($legacyBlob in $LegacyAdvancedHuntingBlobNames) {
         Write-Output "  Removing legacy Advanced Hunting snapshot blob $legacyBlob..."
         Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $legacyBlob -StorageToken $StorageToken
@@ -601,22 +578,11 @@ function Export-ToBlobStorage {
         Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $legacyBlob -StorageToken $StorageToken
     }
 
-    $canonicalVulnHistoryBlobNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($file in @(
-        Get-ChildItem -Path $ExportsPath -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^VulnHistory(?:Rows)?_(?:\d{4}Q[1-4]|\d{4})\.json\.gz$' }
-    )) {
-        [void]$canonicalVulnHistoryBlobNames.Add($file.Name)
-    }
-
-    foreach ($blobName in @(
-        Get-BlobList -AccountName $AccountName -Container $Script:BlobContainers.Exports -StorageToken $StorageToken |
-            Where-Object {
-                $_ -match '^VulnHistory(?:Rows)?_(?:\d{4}Q[1-4]|\d{4})\.json\.gz$' -and
-                -not $canonicalVulnHistoryBlobNames.Contains($_)
-            }
-    )) {
-        Write-Output "  Removing stale vulnerability history blob $blobName..."
+    $staleBlobNames = @(Get-StaleExportStoreArtifactNames `
+        -ExistingNames (Get-BlobList -AccountName $AccountName -Container $Script:BlobContainers.Exports -StorageToken $StorageToken) `
+        -CanonicalNames $canonicalStoreFileNames)
+    foreach ($blobName in $staleBlobNames) {
+        Write-Output "  Removing stale store blob $blobName..."
         Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken
     }
 
@@ -729,7 +695,7 @@ try {
     $legacyVulnerabilityBlobs = @($existingBlobs | Where-Object { $_ -match '^VulnExport_\d+_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
     $hasMachineCurrentBlob = $existingBlobs -contains $Script:MachineCurrentFileName
     $hasAdvancedHuntingCurrentBlob = $existingBlobs -contains $Script:AdvancedHuntingCurrentFileName
-    $hasCanonicalVulnStore = ($existingBlobs -contains $Script:VulnCurrentFileName) -or (@($existingBlobs | Where-Object { $_ -match '^VulnHistory_(?:\d{4}Q[1-4]|\d{4})\.json\.gz$' }).Count -gt 0)
+    $hasCanonicalVulnStore = ($existingBlobs -contains $Script:VulnCurrentFileName) -or (@($existingBlobs | Where-Object { Test-IsVulnHistoryFileName -Name $_ }).Count -gt 0)
     Write-Output "  Found $($existingBlobs.Count) existing blob(s)"
 
     foreach ($blobName in $existingBlobs) {
@@ -743,7 +709,7 @@ try {
         elseif (($blobName -in $legacyVulnerabilityBlobs) -and $hasCanonicalVulnStore) {
             $shouldDownload = $false
         }
-        elseif (($blobName -match '^Machines_History_\d{8}T\d{6}Z_[a-f0-9]{8}\.json\.gz$') -and $hasMachineCurrentBlob) {
+        elseif ((Test-IsMachineHistorySegmentFileName -Name $blobName) -and $hasMachineCurrentBlob) {
             $shouldDownload = $false
         }
 
@@ -757,7 +723,7 @@ try {
         Get-BlobContent -AccountName $StorageAccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -DestinationPath $localFile -StorageToken $storageToken
 
         # Decompress .gz files
-        if ($blobName -match '^(VulnExport_current\.json\.gz|VulnHistory_(?:\d{4}Q[1-4]|\d{4})\.json\.gz|VulnHistoryRows_(?:\d{4}Q[1-4]|\d{4})\.json\.gz|Machines_Current\.json\.gz|Machines_History(?:_\d{4}Q[1-4]|_\d{8}T\d{6}Z_[a-f0-9]{8})?\.json\.gz|AdvancedHunting_Current\.json\.gz)$') {
+        if (Test-IsNativeCompressedStoreFileName -Name $blobName) {
             continue
         }
 
