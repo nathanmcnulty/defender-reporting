@@ -318,7 +318,12 @@ function Publish-VulnStoreFromLegacySnapshot {
             foreach ($periodKey in $existingHistoryByPeriod.Keys) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
             foreach ($periodKey in $touchedPeriods) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
 
-            $publishedHistoryNames = Get-VulnHistoryPublishedNameSet -PeriodKeys @($finalHistoryPeriods)
+            $publishedHistoryNames = if ($finalHistoryPeriods.Count -gt 0) {
+                Get-VulnHistoryPublishedNameSet -PeriodKeys @($finalHistoryPeriods)
+            }
+            else {
+                [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            }
             $historyFilesToRemove = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedHistoryNames
             Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths $historyFilesToRemove
             $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath

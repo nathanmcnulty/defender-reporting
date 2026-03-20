@@ -491,6 +491,7 @@ function Get-VulnObservedWindowIdentityKey {
 }
 
 function Merge-VulnObservedWindowRows {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
     [CmdletBinding()]
     [OutputType([object[]])]
     param(
@@ -561,6 +562,29 @@ function Merge-VulnObservedWindowRows {
     }
 
     return @($mergedRows)
+}
+
+function Read-NormalizedVulnStoreRow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, 30)]
+        [int]$AllowedGapDays = 1
+    )
+
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($record in Read-VulnStoreRow -BasePath $BasePath) {
+        if ($null -ne $record) {
+            $rows.Add($record)
+        }
+    }
+
+    foreach ($row in @(Merge-VulnObservedWindowRows -Rows @($rows) -AllowedGapDays $AllowedGapDays)) {
+        Write-Output $row
+    }
 }
 
 function Get-NormalizationSourceRows {
@@ -673,12 +697,11 @@ function ConvertTo-NormalizedData {
             $fallbackGroupName = $v.PSObject.Properties['RbacGroupName']?.Value
             $fallbackPlatform = $v.PSObject.Properties['OSPlatform']?.Value
             $fallbackOsVersion = $v.PSObject.Properties['OSVersion']?.Value
-            $deviceKey = if ($machine) {
+            $deviceKey = if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
                 $deviceId
             }
             else {
                 @(
-                    $deviceId
                     [string]$fallbackDeviceName
                     [string]$fallbackGroupName
                     [string]$fallbackPlatform
@@ -687,9 +710,8 @@ function ConvertTo-NormalizedData {
             }
 
             if (-not $deviceIndex.ContainsKey($deviceKey)) {
-                    # When machine enrichment is missing, vulnerability exports can still carry
-                    # row-specific device metadata. Keep distinct fallback variants instead of
-                    # collapsing everything to the first row seen for a DeviceId.
+                    # Prefer the stable DeviceId whenever it exists. Only fall back to
+                    # row-level metadata when the export truly lacks a device identifier.
                     $groupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $fallbackGroupName }
                     if ([string]::IsNullOrWhiteSpace([string]$groupName)) {
                         $groupName = if ([string]::IsNullOrWhiteSpace([string]$fallbackGroupName)) { '(none)' } else { $fallbackGroupName }

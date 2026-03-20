@@ -587,6 +587,7 @@ function Get-VulnHistoryPublishedNameSet {
     [OutputType([System.Collections.Generic.HashSet[string]])]
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [string[]]$PeriodKeys
     )
 
@@ -608,9 +609,14 @@ function Get-VulnHistoryRemovePaths {
         [Parameter(Mandatory = $true)]
         [string]$BasePath,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
         [System.Collections.Generic.HashSet[string]]$PublishedHistoryNames
     )
+
+    if ($null -eq $PublishedHistoryNames) {
+        $PublishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
 
     $removePaths = [System.Collections.Generic.List[string]]::new()
     foreach ($path in @(
@@ -1732,7 +1738,12 @@ function Repair-VulnHistoryLayout {
 
     try {
         $filesToPublish = [System.Collections.Generic.List[object]]::new()
-        $publishedHistoryNames = Get-VulnHistoryPublishedNameSet -PeriodKeys @($canonicalDocumentsByPeriod.Keys)
+        $publishedHistoryNames = if ($canonicalDocumentsByPeriod.Count -gt 0) {
+            Get-VulnHistoryPublishedNameSet -PeriodKeys @($canonicalDocumentsByPeriod.Keys)
+        }
+        else {
+            [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        }
 
         foreach ($periodKey in @($canonicalDocumentsByPeriod.Keys | Sort-Object)) {
             $historyDocument = $canonicalDocumentsByPeriod[$periodKey]
@@ -2000,11 +2011,17 @@ function Publish-VulnStoreUnlocked {
             TargetPath = Get-VulnCurrentPath -BasePath $BasePath
         })
 
-        $publishedHistoryNames = Get-VulnHistoryPublishedNameSet -PeriodKeys @(
+        $historyPeriodKeys = @(
             @($storeToPublish.HistoryDocuments) | ForEach-Object {
                 Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $_
             }
         )
+        $publishedHistoryNames = if ($historyPeriodKeys.Count -gt 0) {
+            Get-VulnHistoryPublishedNameSet -PeriodKeys $historyPeriodKeys
+        }
+        else {
+            [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        }
         foreach ($historyDocument in @($storeToPublish.HistoryDocuments)) {
             $periodKey = Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument
             $historyName = [string]::Format($Script:VulnHistoryFileNamePattern, $periodKey)
