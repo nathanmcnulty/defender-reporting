@@ -321,3 +321,5 @@ function Invoke-MdeMachineStoreRefresh {
             OutputFiles = @($publishResult.OutputFiles)
             MigratedLegacy = $publishResult.MigratedLegacy
         }
+    }
+}
