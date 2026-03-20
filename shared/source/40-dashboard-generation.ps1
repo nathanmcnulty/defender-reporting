@@ -463,6 +463,106 @@ function Get-NormalizationCachedYmdDate {
     return $normalized
 }
 
+function Get-VulnObservedWindowIdentityKey {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Row
+    )
+
+    $id = [string](Get-VulnPropertyValue -InputObject $Row -Name 'Id')
+    if (-not [string]::IsNullOrWhiteSpace($id)) {
+        return $id
+    }
+
+    $sourceId = [string](Get-VulnPropertyValue -InputObject $Row -Name 'SourceId')
+    if (-not [string]::IsNullOrWhiteSpace($sourceId)) {
+        return $sourceId
+    }
+
+    return @(
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceId')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'CveId')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareVendor')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareName')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareVersion')
+    ) -join '|'
+}
+
+function Merge-VulnObservedWindowRows {
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Rows,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, 30)]
+        [int]$AllowedGapDays = 1
+    )
+
+    if (@($Rows).Count -le 1) {
+        return @($Rows)
+    }
+
+    $rowsByIdentity = @{}
+    foreach ($row in @($Rows)) {
+        if ($null -eq $row) { continue }
+
+        $identityKey = Get-VulnObservedWindowIdentityKey -Row $row
+        if (-not $rowsByIdentity.ContainsKey($identityKey)) {
+            $rowsByIdentity[$identityKey] = [System.Collections.Generic.List[object]]::new()
+        }
+        $rowsByIdentity[$identityKey].Add($row)
+    }
+
+    $mergedRows = [System.Collections.Generic.List[object]]::new()
+    foreach ($identityKey in @($rowsByIdentity.Keys | Sort-Object)) {
+        $items = @($rowsByIdentity[$identityKey] | Sort-Object FirstSeenTimestamp, LastSeenTimestamp)
+        if ($items.Count -eq 0) { continue }
+
+        $current = Copy-VulnRecord -Record $items[0]
+        for ($index = 1; $index -lt $items.Count; $index++) {
+            $candidate = $items[$index]
+            $currentWindow = Get-NormalizedVulnSeenWindow `
+                -FirstSeenValue (Get-VulnPropertyValue -InputObject $current -Name 'FirstSeenTimestamp') `
+                -LastSeenValue (Get-VulnPropertyValue -InputObject $current -Name 'LastSeenTimestamp')
+            $candidateWindow = Get-NormalizedVulnSeenWindow `
+                -FirstSeenValue (Get-VulnPropertyValue -InputObject $candidate -Name 'FirstSeenTimestamp') `
+                -LastSeenValue (Get-VulnPropertyValue -InputObject $candidate -Name 'LastSeenTimestamp')
+
+            $shouldMerge = $false
+            if (
+                -not [string]::IsNullOrWhiteSpace($currentWindow.FirstSeenTimestamp) -and
+                -not [string]::IsNullOrWhiteSpace($currentWindow.LastSeenTimestamp) -and
+                -not [string]::IsNullOrWhiteSpace($candidateWindow.FirstSeenTimestamp) -and
+                -not [string]::IsNullOrWhiteSpace($candidateWindow.LastSeenTimestamp)
+            ) {
+                $mergeThreshold = ([datetime]$currentWindow.LastSeenTimestamp).AddDays($AllowedGapDays + 1).ToString('yyyy-MM-dd')
+                if ([datetime]$candidateWindow.FirstSeenTimestamp -le [datetime]$mergeThreshold) {
+                    $shouldMerge = $true
+                }
+            }
+
+            if ($shouldMerge) {
+                $merged = Copy-VulnRecord -Record $candidate
+                $merged.FirstSeenTimestamp = Get-MinVulnDate -Primary $currentWindow.FirstSeenTimestamp -Secondary $candidateWindow.FirstSeenTimestamp
+                $merged.LastSeenTimestamp = Get-MaxVulnDate -Primary $currentWindow.LastSeenTimestamp -Secondary $candidateWindow.LastSeenTimestamp
+                $current = $merged
+                continue
+            }
+
+            $mergedRows.Add($current)
+            $current = Copy-VulnRecord -Record $candidate
+        }
+
+        $mergedRows.Add($current)
+    }
+
+    return @($mergedRows)
+}
+
 function Get-NormalizationSourceRows {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
     [CmdletBinding()]
@@ -471,37 +571,48 @@ function Get-NormalizationSourceRows {
         [string]$DataPath
     )
 
+    $rows = [System.Collections.Generic.List[object]]::new()
+
     if (Test-VulnStoreExistence -BasePath $DataPath) {
         Write-Information '  Found vulnerability current/history store to normalize...' -InformationAction Continue
         foreach ($record in Read-VulnStoreRow -BasePath $DataPath) {
             if ($null -ne $record) {
-                Write-Output $record
+                $rows.Add($record)
             }
         }
-        return
     }
+    else {
+        $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $DataPath)
+        if ($legacyFiles.Count -eq 0) { throw "No VulnExport snapshot files found in '$DataPath'." }
 
-    $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $DataPath)
-    if ($legacyFiles.Count -eq 0) { throw "No VulnExport snapshot files found in '$DataPath'." }
+        $legacyStore = Convert-LegacyVulnSnapshotsToStore -BasePath $DataPath
+        Write-Information "  Found $($legacyFiles.Count) legacy export file(s); canonicalizing in memory for normalization..." -InformationAction Continue
 
-    $legacyStore = Convert-LegacyVulnSnapshotsToStore -BasePath $DataPath
-    Write-Information "  Found $($legacyFiles.Count) legacy export file(s); canonicalizing in memory for normalization..." -InformationAction Continue
-
-    foreach ($record in @($legacyStore.CurrentRecords)) {
-        if ($null -ne $record) {
-            Write-Output $record
+        foreach ($record in @($legacyStore.CurrentRecords)) {
+            if ($null -ne $record) {
+                $rows.Add($record)
+            }
         }
-    }
 
-    foreach ($historyDocument in @($legacyStore.HistoryDocuments)) {
-        foreach ($snapshot in @($historyDocument.snapshots)) {
-            foreach ($entry in @($snapshot.closed)) {
-                $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
-                if ($null -ne $row) {
-                    Write-Output $row
+        foreach ($historyDocument in @($legacyStore.HistoryDocuments)) {
+            foreach ($snapshot in @($historyDocument.snapshots)) {
+                foreach ($entry in @($snapshot.closed)) {
+                    $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
+                    if ($null -ne $row) {
+                        $rows.Add($row)
+                    }
                 }
             }
         }
+    }
+
+    $normalizedRows = @(Merge-VulnObservedWindowRows -Rows @($rows))
+    if ($normalizedRows.Count -ne $rows.Count) {
+        Write-Information ("  Collapsed {0} vulnerability observation row(s) into {1} normalized window(s)" -f $rows.Count, $normalizedRows.Count) -InformationAction Continue
+    }
+
+    foreach ($row in $normalizedRows) {
+        Write-Output $row
     }
 }
 
