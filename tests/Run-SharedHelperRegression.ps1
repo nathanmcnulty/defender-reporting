@@ -149,6 +149,34 @@ function Test-LegacyVulnMigrationSmoke {
     }
 }
 
+function Test-LegacyVulnMigrationSingleSnapshot {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('legacy-vuln-single-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $path = Join-Path $tempRoot 'VulnExport_1_2026-03-20.json'
+        $row = Get-TestVulnRow -Id 'single-001' -CveId 'CVE-2026-0099' -SnapshotDate '2026-03-20' -Version '1.0.0'
+        [System.IO.File]::WriteAllLines($path, @($row | ConvertTo-Json -Compress -Depth 8), [System.Text.UTF8Encoding]::new($false))
+
+        $publishResult = Publish-VulnStoreFromLegacySnapshot -BasePath $tempRoot -RemoveLegacyFiles
+        $storeRows = @(Read-VulnStoreRow -BasePath $tempRoot)
+
+        Assert-True ((Test-Path -LiteralPath (Get-VulnCurrentPath -BasePath $tempRoot) -PathType Leaf)) 'Canonical vuln current file was not materialized for a single snapshot.'
+        Assert-True (@(Get-ChildItem -Path $tempRoot -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue).Count -eq 0) 'Single-snapshot migration should not create history period files.'
+        Assert-True ($publishResult.CurrentRows -eq 1) 'Expected one current row after migrating a single snapshot.'
+        Assert-True ($publishResult.HistoryYears -eq 0) 'Expected zero history periods after migrating a single snapshot.'
+        Assert-True ($storeRows.Count -eq 1) 'Expected single-snapshot migration to expose only one current row.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-VulnCanonicalSignatureStability {
     [CmdletBinding()]
     param()
@@ -171,6 +199,7 @@ function Test-VulnCanonicalSignatureStability {
 }
 
 function Test-MergeVulnObservedWindowRows {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
     [CmdletBinding()]
     param()
 
@@ -197,13 +226,79 @@ function Test-MergeVulnObservedWindowRows {
     Assert-True ($mergeIdRows[1].LastSeenTimestamp -eq '2026-03-23') 'Expected distant reappearance to remain a separate window.'
 }
 
+function Test-ReadNormalizedVulnStoreRow {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-vuln-reader-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $historyRow = Get-TestVulnRow -Id 'normalized-001' -CveId 'CVE-2026-0006' -SnapshotDate '2026-03-17' -Version '1.0.0'
+        $currentRow = Get-TestVulnRow -Id 'normalized-001' -CveId 'CVE-2026-0006' -SnapshotDate '2026-03-19' -Version '1.0.0'
+        $currentRow.RecommendedSecurityUpdate = 'KB000777'
+        $currentRow.RecommendedSecurityUpdateId = 'KB000777'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        [void](New-Item -Path (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -ItemType File -Force)
+        Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
+
+        $normalizedRows = @(Read-NormalizedVulnStoreRow -BasePath $tempRoot)
+
+        Assert-True ($normalizedRows.Count -eq 1) 'Expected normalized vuln reader to collapse overlapping same-Id windows from store history.'
+        Assert-True ($normalizedRows[0].FirstSeenTimestamp -eq '2026-03-17') 'Expected normalized vuln reader to preserve the earliest first-seen date.'
+        Assert-True ($normalizedRows[0].LastSeenTimestamp -eq '2026-03-19') 'Expected normalized vuln reader to preserve the latest last-seen date.'
+        Assert-True ($normalizedRows[0].RecommendedSecurityUpdate -eq 'KB000777') 'Expected normalized vuln reader to retain the newest row metadata.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ConvertToNormalizedDataUsesStableDeviceIdFallback {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-device-key-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+
+    try {
+        $first = Get-TestVulnRow -Id 'device-fallback-001' -CveId 'CVE-2026-0007' -SnapshotDate '2026-03-20' -Version '1.0.0'
+        $second = Get-TestVulnRow -Id 'device-fallback-002' -CveId 'CVE-2026-0008' -SnapshotDate '2026-03-20' -Version '1.1.0'
+        $second.DeviceName = 'device01-renamed.contoso.com'
+        $second.RbacGroupName = 'Pilot'
+        $second.OSVersion = '10.0.99999'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($first, $second)
+
+        $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -Machines @{} -AdvancedHuntingData @{}
+
+        Assert-True ($result.Lookups.devices.Count -eq 1) 'Expected normalization to reuse DeviceId when machine enrichment is missing.'
+        Assert-True ([string]$result.Lookups.devices[0].id -eq 'device-001') 'Expected normalized device entry to keep the stable DeviceId.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Write-Output 'Running shared-helper regression checks...'
 Test-CanonicalLayoutHelper
 Write-Output '  Canonical layout helper checks passed.'
 Test-LegacyVulnMigrationSmoke
 Write-Output '  Legacy vulnerability migration smoke checks passed.'
+Test-LegacyVulnMigrationSingleSnapshot
+Write-Output '  Single-snapshot vulnerability migration checks passed.'
 Test-VulnCanonicalSignatureStability
 Write-Output '  Canonical vulnerability signature checks passed.'
 Test-MergeVulnObservedWindowRows
 Write-Output '  Vulnerability observation merge checks passed.'
+Test-ReadNormalizedVulnStoreRow
+Write-Output '  Normalized vulnerability store reader checks passed.'
+Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
+Write-Output '  Stable device fallback identity checks passed.'
 Write-Output 'Shared-helper regression checks passed.'

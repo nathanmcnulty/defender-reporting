@@ -1749,12 +1749,12 @@ function getMostRecentLastSeen() {
  */
 function generateDateRange(startDate, endDate) {
     const sortedDates = [];
-    let currentDate = new Date(startDate);
-    const end = new Date(endDate);
+    let currentDate = parseYmdDateAsUtc(startDate);
+    const end = parseYmdDateAsUtc(endDate);
     
     while (currentDate <= end) {
-        sortedDates.push(currentDate.toISOString().split('T')[0]);
-        currentDate.setDate(currentDate.getDate() + 1);
+        sortedDates.push(formatUtcDateAsYmd(currentDate));
+        currentDate = addDaysToUtcDate(currentDate, 1);
     }
     return sortedDates;
 }
@@ -1765,9 +1765,30 @@ function generateDateRange(startDate, endDate) {
  * @returns {string} Next day in YYYY-MM-DD format
  */
 function nextDay(dateStr) {
-    const d = new Date(dateStr);
-    d.setDate(d.getDate() + 1);
-    return d.toISOString().split('T')[0];
+    return formatUtcDateAsYmd(addDaysToUtcDate(parseYmdDateAsUtc(dateStr), 1));
+}
+
+function parseYmdDateAsUtc(dateStr) {
+    const parts = typeof dateStr === 'string' ? dateStr.split('-').map(Number) : [];
+    if (parts.length !== 3 || parts.some(part => !Number.isInteger(part))) {
+        return new Date(NaN);
+    }
+
+    return new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+}
+
+function addDaysToUtcDate(date, dayCount) {
+    const next = new Date(date.getTime());
+    next.setUTCDate(next.getUTCDate() + dayCount);
+    return next;
+}
+
+function formatUtcDateAsYmd(date) {
+    return [
+        date.getUTCFullYear(),
+        String(date.getUTCMonth() + 1).padStart(2, '0'),
+        String(date.getUTCDate()).padStart(2, '0')
+    ].join('-');
 }
 
 /**

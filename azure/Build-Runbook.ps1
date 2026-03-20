@@ -48,7 +48,13 @@ $sharedHelpers = Get-Content -Path $sharedHelpersPath -Raw
 $runbookSource = Get-Content -Path $runbookSourcePath -Raw
 $lineEnding = if ($runbookSource.Contains("`r`n")) { "`r`n" } else { "`n" }
 $normalizedMarker = $marker -replace "`r?`n", $lineEnding
-$normalizedSharedHelpers = ($sharedHelpers -replace "`r?`n", $lineEnding).TrimEnd()
+$sharedHelpersText = if ($sharedHelpers -is [System.Array]) {
+    @($sharedHelpers) -join $lineEnding
+}
+else {
+    [string]$sharedHelpers
+}
+$normalizedSharedHelpers = ($sharedHelpersText -replace "`r?`n", $lineEnding).TrimEnd()
 
 if (-not $runbookSource.Contains($normalizedMarker)) {
     throw 'Runbook source is missing the shared helper marker.'

@@ -704,6 +704,7 @@ function Get-VulnHistoryPublishedNameSet {
     [OutputType([System.Collections.Generic.HashSet[string]])]
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [string[]]$PeriodKeys
     )
 
@@ -725,9 +726,14 @@ function Get-VulnHistoryRemovePaths {
         [Parameter(Mandatory = $true)]
         [string]$BasePath,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
         [System.Collections.Generic.HashSet[string]]$PublishedHistoryNames
     )
+
+    if ($null -eq $PublishedHistoryNames) {
+        $PublishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
 
     $removePaths = [System.Collections.Generic.List[string]]::new()
     foreach ($path in @(
@@ -1849,7 +1855,12 @@ function Repair-VulnHistoryLayout {
 
     try {
         $filesToPublish = [System.Collections.Generic.List[object]]::new()
-        $publishedHistoryNames = Get-VulnHistoryPublishedNameSet -PeriodKeys @($canonicalDocumentsByPeriod.Keys)
+        $publishedHistoryNames = if ($canonicalDocumentsByPeriod.Count -gt 0) {
+            Get-VulnHistoryPublishedNameSet -PeriodKeys @($canonicalDocumentsByPeriod.Keys)
+        }
+        else {
+            [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        }
 
         foreach ($periodKey in @($canonicalDocumentsByPeriod.Keys | Sort-Object)) {
             $historyDocument = $canonicalDocumentsByPeriod[$periodKey]
@@ -2117,11 +2128,17 @@ function Publish-VulnStoreUnlocked {
             TargetPath = Get-VulnCurrentPath -BasePath $BasePath
         })
 
-        $publishedHistoryNames = Get-VulnHistoryPublishedNameSet -PeriodKeys @(
+        $historyPeriodKeys = @(
             @($storeToPublish.HistoryDocuments) | ForEach-Object {
                 Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $_
             }
         )
+        $publishedHistoryNames = if ($historyPeriodKeys.Count -gt 0) {
+            Get-VulnHistoryPublishedNameSet -PeriodKeys $historyPeriodKeys
+        }
+        else {
+            [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        }
         foreach ($historyDocument in @($storeToPublish.HistoryDocuments)) {
             $periodKey = Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument
             $historyName = [string]::Format($Script:VulnHistoryFileNamePattern, $periodKey)
@@ -2492,7 +2509,12 @@ function Publish-VulnStoreFromLegacySnapshot {
             foreach ($periodKey in $existingHistoryByPeriod.Keys) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
             foreach ($periodKey in $touchedPeriods) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
 
-            $publishedHistoryNames = Get-VulnHistoryPublishedNameSet -PeriodKeys @($finalHistoryPeriods)
+            $publishedHistoryNames = if ($finalHistoryPeriods.Count -gt 0) {
+                Get-VulnHistoryPublishedNameSet -PeriodKeys @($finalHistoryPeriods)
+            }
+            else {
+                [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            }
             $historyFilesToRemove = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedHistoryNames
             Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths $historyFilesToRemove
             $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
@@ -4897,6 +4919,7 @@ function Get-VulnObservedWindowIdentityKey {
 }
 
 function Merge-VulnObservedWindowRows {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
     [CmdletBinding()]
     [OutputType([object[]])]
     param(
@@ -4967,6 +4990,29 @@ function Merge-VulnObservedWindowRows {
     }
 
     return @($mergedRows)
+}
+
+function Read-NormalizedVulnStoreRow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, 30)]
+        [int]$AllowedGapDays = 1
+    )
+
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($record in Read-VulnStoreRow -BasePath $BasePath) {
+        if ($null -ne $record) {
+            $rows.Add($record)
+        }
+    }
+
+    foreach ($row in @(Merge-VulnObservedWindowRows -Rows @($rows) -AllowedGapDays $AllowedGapDays)) {
+        Write-Output $row
+    }
 }
 
 function Get-NormalizationSourceRows {
@@ -5079,12 +5125,11 @@ function ConvertTo-NormalizedData {
             $fallbackGroupName = $v.PSObject.Properties['RbacGroupName']?.Value
             $fallbackPlatform = $v.PSObject.Properties['OSPlatform']?.Value
             $fallbackOsVersion = $v.PSObject.Properties['OSVersion']?.Value
-            $deviceKey = if ($machine) {
+            $deviceKey = if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
                 $deviceId
             }
             else {
                 @(
-                    $deviceId
                     [string]$fallbackDeviceName
                     [string]$fallbackGroupName
                     [string]$fallbackPlatform
@@ -5093,9 +5138,8 @@ function ConvertTo-NormalizedData {
             }
 
             if (-not $deviceIndex.ContainsKey($deviceKey)) {
-                    # When machine enrichment is missing, vulnerability exports can still carry
-                    # row-specific device metadata. Keep distinct fallback variants instead of
-                    # collapsing everything to the first row seen for a DeviceId.
+                    # Prefer the stable DeviceId whenever it exists. Only fall back to
+                    # row-level metadata when the export truly lacks a device identifier.
                     $groupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $fallbackGroupName }
                     if ([string]::IsNullOrWhiteSpace([string]$groupName)) {
                         $groupName = if ([string]::IsNullOrWhiteSpace([string]$fallbackGroupName)) { '(none)' } else { $fallbackGroupName }
