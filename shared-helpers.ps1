@@ -4292,7 +4292,6 @@ function Invoke-MdeMachineStoreRefresh {
             OutputFiles = @($publishResult.OutputFiles)
             MigratedLegacy = $publishResult.MigratedLegacy
         }
-
     }
 }
 
@@ -4429,7 +4428,13 @@ function Write-CombinedPayloadGzip {
             $writer.Write(($lookupPropertyName | ConvertTo-Json -Compress))
             $writer.Write(':')
             $lookupValue = $Lookups.PSObject.Properties[$lookupPropertyName].Value
-            $writer.Write(($lookupValue | ConvertTo-Json -Depth 10 -Compress))
+            $lookupJson = if ($lookupPropertyName -eq 'noTagsIdx') {
+                ConvertTo-Json -InputObject $lookupValue -Depth 10 -Compress
+            }
+            else {
+                ConvertTo-Json -InputObject ([object[]]$lookupValue) -Depth 10 -Compress
+            }
+            $writer.Write($lookupJson)
             $isFirstLookupProperty = $false
         }
         $writer.Write('}')
