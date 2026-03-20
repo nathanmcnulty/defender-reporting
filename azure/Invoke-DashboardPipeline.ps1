@@ -137,6 +137,7 @@ $Script:MachineCurrentFileName = 'Machines_Current.json.gz'
 $Script:MachineHistoryFileName = 'Machines_History.json.gz'
 $Script:MachineHistoryQuarterlyFileNamePattern = 'Machines_History_{0}.json.gz'
 $Script:AdvancedHuntingCurrentFileName = 'AdvancedHunting_Current.json.gz'
+$Script:LegacyVulnMigrationRemovalDate = '2026-07-01'
 $Script:VulnDiskPartitionCount = 64
 
 function Get-StoreLockName {
@@ -451,7 +452,7 @@ function Test-VulnStoreExistence {
     return $historyFiles.Count -gt 0
 }
 
-function New-VulnHistoryPeriodKey {
+function New-QuarterPeriodKey {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
     [OutputType([string])]
@@ -467,7 +468,7 @@ function New-VulnHistoryPeriodKey {
     return ('{0:D4}Q{1}' -f $Year, $Quarter)
 }
 
-function Get-VulnHistoryQuarterFromDate {
+function Get-QuarterNumberFromDate {
     [CmdletBinding()]
     [OutputType([int])]
     param(
@@ -479,7 +480,7 @@ function Get-VulnHistoryQuarterFromDate {
     return [int][math]::Ceiling($month / 3)
 }
 
-function Get-VulnHistoryPeriodKeyFromDate {
+function Get-QuarterPeriodKeyFromDate {
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -488,10 +489,10 @@ function Get-VulnHistoryPeriodKeyFromDate {
     )
 
     $dt = [datetime]$Date
-    return (New-VulnHistoryPeriodKey -Year $dt.Year -Quarter (Get-VulnHistoryQuarterFromDate -Date $Date))
+    return (New-QuarterPeriodKey -Year $dt.Year -Quarter (Get-QuarterNumberFromDate -Date $Date))
 }
 
-function Get-VulnHistoryPeriodInfo {
+function Get-QuarterPeriodInfo {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
@@ -509,6 +510,55 @@ function Get-VulnHistoryPeriodInfo {
         Year = [int]$match.Groups['year'].Value
         Quarter = [int]$match.Groups['quarter'].Value
     }
+}
+
+function New-VulnHistoryPeriodKey {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Year,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 4)]
+        [int]$Quarter
+    )
+
+    return (New-QuarterPeriodKey -Year $Year -Quarter $Quarter)
+}
+
+function Get-VulnHistoryQuarterFromDate {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Date
+    )
+
+    return (Get-QuarterNumberFromDate -Date $Date)
+}
+
+function Get-VulnHistoryPeriodKeyFromDate {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Date
+    )
+
+    return (Get-QuarterPeriodKeyFromDate -Date $Date)
+}
+
+function Get-VulnHistoryPeriodInfo {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PeriodKey
+    )
+
+    return (Get-QuarterPeriodInfo -PeriodKey $PeriodKey)
 }
 
 function Get-VulnHistoryPeriodKeyFromDocument {
@@ -627,6 +677,178 @@ function Get-VulnHistoryRowsPath {
     return Join-Path -Path $BasePath -ChildPath ([string]::Format($Script:VulnHistoryRowsFileNamePattern, $PeriodKey))
 }
 
+function Test-IsVulnHistoryFileName {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return ($Name -match '^VulnHistory_(?:\d{4}Q[1-4]|\d{4})\.json\.gz$')
+}
+
+function Test-IsVulnHistoryRowsFileName {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return ($Name -match '^VulnHistoryRows_(?:\d{4}Q[1-4]|\d{4})\.json\.gz$')
+}
+
+function Get-VulnHistoryPublishedNameSet {
+    [CmdletBinding()]
+    [OutputType([System.Collections.Generic.HashSet[string]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$PeriodKeys
+    )
+
+    $publishedNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($periodKey in @($PeriodKeys | Sort-Object -Unique)) {
+        if ([string]::IsNullOrWhiteSpace($periodKey)) { continue }
+        [void]$publishedNames.Add([string]::Format($Script:VulnHistoryFileNamePattern, $periodKey))
+        [void]$publishedNames.Add([string]::Format($Script:VulnHistoryRowsFileNamePattern, $periodKey))
+    }
+
+    return $publishedNames
+}
+
+function Get-VulnHistoryRemovePaths {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.HashSet[string]]$PublishedHistoryNames
+    )
+
+    $removePaths = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in @(
+        Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue |
+            Where-Object { -not $PublishedHistoryNames.Contains($_.Name) } |
+            ForEach-Object { $_.FullName }
+    )) {
+        $removePaths.Add($path)
+    }
+
+    foreach ($path in @(
+        Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRows_*.json.gz' -File -ErrorAction SilentlyContinue |
+            Where-Object { -not $PublishedHistoryNames.Contains($_.Name) } |
+            ForEach-Object { $_.FullName }
+    )) {
+        $removePaths.Add($path)
+    }
+
+    return [string[]]@($removePaths)
+}
+
+function Test-IsCanonicalExportStoreFileName {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($Name -in @(
+        $Script:VulnCurrentFileName,
+        $Script:MachineCurrentFileName,
+        $Script:AdvancedHuntingCurrentFileName
+    )) {
+        return $true
+    }
+
+    if ((Test-IsVulnHistoryFileName -Name $Name) -or (Test-IsVulnHistoryRowsFileName -Name $Name)) {
+        return $true
+    }
+
+    if (Test-IsMachineHistoryQuarterlyFileName -Name $Name) {
+        return $true
+    }
+
+    return $false
+}
+
+function Test-IsNativeCompressedStoreFileName {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if (Test-IsCanonicalExportStoreFileName -Name $Name) {
+        return $true
+    }
+
+    if ((Test-IsMachineHistorySegmentFileName -Name $Name) -or ($Name -eq $Script:MachineHistoryFileName)) {
+        return $true
+    }
+
+    return $false
+}
+
+function Get-CanonicalExportStoreFileNames {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    return [string[]]@(
+        Get-ChildItem -Path $BasePath -File -ErrorAction SilentlyContinue |
+            Where-Object { Test-IsCanonicalExportStoreFileName -Name $_.Name } |
+            Sort-Object Name |
+            ForEach-Object { $_.Name }
+    )
+}
+
+function Get-StaleExportStoreArtifactNames {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$ExistingNames,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$CanonicalNames
+    )
+
+    $canonicalNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @($CanonicalNames)) {
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        [void]$canonicalNameSet.Add($name)
+    }
+
+    $staleNames = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in @($ExistingNames | Sort-Object -Unique)) {
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        if ($canonicalNameSet.Contains($name)) { continue }
+
+        if (
+            (Test-IsVulnHistoryFileName -Name $name) -or
+            (Test-IsVulnHistoryRowsFileName -Name $name) -or
+            (Test-IsMachineHistoryQuarterlyFileName -Name $name) -or
+            (Test-IsMachineHistorySegmentFileName -Name $name) -or
+            ($name -eq $Script:MachineHistoryFileName)
+        ) {
+            $staleNames.Add($name)
+        }
+    }
+
+    return [string[]]@($staleNames)
+}
+
 function Test-IsLegacyVulnSnapshotFileName {
     [CmdletBinding()]
     param(
@@ -691,30 +913,7 @@ function Convert-VulnToYmdDate {
         [object]$DateValue
     )
 
-    if ($null -eq $DateValue) { return $null }
-
-    $raw = $DateValue.ToString().Trim()
-    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
-
-    if ($raw -match '^\d{4}-\d{2}-\d{2}$') {
-        return $raw
-    }
-
-    if ($raw -match '^(\d{1,2})/(\d{1,2})/(\d{4})') {
-        $month = [int]$Matches[1]
-        $day = [int]$Matches[2]
-        $year = [int]$Matches[3]
-        if ($month -ge 1 -and $month -le 12 -and $day -ge 1 -and $day -le 31) {
-            return ('{0:D4}-{1:D2}-{2:D2}' -f $year, $month, $day)
-        }
-    }
-
-    try {
-        return ([datetime]$raw).ToString('yyyy-MM-dd')
-    }
-    catch {
-        return $null
-    }
+    return (Convert-ToYmdDate -DateValue $DateValue)
 }
 
 function Get-VulnNextDay {
@@ -1658,7 +1857,7 @@ function Repair-VulnHistoryLayout {
 
     try {
         $filesToPublish = [System.Collections.Generic.List[object]]::new()
-        $publishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $publishedHistoryNames = Get-VulnHistoryPublishedNameSet -PeriodKeys @($canonicalDocumentsByPeriod.Keys)
 
         foreach ($periodKey in @($canonicalDocumentsByPeriod.Keys | Sort-Object)) {
             $historyDocument = $canonicalDocumentsByPeriod[$periodKey]
@@ -1667,8 +1866,6 @@ function Repair-VulnHistoryLayout {
             $historyRowsStagePath = Get-VulnHistoryRowsPath -BasePath $stageRoot -PeriodKey $periodKey
             Write-VulnHistoryRowsFile -Path $historyRowsStagePath -HistoryDocument $historyDocument
 
-            $historyName = [string]::Format($Script:VulnHistoryFileNamePattern, $periodKey)
-            [void]$publishedHistoryNames.Add($historyName)
             $filesToPublish.Add([PSCustomObject]@{
                 StagePath = $historyStagePath
                 TargetPath = Get-VulnHistoryPath -BasePath $BasePath -PeriodKey $periodKey
@@ -1679,31 +1876,8 @@ function Repair-VulnHistoryLayout {
             })
         }
 
-        $historyFilesToRemove = [System.Collections.Generic.List[string]]::new()
-        foreach ($path in @(
-            Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue |
-                Where-Object { -not $publishedHistoryNames.Contains($_.Name) } |
-                ForEach-Object { $_.FullName }
-        )) {
-            $historyFilesToRemove.Add($path)
-        }
-        foreach ($path in @(
-            Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRows_*.json.gz' -File -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $keyMatch = [regex]::Match($_.Name, '^VulnHistoryRows_(?<period>\d{4}Q[1-4]|\d{4})\.json\.gz$')
-                    if (-not $keyMatch.Success) {
-                        $true
-                    }
-                    else {
-                        -not $publishedHistoryNames.Contains([string]::Format($Script:VulnHistoryFileNamePattern, $keyMatch.Groups['period'].Value))
-                    }
-                } |
-                ForEach-Object { $_.FullName }
-        )) {
-            $historyFilesToRemove.Add($path)
-        }
-
-        Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths @($historyFilesToRemove)
+        $historyFilesToRemove = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedHistoryNames
+        Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths $historyFilesToRemove
         return $canonicalDocumentsByPeriod.Count
     }
     finally {
@@ -1950,11 +2124,14 @@ function Publish-VulnStoreUnlocked {
             TargetPath = Get-VulnCurrentPath -BasePath $BasePath
         })
 
-        $publishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $publishedHistoryNames = Get-VulnHistoryPublishedNameSet -PeriodKeys @(
+            @($storeToPublish.HistoryDocuments) | ForEach-Object {
+                Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $_
+            }
+        )
         foreach ($historyDocument in @($storeToPublish.HistoryDocuments)) {
             $periodKey = Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument
             $historyName = [string]::Format($Script:VulnHistoryFileNamePattern, $periodKey)
-            [void]$publishedHistoryNames.Add($historyName)
             $filesToPublish.Add([PSCustomObject]@{
                 StagePath = Join-Path $stageRoot $historyName
                 TargetPath = Join-Path $BasePath $historyName
@@ -1967,31 +2144,8 @@ function Publish-VulnStoreUnlocked {
             })
         }
 
-        $historyFilesToRemove = [System.Collections.Generic.List[string]]::new()
-        foreach ($path in @(
-            Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue |
-                Where-Object { -not $publishedHistoryNames.Contains($_.Name) } |
-                ForEach-Object { $_.FullName }
-        )) {
-            $historyFilesToRemove.Add($path)
-        }
-        foreach ($path in @(
-            Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRows_*.json.gz' -File -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $keyMatch = [regex]::Match($_.Name, '^VulnHistoryRows_(?<period>\d{4}Q[1-4]|\d{4})\.json\.gz$')
-                    if (-not $keyMatch.Success) {
-                        $true
-                    }
-                    else {
-                        -not $publishedHistoryNames.Contains([string]::Format($Script:VulnHistoryFileNamePattern, $keyMatch.Groups['period'].Value))
-                    }
-                } |
-                ForEach-Object { $_.FullName }
-        )) {
-            $historyFilesToRemove.Add($path)
-        }
-
-        Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths @($historyFilesToRemove)
+        $historyFilesToRemove = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedHistoryNames
+        Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths $historyFilesToRemove
         $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
 
         return [PSCustomObject]@{
@@ -2025,6 +2179,104 @@ function Publish-VulnStore {
     }
 }
 
+# =============================================================================
+# TEMPORARY LEGACY VULNERABILITY MIGRATION HELPERS
+# Remove after $Script:LegacyVulnMigrationRemovalDate once legacy VulnExport_* snapshots
+# are no longer supported.
+# =============================================================================
+
+function Test-VulnStoreRequiresCanonicalRepair {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$HistoryDocuments
+    )
+
+    $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue)
+    if (@($historyFiles | Where-Object { $_.BaseName -match '^VulnHistory_\d{4}$' }).Count -gt 0) {
+        return $true
+    }
+
+    foreach ($historyDocument in @($HistoryDocuments)) {
+        $periodKey = Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument
+        $rowsPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
+        if (-not (Test-Path -LiteralPath $rowsPath -PathType Leaf)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Publish-VulnStoreExistingCanonicalState {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [string]$LatestSnapshotDate
+    )
+
+    $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+    $historyDocuments = @(Get-VulnHistoryDocumentList -BasePath $BasePath)
+    $requiresCanonicalRepair = Test-VulnStoreRequiresCanonicalRepair -BasePath $BasePath -HistoryDocuments $historyDocuments
+    if ($requiresCanonicalRepair) {
+        $currentRecords = if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
+            @(Read-VulnNdjsonRecordsFromPath -Path $currentPath)
+        }
+        else {
+            @()
+        }
+
+        [void](Publish-VulnStoreUnlocked -BasePath $BasePath -Store ([PSCustomObject]@{
+            CurrentRecords = $currentRecords
+            HistoryDocuments = $historyDocuments
+            LatestSnapshotDate = $LatestSnapshotDate
+        }))
+    }
+
+    $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
+    $currentRows = if (Test-Path -LiteralPath $currentPath -PathType Leaf) { Test-VulnCurrentFile -Path $currentPath } else { 0 }
+
+    return [PSCustomObject]@{
+        CurrentRows = $currentRows
+        HistoryYears = if ($historyPeriodCount -gt 0) { $historyPeriodCount } else { $historyDocuments.Count }
+        LatestSnapshotDate = $LatestSnapshotDate
+        MigratedLegacy = $requiresCanonicalRepair
+    }
+}
+
+function Get-VulnLegacyFilesBySnapshotDate {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo[]]$LegacyFiles,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$SnapshotDates
+    )
+
+    $filesByDate = @{}
+    foreach ($file in @($LegacyFiles)) {
+        $date = Get-VulnSnapshotDateFromName -Name $file.Name
+        if ($date -notin $SnapshotDates) { continue }
+        if (-not $filesByDate.ContainsKey($date)) {
+            $filesByDate[$date] = [System.Collections.Generic.List[object]]::new()
+        }
+        $filesByDate[$date].Add($file)
+    }
+
+    return $filesByDate
+}
+
 function Publish-VulnStoreFromLegacySnapshot {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '')]
     [CmdletBinding()]
@@ -2054,67 +2306,31 @@ function Publish-VulnStoreFromLegacySnapshot {
         $snapshotDates = @($legacyFiles | ForEach-Object { Get-VulnSnapshotDateFromName -Name $_.Name } | Sort-Object -Unique)
 
         if (-not [string]::IsNullOrWhiteSpace($latestKnownSnapshot)) {
-            $staleDates = @($snapshotDates | Where-Object { ([datetime]$_) -le ([datetime]$latestKnownSnapshot) })
-            if ($staleDates.Count -gt 0) {
-                Write-Verbose "Skipping legacy snapshot dates already represented in the current store. StoreLatest=$latestKnownSnapshot Incoming=$($staleDates -join ', ')"
-                $snapshotDates = @($snapshotDates | Where-Object { ([datetime]$_) -gt ([datetime]$latestKnownSnapshot) })
+            $duplicateLatestDates = @($snapshotDates | Where-Object { ([datetime]$_) -eq ([datetime]$latestKnownSnapshot) })
+            if ($duplicateLatestDates.Count -gt 0) {
+                Write-Verbose "Skipping legacy snapshot dates already represented by the current store latest snapshot date. StoreLatest=$latestKnownSnapshot Incoming=$($duplicateLatestDates -join ', ')"
+                $snapshotDates = @($snapshotDates | Where-Object { ([datetime]$_) -ne ([datetime]$latestKnownSnapshot) })
+            }
+
+            $backfillDates = @($snapshotDates | Where-Object { ([datetime]$_) -lt ([datetime]$latestKnownSnapshot) })
+            if ($backfillDates.Count -gt 0) {
+                throw ("Legacy snapshot date(s) {0} are older than the current store latest snapshot date {1}. Incremental import would skip or mis-order those older snapshots. Rebuild the vulnerability store from the full legacy snapshot set before importing backfilled history." -f ($backfillDates -join ', '), $latestKnownSnapshot)
             }
         }
 
         if ($snapshotDates.Count -eq 0 -and $storeExists) {
-            $currentPath = Get-VulnCurrentPath -BasePath $BasePath
-            $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue)
-            $historyDocuments = @(Get-VulnHistoryDocumentList -BasePath $BasePath)
-            $requiresQuarterMigration = @($historyFiles | Where-Object { $_.BaseName -match '^VulnHistory_\d{4}$' }).Count -gt 0
-            if (-not $requiresQuarterMigration) {
-                foreach ($historyDocument in $historyDocuments) {
-                    $periodKey = Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument
-                    $rowsPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
-                    if (-not (Test-Path -LiteralPath $rowsPath -PathType Leaf)) {
-                        $requiresQuarterMigration = $true
-                        break
-                    }
-                }
-            }
-
-            if ($requiresQuarterMigration) {
-                $currentRecords = if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
-                    @(Read-VulnNdjsonRecordsFromPath -Path $currentPath)
-                }
-                else {
-                    @()
-                }
-
-                [void](Publish-VulnStoreUnlocked -BasePath $BasePath -Store ([PSCustomObject]@{
-                    CurrentRecords = $currentRecords
-                    HistoryDocuments = $historyDocuments
-                    LatestSnapshotDate = $latestKnownSnapshot
-                }))
-            }
-
-            $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
-
-            $currentRows = if (Test-Path -LiteralPath $currentPath -PathType Leaf) { Test-VulnCurrentFile -Path $currentPath } else { 0 }
-
+            $canonicalState = Publish-VulnStoreExistingCanonicalState -BasePath $BasePath -LatestSnapshotDate $latestKnownSnapshot
             return [PSCustomObject]@{
                 DownloadedFiles = $legacyFiles.Count
-                CurrentRows = $currentRows
-                HistoryYears = if ($historyPeriodCount -gt 0) { $historyPeriodCount } else { $historyDocuments.Count }
-                LatestSnapshotDate = $latestKnownSnapshot
-                MigratedLegacy = $requiresQuarterMigration
+                CurrentRows = $canonicalState.CurrentRows
+                HistoryYears = $canonicalState.HistoryYears
+                LatestSnapshotDate = $canonicalState.LatestSnapshotDate
+                MigratedLegacy = $canonicalState.MigratedLegacy
                 RemovedLegacyFiles = $false
             }
         }
 
-        $filesByDate = @{}
-        foreach ($file in $legacyFiles) {
-            $date = Get-VulnSnapshotDateFromName -Name $file.Name
-            if ($date -notin $snapshotDates) { continue }
-            if (-not $filesByDate.ContainsKey($date)) {
-                $filesByDate[$date] = [System.Collections.Generic.List[object]]::new()
-            }
-            $filesByDate[$date].Add($file)
-        }
+        $filesByDate = Get-VulnLegacyFilesBySnapshotDate -LegacyFiles $legacyFiles -SnapshotDates $snapshotDates
 
         $stageRoot = Join-Path $BasePath ('.vuln-store-staging-' + [guid]::NewGuid().ToString('N'))
         [void](New-Item -Path $stageRoot -ItemType Directory -Force)
@@ -2282,36 +2498,9 @@ function Publish-VulnStoreFromLegacySnapshot {
             foreach ($periodKey in $existingHistoryByPeriod.Keys) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
             foreach ($periodKey in $touchedPeriods) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
 
-            $publishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($periodKey in $finalHistoryPeriods) {
-                [void]$publishedHistoryNames.Add([string]::Format($Script:VulnHistoryFileNamePattern, $periodKey))
-            }
-
-            $historyFilesToRemove = [System.Collections.Generic.List[string]]::new()
-            foreach ($path in @(
-                Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue |
-                    Where-Object { -not $publishedHistoryNames.Contains($_.Name) } |
-                    ForEach-Object { $_.FullName }
-            )) {
-                $historyFilesToRemove.Add($path)
-            }
-            foreach ($path in @(
-                Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRows_*.json.gz' -File -ErrorAction SilentlyContinue |
-                    Where-Object {
-                        $keyMatch = [regex]::Match($_.Name, '^VulnHistoryRows_(?<period>\d{4}Q[1-4]|\d{4})\.json\.gz$')
-                        if (-not $keyMatch.Success) {
-                            $true
-                        }
-                        else {
-                            -not $publishedHistoryNames.Contains([string]::Format($Script:VulnHistoryFileNamePattern, $keyMatch.Groups['period'].Value))
-                        }
-                    } |
-                    ForEach-Object { $_.FullName }
-            )) {
-                $historyFilesToRemove.Add($path)
-            }
-
-            Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths @($historyFilesToRemove)
+            $publishedHistoryNames = Get-VulnHistoryPublishedNameSet -PeriodKeys @($finalHistoryPeriods)
+            $historyFilesToRemove = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedHistoryNames
+            Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths $historyFilesToRemove
             $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
 
             return [PSCustomObject]@{
@@ -2773,10 +2962,15 @@ function Update-VulnStoreFromLegacySnapshot {
     $snapshotDates = @($legacyFiles | ForEach-Object { Get-VulnSnapshotDateFromName -Name $_.Name } | Sort-Object -Unique)
 
     if (-not [string]::IsNullOrWhiteSpace($latestKnownSnapshot)) {
-        $staleDates = @($snapshotDates | Where-Object { ([datetime]$_) -le ([datetime]$latestKnownSnapshot) })
-        if ($staleDates.Count -gt 0) {
-            Write-Verbose "Skipping legacy snapshot dates already represented in the current store. StoreLatest=$latestKnownSnapshot Incoming=$($staleDates -join ', ')"
-            $snapshotDates = @($snapshotDates | Where-Object { ([datetime]$_) -gt ([datetime]$latestKnownSnapshot) })
+        $duplicateLatestDates = @($snapshotDates | Where-Object { ([datetime]$_) -eq ([datetime]$latestKnownSnapshot) })
+        if ($duplicateLatestDates.Count -gt 0) {
+            Write-Verbose "Skipping legacy snapshot dates already represented by the current store latest snapshot date. StoreLatest=$latestKnownSnapshot Incoming=$($duplicateLatestDates -join ', ')"
+            $snapshotDates = @($snapshotDates | Where-Object { ([datetime]$_) -ne ([datetime]$latestKnownSnapshot) })
+        }
+
+        $backfillDates = @($snapshotDates | Where-Object { ([datetime]$_) -lt ([datetime]$latestKnownSnapshot) })
+        if ($backfillDates.Count -gt 0) {
+            throw ("Legacy snapshot date(s) {0} are older than the current store latest snapshot date {1}. Incremental import would skip or mis-order those older snapshots. Rebuild the vulnerability store from the full legacy snapshot set before importing backfilled history." -f ($backfillDates -join ', '), $latestKnownSnapshot)
         }
     }
 
@@ -3500,7 +3694,7 @@ function Add-MachineHistoryRecordToPeriodMap {
     $recordKey = Get-MachineHistoryRecordKey -Record $Record
     if (-not $RecordKeys.Add($recordKey)) { return }
 
-    $periodKey = Get-VulnHistoryPeriodKeyFromDate -Date $observedOn
+    $periodKey = Get-QuarterPeriodKeyFromDate -Date $observedOn
     if (-not $HistoryRecordsByPeriod.ContainsKey($periodKey)) {
         $HistoryRecordsByPeriod[$periodKey] = [System.Collections.Generic.List[object]]::new()
     }
@@ -4020,6 +4214,163 @@ DeviceTvmSoftwareVulnerabilities
     }
 }
 
+function Get-MdeMachineSnapshotMap {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Headers,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BaseApiUrl,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ObservedOn
+    )
+
+    $url = "$BaseApiUrl/api/machines?`$filter=onboardingStatus eq 'Onboarded'"
+    $pageCount = 0
+    $snapshotsById = @{}
+
+    do {
+        $pageCount++
+        $response = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get -ErrorAction Stop
+
+        if ($response.value) {
+            foreach ($machine in $response.value) {
+                $snapshot = New-MachineSnapshotRecord -Machine $machine -ObservedOn $ObservedOn
+                $snapshotsById[$snapshot.id] = $snapshot
+            }
+        }
+
+        $url = if ($response.PSObject.Properties['@odata.nextLink']) {
+            $response.'@odata.nextLink'
+        }
+        else {
+            $null
+        }
+        $response = $null
+    } while ($url)
+
+    return [PSCustomObject]@{
+        SnapshotsById = $snapshotsById
+        PageCount = $pageCount
+    }
+}
+
+function Get-MachineStoreRefreshPlan {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$CurrentRecords,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$FetchedSnapshotsById,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ObservedOn
+    )
+
+    $changeRecords = [System.Collections.Generic.List[object]]::new()
+    $nextCurrentRecords = @{}
+
+    foreach ($snapshot in $FetchedSnapshotsById.Values) {
+        $existing = $CurrentRecords[$snapshot.id]
+        if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
+            $changeRecords.Add($snapshot)
+        }
+
+        $nextCurrentRecords[$snapshot.id] = $snapshot
+    }
+
+    foreach ($existingId in @($CurrentRecords.Keys)) {
+        if (-not $nextCurrentRecords.ContainsKey($existingId)) {
+            $changeRecords.Add((New-MachineRemovalRecord -MachineId $existingId -ObservedOn $ObservedOn))
+        }
+    }
+
+    return [PSCustomObject]@{
+        ChangeRecords = $changeRecords
+        NextCurrentRecords = $nextCurrentRecords
+        MachineCount = $nextCurrentRecords.Count
+    }
+}
+
+function Publish-MachineStoreState {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Store,
+
+        [Parameter(Mandatory = $true)]
+        $ChangeRecords
+    )
+
+    $stageRoot = Join-Path $OutputPath ('.machine-store-staging-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $stageRoot -ItemType Directory -Force)
+
+    try {
+        $stagedCurrentPath = Join-Path $stageRoot (Split-Path -Leaf $Store.CurrentPath)
+        Write-NdjsonRecordsFile -Path $stagedCurrentPath -Records $Store.CurrentRecords.Values
+
+        $filesToPublish = [System.Collections.Generic.List[object]]::new()
+        $filesToPublish.Add([PSCustomObject]@{
+            StagePath = $stagedCurrentPath
+            TargetPath = $Store.CurrentPath
+        })
+
+        $outputFiles = [System.Collections.Generic.List[string]]::new()
+        $outputFiles.Add($Store.CurrentPath)
+
+        $historyRecordKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($periodKey in @($Store.HistoryRecordsByPeriod.Keys)) {
+            foreach ($record in @($Store.HistoryRecordsByPeriod[$periodKey])) {
+                [void]$historyRecordKeys.Add((Get-MachineHistoryRecordKey -Record $record))
+            }
+        }
+
+        foreach ($changeRecord in $ChangeRecords) {
+            Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $Store.HistoryRecordsByPeriod -RecordKeys $historyRecordKeys -Record $changeRecord
+        }
+
+        $publishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($periodKey in @($Store.HistoryRecordsByPeriod.Keys | Sort-Object)) {
+            $historyStagePath = Get-MachineHistoryQuarterlyPath -BasePath $stageRoot -PeriodKey $periodKey
+            Write-NdjsonRecordsFile -Path $historyStagePath -Records $Store.HistoryRecordsByPeriod[$periodKey]
+
+            $historyTargetPath = Get-MachineHistoryQuarterlyPath -BasePath $OutputPath -PeriodKey $periodKey
+            $filesToPublish.Add([PSCustomObject]@{
+                StagePath = $historyStagePath
+                TargetPath = $historyTargetPath
+            })
+
+            $historyName = Split-Path -Leaf $historyTargetPath
+            [void]$publishedHistoryNames.Add($historyName)
+            $outputFiles.Add($historyTargetPath)
+        }
+
+        $removePaths = @(Get-MachineHistoryRemovePaths -BasePath $OutputPath -PublishedHistoryNames $publishedHistoryNames)
+        Publish-StoreFilesTransactional -BasePath $OutputPath -StoreName 'machines' -Files @($filesToPublish) -RemovePaths $removePaths
+
+        return [PSCustomObject]@{
+            Success = $true
+            ChangeCount = $ChangeRecords.Count
+            OutputFiles = @($outputFiles)
+            MigratedLegacy = $Store.MigratedLegacy
+        }
+    }
+    finally {
+        if (Test-Path -Path $stageRoot) {
+            Remove-Item -Path $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Invoke-MdeMachineStoreRefresh {
     [CmdletBinding()]
     param(
@@ -4033,116 +4384,24 @@ function Invoke-MdeMachineStoreRefresh {
         [string]$BaseApiUrl
     )
 
-    $url = "$BaseApiUrl/api/machines?`$filter=onboardingStatus eq 'Onboarded'"
-    $pageCount = 0
     $observedOn = Get-Date -Format 'yyyy-MM-dd'
-    $fetchedSnapshotsById = @{}
-
-    do {
-        $pageCount++
-        $response = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get -ErrorAction Stop
-
-        if ($response.value) {
-            foreach ($machine in $response.value) {
-                $snapshot = New-MachineSnapshotRecord -Machine $machine -ObservedOn $observedOn
-                $fetchedSnapshotsById[$snapshot.id] = $snapshot
-            }
-        }
-
-        $url = if ($response.PSObject.Properties['@odata.nextLink']) {
-            $response.'@odata.nextLink'
-        }
-        else {
-            $null
-        }
-        $response = $null
-    } while ($url)
+    $snapshotResult = Get-MdeMachineSnapshotMap -Headers $Headers -BaseApiUrl $BaseApiUrl -ObservedOn $observedOn
 
     return Invoke-WithStoreLock -BasePath $OutputPath -StoreName 'machines' -ScriptBlock {
         Restore-StoreTransaction -BasePath $OutputPath -StoreName 'machines'
 
         $store = Initialize-MachineHistoryStore -Path $OutputPath -RemoveLegacyFiles
-        $changeRecords = [System.Collections.Generic.List[object]]::new()
-        $machineCount = 0
-        $nextCurrentRecords = @{}
+        $refreshPlan = Get-MachineStoreRefreshPlan -CurrentRecords $store.CurrentRecords -FetchedSnapshotsById $snapshotResult.SnapshotsById -ObservedOn $observedOn
+        $store.CurrentRecords = $refreshPlan.NextCurrentRecords
 
-        foreach ($snapshot in $fetchedSnapshotsById.Values) {
-            $existing = $store.CurrentRecords[$snapshot.id]
-            if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
-                $changeRecords.Add($snapshot)
-            }
-
-            $nextCurrentRecords[$snapshot.id] = $snapshot
-            $machineCount++
-        }
-
-        foreach ($existingId in @($store.CurrentRecords.Keys)) {
-            if (-not $nextCurrentRecords.ContainsKey($existingId)) {
-                $changeRecords.Add((New-MachineRemovalRecord -MachineId $existingId -ObservedOn $observedOn))
-            }
-        }
-
-        $store.CurrentRecords = $nextCurrentRecords
-
-        $stageRoot = Join-Path $OutputPath ('.machine-store-staging-' + [guid]::NewGuid().ToString('N'))
-        [void](New-Item -Path $stageRoot -ItemType Directory -Force)
-
-        try {
-            $stagedCurrentPath = Join-Path $stageRoot (Split-Path -Leaf $store.CurrentPath)
-            Write-NdjsonRecordsFile -Path $stagedCurrentPath -Records $store.CurrentRecords.Values
-
-            $filesToPublish = [System.Collections.Generic.List[object]]::new()
-            $filesToPublish.Add([PSCustomObject]@{
-                StagePath = $stagedCurrentPath
-                TargetPath = $store.CurrentPath
-            })
-
-            $outputFiles = [System.Collections.Generic.List[string]]::new()
-            $outputFiles.Add($store.CurrentPath)
-
-            $historyRecordKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($periodKey in @($store.HistoryRecordsByPeriod.Keys)) {
-                foreach ($record in @($store.HistoryRecordsByPeriod[$periodKey])) {
-                    [void]$historyRecordKeys.Add((Get-MachineHistoryRecordKey -Record $record))
-                }
-            }
-
-            foreach ($changeRecord in $changeRecords) {
-                Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $store.HistoryRecordsByPeriod -RecordKeys $historyRecordKeys -Record $changeRecord
-            }
-
-            $publishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($periodKey in @($store.HistoryRecordsByPeriod.Keys | Sort-Object)) {
-                $historyStagePath = Get-MachineHistoryQuarterlyPath -BasePath $stageRoot -PeriodKey $periodKey
-                Write-NdjsonRecordsFile -Path $historyStagePath -Records $store.HistoryRecordsByPeriod[$periodKey]
-
-                $historyTargetPath = Get-MachineHistoryQuarterlyPath -BasePath $OutputPath -PeriodKey $periodKey
-                $filesToPublish.Add([PSCustomObject]@{
-                    StagePath = $historyStagePath
-                    TargetPath = $historyTargetPath
-                })
-
-                $historyName = Split-Path -Leaf $historyTargetPath
-                [void]$publishedHistoryNames.Add($historyName)
-                $outputFiles.Add($historyTargetPath)
-            }
-
-            $removePaths = @(Get-MachineHistoryRemovePaths -BasePath $OutputPath -PublishedHistoryNames $publishedHistoryNames)
-            Publish-StoreFilesTransactional -BasePath $OutputPath -StoreName 'machines' -Files @($filesToPublish) -RemovePaths $removePaths
-
-            return [PSCustomObject]@{
-                Success = $true
-                MachineCount = $machineCount
-                ChangeCount = $changeRecords.Count
-                PageCount = $pageCount
-                OutputFiles = @($outputFiles)
-                MigratedLegacy = $store.MigratedLegacy
-            }
-        }
-        finally {
-            if (Test-Path -Path $stageRoot) {
-                Remove-Item -Path $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
-            }
+        $publishResult = Publish-MachineStoreState -OutputPath $OutputPath -Store $store -ChangeRecords $refreshPlan.ChangeRecords
+        return [PSCustomObject]@{
+            Success = $true
+            MachineCount = $refreshPlan.MachineCount
+            ChangeCount = $publishResult.ChangeCount
+            PageCount = $snapshotResult.PageCount
+            OutputFiles = @($publishResult.OutputFiles)
+            MigratedLegacy = $publishResult.MigratedLegacy
         }
     }
 }
@@ -4536,6 +4795,118 @@ function Get-CaseSensitiveIndexMap {
     return [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal)
 }
 
+function Get-NormalizationContext {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param()
+
+    return [PSCustomObject]@{
+        Lookups = @{
+            vendors = [System.Collections.Generic.List[string]]::new()
+            severities = @('Critical', 'High', 'Medium', 'Low')
+            exploitLevels = [System.Collections.Generic.List[string]]::new()
+            groups = [System.Collections.Generic.List[string]]::new()
+            platforms = [System.Collections.Generic.List[string]]::new()
+            tags = [System.Collections.Generic.List[string]]::new()
+            updates = [System.Collections.Generic.List[PSObject]]::new()
+            versions = [System.Collections.Generic.List[string]]::new()
+            dates = [System.Collections.Generic.List[string]]::new()
+            diskPaths = [System.Collections.Generic.List[string]]::new()
+            regPaths = [System.Collections.Generic.List[string]]::new()
+            affSoftware = [System.Collections.Generic.List[string]]::new()
+            batchTitles = [System.Collections.Generic.List[string]]::new()
+            devices = [System.Collections.Generic.List[PSObject]]::new()
+            software = [System.Collections.Generic.List[PSObject]]::new()
+            cves = [System.Collections.Generic.List[PSObject]]::new()
+        }
+        Indexes = @{
+            vendors = Get-CaseSensitiveIndexMap
+            exploitLevels = Get-CaseSensitiveIndexMap
+            groups = Get-CaseSensitiveIndexMap
+            platforms = Get-CaseSensitiveIndexMap
+            tags = Get-CaseSensitiveIndexMap
+            updates = Get-CaseSensitiveIndexMap
+            devices = Get-CaseSensitiveIndexMap
+            software = Get-CaseSensitiveIndexMap
+            cves = Get-CaseSensitiveIndexMap
+            versions = Get-CaseSensitiveIndexMap
+            dates = Get-CaseSensitiveIndexMap
+            diskPaths = Get-CaseSensitiveIndexMap
+            regPaths = Get-CaseSensitiveIndexMap
+            affSoftware = Get-CaseSensitiveIndexMap
+            batchTitles = Get-CaseSensitiveIndexMap
+        }
+        DateValueCache = @{}
+    }
+}
+
+function Get-NormalizationCachedYmdDate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Context,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$DateValue
+    )
+
+    if ($null -eq $DateValue) {
+        return $null
+    }
+
+    $cacheKey = $DateValue.ToString()
+    if ($Context.DateValueCache.ContainsKey($cacheKey)) {
+        return $Context.DateValueCache[$cacheKey]
+    }
+
+    $normalized = Convert-ToYmdDate -DateValue $DateValue
+    $Context.DateValueCache[$cacheKey] = $normalized
+    return $normalized
+}
+
+function Get-NormalizationSourceRows {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DataPath
+    )
+
+    if (Test-VulnStoreExistence -BasePath $DataPath) {
+        Write-Information '  Found vulnerability current/history store to normalize...' -InformationAction Continue
+        foreach ($record in Read-VulnStoreRow -BasePath $DataPath) {
+            if ($null -ne $record) {
+                Write-Output $record
+            }
+        }
+        return
+    }
+
+    $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $DataPath)
+    if ($legacyFiles.Count -eq 0) { throw "No VulnExport snapshot files found in '$DataPath'." }
+
+    $legacyStore = Convert-LegacyVulnSnapshotsToStore -BasePath $DataPath
+    Write-Information "  Found $($legacyFiles.Count) legacy export file(s); canonicalizing in memory for normalization..." -InformationAction Continue
+
+    foreach ($record in @($legacyStore.CurrentRecords)) {
+        if ($null -ne $record) {
+            Write-Output $record
+        }
+    }
+
+    foreach ($historyDocument in @($legacyStore.HistoryDocuments)) {
+        foreach ($snapshot in @($historyDocument.snapshots)) {
+            foreach ($entry in @($snapshot.closed)) {
+                $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
+                if ($null -ne $row) {
+                    Write-Output $row
+                }
+            }
+        }
+    }
+}
+
 function ConvertTo-NormalizedData {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -4554,60 +4925,23 @@ function ConvertTo-NormalizedData {
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
-    $normalizationDataPath = $DataPath
-
-    $lookups = @{
-        vendors = [System.Collections.Generic.List[string]]::new()
-        severities = @('Critical', 'High', 'Medium', 'Low')
-        exploitLevels = [System.Collections.Generic.List[string]]::new()
-        groups = [System.Collections.Generic.List[string]]::new()
-        platforms = [System.Collections.Generic.List[string]]::new()
-        tags = [System.Collections.Generic.List[string]]::new()
-        updates = [System.Collections.Generic.List[PSObject]]::new()
-        versions = [System.Collections.Generic.List[string]]::new()
-        dates = [System.Collections.Generic.List[string]]::new()
-        diskPaths = [System.Collections.Generic.List[string]]::new()
-        regPaths = [System.Collections.Generic.List[string]]::new()
-        affSoftware = [System.Collections.Generic.List[string]]::new()
-        batchTitles = [System.Collections.Generic.List[string]]::new()
-        devices = [System.Collections.Generic.List[PSObject]]::new()
-        software = [System.Collections.Generic.List[PSObject]]::new()
-        cves = [System.Collections.Generic.List[PSObject]]::new()
-    }
-
-    $vendorIndex = Get-CaseSensitiveIndexMap
-    $exploitIndex = Get-CaseSensitiveIndexMap
-    $groupIndex = Get-CaseSensitiveIndexMap
-    $platformIndex = Get-CaseSensitiveIndexMap
-    $tagIndex = Get-CaseSensitiveIndexMap
-    $updateIndex = Get-CaseSensitiveIndexMap
-    $deviceIndex = Get-CaseSensitiveIndexMap
-    $softwareIndex = Get-CaseSensitiveIndexMap
-    $cveIndex = Get-CaseSensitiveIndexMap
-    $versionIndex = Get-CaseSensitiveIndexMap
-    $dateIndex = Get-CaseSensitiveIndexMap
-    $diskPathIndex = Get-CaseSensitiveIndexMap
-    $regPathIndex = Get-CaseSensitiveIndexMap
-    $affSoftwareIndex = Get-CaseSensitiveIndexMap
-    $batchTitleIndex = Get-CaseSensitiveIndexMap
-
-    $dateValueCache = @{}
-    function Get-CachedYmdDate {
-        param($dateValue)
-
-        if ($null -eq $dateValue) {
-            return $null
-        }
-
-        $cacheKey = $dateValue.ToString()
-        if ($dateValueCache.ContainsKey($cacheKey)) {
-            return $dateValueCache[$cacheKey]
-        }
-
-        $normalized = Convert-ToYmdDate -DateValue $dateValue
-        $dateValueCache[$cacheKey] = $normalized
-        return $normalized
-    }
+    $context = Get-NormalizationContext
+    $lookups = $context.Lookups
+    $vendorIndex = $context.Indexes.vendors
+    $exploitIndex = $context.Indexes.exploitLevels
+    $groupIndex = $context.Indexes.groups
+    $platformIndex = $context.Indexes.platforms
+    $tagIndex = $context.Indexes.tags
+    $updateIndex = $context.Indexes.updates
+    $deviceIndex = $context.Indexes.devices
+    $softwareIndex = $context.Indexes.software
+    $cveIndex = $context.Indexes.cves
+    $versionIndex = $context.Indexes.versions
+    $dateIndex = $context.Indexes.dates
+    $diskPathIndex = $context.Indexes.diskPaths
+    $regPathIndex = $context.Indexes.regPaths
+    $affSoftwareIndex = $context.Indexes.affSoftware
+    $batchTitleIndex = $context.Indexes.batchTitles
 
     $firstLastSwappedCount = 0
     $processedCount = 0
@@ -4615,50 +4949,11 @@ function ConvertTo-NormalizedData {
     $vulnWriter = $null
     $isFirstVuln = $true
 
-    function Get-NormalizationSourceRows {
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
-        [CmdletBinding()]
-        param()
-
-        if (Test-VulnStoreExistence -BasePath $normalizationDataPath) {
-            Write-Information '  Found vulnerability current/history store to normalize...' -InformationAction Continue
-            foreach ($record in Read-VulnStoreRow -BasePath $normalizationDataPath) {
-                if ($null -ne $record) {
-                    Write-Output $record
-                }
-            }
-            return
-        }
-
-        $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $normalizationDataPath)
-        if ($legacyFiles.Count -eq 0) { throw "No VulnExport snapshot files found in '$normalizationDataPath'." }
-
-        $legacyStore = Convert-LegacyVulnSnapshotsToStore -BasePath $normalizationDataPath
-        Write-Information "  Found $($legacyFiles.Count) legacy export file(s); canonicalizing in memory for normalization..." -InformationAction Continue
-
-        foreach ($record in @($legacyStore.CurrentRecords)) {
-            if ($null -ne $record) {
-                Write-Output $record
-            }
-        }
-
-        foreach ($historyDocument in @($legacyStore.HistoryDocuments)) {
-            foreach ($snapshot in @($historyDocument.snapshots)) {
-                foreach ($entry in @($snapshot.closed)) {
-                    $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
-                    if ($null -ne $row) {
-                        Write-Output $row
-                    }
-                }
-            }
-        }
-    }
-
     try {
         $vulnWriter = [System.IO.StreamWriter]::new($VulnOutputPath, $false, [System.Text.UTF8Encoding]::new($false))
         $vulnWriter.Write('[')
 
-        foreach ($v in Get-NormalizationSourceRows) {
+        foreach ($v in Get-NormalizationSourceRows -DataPath $DataPath) {
             if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { continue }
             $processedCount++
 
@@ -4719,8 +5014,8 @@ function ConvertTo-NormalizedData {
                             dv = $machine.PSObject.Properties['deviceValue']?.Value
                             mb = $machine.PSObject.Properties['managedBy']?.Value
                             aad = $machine.PSObject.Properties['isAadJoined']?.Value
-                            ls = Get-CachedYmdDate -dateValue $machineLastSeen
-                            fs = Get-CachedYmdDate -dateValue $machineFirstSeen
+                            ls = Get-NormalizationCachedYmdDate -Context $context -DateValue $machineLastSeen
+                            fs = Get-NormalizationCachedYmdDate -Context $context -DateValue $machineFirstSeen
                         }
                     }
 
@@ -4844,8 +5139,8 @@ function ConvertTo-NormalizedData {
             $seenWindow = Get-NormalizedVulnSeenWindow `
                 -FirstSeenValue $v.PSObject.Properties['FirstSeenTimestamp']?.Value `
                 -LastSeenValue $v.PSObject.Properties['LastSeenTimestamp']?.Value
-            $firstSeen = if ($seenWindow.FirstSeenTimestamp) { Get-CachedYmdDate -dateValue $seenWindow.FirstSeenTimestamp } else { $null }
-            $lastSeen = if ($seenWindow.LastSeenTimestamp) { Get-CachedYmdDate -dateValue $seenWindow.LastSeenTimestamp } else { $null }
+            $firstSeen = if ($seenWindow.FirstSeenTimestamp) { Get-NormalizationCachedYmdDate -Context $context -DateValue $seenWindow.FirstSeenTimestamp } else { $null }
+            $lastSeen = if ($seenWindow.LastSeenTimestamp) { Get-NormalizationCachedYmdDate -Context $context -DateValue $seenWindow.LastSeenTimestamp } else { $null }
             if ($seenWindow.WasReordered) {
                 $firstLastSwappedCount++
             }
@@ -5370,17 +5665,13 @@ function Export-ToBlobStorage {
 
     # Upload new export files (compressed)
     $exportFiles = Get-ChildItem -Path $ExportsPath -File | Where-Object { $_.Extension -in @('.json', '.gz') }
+    $canonicalStoreFileNames = @(Get-CanonicalExportStoreFileNames -BasePath $ExportsPath)
+    $canonicalStoreFileNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($canonicalStoreFileName in $canonicalStoreFileNames) {
+        [void]$canonicalStoreFileNameSet.Add($canonicalStoreFileName)
+    }
     foreach ($file in $exportFiles) {
-        $isCanonicalStoreFile = $file.Name -in @($Script:MachineCurrentFileName, $Script:MachineHistoryFileName, $Script:AdvancedHuntingCurrentFileName, $Script:VulnCurrentFileName)
-        if ($file.Name -like 'VulnHistory_*.json.gz') {
-            $isCanonicalStoreFile = $true
-        }
-        if ($file.Name -like 'VulnHistoryRows_*.json.gz') {
-            $isCanonicalStoreFile = $true
-        }
-        if ($file.Name -match '^Machines_History_(?:\d{4}Q[1-4]|\d{8}T\d{6}Z_[a-f0-9]{8})\.json\.gz$') {
-            $isCanonicalStoreFile = $true
-        }
+        $isCanonicalStoreFile = $canonicalStoreFileNameSet.Contains($file.Name)
         if ($UseGzip) {
             if ($file.Extension -eq '.gz') {
                 $blobName = $file.Name
@@ -5424,25 +5715,6 @@ function Export-ToBlobStorage {
         Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $legacyBlob -StorageToken $StorageToken
     }
 
-    $canonicalMachineHistoryBlobNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($file in @(
-        Get-ChildItem -Path $ExportsPath -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^Machines_History_\d{4}Q[1-4]\.json\.gz$' }
-    )) {
-        [void]$canonicalMachineHistoryBlobNames.Add($file.Name)
-    }
-
-    foreach ($blobName in @(
-        Get-BlobList -AccountName $AccountName -Container $Script:BlobContainers.Exports -StorageToken $StorageToken |
-            Where-Object {
-                $_ -match '^Machines_History(?:_\d{4}Q[1-4]|_\d{8}T\d{6}Z_[a-f0-9]{8})?\.json\.gz$' -and
-                -not $canonicalMachineHistoryBlobNames.Contains($_)
-            }
-    )) {
-        Write-Output "  Removing stale machine history blob $blobName..."
-        Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken
-    }
-
     foreach ($legacyBlob in $LegacyAdvancedHuntingBlobNames) {
         Write-Output "  Removing legacy Advanced Hunting snapshot blob $legacyBlob..."
         Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $legacyBlob -StorageToken $StorageToken
@@ -5453,22 +5725,11 @@ function Export-ToBlobStorage {
         Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $legacyBlob -StorageToken $StorageToken
     }
 
-    $canonicalVulnHistoryBlobNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($file in @(
-        Get-ChildItem -Path $ExportsPath -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^VulnHistory(?:Rows)?_(?:\d{4}Q[1-4]|\d{4})\.json\.gz$' }
-    )) {
-        [void]$canonicalVulnHistoryBlobNames.Add($file.Name)
-    }
-
-    foreach ($blobName in @(
-        Get-BlobList -AccountName $AccountName -Container $Script:BlobContainers.Exports -StorageToken $StorageToken |
-            Where-Object {
-                $_ -match '^VulnHistory(?:Rows)?_(?:\d{4}Q[1-4]|\d{4})\.json\.gz$' -and
-                -not $canonicalVulnHistoryBlobNames.Contains($_)
-            }
-    )) {
-        Write-Output "  Removing stale vulnerability history blob $blobName..."
+    $staleBlobNames = @(Get-StaleExportStoreArtifactNames `
+        -ExistingNames (Get-BlobList -AccountName $AccountName -Container $Script:BlobContainers.Exports -StorageToken $StorageToken) `
+        -CanonicalNames $canonicalStoreFileNames)
+    foreach ($blobName in $staleBlobNames) {
+        Write-Output "  Removing stale store blob $blobName..."
         Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken
     }
 
@@ -5581,7 +5842,7 @@ try {
     $legacyVulnerabilityBlobs = @($existingBlobs | Where-Object { $_ -match '^VulnExport_\d+_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
     $hasMachineCurrentBlob = $existingBlobs -contains $Script:MachineCurrentFileName
     $hasAdvancedHuntingCurrentBlob = $existingBlobs -contains $Script:AdvancedHuntingCurrentFileName
-    $hasCanonicalVulnStore = ($existingBlobs -contains $Script:VulnCurrentFileName) -or (@($existingBlobs | Where-Object { $_ -match '^VulnHistory_(?:\d{4}Q[1-4]|\d{4})\.json\.gz$' }).Count -gt 0)
+    $hasCanonicalVulnStore = ($existingBlobs -contains $Script:VulnCurrentFileName) -or (@($existingBlobs | Where-Object { Test-IsVulnHistoryFileName -Name $_ }).Count -gt 0)
     Write-Output "  Found $($existingBlobs.Count) existing blob(s)"
 
     foreach ($blobName in $existingBlobs) {
@@ -5595,7 +5856,7 @@ try {
         elseif (($blobName -in $legacyVulnerabilityBlobs) -and $hasCanonicalVulnStore) {
             $shouldDownload = $false
         }
-        elseif (($blobName -match '^Machines_History_\d{8}T\d{6}Z_[a-f0-9]{8}\.json\.gz$') -and $hasMachineCurrentBlob) {
+        elseif ((Test-IsMachineHistorySegmentFileName -Name $blobName) -and $hasMachineCurrentBlob) {
             $shouldDownload = $false
         }
 
@@ -5609,7 +5870,7 @@ try {
         Get-BlobContent -AccountName $StorageAccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -DestinationPath $localFile -StorageToken $storageToken
 
         # Decompress .gz files
-        if ($blobName -match '^(VulnExport_current\.json\.gz|VulnHistory_(?:\d{4}Q[1-4]|\d{4})\.json\.gz|VulnHistoryRows_(?:\d{4}Q[1-4]|\d{4})\.json\.gz|Machines_Current\.json\.gz|Machines_History(?:_\d{4}Q[1-4]|_\d{8}T\d{6}Z_[a-f0-9]{8})?\.json\.gz|AdvancedHunting_Current\.json\.gz)$') {
+        if (Test-IsNativeCompressedStoreFileName -Name $blobName) {
             continue
         }
 
