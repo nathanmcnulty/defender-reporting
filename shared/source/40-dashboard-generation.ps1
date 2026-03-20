@@ -1,6 +1,3 @@
-    }
-}
-
 # Shared generator/runbook helpers used for dashboard normalization and HTML assembly.
 
 function Get-JSLibrary {
