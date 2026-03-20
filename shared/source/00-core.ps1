@@ -895,28 +895,20 @@ function Get-VulnCanonicalRowSignature {
         $Row
     )
 
+    # Use only the stable vulnerability identity for versioning. Volatile enrichment
+    # fields such as OS version, recommendations, and paths can change between
+    # snapshots without indicating that the vulnerability itself disappeared.
+    $id = [string](Get-VulnPropertyValue -InputObject $Row -Name 'Id')
+    if (-not [string]::IsNullOrWhiteSpace($id)) {
+        return $id
+    }
+
     $payload = [ordered]@{
         DeviceId = [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceId')
-        DeviceName = [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceName')
-        RbacGroupName = [string](Get-VulnPropertyValue -InputObject $Row -Name 'RbacGroupName')
-        OSPlatform = [string](Get-VulnPropertyValue -InputObject $Row -Name 'OSPlatform')
-        OSVersion = [string](Get-VulnPropertyValue -InputObject $Row -Name 'OSVersion')
         CveId = [string](Get-VulnPropertyValue -InputObject $Row -Name 'CveId')
-        CvssScore = Get-VulnPropertyValue -InputObject $Row -Name 'CvssScore'
-        VulnerabilitySeverityLevel = [string](Get-VulnPropertyValue -InputObject $Row -Name 'VulnerabilitySeverityLevel')
-        ExploitabilityLevel = [string](Get-VulnPropertyValue -InputObject $Row -Name 'ExploitabilityLevel')
-        CveBatchUrl = [string](Get-VulnPropertyValue -InputObject $Row -Name 'CveBatchUrl')
-        CveBatchTitle = [string](Get-VulnPropertyValue -InputObject $Row -Name 'CveBatchTitle')
         SoftwareVendor = [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareVendor')
         SoftwareName = [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareName')
         SoftwareVersion = [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareVersion')
-        RecommendationReference = [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendationReference')
-        SecurityUpdateAvailable = ((Get-VulnPropertyValue -InputObject $Row -Name 'SecurityUpdateAvailable') -eq $true)
-        RecommendedSecurityUpdate = [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendedSecurityUpdate')
-        RecommendedSecurityUpdateId = [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendedSecurityUpdateId')
-        RecommendedSecurityUpdateUrl = [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendedSecurityUpdateUrl')
-        DiskPaths = @((@(Get-VulnPropertyValue -InputObject $Row -Name 'DiskPaths') | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique))
-        RegistryPaths = @((@(Get-VulnPropertyValue -InputObject $Row -Name 'RegistryPaths') | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique))
     }
 
     return ($payload | ConvertTo-Json -Compress -Depth 20)

@@ -149,9 +149,61 @@ function Test-LegacyVulnMigrationSmoke {
     }
 }
 
+function Test-VulnCanonicalSignatureStability {
+    [CmdletBinding()]
+    param()
+
+    $baseline = Get-TestVulnRow -Id 'stable-001' -CveId 'CVE-2026-0003' -SnapshotDate '2026-03-17' -Version '1.0.0'
+    $variant = Get-TestVulnRow -Id 'stable-001' -CveId 'CVE-2026-0003' -SnapshotDate '2026-03-19' -Version '1.0.0'
+    $variant.OSVersion = '10.0.99999'
+    $variant.RecommendedSecurityUpdate = 'KB999999'
+    $variant.RecommendedSecurityUpdateId = 'KB999999'
+    $variant.RecommendedSecurityUpdateUrl = 'https://example.invalid/kb999999'
+    $variant.CveBatchTitle = 'March 2026 Security Updates'
+    $variant.CveBatchUrl = 'https://example.invalid/batch/mar-2026'
+    $variant.DiskPaths = @('C:\Program Files\Legacy Agent\alt.exe')
+    $variant.RegistryPaths = @('HKLM\Software\Contoso\LegacyAgentV2')
+
+    $baselineSignature = Get-VulnCanonicalRowSignature -Row $baseline
+    $variantSignature = Get-VulnCanonicalRowSignature -Row $variant
+
+    Assert-True ($baselineSignature -eq $variantSignature) 'Canonical vulnerability signature should ignore volatile metadata changes for the same Id.'
+}
+
+function Test-MergeVulnObservedWindowRows {
+    [CmdletBinding()]
+    param()
+
+    $first = Get-TestVulnRow -Id 'merge-001' -CveId 'CVE-2026-0004' -SnapshotDate '2026-03-17' -Version '1.0.0'
+    $second = Get-TestVulnRow -Id 'merge-001' -CveId 'CVE-2026-0004' -SnapshotDate '2026-03-19' -Version '1.0.0'
+    $second.RecommendedSecurityUpdate = 'KB000099'
+    $second.RecommendedSecurityUpdateId = 'KB000099'
+    $third = Get-TestVulnRow -Id 'merge-001' -CveId 'CVE-2026-0004' -SnapshotDate '2026-03-23' -Version '1.0.0'
+    $third.RecommendedSecurityUpdate = 'KB000123'
+    $third.RecommendedSecurityUpdateId = 'KB000123'
+    $sameDayDuplicate = Get-TestVulnRow -Id 'merge-001' -CveId 'CVE-2026-0004' -SnapshotDate '2026-03-19' -Version '1.0.0'
+    $sameDayDuplicate.RecommendedSecurityUpdate = 'KB000100'
+    $sameDayDuplicate.RecommendedSecurityUpdateId = 'KB000100'
+    $otherId = Get-TestVulnRow -Id 'merge-002' -CveId 'CVE-2026-0005' -SnapshotDate '2026-03-19' -Version '2.0.0'
+
+    $merged = @(Merge-VulnObservedWindowRows -Rows @($first, $second, $third, $sameDayDuplicate, $otherId))
+    $mergeIdRows = @($merged | Where-Object { $_.Id -eq 'merge-001' } | Sort-Object FirstSeenTimestamp, LastSeenTimestamp)
+
+    Assert-True ($mergeIdRows.Count -eq 2) 'Expected same-Id windows with overlap or a one-day gap to collapse into two observation windows.'
+    Assert-True ($mergeIdRows[0].FirstSeenTimestamp -eq '2026-03-17') 'Expected merged window to preserve the earliest first-seen date.'
+    Assert-True ($mergeIdRows[0].LastSeenTimestamp -eq '2026-03-19') 'Expected merged window to span the one-day observation gap.'
+    Assert-True ($mergeIdRows[0].RecommendedSecurityUpdate -eq 'KB000100') 'Expected merged window to retain the latest row metadata.'
+    Assert-True ($mergeIdRows[1].FirstSeenTimestamp -eq '2026-03-23') 'Expected distant reappearance to remain a separate window.'
+    Assert-True ($mergeIdRows[1].LastSeenTimestamp -eq '2026-03-23') 'Expected distant reappearance to remain a separate window.'
+}
+
 Write-Output 'Running shared-helper regression checks...'
 Test-CanonicalLayoutHelper
 Write-Output '  Canonical layout helper checks passed.'
 Test-LegacyVulnMigrationSmoke
 Write-Output '  Legacy vulnerability migration smoke checks passed.'
+Test-VulnCanonicalSignatureStability
+Write-Output '  Canonical vulnerability signature checks passed.'
+Test-MergeVulnObservedWindowRows
+Write-Output '  Vulnerability observation merge checks passed.'
 Write-Output 'Shared-helper regression checks passed.'
