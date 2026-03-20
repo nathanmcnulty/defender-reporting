@@ -1,0 +1,939 @@
+
+# Shared machine storage helpers used by export, generator, and the Azure runbook.
+
+function ConvertTo-CompactMachineRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Machine
+    )
+
+    return [PSCustomObject]@{
+        id                    = $Machine.PSObject.Properties['id']?.Value
+        computerDnsName       = $Machine.PSObject.Properties['computerDnsName']?.Value
+        rbacGroupName         = $Machine.PSObject.Properties['rbacGroupName']?.Value
+        osPlatform            = $Machine.PSObject.Properties['osPlatform']?.Value
+        osVersion             = $Machine.PSObject.Properties['osVersion']?.Value
+        machineTags           = Get-NormalizedMachineTag -Tags $Machine.PSObject.Properties['machineTags']?.Value
+        lastIpAddress         = $Machine.PSObject.Properties['lastIpAddress']?.Value
+        lastExternalIpAddress = $Machine.PSObject.Properties['lastExternalIpAddress']?.Value
+        healthStatus          = $Machine.PSObject.Properties['healthStatus']?.Value
+        riskScore             = $Machine.PSObject.Properties['riskScore']?.Value
+        exposureLevel         = $Machine.PSObject.Properties['exposureLevel']?.Value
+        deviceValue           = $Machine.PSObject.Properties['deviceValue']?.Value
+        managedBy             = $Machine.PSObject.Properties['managedBy']?.Value
+        isAadJoined           = $Machine.PSObject.Properties['isAadJoined']?.Value
+        lastSeen              = $Machine.PSObject.Properties['lastSeen']?.Value
+        firstSeen             = $Machine.PSObject.Properties['firstSeen']?.Value
+    }
+}
+
+function Get-NormalizedMachineTag {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Tags
+    )
+
+    $tagList = [System.Collections.Generic.List[string]]::new()
+
+    if ($null -eq $Tags) {
+        return [string[]]@()
+    }
+
+    if ($Tags -is [string]) {
+        if (-not [string]::IsNullOrWhiteSpace($Tags)) {
+            $tagList.Add($Tags)
+        }
+    }
+    elseif ($Tags -is [System.Collections.IEnumerable]) {
+        foreach ($tag in $Tags) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$tag)) {
+                $tagList.Add([string]$tag)
+            }
+        }
+    }
+    else {
+        $tagValue = [string]$Tags
+        if (-not [string]::IsNullOrWhiteSpace($tagValue)) {
+            $tagList.Add($tagValue)
+        }
+    }
+
+    if ($tagList.Count -eq 0) {
+        return [string[]]@()
+    }
+
+    return [string[]]@($tagList | Sort-Object -Unique)
+}
+
+function Get-MachineCurrentPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    return Join-Path -Path $BasePath -ChildPath $Script:MachineCurrentFileName
+}
+
+function Get-MachineHistoryPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    return Join-Path -Path $BasePath -ChildPath $Script:MachineHistoryFileName
+}
+
+function Get-MachineHistoryQuarterlyPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PeriodKey
+    )
+
+    return Join-Path -Path $BasePath -ChildPath ([string]::Format($Script:MachineHistoryQuarterlyFileNamePattern, $PeriodKey))
+}
+
+function Test-IsMachineHistoryQuarterlyFileName {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return ($Name -match '^Machines_History_\d{4}Q[1-4]\.json\.gz$')
+}
+
+function Test-IsMachineHistorySegmentFileName {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return ($Name -match '^Machines_History_\d{8}T\d{6}Z_[a-f0-9]{8}\.json\.gz$')
+}
+
+function New-MachineHistorySegmentFileName {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    $timestamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+    $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
+    return "Machines_History_${timestamp}_${suffix}.json.gz"
+}
+
+function Get-MachineHistoryQuarterlyFiles {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    [OutputType([System.IO.FileInfo[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    return [System.IO.FileInfo[]]@(
+        Get-ChildItem -Path $BasePath -Filter 'Machines_History_*.json.gz' -File -ErrorAction SilentlyContinue |
+            Where-Object { Test-IsMachineHistoryQuarterlyFileName -Name $_.Name } |
+            Sort-Object Name
+    )
+}
+
+function Get-MachineHistorySegmentFiles {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    [OutputType([System.IO.FileInfo[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    return [System.IO.FileInfo[]]@(
+        Get-ChildItem -Path $BasePath -Filter 'Machines_History_*.json.gz' -File -ErrorAction SilentlyContinue |
+            Where-Object { Test-IsMachineHistorySegmentFileName -Name $_.Name } |
+            Sort-Object Name
+    )
+}
+
+function Get-MachineHistoryAllSourcePaths {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $paths = [System.Collections.Generic.List[string]]::new()
+    $historyPath = Get-MachineHistoryPath -BasePath $BasePath
+    $legacyHistoryPath = Get-LegacyCanonicalPath -Path $historyPath
+
+    foreach ($file in Get-MachineHistoryQuarterlyFiles -BasePath $BasePath) {
+        $paths.Add($file.FullName)
+    }
+
+    if (Test-Path -Path $historyPath -PathType Leaf) {
+        $paths.Add($historyPath)
+    }
+    elseif (Test-Path -Path $legacyHistoryPath -PathType Leaf) {
+        $paths.Add($legacyHistoryPath)
+    }
+
+    foreach ($file in Get-MachineHistorySegmentFiles -BasePath $BasePath) {
+        $paths.Add($file.FullName)
+    }
+
+    return [string[]]@($paths)
+}
+
+function Get-MachineHistorySourcePaths {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $quarterlyFiles = @(Get-MachineHistoryQuarterlyFiles -BasePath $BasePath)
+    if ($quarterlyFiles.Count -gt 0) {
+        return [string[]]@($quarterlyFiles | ForEach-Object { $_.FullName })
+    }
+
+    return (Get-MachineHistoryAllSourcePaths -BasePath $BasePath)
+}
+
+function Get-AdvancedHuntingCurrentPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    return Join-Path -Path $BasePath -ChildPath $Script:AdvancedHuntingCurrentFileName
+}
+
+function Get-LegacyCanonicalPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $Path.Substring(0, $Path.Length - 3)
+    }
+
+    return "$Path.gz"
+}
+
+function Test-IsLegacyMachineSnapshotFileName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return ($Name -match '^Machines_\d{4}-\d{2}-\d{2}\.json$')
+}
+
+function Test-IsLegacyAdvancedHuntingSnapshotFileName {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return ($Name -match '^AdvancedHunting_\d+_\d{4}-\d{2}-\d{2}\.json$')
+}
+
+function Read-TextFileContent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return (Read-GzipTextFile -Path $Path)
+    }
+
+    return (Get-Content -Path $Path -Raw)
+}
+
+function Get-JsonFileMode {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fileStream = [System.IO.File]::OpenRead($Path)
+    try {
+        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        } else { $fileStream }
+        try {
+            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.Encoding]::UTF8, $true)
+            try {
+                while (-not $reader.EndOfStream) {
+                    $charValue = $reader.Read()
+                    if ($charValue -lt 0) { break }
+                    $char = [char]$charValue
+                    if (-not [char]::IsWhiteSpace($char)) {
+                        if ($char -eq '[') { return 'Array' }
+                        return 'Ndjson'
+                    }
+                }
+                return 'Empty'
+            }
+            finally { $reader.Dispose() }
+        }
+        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
+    }
+    finally { $fileStream.Dispose() }
+}
+
+function Read-MachineRecordsFromFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fileMode = Get-JsonFileMode -Path $Path
+    if ($fileMode -eq 'Empty') {
+        return
+    }
+
+    if ($fileMode -eq 'Array') {
+        $rawContent = Read-TextFileContent -Path $Path
+        $machineList = $rawContent | ConvertFrom-Json
+        $rawContent = $null
+        if ($null -eq $machineList) { return }
+        if ($machineList -isnot [System.Array]) { $machineList = @($machineList) }
+
+        foreach ($machine in $machineList) {
+            if ($null -eq $machine) { continue }
+            if ($machine.PSObject.Properties['removed']?.Value -eq $true) {
+                Write-Output ([PSCustomObject]@{
+                    id = $machine.PSObject.Properties['id']?.Value
+                    observedOn = $machine.PSObject.Properties['observedOn']?.Value
+                    removed = $true
+                    stateHash = $machine.PSObject.Properties['stateHash']?.Value
+                })
+                continue
+            }
+            $record = ConvertTo-CompactMachineRecord -Machine $machine
+            $stateHash = $machine.PSObject.Properties['stateHash']?.Value
+            $observedOn = $machine.PSObject.Properties['observedOn']?.Value
+            if ($stateHash) { Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash }
+            if ($observedOn) { Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn }
+            Write-Output $record
+        }
+
+        return
+    }
+
+    $fileStream = [System.IO.File]::OpenRead($Path)
+    try {
+        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        } else { $fileStream }
+        try {
+            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
+            try {
+                while (-not $reader.EndOfStream) {
+                    $line = $reader.ReadLine()
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    try {
+                        $machine = $line | ConvertFrom-Json
+                    }
+                    catch {
+                        Write-Warning "Failed to parse machine line in $(Split-Path -Leaf $Path): $_"
+                        continue
+                    }
+
+                    if ($null -eq $machine) { continue }
+                    if ($machine.PSObject.Properties['removed']?.Value -eq $true) {
+                        Write-Output ([PSCustomObject]@{
+                            id = $machine.PSObject.Properties['id']?.Value
+                            observedOn = $machine.PSObject.Properties['observedOn']?.Value
+                            removed = $true
+                            stateHash = $machine.PSObject.Properties['stateHash']?.Value
+                        })
+                        continue
+                    }
+                    $record = ConvertTo-CompactMachineRecord -Machine $machine
+                    $stateHash = $machine.PSObject.Properties['stateHash']?.Value
+                    $observedOn = $machine.PSObject.Properties['observedOn']?.Value
+                    if ($stateHash) { Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash }
+                    if ($observedOn) { Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn }
+                    Write-Output $record
+                }
+            }
+            finally { $reader.Dispose() }
+        }
+        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
+    }
+    finally { $fileStream.Dispose() }
+}
+
+function Get-MachineStateHash {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Machine
+    )
+
+    $state = [ordered]@{
+        computerDnsName       = $Machine.PSObject.Properties['computerDnsName']?.Value
+        rbacGroupName         = $Machine.PSObject.Properties['rbacGroupName']?.Value
+        osPlatform            = $Machine.PSObject.Properties['osPlatform']?.Value
+        osVersion             = $Machine.PSObject.Properties['osVersion']?.Value
+        machineTags           = @(Get-NormalizedMachineTag -Tags $Machine.PSObject.Properties['machineTags']?.Value)
+        lastIpAddress         = $Machine.PSObject.Properties['lastIpAddress']?.Value
+        lastExternalIpAddress = $Machine.PSObject.Properties['lastExternalIpAddress']?.Value
+        healthStatus          = $Machine.PSObject.Properties['healthStatus']?.Value
+        riskScore             = $Machine.PSObject.Properties['riskScore']?.Value
+        exposureLevel         = $Machine.PSObject.Properties['exposureLevel']?.Value
+        deviceValue           = $Machine.PSObject.Properties['deviceValue']?.Value
+        managedBy             = $Machine.PSObject.Properties['managedBy']?.Value
+        isAadJoined           = $Machine.PSObject.Properties['isAadJoined']?.Value
+    }
+
+    $stateJson = $state | ConvertTo-Json -Compress -Depth 5
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($stateJson)
+    if (-not (Get-Variable -Name _sha256 -Scope Script -ErrorAction Ignore)) {
+        $Script:_sha256 = [System.Security.Cryptography.SHA256]::Create()
+    }
+    $hashBytes = $Script:_sha256.ComputeHash($bytes)
+    return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+}
+
+function New-MachineSnapshotRecord {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Machine,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ObservedOn
+    )
+
+    $compactRecord = ConvertTo-CompactMachineRecord -Machine $Machine
+    $snapshot = [ordered]@{}
+    foreach ($property in $compactRecord.PSObject.Properties) {
+        $snapshot[$property.Name] = $property.Value
+    }
+    $snapshot['observedOn'] = $ObservedOn
+    $snapshot['stateHash'] = Get-MachineStateHash -Machine $compactRecord
+
+    return [PSCustomObject]$snapshot
+}
+
+function New-MachineRemovalRecord {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$MachineId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ObservedOn
+    )
+
+    return [PSCustomObject]@{
+        id = $MachineId
+        observedOn = $ObservedOn
+        removed = $true
+        stateHash = 'removed'
+    }
+}
+
+function Write-NdjsonRecordsFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IEnumerable]$Records
+    )
+
+    $fileStream = $null
+    $gzipStream = $null
+    $writer = $null
+    try {
+        if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $fileStream = [System.IO.File]::Create($Path)
+            $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+            $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
+        }
+        else {
+            $writer = [System.IO.StreamWriter]::new($Path, $false, [System.Text.UTF8Encoding]::new($false))
+        }
+
+        foreach ($record in $Records) {
+            if ($null -eq $record) { continue }
+            $writer.WriteLine(($record | ConvertTo-Json -Compress -Depth 6))
+        }
+    }
+    finally {
+        if ($writer) { $writer.Dispose() }
+        elseif ($gzipStream) { $gzipStream.Dispose() }
+        elseif ($fileStream) { $fileStream.Dispose() }
+    }
+}
+
+function Get-MachineHistoryRecordKey {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Record
+    )
+
+    $id = [string]$Record.PSObject.Properties['id']?.Value
+    $observedOn = Convert-ToYmdDate -DateValue $Record.PSObject.Properties['observedOn']?.Value
+    $removed = if ($Record.PSObject.Properties['removed']?.Value -eq $true) { '1' } else { '0' }
+    $stateHash = [string]$Record.PSObject.Properties['stateHash']?.Value
+    return ($id + '|' + $observedOn + '|' + $removed + '|' + $stateHash)
+}
+
+function Add-MachineHistoryRecordToPeriodMap {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$HistoryRecordsByPeriod,
+
+        [Parameter(Mandatory = $true)]
+        $RecordKeys,
+
+        [Parameter(Mandatory = $true)]
+        $Record
+    )
+
+    if ($null -eq $Record) { return }
+
+    $id = [string]$Record.PSObject.Properties['id']?.Value
+    if ([string]::IsNullOrWhiteSpace($id)) { return }
+
+    $observedOn = Convert-ToYmdDate -DateValue $Record.PSObject.Properties['observedOn']?.Value
+    if ([string]::IsNullOrWhiteSpace($observedOn)) { return }
+
+    if (($Record.PSObject.Properties['removed']?.Value -ne $true) -and -not $Record.PSObject.Properties['stateHash']) {
+        Add-Member -InputObject $Record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $Record) -Force
+    }
+
+    if (-not $Record.PSObject.Properties['observedOn']) {
+        Add-Member -InputObject $Record -NotePropertyName observedOn -NotePropertyValue $observedOn -Force
+    }
+
+    $recordKey = Get-MachineHistoryRecordKey -Record $Record
+    if (-not $RecordKeys.Add($recordKey)) { return }
+
+    $periodKey = Get-QuarterPeriodKeyFromDate -Date $observedOn
+    if (-not $HistoryRecordsByPeriod.ContainsKey($periodKey)) {
+        $HistoryRecordsByPeriod[$periodKey] = [System.Collections.Generic.List[object]]::new()
+    }
+
+    $HistoryRecordsByPeriod[$periodKey].Add($Record)
+}
+
+function Get-MachineHistoryRemovePaths {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.HashSet[string]]$PublishedHistoryNames
+    )
+
+    $removePaths = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in @(
+        Get-ChildItem -Path $BasePath -Filter 'Machines_History*.json.gz' -File -ErrorAction SilentlyContinue |
+            Where-Object { -not $PublishedHistoryNames.Contains($_.Name) } |
+            ForEach-Object { $_.FullName }
+    )) {
+        $removePaths.Add($path)
+    }
+
+    $legacyHistoryJsonPath = Get-MachineHistoryPath -BasePath $BasePath
+    $legacyHistoryGzipPath = Get-LegacyCanonicalPath -Path $legacyHistoryJsonPath
+    foreach ($path in @($legacyHistoryJsonPath, $legacyHistoryGzipPath)) {
+        if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        if ($removePaths -contains $path) { continue }
+        $removePaths.Add($path)
+    }
+
+    return [string[]]@($removePaths)
+}
+
+function Initialize-MachineHistoryStore {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$RemoveLegacyFiles
+    )
+
+    $currentPath = Get-MachineCurrentPath -BasePath $Path
+    $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
+    $currentReadPath = if (Test-Path -Path $currentPath) { $currentPath } elseif (Test-Path -Path $legacyCurrentPath) { $legacyCurrentPath } else { $null }
+    $historySourcePaths = @(Get-MachineHistoryAllSourcePaths -BasePath $Path)
+    $legacyFiles = @(Get-ChildItem -Path $Path -Filter 'Machines_*.json' -File | Where-Object { Test-IsLegacyMachineSnapshotFileName -Name $_.Name } | Sort-Object Name)
+    $currentRecords = @{}
+    $migratedLegacy = $false
+    $historyRecordsByPeriod = @{}
+    $historyRecordKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($sourcePath in $historySourcePaths) {
+        foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
+            Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $record
+        }
+    }
+
+    if ($null -ne $currentReadPath) {
+        foreach ($record in Read-MachineRecordsFromFile -Path $currentReadPath) {
+            if (-not $record.id) { continue }
+            if ($record.PSObject.Properties['removed']?.Value -eq $true) {
+                $currentRecords.Remove($record.id)
+                continue
+            }
+            if (-not $record.PSObject.Properties['stateHash']) {
+                Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
+            }
+            if (-not $record.PSObject.Properties['observedOn']) {
+                Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
+            }
+            $currentRecords[$record.id] = $record
+        }
+    } elseif ($historySourcePaths.Count -gt 0) {
+        foreach ($sourcePath in $historySourcePaths) {
+            foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
+                if (-not $record.id) { continue }
+                if ($record.PSObject.Properties['removed']?.Value -eq $true) {
+                    $currentRecords.Remove($record.id)
+                    continue
+                }
+                if (-not $record.PSObject.Properties['stateHash']) {
+                    Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
+                }
+                if (-not $record.PSObject.Properties['observedOn']) {
+                    Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
+                }
+                $currentRecords[$record.id] = $record
+            }
+        }
+    }
+
+    if ($legacyFiles.Count -gt 0) {
+        foreach ($file in $legacyFiles) {
+            $observedOn = [regex]::Match($file.Name, '\d{4}-\d{2}-\d{2}').Value
+            foreach ($record in Read-MachineRecordsFromFile -Path $file.FullName) {
+                if (-not $record.id) { continue }
+                $snapshot = New-MachineSnapshotRecord -Machine $record -ObservedOn $observedOn
+                $existing = $currentRecords[$snapshot.id]
+                if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
+                    Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $snapshot
+                }
+                $currentRecords[$snapshot.id] = $snapshot
+            }
+        }
+        if ($RemoveLegacyFiles) {
+            Remove-Item -Path $legacyFiles.FullName -Force -ErrorAction SilentlyContinue
+        }
+        $migratedLegacy = $true
+    }
+
+    if (($historyRecordsByPeriod.Count -eq 0) -and $currentRecords.Count -gt 0) {
+        foreach ($record in $currentRecords.Values) {
+            if (-not $record.PSObject.Properties['stateHash']) {
+                Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
+            }
+            if (-not $record.PSObject.Properties['observedOn']) {
+                Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
+            }
+            Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $record
+        }
+    }
+
+    if ($migratedLegacy -and (Test-Path -Path $legacyCurrentPath)) {
+        Remove-Item -Path $legacyCurrentPath -Force -ErrorAction SilentlyContinue
+    }
+
+    return @{
+        CurrentPath           = $currentPath
+        CurrentRecords        = $currentRecords
+        HistoryRecordsByPeriod = $historyRecordsByPeriod
+        MigratedLegacy        = $migratedLegacy
+    }
+}
+
+function Convert-ToYmdDate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$DateValue
+    )
+
+    if ($null -eq $DateValue) {
+        return $null
+    }
+
+    $raw = $DateValue.ToString().Trim()
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $null
+    }
+
+    if ($raw -match '^\d{4}-\d{2}-\d{2}$') {
+        return $raw
+    }
+
+    if ($raw -match '^(\d{1,2})/(\d{1,2})/(\d{4})') {
+        $month = [int]$Matches[1]
+        $day = [int]$Matches[2]
+        $year = [int]$Matches[3]
+        if ($month -ge 1 -and $month -le 12 -and $day -ge 1 -and $day -le 31) {
+            return ('{0:D4}-{1:D2}-{2:D2}' -f $year, $month, $day)
+        }
+    }
+
+    try {
+        return ([datetime]$raw).ToString('yyyy-MM-dd')
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-VendorMatchKey {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Vendor
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Vendor)) {
+        return ''
+    }
+
+    $trimmed = $Vendor.Trim()
+    if ($env:DEFENDER_REPORTING_NORMALIZE_VENDOR_MATCH -ne '1') {
+        return $trimmed
+    }
+
+    $normalized = $trimmed.ToLowerInvariant()
+    $normalized = [regex]::Replace($normalized, '[^a-z0-9]+', ' ')
+    $normalized = [regex]::Replace($normalized, '\b(corporation|corp|incorporated|inc|llc|ltd|limited|company|co|gmbh|ag|plc|pte)\b', ' ')
+    $normalized = [regex]::Replace($normalized, '\s+', ' ').Trim()
+    return $normalized
+}
+
+function Get-AdvancedHuntingLastModifiedKey {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$LastModifiedTime,
+
+        [Parameter(Mandatory = $false)]
+        [string]$FallbackDate = ''
+    )
+
+    if ($null -ne $LastModifiedTime) {
+        $rawValue = $LastModifiedTime.ToString().Trim()
+        if (-not [string]::IsNullOrWhiteSpace($rawValue)) {
+            try {
+                return ([datetimeoffset]$rawValue).UtcDateTime.ToString('o')
+            }
+            catch {
+                $normalized = Convert-ToYmdDate -DateValue $rawValue
+                if ($normalized) {
+                    return $normalized
+                }
+
+                return $rawValue
+            }
+        }
+    }
+
+    return $FallbackDate
+}
+
+function Read-AdvancedHuntingRecordsFromFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fileMode = Get-JsonFileMode -Path $Path
+    if ($fileMode -eq 'Empty') {
+        return
+    }
+
+    if ($fileMode -eq 'Array') {
+        $rawContent = Read-TextFileContent -Path $Path
+        $records = $rawContent | ConvertFrom-Json
+        $rawContent = $null
+        if ($null -eq $records) { return }
+        if ($records -isnot [System.Array]) { $records = @($records) }
+
+        foreach ($record in $records) {
+            if ($null -ne $record) {
+                Write-Output $record
+            }
+        }
+
+        return
+    }
+
+    $fileStream = [System.IO.File]::OpenRead($Path)
+    try {
+        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        } else { $fileStream }
+        try {
+            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
+            try {
+                while (-not $reader.EndOfStream) {
+                    $line = $reader.ReadLine()
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    try {
+                        $record = $line | ConvertFrom-Json
+                        if ($null -ne $record) { Write-Output $record }
+                    }
+                    catch {
+                        Write-Warning "Failed to parse Advanced Hunting line in $(Split-Path -Leaf $Path): $_"
+                    }
+                }
+            }
+            finally { $reader.Dispose() }
+        }
+        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
+    }
+    finally { $fileStream.Dispose() }
+}
+
+function Initialize-AdvancedHuntingStore {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$RemoveLegacyFiles
+    )
+
+    $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
+    $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
+    $currentRecords = @{}
+    $migratedLegacy = $false
+    $legacyFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File | Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } | Sort-Object Name)
+
+    if (Test-Path -Path $currentPath) {
+        foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $currentPath) {
+            $cveId = $record.PSObject.Properties['CveId']?.Value
+            if ($cveId) {
+                $currentRecords[$cveId] = $record
+            }
+        }
+    }
+    elseif (Test-Path -Path $legacyCurrentPath) {
+        foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $legacyCurrentPath) {
+            $cveId = $record.PSObject.Properties['CveId']?.Value
+            if ($cveId) {
+                $currentRecords[$cveId] = $record
+            }
+        }
+        $migratedLegacy = $true
+    }
+
+    if ($legacyFiles.Count -gt 0) {
+        foreach ($file in $legacyFiles) {
+            $fallbackDate = [regex]::Match($file.Name, '\d{4}-\d{2}-\d{2}').Value
+            foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
+                $cveId = $record.PSObject.Properties['CveId']?.Value
+                if (-not $cveId) { continue }
+
+                $incomingKey = Get-AdvancedHuntingLastModifiedKey -LastModifiedTime $record.PSObject.Properties['LastModifiedTime']?.Value -FallbackDate $fallbackDate
+                $existing = $currentRecords[$cveId]
+
+                if ($null -eq $existing) {
+                    $currentRecords[$cveId] = $record
+                    $migratedLegacy = $true
+                    continue
+                }
+
+                $existingKey = Get-AdvancedHuntingLastModifiedKey -LastModifiedTime $existing.PSObject.Properties['LastModifiedTime']?.Value -FallbackDate ''
+                if ([string]::CompareOrdinal($incomingKey, $existingKey) -gt 0) {
+                    $currentRecords[$cveId] = $record
+                    $migratedLegacy = $true
+                }
+            }
+        }
+
+        if ($migratedLegacy) {
+            $stageRoot = Join-Path $Path ('.advancedhunting-store-staging-' + [guid]::NewGuid().ToString('N'))
+            [void](New-Item -Path $stageRoot -ItemType Directory -Force)
+            try {
+                $stagedCurrentPath = Join-Path $stageRoot (Split-Path -Leaf $currentPath)
+                Write-NdjsonRecordsFile -Path $stagedCurrentPath -Records $currentRecords.Values
+                $removePaths = if ($RemoveLegacyFiles -and $currentRecords.Count -gt 0) {
+                    @($legacyFiles.FullName) + @(
+                        if (Test-Path -Path $legacyCurrentPath) { $legacyCurrentPath }
+                    )
+                }
+                else {
+                    @()
+                }
+
+                Publish-StoreFilesTransactional -BasePath $Path -StoreName 'advancedhunting' -Files @([PSCustomObject]@{
+                    StagePath = $stagedCurrentPath
+                    TargetPath = $currentPath
+                }) -RemovePaths $removePaths
+            }
+            finally {
+                if (Test-Path -Path $stageRoot) {
+                    Remove-Item -Path $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+
+    return @{
+        CurrentPath    = $currentPath
+        CurrentRecords = $currentRecords
+        MigratedLegacy = $migratedLegacy
+    }
+}

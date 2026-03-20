@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version Latest
+Set-StrictMode -Version Latest
 
 # Canonical shared helper surface for the Defender reporting scripts.
 #
@@ -1987,6 +1987,7 @@ function Publish-VulnStoreUnlocked {
     try {
         $stagedCurrentPath = Get-VulnCurrentPath -BasePath $stageRoot
         Write-VulnCurrentFile -Path $stagedCurrentPath -Records $storeToPublish.CurrentRecords
+        Write-Information ("  Vulnerability store publish: {0} current row(s), {1} history period(s)" -f @($storeToPublish.CurrentRecords).Count, @($storeToPublish.HistoryDocuments).Count) -InformationAction Continue
 
         foreach ($historyDocument in @($storeToPublish.HistoryDocuments)) {
             $periodKey = Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument
@@ -2061,6 +2062,7 @@ function Publish-VulnStore {
         Publish-VulnStoreUnlocked -BasePath $BasePath -Store $storeToPublish
     }
 }
+
 
 # =============================================================================
 # TEMPORARY LEGACY VULNERABILITY MIGRATION HELPERS
@@ -3027,6 +3029,7 @@ function Convert-LegacyVulnSnapshotsToStore {
     }
 }
 
+
 # Shared machine storage helpers used by export, generator, and the Azure runbook.
 
 function ConvertTo-CompactMachineRecord {
@@ -3966,6 +3969,7 @@ function Initialize-AdvancedHuntingStore {
     }
 }
 
+
 # Shared MDE export helpers used by local export, generator refresh, and the Azure runbook.
 
 function Get-MdeHeaderCollection {
@@ -4076,6 +4080,7 @@ DeviceTvmSoftwareVulnerabilities
         try {
             $stagedCurrentPath = Join-Path $stageRoot (Split-Path -Leaf $store.CurrentPath)
             Write-NdjsonRecordsFile -Path $stagedCurrentPath -Records $store.CurrentRecords.Values
+            Write-Information ("  Advanced Hunting store publish: {0} record(s)" -f $store.CurrentRecords.Count) -InformationAction Continue
 
             Publish-StoreFilesTransactional -BasePath $OutputPath -StoreName 'advancedhunting' -Files @([PSCustomObject]@{
                 StagePath = $stagedCurrentPath
@@ -4200,6 +4205,7 @@ function Publish-MachineStoreState {
     try {
         $stagedCurrentPath = Join-Path $stageRoot (Split-Path -Leaf $Store.CurrentPath)
         Write-NdjsonRecordsFile -Path $stagedCurrentPath -Records $Store.CurrentRecords.Values
+        Write-Information ("  Machine store publish: {0} current record(s), {1} history period(s), {2} change record(s)" -f $Store.CurrentRecords.Count, $Store.HistoryRecordsByPeriod.Count, @($ChangeRecords).Count) -InformationAction Continue
 
         $filesToPublish = [System.Collections.Generic.List[object]]::new()
         $filesToPublish.Add([PSCustomObject]@{
@@ -4286,6 +4292,7 @@ function Invoke-MdeMachineStoreRefresh {
             OutputFiles = @($publishResult.OutputFiles)
             MigratedLegacy = $publishResult.MigratedLegacy
         }
+
     }
 }
 
@@ -4808,6 +4815,7 @@ function ConvertTo-NormalizedData {
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
+    Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s)" -f $Machines.Count, $AdvancedHuntingData.Count) -InformationAction Continue
     $context = Get-NormalizationContext
     $lookups = $context.Lookups
     $vendorIndex = $context.Indexes.vendors
