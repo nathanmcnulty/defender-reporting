@@ -65,6 +65,7 @@ For managed identity auth, Azure provisioning, and GitHub workflow setup, use th
 | [Azure setup](docs/azure-setup.md) | API permissions, authentication options, Azure Automation provisioning, and Container App publishing |
 | [GitHub Actions setup](docs/github-actions-setup.md) | OIDC service principal setup, required repository secrets, and branch protection guidance |
 | [Workflow notes](docs/workflows.md) | What each workflow does and when to use it |
+| [Changelog](CHANGELOG.md) | Release-style summary of notable changes |
 
 ## Core scripts
 
@@ -81,9 +82,13 @@ For managed identity auth, Azure provisioning, and GitHub workflow setup, use th
 | File | Purpose |
 |---|---|
 | `exports/VulnExport_current.json.gz` | Current open vulnerability row versions |
-| `exports/VulnHistory_YYYY.json.gz` | Historical row versions closed during each year |
+| `exports/VulnHistory_YYYYQn.json.gz` | Historical row versions closed during each quarter |
+| `exports/VulnHistoryRows_YYYYQn.json.gz` | Historical row observation detail used for window normalization |
+| `exports/VulnContentDictionary.json.gz` | Shared vulnerability content dictionary for content-store mode |
+| `exports/VulnCurrentRefs.json.gz` | Current vulnerability references into the content dictionary |
+| `exports/VulnHistoryRefs_YYYYQn.json.gz` | Historical vulnerability references into the content dictionary |
 | `exports/Machines_Current.json.gz` | Latest known state per device |
-| `exports/Machines_History.json.gz` | Append-only machine state changes |
+| `exports/Machines_History_YYYYQn.json.gz` | Machine state changes by quarter |
 | `exports/AdvancedHunting_Current.json.gz` | Latest known CVE enrichment from Advanced Hunting |
 
 ## Delivery paths
@@ -103,3 +108,4 @@ flowchart TD
 - `azure/Invoke-DashboardPipeline.ps1` is a generated runbook artifact. Edit `shared-helpers.ps1` and `azure/runbook-source.ps1`, then rebuild with `.\azure\Build-Runbook.ps1`.
 - Legacy `VulnExport_<group>_<date>.json(.gz)` compatibility remains temporary through `2026-07-01`.
 - Sample PDF outputs are committed under `reports/`.
+- `exports/.dashboard-cache` is a derived local build cache and is intentionally ignored by git.
