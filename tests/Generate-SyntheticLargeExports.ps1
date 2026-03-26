@@ -35,7 +35,7 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'shared-helpers.ps1')
 
-function Get-PresetSettings {
+function Get-PresetSetting {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -67,7 +67,7 @@ function Get-PresetSettings {
     }
 }
 
-function New-ObjectCopy {
+function ConvertTo-ObjectCopy {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -82,7 +82,7 @@ function New-ObjectCopy {
     return [PSCustomObject]$copy
 }
 
-function Set-ObjectProperty {
+function Add-ObjectProperty {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -167,7 +167,7 @@ function Get-ProfileKey {
     return 'unknown'
 }
 
-function New-SyntheticDeviceId {
+function Get-SyntheticDeviceId {
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -182,7 +182,7 @@ function New-SyntheticDeviceId {
     return ('sim-{0:D5}-{1}' -f $Index, $normalizedBase)
 }
 
-function New-SyntheticDeviceName {
+function Get-SyntheticDeviceName {
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -233,7 +233,7 @@ function Get-SyntheticRowId {
     return ($DeviceId + '_' + $softwareName + '_' + $cveId)
 }
 
-function New-SyntheticMachineRecord {
+function ConvertTo-SyntheticMachineRecord {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -249,15 +249,15 @@ function New-SyntheticMachineRecord {
         [string]$ObservedOn
     )
 
-    $machine = New-ObjectCopy -InputObject $TemplateMachine
-    Set-ObjectProperty -InputObject $machine -Name 'id' -Value $DeviceId
-    Set-ObjectProperty -InputObject $machine -Name 'computerDnsName' -Value $DeviceName
-    Set-ObjectProperty -InputObject $machine -Name 'observedOn' -Value $ObservedOn
-    Set-ObjectProperty -InputObject $machine -Name 'stateHash' -Value (Get-MachineStateHash -Machine $machine)
+    $machine = ConvertTo-ObjectCopy -InputObject $TemplateMachine
+    Add-ObjectProperty -InputObject $machine -Name 'id' -Value $DeviceId
+    Add-ObjectProperty -InputObject $machine -Name 'computerDnsName' -Value $DeviceName
+    Add-ObjectProperty -InputObject $machine -Name 'observedOn' -Value $ObservedOn
+    Add-ObjectProperty -InputObject $machine -Name 'stateHash' -Value (Get-MachineStateHash -Machine $machine)
     return $machine
 }
 
-function New-SyntheticRow {
+function ConvertTo-SyntheticRow {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -273,16 +273,16 @@ function New-SyntheticRow {
 
     $row = Copy-VulnRecord -Record $SourceRow
     $deviceId = [string](Get-MachineRecordValue -Machine $SyntheticMachine -Name 'id')
-    Set-ObjectProperty -InputObject $row -Name 'DeviceId' -Value $deviceId
-    Set-ObjectProperty -InputObject $row -Name 'DeviceName' -Value ([string](Get-MachineRecordValue -Machine $SyntheticMachine -Name 'computerDnsName'))
-    Set-ObjectProperty -InputObject $row -Name 'RbacGroupName' -Value ([string](Get-MachineRecordValue -Machine $SyntheticMachine -Name 'rbacGroupName'))
-    Set-ObjectProperty -InputObject $row -Name 'OSPlatform' -Value ([string](Get-MachineRecordValue -Machine $SyntheticMachine -Name 'osPlatform'))
-    Set-ObjectProperty -InputObject $row -Name 'OSVersion' -Value (Get-MachineRecordValue -Machine $SyntheticMachine -Name 'osVersion')
-    Set-ObjectProperty -InputObject $row -Name 'MachineTags' -Value (@(Get-NormalizedMachineTag -Tags (Get-MachineRecordValue -Machine $SyntheticMachine -Name 'machineTags')))
-    Set-ObjectProperty -InputObject $row -Name 'IsOnboarded' -Value $true
-    Set-ObjectProperty -InputObject $row -Name 'Id' -Value (Get-SyntheticRowId -SourceRow $SourceRow -DeviceId $deviceId)
+    Add-ObjectProperty -InputObject $row -Name 'DeviceId' -Value $deviceId
+    Add-ObjectProperty -InputObject $row -Name 'DeviceName' -Value ([string](Get-MachineRecordValue -Machine $SyntheticMachine -Name 'computerDnsName'))
+    Add-ObjectProperty -InputObject $row -Name 'RbacGroupName' -Value ([string](Get-MachineRecordValue -Machine $SyntheticMachine -Name 'rbacGroupName'))
+    Add-ObjectProperty -InputObject $row -Name 'OSPlatform' -Value ([string](Get-MachineRecordValue -Machine $SyntheticMachine -Name 'osPlatform'))
+    Add-ObjectProperty -InputObject $row -Name 'OSVersion' -Value (Get-MachineRecordValue -Machine $SyntheticMachine -Name 'osVersion')
+    Add-ObjectProperty -InputObject $row -Name 'MachineTags' -Value (@(Get-NormalizedMachineTag -Tags (Get-MachineRecordValue -Machine $SyntheticMachine -Name 'machineTags')))
+    Add-ObjectProperty -InputObject $row -Name 'IsOnboarded' -Value $true
+    Add-ObjectProperty -InputObject $row -Name 'Id' -Value (Get-SyntheticRowId -SourceRow $SourceRow -DeviceId $deviceId)
     if ($null -ne $RbacGroupId) {
-        Set-ObjectProperty -InputObject $row -Name 'RbacGroupId' -Value $RbacGroupId
+        Add-ObjectProperty -InputObject $row -Name 'RbacGroupId' -Value $RbacGroupId
     }
     return $row
 }
@@ -336,7 +336,7 @@ function Get-HistorySnapshotDate {
     return (Get-Date).ToString('yyyy-MM-dd')
 }
 
-function New-GzipWriter {
+function Open-GzipWriter {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -358,7 +358,7 @@ function New-GzipWriter {
     }
 }
 
-function Flush-GzipWriter {
+function Sync-GzipWriter {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -396,7 +396,7 @@ function Close-GzipWriter {
     }
 }
 
-function Get-AllocationCounts {
+function Get-AllocationCount {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -419,7 +419,7 @@ function Get-AllocationCounts {
     return $whole
 }
 
-function Add-DeltaAcrossPlans {
+function Add-DeltaAcrossPlanSet {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -504,7 +504,7 @@ function Add-DeltaAcrossPlans {
     }
 }
 
-function Get-SampledItems {
+function Get-SampledItemSet {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -626,7 +626,7 @@ function Add-SourceRowContentTemplateIndex {
     return $contentIndexValue
 }
 
-$presetSettings = Get-PresetSettings -Name $Preset
+$presetSettings = Get-PresetSetting -Name $Preset
 if ($TargetDeviceCount -le 0) {
     $TargetDeviceCount = [int]$presetSettings.TargetDeviceCount
 }
@@ -726,13 +726,13 @@ foreach ($historyEntry in $sourceHistoryEntries) {
     [void](Add-SourceRowContentTemplateIndex -Row $historyEntry.Row -ContentTemplates $contentTemplates -ContentTemplateIndex $contentTemplateIndex)
 }
 
-$profileMap = @{}
+$rowProfileMap = @{}
 foreach ($machine in $machineTemplates) {
     $machineId = [string](Get-MachineRecordValue -Machine $machine -Name 'id')
     $machineName = [string](Get-MachineRecordValue -Machine $machine -Name 'computerDnsName')
     $profileKey = Get-ProfileKey -DeviceId $machineId -DeviceName $machineName
-    if (-not $profileMap.ContainsKey($profileKey)) {
-        $profileMap[$profileKey] = [PSCustomObject]@{
+    if (-not $rowProfileMap.ContainsKey($profileKey)) {
+        $rowProfileMap[$profileKey] = [PSCustomObject]@{
             ProfileKey = $profileKey
             TemplateMachine = $machine
             CurrentRows = [System.Collections.Generic.List[object]]::new()
@@ -740,15 +740,15 @@ foreach ($machine in $machineTemplates) {
             RbacGroupId = $null
         }
     }
-    elseif ($null -eq $profileMap[$profileKey].TemplateMachine) {
-        $profileMap[$profileKey].TemplateMachine = $machine
+    elseif ($null -eq $rowProfileMap[$profileKey].TemplateMachine) {
+        $rowProfileMap[$profileKey].TemplateMachine = $machine
     }
 }
 
 foreach ($row in $sourceCurrentRows) {
     $profileKey = Get-ProfileKey -DeviceId ([string](Get-RowPropertyValue -Row $row -Name 'DeviceId')) -DeviceName ([string](Get-RowPropertyValue -Row $row -Name 'DeviceName'))
-    if (-not $profileMap.ContainsKey($profileKey)) {
-        $profileMap[$profileKey] = [PSCustomObject]@{
+    if (-not $rowProfileMap.ContainsKey($profileKey)) {
+        $rowProfileMap[$profileKey] = [PSCustomObject]@{
             ProfileKey = $profileKey
             TemplateMachine = $null
             CurrentRows = [System.Collections.Generic.List[object]]::new()
@@ -756,17 +756,17 @@ foreach ($row in $sourceCurrentRows) {
             RbacGroupId = $null
         }
     }
-    $profileMap[$profileKey].CurrentRows.Add($row)
-    if ($null -eq $profileMap[$profileKey].RbacGroupId -and $row.PSObject.Properties['RbacGroupId']) {
-        $profileMap[$profileKey].RbacGroupId = $row.RbacGroupId
+    $rowProfileMap[$profileKey].CurrentRows.Add($row)
+    if ($null -eq $rowProfileMap[$profileKey].RbacGroupId -and $row.PSObject.Properties['RbacGroupId']) {
+        $rowProfileMap[$profileKey].RbacGroupId = $row.RbacGroupId
     }
 }
 
 foreach ($historyEntry in $sourceHistoryEntries) {
     $row = $historyEntry.Row
     $profileKey = Get-ProfileKey -DeviceId ([string](Get-RowPropertyValue -Row $row -Name 'DeviceId')) -DeviceName ([string](Get-RowPropertyValue -Row $row -Name 'DeviceName'))
-    if (-not $profileMap.ContainsKey($profileKey)) {
-        $profileMap[$profileKey] = [PSCustomObject]@{
+    if (-not $rowProfileMap.ContainsKey($profileKey)) {
+        $rowProfileMap[$profileKey] = [PSCustomObject]@{
             ProfileKey = $profileKey
             TemplateMachine = $null
             CurrentRows = [System.Collections.Generic.List[object]]::new()
@@ -774,18 +774,18 @@ foreach ($historyEntry in $sourceHistoryEntries) {
             RbacGroupId = $null
         }
     }
-    $profileMap[$profileKey].HistoryEntries.Add($historyEntry)
-    if ($null -eq $profileMap[$profileKey].RbacGroupId -and $row.PSObject.Properties['RbacGroupId']) {
-        $profileMap[$profileKey].RbacGroupId = $row.RbacGroupId
+    $rowProfileMap[$profileKey].HistoryEntries.Add($historyEntry)
+    if ($null -eq $rowProfileMap[$profileKey].RbacGroupId -and $row.PSObject.Properties['RbacGroupId']) {
+        $rowProfileMap[$profileKey].RbacGroupId = $row.RbacGroupId
     }
 }
 
 $rowProfiles = [System.Collections.Generic.List[object]]::new()
-foreach ($profile in $profileMap.Values) {
-    if ($null -eq $profile.TemplateMachine) {
-        $fallbackRow = if ($profile.CurrentRows.Count -gt 0) { $profile.CurrentRows[0] } elseif ($profile.HistoryEntries.Count -gt 0) { $profile.HistoryEntries[0].Row } else { $null }
+foreach ($rowProfileEntry in $rowProfileMap.Values) {
+    if ($null -eq $rowProfileEntry.TemplateMachine) {
+        $fallbackRow = if ($rowProfileEntry.CurrentRows.Count -gt 0) { $rowProfileEntry.CurrentRows[0] } elseif ($rowProfileEntry.HistoryEntries.Count -gt 0) { $rowProfileEntry.HistoryEntries[0].Row } else { $null }
         if ($null -ne $fallbackRow) {
-            $profile.TemplateMachine = [PSCustomObject]@{
+            $rowProfileEntry.TemplateMachine = [PSCustomObject]@{
                 id = [string](Get-RowPropertyValue -Row $fallbackRow -Name 'DeviceId')
                 computerDnsName = [string](Get-RowPropertyValue -Row $fallbackRow -Name 'DeviceName')
                 rbacGroupName = [string](Get-RowPropertyValue -Row $fallbackRow -Name 'RbacGroupName')
@@ -806,8 +806,8 @@ foreach ($profile in $profileMap.Values) {
         }
     }
 
-    if (($profile.CurrentRows.Count + $profile.HistoryEntries.Count) -gt 0 -and $null -ne $profile.TemplateMachine) {
-        $rowProfiles.Add($profile)
+    if (($rowProfileEntry.CurrentRows.Count + $rowProfileEntry.HistoryEntries.Count) -gt 0 -and $null -ne $rowProfileEntry.TemplateMachine) {
+        $rowProfiles.Add($rowProfileEntry)
     }
 }
 
@@ -844,14 +844,14 @@ for ($i = 0; $i -lt $TargetDeviceCount; $i++) {
     $deviceOrdinal = $i + 1
     $sourceMachineId = [string](Get-MachineRecordValue -Machine $machineTemplate -Name 'id' -Fallback ("device-{0:D5}" -f $deviceOrdinal))
     $sourceMachineName = [string](Get-MachineRecordValue -Machine $machineTemplate -Name 'computerDnsName' -Fallback ("device-{0:D5}" -f $deviceOrdinal))
-    $deviceId = New-SyntheticDeviceId -BaseId $sourceMachineId -Index $deviceOrdinal
-    $deviceName = New-SyntheticDeviceName -BaseName $sourceMachineName -Index $deviceOrdinal
-    $syntheticMachine = New-SyntheticMachineRecord -TemplateMachine $machineTemplate -DeviceId $deviceId -DeviceName $deviceName -ObservedOn $generationDate
+    $deviceId = Get-SyntheticDeviceId -BaseId $sourceMachineId -Index $deviceOrdinal
+    $deviceName = Get-SyntheticDeviceName -BaseName $sourceMachineName -Index $deviceOrdinal
+    $syntheticMachine = ConvertTo-SyntheticMachineRecord -TemplateMachine $machineTemplate -DeviceId $deviceId -DeviceName $deviceName -ObservedOn $generationDate
 
     $currentCapacity = $rowProfile.CurrentRows.Count
     $historyCapacity = $rowProfile.HistoryEntries.Count
-    $currentTarget = Get-AllocationCounts -Value ($currentCapacity * $scaleFactor) -Random $random
-    $historyTarget = Get-AllocationCounts -Value ($historyCapacity * $scaleFactor) -Random $random
+    $currentTarget = Get-AllocationCount -Value ($currentCapacity * $scaleFactor) -Random $random
+    $historyTarget = Get-AllocationCount -Value ($historyCapacity * $scaleFactor) -Random $random
 
     if (($currentTarget + $historyTarget) -eq 0) {
         if ($historyCapacity -gt 0) {
@@ -879,12 +879,12 @@ for ($i = 0; $i -lt $TargetDeviceCount; $i++) {
 
 $currentDelta = $targetCurrentRows - (@($plans | Measure-Object -Property CurrentTarget -Sum).Sum)
 $historyDelta = $targetHistoryRows - (@($plans | Measure-Object -Property HistoryTarget -Sum).Sum)
-Add-DeltaAcrossPlans -Plans $plans -Kind 'Current' -Delta $currentDelta -Random $random
-Add-DeltaAcrossPlans -Plans $plans -Kind 'History' -Delta $historyDelta -Random $random
+Add-DeltaAcrossPlanSet -Plans $plans -Kind 'Current' -Delta $currentDelta -Random $random
+Add-DeltaAcrossPlanSet -Plans $plans -Kind 'History' -Delta $historyDelta -Random $random
 
-$currentWriter = if ($IncludeRawRows) { New-GzipWriter -Path (Get-VulnCurrentPath -BasePath $OutputPath) } else { $null }
+$currentWriter = if ($IncludeRawRows) { Open-GzipWriter -Path (Get-VulnCurrentPath -BasePath $OutputPath) } else { $null }
 $currentRefsPath = Get-VulnCurrentRefsPath -BasePath $OutputPath
-$currentRefsWriter = New-GzipWriter -Path $currentRefsPath
+$currentRefsWriter = Open-GzipWriter -Path $currentRefsPath
 $historyWriters = @{}
 $historyRefsWriters = @{}
 $historyLatestByPeriod = @{}
@@ -916,11 +916,11 @@ try {
         $deviceIndexValue = [int]$deviceProfileIndex[$deviceSignature]
         $syntheticDeviceId = [string]$planDeviceProfileRow.DeviceId
 
-        $selectedCurrentRows = Get-SampledItems -Items @($plan.RowProfile.CurrentRows) -Count ([int]$plan.CurrentTarget) -Random $random
+        $selectedCurrentRows = Get-SampledItemSet -Items @($plan.RowProfile.CurrentRows) -Count ([int]$plan.CurrentTarget) -Random $random
         foreach ($sourceRow in $selectedCurrentRows) {
             $row = $null
             if ($IncludeRawRows) {
-                $row = New-SyntheticRow -SourceRow $sourceRow -SyntheticMachine $plan.Machine -RbacGroupId $plan.RbacGroupId
+                $row = ConvertTo-SyntheticRow -SourceRow $sourceRow -SyntheticMachine $plan.Machine -RbacGroupId $plan.RbacGroupId
                 $currentWriter.Writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
             }
             $rowId = if ($row) { [string](Get-RowPropertyValue -Row $row -Name 'Id') } else { Get-SyntheticRowId -SourceRow $sourceRow -DeviceId $syntheticDeviceId }
@@ -940,7 +940,7 @@ try {
             $writtenCurrentRows++
         }
 
-        $selectedHistoryEntries = Get-SampledItems -Items @($plan.RowProfile.HistoryEntries) -Count ([int]$plan.HistoryTarget) -Random $random
+        $selectedHistoryEntries = Get-SampledItemSet -Items @($plan.RowProfile.HistoryEntries) -Count ([int]$plan.HistoryTarget) -Random $random
         foreach ($historyEntry in $selectedHistoryEntries) {
             $row = $null
             $periodKey = [string]$historyEntry.PeriodKey
@@ -948,7 +948,7 @@ try {
             $historyLastSeenTimestamp = [string](Get-RowPropertyValue -Row $sourceHistoryRow -Name 'LastSeenTimestamp')
             $historyFirstSeenTimestamp = [string](Get-RowPropertyValue -Row $sourceHistoryRow -Name 'FirstSeenTimestamp')
             if ($IncludeRawRows) {
-                $row = New-SyntheticRow -SourceRow $sourceHistoryRow -SyntheticMachine $plan.Machine -RbacGroupId $plan.RbacGroupId
+                $row = ConvertTo-SyntheticRow -SourceRow $sourceHistoryRow -SyntheticMachine $plan.Machine -RbacGroupId $plan.RbacGroupId
             }
             if ([string]::IsNullOrWhiteSpace($periodKey)) {
                 $periodKey = Get-QuarterPeriodKeyFromDate -Date (Convert-ToYmdDate -DateValue $historyLastSeenTimestamp)
@@ -956,10 +956,10 @@ try {
             if (-not $historyRefsWriters.ContainsKey($periodKey)) {
                 if ($IncludeRawRows) {
                     $historyRowsPath = Get-VulnHistoryRowsPath -BasePath $OutputPath -PeriodKey $periodKey
-                    $historyWriters[$periodKey] = New-GzipWriter -Path $historyRowsPath
+                    $historyWriters[$periodKey] = Open-GzipWriter -Path $historyRowsPath
                 }
                 $historyRefsPath = Get-VulnHistoryRefsPath -BasePath $OutputPath -PeriodKey $periodKey
-                $historyRefsWriters[$periodKey] = New-GzipWriter -Path $historyRefsPath
+                $historyRefsWriters[$periodKey] = Open-GzipWriter -Path $historyRefsPath
                 $historyLatestByPeriod[$periodKey] = ''
             }
 
@@ -991,14 +991,14 @@ try {
 
         if ($plan.DeviceOrdinal -ge $nextCheckpointDevice -or $plan.DeviceOrdinal -eq $TargetDeviceCount) {
             if ($currentWriter) {
-                Flush-GzipWriter -WriterState $currentWriter
+                Sync-GzipWriter -WriterState $currentWriter
             }
-            Flush-GzipWriter -WriterState $currentRefsWriter
+            Sync-GzipWriter -WriterState $currentRefsWriter
             foreach ($writerState in $historyWriters.Values) {
-                Flush-GzipWriter -WriterState $writerState
+                Sync-GzipWriter -WriterState $writerState
             }
             foreach ($writerState in $historyRefsWriters.Values) {
-                Flush-GzipWriter -WriterState $writerState
+                Sync-GzipWriter -WriterState $writerState
             }
 
             Write-Output ("Progress: {0}/{1} devices, {2} current rows, {3} history rows, elapsed {4}" -f $plan.DeviceOrdinal, $TargetDeviceCount, $writtenCurrentRows, $writtenHistoryRows, $generationStopwatch.Elapsed.ToString('hh\:mm\:ss'))
