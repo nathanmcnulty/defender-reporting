@@ -64,6 +64,7 @@ function Publish-VulnStoreExistingCanonicalState {
 
     $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
     $currentRows = if (Test-Path -LiteralPath $currentPath -PathType Leaf) { Test-VulnCurrentFile -Path $currentPath } else { 0 }
+    Publish-VulnContentStoreUnlocked -BasePath $BasePath
 
     return [PSCustomObject]@{
         CurrentRows = $currentRows
@@ -327,6 +328,7 @@ function Publish-VulnStoreFromLegacySnapshot {
             $historyFilesToRemove = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedHistoryNames
             Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths $historyFilesToRemove
             $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
+            Publish-VulnContentStoreUnlocked -BasePath $BasePath
 
             return [PSCustomObject]@{
                 DownloadedFiles = $legacyFiles.Count
@@ -386,6 +388,22 @@ function Read-VulnStoreRow {
 
     Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
         Restore-StoreTransaction -BasePath $BasePath -StoreName 'vuln'
+
+        if (-not (Test-VulnContentStoreExistence -BasePath $BasePath)) {
+            try {
+                Publish-VulnContentStoreUnlocked -BasePath $BasePath
+            }
+            catch {
+                Write-Verbose "Vulnerability content sidecar rebuild failed; falling back to raw row files. $_"
+            }
+        }
+
+        if (Test-VulnContentStoreExistence -BasePath $BasePath) {
+            foreach ($record in Read-VulnContentStoreRow -BasePath $BasePath) {
+                Write-Output $record
+            }
+            return
+        }
 
         $currentPath = Get-VulnCurrentPath -BasePath $BasePath
         if (Test-Path -Path $currentPath) {

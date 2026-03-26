@@ -370,14 +370,14 @@ const VULNDB_STORE = 'denormalized';
  * not just at the boundaries.
  */
 function computeDataFingerprint() {
-    const len = rawVulns.length;
+    const len = getRawVulnCount();
     if (len === 0) return 'empty';
     // Sample up to 10 records evenly distributed across the array
     const sampleCount = Math.min(10, len);
     let sample = '' + len;
     for (let i = 0; i < sampleCount; i++) {
         const idx = Math.floor(i * len / sampleCount);
-        sample += JSON.stringify(rawVulns[idx]);
+        sample += JSON.stringify(getRawVulnRecord(idx));
     }
     // Include key lookup-table slices so enrichment-only changes invalidate cache
     if (lookups) {
@@ -469,6 +469,30 @@ function buildWorkerSource() {
 self.onmessage = function(e) {
     var lookups = e.data.lookups;
     var rawVulns = e.data.rawVulns;
+    function isColumnarRawVulnData(value) {
+        return !!(value && !Array.isArray(value) && Array.isArray(value.d));
+    }
+    function getRawVulnCount() {
+        if (!rawVulns) return 0;
+        if (Array.isArray(rawVulns)) return rawVulns.length;
+        if (isColumnarRawVulnData(rawVulns)) return rawVulns.d.length;
+        return 0;
+    }
+    function getRawVulnRecord(index) {
+        if (Array.isArray(rawVulns)) return rawVulns[index];
+        return [
+            rawVulns.d[index],
+            rawVulns.c[index],
+            rawVulns.s[index],
+            rawVulns.v[index],
+            rawVulns.f[index],
+            rawVulns.l[index],
+            rawVulns.ua[index],
+            rawVulns.u[index],
+            rawVulns.dp[index],
+            rawVulns.rp[index]
+        ];
+    }
     function normalizeDateYMD(value) {
         if (!value) return null;
         var datePart = String(value).split(/[T ]/)[0];
@@ -488,9 +512,10 @@ self.onmessage = function(e) {
         }
         return lookup[index];
     }
-    var result = new Array(rawVulns.length);
-    for (var i = 0; i < rawVulns.length; i++) {
-        var v = rawVulns[i];
+    var rawCount = getRawVulnCount();
+    var result = new Array(rawCount);
+    for (var i = 0; i < rawCount; i++) {
+        var v = getRawVulnRecord(i);
         var device = lookups.devices[v[0]];
         var cve = lookups.cves[v[1]];
         var software = lookups.software[v[2]];
@@ -753,7 +778,50 @@ function loadData() {
     }
     
     console.log('Loaded lookups:', Object.keys(lookups));
-    console.log('Loaded', rawVulns.length, 'vulnerability records');
+    console.log('Loaded', getRawVulnCount(), 'vulnerability records');
+}
+
+function isColumnarRawVulnData(value) {
+    return !!(value && !Array.isArray(value) && Array.isArray(value.d));
+}
+
+function getRawVulnCount() {
+    if (!rawVulns) {
+        return 0;
+    }
+
+    if (Array.isArray(rawVulns)) {
+        return rawVulns.length;
+    }
+
+    if (isColumnarRawVulnData(rawVulns)) {
+        return rawVulns.d.length;
+    }
+
+    return 0;
+}
+
+function getRawVulnRecord(index) {
+    if (Array.isArray(rawVulns)) {
+        return rawVulns[index];
+    }
+
+    if (!isColumnarRawVulnData(rawVulns)) {
+        return null;
+    }
+
+    return [
+        rawVulns.d[index],
+        rawVulns.c[index],
+        rawVulns.s[index],
+        rawVulns.v[index],
+        rawVulns.f[index],
+        rawVulns.l[index],
+        rawVulns.ua[index],
+        rawVulns.u[index],
+        rawVulns.dp[index],
+        rawVulns.rp[index]
+    ];
 }
 
 /**
@@ -845,10 +913,14 @@ function denormalizeVuln(v, index) {
  * Denormalize all vulnerability records (main-thread fallback)
  */
 function denormalizeAllVulns() {
-    console.log('Denormalizing', rawVulns.length, 'records (main thread)...');
+    const rawCount = getRawVulnCount();
+    console.log('Denormalizing', rawCount, 'records (main thread)...');
     const startTime = performance.now();
-    
-    vulnerabilityData = rawVulns.map((v, i) => denormalizeVuln(v, i));
+
+    vulnerabilityData = new Array(rawCount);
+    for (let i = 0; i < rawCount; i++) {
+        vulnerabilityData[i] = denormalizeVuln(getRawVulnRecord(i), i);
+    }
     
     const elapsed = Math.round(performance.now() - startTime);
     console.log('Denormalization complete in', elapsed, 'ms');
@@ -861,11 +933,12 @@ function denormalizeAllVulns() {
  */
 async function denormalizeWithCaching() {
     const fingerprint = computeDataFingerprint();
+    const rawCount = getRawVulnCount();
     console.log('Data fingerprint:', fingerprint);
 
     // 1. Try IndexedDB cache
     const cached = await getCachedData(fingerprint);
-    if (cached && cached.length === rawVulns.length) {
+    if (cached && cached.length === rawCount) {
         console.log('Loaded', cached.length, 'records from IndexedDB cache');
         vulnerabilityData = cached;
         return;
@@ -873,7 +946,7 @@ async function denormalizeWithCaching() {
 
     // 2. Try Web Worker
     try {
-        console.log('Denormalizing', rawVulns.length, 'records via Web Worker...');
+        console.log('Denormalizing', rawCount, 'records via Web Worker...');
         const startTime = performance.now();
         vulnerabilityData = await denormalizeInWorker();
         const elapsed = Math.round(performance.now() - startTime);
@@ -4845,8 +4918,8 @@ window.addEventListener('keydown', function(event) {
 let pdfLibrariesLoaded = false;
 
 /**
- * Load PDF libraries on demand (pdfmake, vfsfonts, html2pdf, html2canvas)
- * Libraries are stored as text/plain script tags and executed when needed
+ * Load PDF libraries on demand.
+ * The embedded bundle contains html2canvas + pdfmake + vfs_fonts.
  */
 function loadPdfLibraries() {
     if (pdfLibrariesLoaded) {
@@ -4855,32 +4928,24 @@ function loadPdfLibraries() {
     
     return new Promise((resolve, reject) => {
         try {
-            // Load libraries in correct order: html2canvas first, then pdfmake, vfsfonts, html2pdf
-            const libraryIds = ['html2canvasLib', 'pdfmakeLib', 'vfsfontsLib', 'html2pdfLib'];
-            
-            for (const libId of libraryIds) {
-                const libScript = document.getElementById(libId);
-                if (libScript && libScript.type === 'text/plain') {
-                    const execScript = document.createElement('script');
-                    execScript.textContent = libScript.textContent;
-                    document.head.appendChild(execScript);
-                    // Mark as loaded by changing type
-                    libScript.type = 'text/javascript-loaded';
-                }
+            if (typeof window.__inflateEmbeddedScript !== 'function') {
+                throw new Error('Embedded script inflater is unavailable');
             }
-            
+
+            window.__inflateEmbeddedScript('pdfExportBundleLib');
+
             // Wait for pdfMake to be available (it may take a moment to initialize)
             let attempts = 0;
             const checkPdfMake = setInterval(() => {
                 attempts++;
-                if (typeof pdfMake !== 'undefined' && typeof pdfMake.createPdf === 'function') {
+                if (typeof pdfMake !== 'undefined' && typeof pdfMake.createPdf === 'function' && typeof html2canvas === 'function') {
                     clearInterval(checkPdfMake);
                     pdfLibrariesLoaded = true;
                     console.log('PDF libraries loaded successfully');
                     resolve();
                 } else if (attempts > 50) { // 5 seconds timeout
                     clearInterval(checkPdfMake);
-                    reject(new Error('pdfMake failed to initialize after 5 seconds'));
+                    reject(new Error('PDF export bundle failed to initialize after 5 seconds'));
                 }
             }, 100);
         } catch (error) {
