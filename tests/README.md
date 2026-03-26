@@ -22,3 +22,33 @@ Important note:
 - `Machines_Current.json` is a single JSON object
 
 These shapes match what the pipeline readers already support, even though NDJSON files are not a single valid JSON document when opened in a generic JSON validator.
+
+## Large synthetic stress dataset
+
+Generate a large helper-compatible export set locally with:
+
+```powershell
+pwsh -NoProfile -File .\tests\Generate-SyntheticLargeExports.ps1
+```
+
+Defaults:
+- preset: `BalancedMediumHeavy`
+- target devices: `20,000`
+- target vulnerability rows: `1,500,000`
+- output path: `.\exports-synthetic`
+
+Run a full local dashboard generation against that synthetic export set with:
+
+```powershell
+pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -Validate
+```
+
+That command:
+- regenerates the synthetic exports
+- runs `Generate-VulnerabilityDashboard.ps1` against them
+- writes `synthetic-manifest.json` and `stress-validation-report.json` under `exports-synthetic/`
+
+Supported presets:
+- `DeviceCardinalityFirst`
+- `BalancedMediumHeavy`
+- `CurrentDensity`

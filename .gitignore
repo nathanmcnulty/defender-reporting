@@ -1,2 +1,6 @@
 .github/copilot-instructions.md
+/node_modules
 /dashboard-app
+/exports/.dashboard-cache/
+/exports-synthetic*
+/stress-output

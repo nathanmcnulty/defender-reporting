@@ -286,6 +286,123 @@ function Test-ConvertToNormalizedDataUsesStableDeviceIdFallback {
     }
 }
 
+function Test-VulnContentStoreRoundTrip {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-content-store-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'content-001' -CveId 'CVE-2026-0101' -SnapshotDate '2026-03-20' -Version '1.0.0'
+        $historyRow = Get-TestVulnRow -Id 'content-002' -CveId 'CVE-2026-0102' -SnapshotDate '2026-03-18' -Version '1.1.0'
+        $historyRow.DeviceId = 'device-002'
+        $historyRow.DeviceName = 'device02.contoso.com'
+        $historyRow.MachineTags = @('Pilot', 'Servers')
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
+
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+        $roundTripped = @(Read-VulnContentStoreRow -BasePath $tempRoot | Sort-Object Id)
+
+        Assert-True ((Test-Path -LiteralPath (Get-VulnContentDictionaryPath -BasePath $tempRoot) -PathType Leaf)) 'Expected vulnerability content dictionary sidecar to be created.'
+        Assert-True ((Test-Path -LiteralPath (Get-VulnCurrentRefsPath -BasePath $tempRoot) -PathType Leaf)) 'Expected vulnerability current refs sidecar to be created.'
+        Assert-True ((Test-Path -LiteralPath (Get-VulnHistoryRefsPath -BasePath $tempRoot -PeriodKey '2026Q1') -PathType Leaf)) 'Expected vulnerability history refs sidecar to be created.'
+        Assert-True ($roundTripped.Count -eq 2) 'Expected content sidecar round-trip to return both current and history rows.'
+
+        $expectedRows = @($currentRow, $historyRow) | Sort-Object Id
+        for ($i = 0; $i -lt $expectedRows.Count; $i++) {
+            $expected = $expectedRows[$i]
+            $actual = $roundTripped[$i]
+
+            foreach ($propertyName in @(
+                'Id',
+                'DeviceId',
+                'DeviceName',
+                'RbacGroupName',
+                'OSPlatform',
+                'OSVersion',
+                'CveId',
+                'SoftwareVendor',
+                'SoftwareName',
+                'SoftwareVersion',
+                'VulnerabilitySeverityLevel',
+                'ExploitabilityLevel',
+                'RecommendationReference',
+                'RecommendedSecurityUpdate',
+                'RecommendedSecurityUpdateId',
+                'RecommendedSecurityUpdateUrl',
+                'FirstSeenTimestamp',
+                'LastSeenTimestamp',
+                'CveBatchTitle',
+                'CveBatchUrl'
+            )) {
+                Assert-True ([string]$expected.$propertyName -eq [string]$actual.$propertyName) "Expected content sidecar round-trip to preserve property '$propertyName'."
+            }
+
+            Assert-True ((@($expected.MachineTags) -join '|') -eq (@($actual.MachineTags) -join '|')) 'Expected content sidecar round-trip to preserve machine tags.'
+            Assert-True ((@($expected.DiskPaths) -join '|') -eq (@($actual.DiskPaths) -join '|')) 'Expected content sidecar round-trip to preserve disk paths.'
+            Assert-True ((@($expected.RegistryPaths) -join '|') -eq (@($actual.RegistryPaths) -join '|')) 'Expected content sidecar round-trip to preserve registry paths.'
+            Assert-True (($expected.SecurityUpdateAvailable -eq $true) -eq ($actual.SecurityUpdateAvailable -eq $true)) 'Expected content sidecar round-trip to preserve update availability.'
+            Assert-True (($expected.IsOnboarded -eq $true) -eq ($actual.IsOnboarded -eq $true)) 'Expected content sidecar round-trip to preserve onboarded state.'
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-VulnObservedWindowCacheRoundTrip {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-observed-cache-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'merge-001' -CveId 'CVE-2026-0004' -SnapshotDate '2026-03-17' -Version '1.0.0'
+        $historyRow = Get-TestVulnRow -Id 'merge-001' -CveId 'CVE-2026-0004' -SnapshotDate '2026-03-19' -Version '1.0.0'
+        $historyRow.RecommendedSecurityUpdate = 'KB000099'
+        $historyRow.RecommendedSecurityUpdateId = 'KB000099'
+        $otherHistoryRow = Get-TestVulnRow -Id 'merge-002' -CveId 'CVE-2026-0005' -SnapshotDate '2026-03-23' -Version '2.0.0'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow, $otherHistoryRow)
+
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+        $expectedRows = @(Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $tempRoot } | Sort-Object Id, FirstSeenTimestamp, LastSeenTimestamp)
+        $cachePath = Publish-VulnObservedWindowCache -BasePath $tempRoot
+        $cachedRows = @(Read-VulnNdjsonRecordsFromPath -Path $cachePath | Sort-Object Id, FirstSeenTimestamp, LastSeenTimestamp)
+
+        Assert-True ((Test-Path -LiteralPath $cachePath -PathType Leaf)) 'Expected observed-window cache to be created.'
+        Assert-True ($expectedRows.Count -eq $cachedRows.Count) 'Expected observed-window cache to preserve merged row count.'
+
+        for ($i = 0; $i -lt $expectedRows.Count; $i++) {
+            $expected = $expectedRows[$i]
+            $actual = $cachedRows[$i]
+            foreach ($propertyName in @(
+                'Id',
+                'DeviceId',
+                'CveId',
+                'RecommendedSecurityUpdate',
+                'RecommendedSecurityUpdateId',
+                'FirstSeenTimestamp',
+                'LastSeenTimestamp'
+            )) {
+                Assert-True ([string]$expected.$propertyName -eq [string]$actual.$propertyName) "Expected observed-window cache to preserve property '$propertyName'."
+            }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Write-Output 'Running shared-helper regression checks...'
 Test-CanonicalLayoutHelper
 Write-Output '  Canonical layout helper checks passed.'
@@ -301,4 +418,8 @@ Test-ReadNormalizedVulnStoreRow
 Write-Output '  Normalized vulnerability store reader checks passed.'
 Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
 Write-Output '  Stable device fallback identity checks passed.'
+Test-VulnContentStoreRoundTrip
+Write-Output '  Vulnerability content store round-trip checks passed.'
+Test-VulnObservedWindowCacheRoundTrip
+Write-Output '  Observed-window cache round-trip checks passed.'
 Write-Output 'Shared-helper regression checks passed.'

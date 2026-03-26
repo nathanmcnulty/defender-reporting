@@ -16,6 +16,9 @@ Set-StrictMode -Version Latest
 $Script:VulnCurrentFileName = 'VulnExport_current.json.gz'
 $Script:VulnHistoryFileNamePattern = 'VulnHistory_{0}.json.gz'
 $Script:VulnHistoryRowsFileNamePattern = 'VulnHistoryRows_{0}.json.gz'
+$Script:VulnContentDictionaryFileName = 'VulnContentDictionary.json.gz'
+$Script:VulnCurrentRefsFileName = 'VulnCurrentRefs.json.gz'
+$Script:VulnHistoryRefsFileNamePattern = 'VulnHistoryRefs_{0}.json.gz'
 $Script:MachineCurrentFileName = 'Machines_Current.json.gz'
 $Script:MachineHistoryFileName = 'Machines_History.json.gz'
 $Script:MachineHistoryQuarterlyFileNamePattern = 'Machines_History_{0}.json.gz'
@@ -319,6 +322,42 @@ function Get-VulnCurrentPath {
     return Join-Path -Path $BasePath -ChildPath $Script:VulnCurrentFileName
 }
 
+function Get-VulnContentDictionaryPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    return Join-Path -Path $BasePath -ChildPath $Script:VulnContentDictionaryFileName
+}
+
+function Get-VulnCurrentRefsPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    return Join-Path -Path $BasePath -ChildPath $Script:VulnCurrentRefsFileName
+}
+
+function Get-VulnHistoryRefsPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PeriodKey
+    )
+
+    return Join-Path -Path $BasePath -ChildPath ([string]::Format($Script:VulnHistoryRefsFileNamePattern, $PeriodKey))
+}
+
 function Test-VulnStoreExistence {
     [CmdletBinding()]
     [OutputType([bool])]
@@ -333,6 +372,38 @@ function Test-VulnStoreExistence {
 
     $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue)
     return $historyFiles.Count -gt 0
+}
+
+function Test-VulnContentStoreExistence {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $BasePath
+    if (-not (Test-Path -LiteralPath $dictionaryPath -PathType Leaf)) {
+        return $false
+    }
+
+    $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+    $currentRefsPath = Get-VulnCurrentRefsPath -BasePath $BasePath
+    if ((Test-Path -LiteralPath $currentPath -PathType Leaf) -and -not (Test-Path -LiteralPath $currentRefsPath -PathType Leaf)) {
+        return $false
+    }
+
+    foreach ($historyRowsFile in @(Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRows_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        $match = [regex]::Match($historyRowsFile.Name, '^VulnHistoryRows_(?<period>\d{4}Q[1-4]|\d{4})\.json\.gz$')
+        if (-not $match.Success) { continue }
+
+        $historyRefsPath = Get-VulnHistoryRefsPath -BasePath $BasePath -PeriodKey $match.Groups['period'].Value
+        if (-not (Test-Path -LiteralPath $historyRefsPath -PathType Leaf)) {
+            return $false
+        }
+    }
+
+    return $true
 }
 
 function New-QuarterPeriodKey {
@@ -582,6 +653,17 @@ function Test-IsVulnHistoryRowsFileName {
     return ($Name -match '^VulnHistoryRows_(?:\d{4}Q[1-4]|\d{4})\.json\.gz$')
 }
 
+function Test-IsVulnHistoryRefsFileName {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    return ($Name -match '^VulnHistoryRefs_(?:\d{4}Q[1-4]|\d{4})\.json\.gz$')
+}
+
 function Get-VulnHistoryPublishedNameSet {
     [CmdletBinding()]
     [OutputType([System.Collections.Generic.HashSet[string]])]
@@ -596,9 +678,10 @@ function Get-VulnHistoryPublishedNameSet {
         if ([string]::IsNullOrWhiteSpace($periodKey)) { continue }
         [void]$publishedNames.Add([string]::Format($Script:VulnHistoryFileNamePattern, $periodKey))
         [void]$publishedNames.Add([string]::Format($Script:VulnHistoryRowsFileNamePattern, $periodKey))
+        [void]$publishedNames.Add([string]::Format($Script:VulnHistoryRefsFileNamePattern, $periodKey))
     }
 
-    return $publishedNames
+    return ,$publishedNames
 }
 
 function Get-VulnHistoryRemovePaths {
@@ -635,6 +718,14 @@ function Get-VulnHistoryRemovePaths {
         $removePaths.Add($path)
     }
 
+    foreach ($path in @(
+        Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRefs_*.json.gz' -File -ErrorAction SilentlyContinue |
+            Where-Object { -not $PublishedHistoryNames.Contains($_.Name) } |
+            ForEach-Object { $_.FullName }
+    )) {
+        $removePaths.Add($path)
+    }
+
     return [string[]]@($removePaths)
 }
 
@@ -648,13 +739,15 @@ function Test-IsCanonicalExportStoreFileName {
 
     if ($Name -in @(
         $Script:VulnCurrentFileName,
+        $Script:VulnContentDictionaryFileName,
+        $Script:VulnCurrentRefsFileName,
         $Script:MachineCurrentFileName,
         $Script:AdvancedHuntingCurrentFileName
     )) {
         return $true
     }
 
-    if ((Test-IsVulnHistoryFileName -Name $Name) -or (Test-IsVulnHistoryRowsFileName -Name $Name)) {
+    if ((Test-IsVulnHistoryFileName -Name $Name) -or (Test-IsVulnHistoryRowsFileName -Name $Name) -or (Test-IsVulnHistoryRefsFileName -Name $Name)) {
         return $true
     }
 
@@ -727,6 +820,7 @@ function Get-StaleExportStoreArtifactNames {
         if (
             (Test-IsVulnHistoryFileName -Name $name) -or
             (Test-IsVulnHistoryRowsFileName -Name $name) -or
+            (Test-IsVulnHistoryRefsFileName -Name $name) -or
             (Test-IsMachineHistoryQuarterlyFileName -Name $name) -or
             (Test-IsMachineHistorySegmentFileName -Name $name) -or
             ($name -eq $Script:MachineHistoryFileName)
@@ -1168,16 +1262,66 @@ function Read-VulnNdjsonLinesFromPath {
         }
 
         try {
-            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
+            $buffer = New-Object byte[] 65536
+            $carryStream = [System.IO.MemoryStream]::new()
             try {
-                while (-not $reader.EndOfStream) {
-                    $line = $reader.ReadLine()
-                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                    Write-Output $line
+                while (($bytesRead = $contentStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $segmentStart = 0
+                    for ($index = 0; $index -lt $bytesRead; $index++) {
+                        if ($buffer[$index] -ne 0x0A) { continue }
+
+                        $segmentLength = $index - $segmentStart
+                        if ($segmentLength -gt 0 -and $buffer[$index - 1] -eq 0x0D) {
+                            $segmentLength--
+                        }
+
+                        if ($carryStream.Length -gt 0) {
+                            if ($segmentLength -gt 0) {
+                                $carryStream.Write($buffer, $segmentStart, $segmentLength)
+                            }
+
+                            if ($carryStream.Length -gt 0) {
+                                $line = [System.Text.Encoding]::UTF8.GetString($carryStream.ToArray())
+                                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                                    Write-Output $line
+                                }
+                            }
+
+                            $carryStream.SetLength(0)
+                        }
+                        elseif ($segmentLength -gt 0) {
+                            $line = [System.Text.Encoding]::UTF8.GetString($buffer, $segmentStart, $segmentLength)
+                            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                                Write-Output $line
+                            }
+                        }
+
+                        $segmentStart = $index + 1
+                    }
+
+                    $remainingLength = $bytesRead - $segmentStart
+                    if ($remainingLength -gt 0) {
+                        $carryStream.Write($buffer, $segmentStart, $remainingLength)
+                    }
+                }
+
+                if ($carryStream.Length -gt 0) {
+                    $lineBytes = $carryStream.ToArray()
+                    $lineLength = $lineBytes.Length
+                    if ($lineLength -gt 0 -and $lineBytes[$lineLength - 1] -eq 0x0D) {
+                        $lineLength--
+                    }
+
+                    if ($lineLength -gt 0) {
+                        $line = [System.Text.Encoding]::UTF8.GetString($lineBytes, 0, $lineLength)
+                        if (-not [string]::IsNullOrWhiteSpace($line)) {
+                            Write-Output $line
+                        }
+                    }
                 }
             }
             finally {
-                $reader.Dispose()
+                $carryStream.Dispose()
             }
         }
         finally {
@@ -1188,6 +1332,122 @@ function Read-VulnNdjsonLinesFromPath {
     }
     finally {
         $fileStream.Dispose()
+    }
+}
+
+function Invoke-VulnNdjsonLineAction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
+
+    $fileStream = [System.IO.File]::OpenRead($Path)
+    try {
+        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        }
+        else {
+            $fileStream
+        }
+
+        try {
+            $buffer = New-Object byte[] 65536
+            $carryStream = [System.IO.MemoryStream]::new()
+            try {
+                while (($bytesRead = $contentStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $segmentStart = 0
+                    for ($index = 0; $index -lt $bytesRead; $index++) {
+                        if ($buffer[$index] -ne 0x0A) { continue }
+
+                        $segmentLength = $index - $segmentStart
+                        if ($segmentLength -gt 0 -and $buffer[$index - 1] -eq 0x0D) {
+                            $segmentLength--
+                        }
+
+                        $line = $null
+                        if ($carryStream.Length -gt 0) {
+                            if ($segmentLength -gt 0) {
+                                $carryStream.Write($buffer, $segmentStart, $segmentLength)
+                            }
+
+                            if ($carryStream.Length -gt 0) {
+                                $line = [System.Text.Encoding]::UTF8.GetString($carryStream.ToArray())
+                            }
+                            $carryStream.SetLength(0)
+                        }
+                        elseif ($segmentLength -gt 0) {
+                            $line = [System.Text.Encoding]::UTF8.GetString($buffer, $segmentStart, $segmentLength)
+                        }
+
+                        if (-not [string]::IsNullOrWhiteSpace($line)) {
+                            & $Action $line
+                        }
+
+                        $segmentStart = $index + 1
+                    }
+
+                    $remainingLength = $bytesRead - $segmentStart
+                    if ($remainingLength -gt 0) {
+                        $carryStream.Write($buffer, $segmentStart, $remainingLength)
+                    }
+                }
+
+                if ($carryStream.Length -gt 0) {
+                    $lineBytes = $carryStream.ToArray()
+                    $lineLength = $lineBytes.Length
+                    if ($lineLength -gt 0 -and $lineBytes[$lineLength - 1] -eq 0x0D) {
+                        $lineLength--
+                    }
+
+                    if ($lineLength -gt 0) {
+                        $line = [System.Text.Encoding]::UTF8.GetString($lineBytes, 0, $lineLength)
+                        if (-not [string]::IsNullOrWhiteSpace($line)) {
+                            & $Action $line
+                        }
+                    }
+                }
+            }
+            finally {
+                $carryStream.Dispose()
+            }
+        }
+        finally {
+            if ($contentStream -ne $fileStream) {
+                $contentStream.Dispose()
+            }
+        }
+    }
+    finally {
+        $fileStream.Dispose()
+    }
+}
+
+function Invoke-VulnNdjsonJsonRootAction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
+
+    $rootAction = $Action
+
+    Invoke-VulnNdjsonLineAction -Path $Path -Action {
+        param([string]$JsonLine)
+
+        $document = [System.Text.Json.JsonDocument]::Parse($JsonLine)
+        try {
+            & $rootAction $document.RootElement
+        }
+        finally {
+            $document.Dispose()
+        }
     }
 }
 
@@ -2040,6 +2300,7 @@ function Publish-VulnStoreUnlocked {
         $historyFilesToRemove = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedHistoryNames
         Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths $historyFilesToRemove
         $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
+        Publish-VulnContentStoreUnlocked -BasePath $BasePath
 
         return [PSCustomObject]@{
             CurrentRows = $currentCount
@@ -2069,5 +2330,391 @@ function Publish-VulnStore {
     return Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
         Restore-StoreTransaction -BasePath $BasePath -StoreName 'vuln'
         Publish-VulnStoreUnlocked -BasePath $BasePath -Store $storeToPublish
+    }
+}
+
+function Get-VulnDeviceProfileSignature {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Row
+    )
+
+    $machineTags = @((Get-VulnPropertyValue -InputObject $Row -Name 'MachineTags'))
+    $valueDelimiter = [string][char]0x001f
+    $listDelimiter = [string][char]0x001e
+    return @(
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceId')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceName')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'RbacGroupName')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'OSPlatform')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'OSVersion')
+        ($machineTags -join $listDelimiter)
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'IsOnboarded')
+    ) -join $valueDelimiter
+}
+
+function Get-VulnContentTemplateSignature {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Row
+    )
+
+    $diskPaths = @((Get-VulnPropertyValue -InputObject $Row -Name 'DiskPaths'))
+    $registryPaths = @((Get-VulnPropertyValue -InputObject $Row -Name 'RegistryPaths'))
+
+    $valueDelimiter = [string][char]0x001f
+    $listDelimiter = [string][char]0x001e
+    return @(
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'CveId')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareVendor')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareName')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareVersion')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'VulnerabilitySeverityLevel')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'CvssScore')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'ExploitabilityLevel')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendationReference')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendedSecurityUpdate')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendedSecurityUpdateId')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendedSecurityUpdateUrl')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'SecurityUpdateAvailable')
+        ($diskPaths -join $listDelimiter)
+        ($registryPaths -join $listDelimiter)
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'CveBatchTitle')
+        [string](Get-VulnPropertyValue -InputObject $Row -Name 'CveBatchUrl')
+    ) -join $valueDelimiter
+}
+
+function New-VulnDeviceProfileTemplate {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Row
+    )
+
+    return [PSCustomObject]@{
+        id = [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceId')
+        n = [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceName')
+        g = [string](Get-VulnPropertyValue -InputObject $Row -Name 'RbacGroupName')
+        o = [string](Get-VulnPropertyValue -InputObject $Row -Name 'OSPlatform')
+        ov = [string](Get-VulnPropertyValue -InputObject $Row -Name 'OSVersion')
+        t = @((Get-VulnPropertyValue -InputObject $Row -Name 'MachineTags'))
+        ob = ((Get-VulnPropertyValue -InputObject $Row -Name 'IsOnboarded') -eq $true)
+    }
+}
+
+function New-VulnContentTemplate {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Row
+    )
+
+    return [PSCustomObject]@{
+        c = [string](Get-VulnPropertyValue -InputObject $Row -Name 'CveId')
+        sv = [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareVendor')
+        sn = [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareName')
+        ver = [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareVersion')
+        sev = [string](Get-VulnPropertyValue -InputObject $Row -Name 'VulnerabilitySeverityLevel')
+        sc = (Get-VulnPropertyValue -InputObject $Row -Name 'CvssScore')
+        ex = [string](Get-VulnPropertyValue -InputObject $Row -Name 'ExploitabilityLevel')
+        rr = [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendationReference')
+        ru = [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendedSecurityUpdate')
+        rid = [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendedSecurityUpdateId')
+        url = [string](Get-VulnPropertyValue -InputObject $Row -Name 'RecommendedSecurityUpdateUrl')
+        ua = ((Get-VulnPropertyValue -InputObject $Row -Name 'SecurityUpdateAvailable') -eq $true)
+        dp = @((Get-VulnPropertyValue -InputObject $Row -Name 'DiskPaths'))
+        rp = @((Get-VulnPropertyValue -InputObject $Row -Name 'RegistryPaths'))
+        bt = [string](Get-VulnPropertyValue -InputObject $Row -Name 'CveBatchTitle')
+        bu = [string](Get-VulnPropertyValue -InputObject $Row -Name 'CveBatchUrl')
+    }
+}
+
+function Convert-ToJsonStringLiteral {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [string]$Value
+    )
+
+    if ($null -eq $Value) {
+        return 'null'
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    foreach ($character in $Value.ToCharArray()) {
+        switch ($character) {
+            '"' { [void]$builder.Append('\"') }
+            '\' { [void]$builder.Append('\\') }
+            "`b" { [void]$builder.Append('\b') }
+            "`f" { [void]$builder.Append('\f') }
+            "`n" { [void]$builder.Append('\n') }
+            "`r" { [void]$builder.Append('\r') }
+            "`t" { [void]$builder.Append('\t') }
+            default {
+                if ([int][char]$character -lt 32) {
+                    [void]$builder.Append('\u')
+                    [void]$builder.Append(([int][char]$character).ToString('x4'))
+                }
+                else {
+                    [void]$builder.Append($character)
+                }
+            }
+        }
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Write-VulnObservationRefLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.StreamWriter]$Writer,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Id,
+
+        [Parameter(Mandatory = $true)]
+        [int]$DeviceProfileIndex,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ContentTemplateIndex,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [string]$FirstSeenTimestamp,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [string]$LastSeenTimestamp
+    )
+
+    $Writer.WriteLine((
+        '[' +
+        (Convert-ToJsonStringLiteral -Value $Id) + ',' +
+        $DeviceProfileIndex + ',' +
+        $ContentTemplateIndex + ',' +
+        (Convert-ToJsonStringLiteral -Value $FirstSeenTimestamp) + ',' +
+        (Convert-ToJsonStringLiteral -Value $LastSeenTimestamp) +
+        ']'
+    ))
+}
+
+function Read-VulnContentDictionary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return (Read-GzipTextFile -Path $Path | ConvertFrom-Json -Depth 20)
+}
+
+function Read-VulnContentStoreRow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $dictionary = Read-VulnContentDictionary -Path (Get-VulnContentDictionaryPath -BasePath $BasePath)
+    $refPaths = [System.Collections.Generic.List[string]]::new()
+
+    $currentRefsPath = Get-VulnCurrentRefsPath -BasePath $BasePath
+    if (Test-Path -LiteralPath $currentRefsPath -PathType Leaf) {
+        $refPaths.Add($currentRefsPath)
+    }
+
+    foreach ($historyRefsFile in @(Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRefs_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        $refPaths.Add($historyRefsFile.FullName)
+    }
+
+    foreach ($refPath in $refPaths) {
+        foreach ($line in Read-VulnNdjsonLinesFromPath -Path $refPath) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+            $ref = $line | ConvertFrom-Json -Depth 10
+            $device = $dictionary.deviceProfiles[[int]$ref[1]]
+            $content = $dictionary.contentTemplates[[int]$ref[2]]
+
+            Write-Output ([PSCustomObject]@{
+                Id = [string]$ref[0]
+                DeviceId = [string]$device.id
+                DeviceName = [string]$device.n
+                RbacGroupName = [string]$device.g
+                OSPlatform = [string]$device.o
+                OSVersion = [string]$device.ov
+                MachineTags = @($device.t)
+                CveId = [string]$content.c
+                SoftwareVendor = [string]$content.sv
+                SoftwareName = [string]$content.sn
+                SoftwareVersion = [string]$content.ver
+                VulnerabilitySeverityLevel = [string]$content.sev
+                CvssScore = $content.sc
+                ExploitabilityLevel = [string]$content.ex
+                RecommendationReference = [string]$content.rr
+                RecommendedSecurityUpdate = [string]$content.ru
+                RecommendedSecurityUpdateId = [string]$content.rid
+                RecommendedSecurityUpdateUrl = [string]$content.url
+                SecurityUpdateAvailable = ($content.ua -eq $true)
+                FirstSeenTimestamp = [string]$ref[3]
+                LastSeenTimestamp = [string]$ref[4]
+                DiskPaths = @($content.dp)
+                RegistryPaths = @($content.rp)
+                CveBatchTitle = [string]$content.bt
+                CveBatchUrl = [string]$content.bu
+                IsOnboarded = ($device.ob -eq $true)
+            })
+        }
+    }
+}
+
+function Publish-VulnContentStoreUnlocked {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    if (-not (Test-VulnStoreExistence -BasePath $BasePath)) {
+        return
+    }
+
+    $stageRoot = Join-Path $BasePath ('.vuln-content-store-staging-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $stageRoot -ItemType Directory -Force)
+
+    try {
+        $deviceProfiles = [System.Collections.Generic.List[object]]::new()
+        $deviceProfileIndex = @{}
+        $contentTemplates = [System.Collections.Generic.List[object]]::new()
+        $contentTemplateIndex = @{}
+        $filesToPublish = [System.Collections.Generic.List[object]]::new()
+
+        $writeObservationRefs = {
+            param(
+                [string]$InputPath,
+                [string]$OutputPath
+            )
+
+            $fileStream = $null
+            $gzipStream = $null
+            $writer = $null
+            try {
+                $fileStream = [System.IO.File]::Create($OutputPath)
+                $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+                $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
+
+                foreach ($row in Read-VulnNdjsonRecordsFromPath -Path $InputPath) {
+                    if ($null -eq $row) { continue }
+
+                    $deviceSignature = Get-VulnDeviceProfileSignature -Row $row
+                    if (-not $deviceProfileIndex.ContainsKey($deviceSignature)) {
+                        $deviceProfileIndex[$deviceSignature] = $deviceProfiles.Count
+                        [void]$deviceProfiles.Add((New-VulnDeviceProfileTemplate -Row $row))
+                    }
+                    $deviceIndexValue = [int]$deviceProfileIndex[$deviceSignature]
+
+                    $contentSignature = Get-VulnContentTemplateSignature -Row $row
+                    if (-not $contentTemplateIndex.ContainsKey($contentSignature)) {
+                        $contentTemplateIndex[$contentSignature] = $contentTemplates.Count
+                        [void]$contentTemplates.Add((New-VulnContentTemplate -Row $row))
+                    }
+                    $contentIndexValue = [int]$contentTemplateIndex[$contentSignature]
+
+                    Write-VulnObservationRefLine `
+                        -Writer $writer `
+                        -Id ([string](Get-VulnPropertyValue -InputObject $row -Name 'Id')) `
+                        -DeviceProfileIndex $deviceIndexValue `
+                        -ContentTemplateIndex $contentIndexValue `
+                        -FirstSeenTimestamp ([string](Get-VulnPropertyValue -InputObject $row -Name 'FirstSeenTimestamp')) `
+                        -LastSeenTimestamp ([string](Get-VulnPropertyValue -InputObject $row -Name 'LastSeenTimestamp'))
+                }
+            }
+            finally {
+                if ($writer) { $writer.Dispose() }
+                elseif ($gzipStream) { $gzipStream.Dispose() }
+                elseif ($fileStream) { $fileStream.Dispose() }
+            }
+        }
+
+        $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+        if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
+            $stagedCurrentRefsPath = Get-VulnCurrentRefsPath -BasePath $stageRoot
+            & $writeObservationRefs $currentPath $stagedCurrentRefsPath
+            [void]$filesToPublish.Add([PSCustomObject]@{
+                StagePath = $stagedCurrentRefsPath
+                TargetPath = Get-VulnCurrentRefsPath -BasePath $BasePath
+            })
+        }
+
+        $periodKeys = [System.Collections.Generic.List[string]]::new()
+        foreach ($historyRowsFile in @(Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRows_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $match = [regex]::Match($historyRowsFile.Name, '^VulnHistoryRows_(?<period>\d{4}Q[1-4]|\d{4})\.json\.gz$')
+            if (-not $match.Success) { continue }
+
+            $periodKey = [string]$match.Groups['period'].Value
+            [void]$periodKeys.Add($periodKey)
+            $stagedHistoryRefsPath = Get-VulnHistoryRefsPath -BasePath $stageRoot -PeriodKey $periodKey
+            & $writeObservationRefs $historyRowsFile.FullName $stagedHistoryRefsPath
+            [void]$filesToPublish.Add([PSCustomObject]@{
+                StagePath = $stagedHistoryRefsPath
+                TargetPath = Get-VulnHistoryRefsPath -BasePath $BasePath -PeriodKey $periodKey
+            })
+        }
+
+        $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $stageRoot
+        $dictionaryJson = [PSCustomObject]@{
+            version = 'content-dictionary-v1'
+            deviceProfiles = @($deviceProfiles)
+            contentTemplates = @($contentTemplates)
+        } | ConvertTo-Json -Compress -Depth 20
+        $dictionaryFileStream = $null
+        $dictionaryGzipStream = $null
+        $dictionaryWriter = $null
+        try {
+            $dictionaryFileStream = [System.IO.File]::Create($dictionaryPath)
+            $dictionaryGzipStream = [System.IO.Compression.GZipStream]::new($dictionaryFileStream, [System.IO.Compression.CompressionMode]::Compress)
+            $dictionaryWriter = [System.IO.StreamWriter]::new($dictionaryGzipStream, [System.Text.UTF8Encoding]::new($false))
+            $dictionaryWriter.Write($dictionaryJson)
+        }
+        finally {
+            if ($dictionaryWriter) { $dictionaryWriter.Dispose() }
+            elseif ($dictionaryGzipStream) { $dictionaryGzipStream.Dispose() }
+            elseif ($dictionaryFileStream) { $dictionaryFileStream.Dispose() }
+        }
+        [void]$filesToPublish.Add([PSCustomObject]@{
+            StagePath = $dictionaryPath
+            TargetPath = Get-VulnContentDictionaryPath -BasePath $BasePath
+        })
+
+        $publishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($periodKey in @($periodKeys | Sort-Object -Unique)) {
+            if ([string]::IsNullOrWhiteSpace($periodKey)) { continue }
+            [void]$publishedHistoryNames.Add([string]::Format($Script:VulnHistoryFileNamePattern, $periodKey))
+            [void]$publishedHistoryNames.Add([string]::Format($Script:VulnHistoryRowsFileNamePattern, $periodKey))
+            [void]$publishedHistoryNames.Add([string]::Format($Script:VulnHistoryRefsFileNamePattern, $periodKey))
+        }
+        [void]$publishedHistoryNames.Add($Script:VulnCurrentRefsFileName)
+        [void]$publishedHistoryNames.Add($Script:VulnContentDictionaryFileName)
+        $removePaths = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedHistoryNames
+        if ((Test-Path -LiteralPath (Get-VulnCurrentRefsPath -BasePath $BasePath) -PathType Leaf) -and -not (Test-Path -LiteralPath $currentPath -PathType Leaf)) {
+            $removePaths = @($removePaths) + (Get-VulnCurrentRefsPath -BasePath $BasePath)
+        }
+
+        Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths @($removePaths)
+    }
+    finally {
+        if (Test-Path -LiteralPath $stageRoot) {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
