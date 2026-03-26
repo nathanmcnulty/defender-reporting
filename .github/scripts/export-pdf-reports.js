@@ -9,6 +9,7 @@
 const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 const REPORTS = [
     { id: 'active-vulnerabilities', label: 'Active_Vulnerabilities' },
@@ -32,6 +33,7 @@ const DATA_INIT_MS            = 2_000;
 
     const reportsDir = path.resolve('reports');
     fs.mkdirSync(reportsDir, { recursive: true });
+    const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-pdf-export-'));
 
     const date = new Date().toISOString().slice(0, 10);
 
@@ -62,11 +64,29 @@ const DATA_INIT_MS            = 2_000;
         ]);
 
         const fileName = `${report.label}_${date}.pdf`;
-        await download.saveAs(path.join(reportsDir, fileName));
-        console.log(`  Saved: reports/${fileName}`);
+        await download.saveAs(path.join(stagingDir, fileName));
+        console.log(`  Staged: reports/${fileName}`);
     }
 
     await browser.close();
+
+    for (const report of REPORTS) {
+        const filePattern = new RegExp(`^${report.label}_\\d{4}-\\d{2}-\\d{2}\\.pdf$`);
+        for (const entry of fs.readdirSync(reportsDir, { withFileTypes: true })) {
+            if (!entry.isFile()) continue;
+            if (!filePattern.test(entry.name)) continue;
+            fs.unlinkSync(path.join(reportsDir, entry.name));
+        }
+    }
+
+    for (const fileName of fs.readdirSync(stagingDir)) {
+        const sourcePath = path.join(stagingDir, fileName);
+        const targetPath = path.join(reportsDir, fileName);
+        fs.renameSync(sourcePath, targetPath);
+        console.log(`  Saved: reports/${fileName}`);
+    }
+
+    fs.rmSync(stagingDir, { recursive: true, force: true });
     console.log('All reports exported.');
 })().catch(err => {
     console.error(err);
