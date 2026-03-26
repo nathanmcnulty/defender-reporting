@@ -118,7 +118,7 @@ function Test-CanonicalLayoutHelper {
     }
 }
 
-function Test-VulnContentStoreExistenceNeedsRefs {
+function Test-VulnContentStoreExistenceNeedsRef {
     [CmdletBinding()]
     param()
 
@@ -477,7 +477,7 @@ function Test-VulnObservedWindowCacheRoundTrip {
 Write-Output 'Running shared-helper regression checks...'
 Test-CanonicalLayoutHelper
 Write-Output '  Canonical layout helper checks passed.'
-Test-VulnContentStoreExistenceNeedsRefs
+Test-VulnContentStoreExistenceNeedsRef
 Write-Output '  Content-store existence checks passed.'
 Test-LocalExportArtifactCleanup
 Write-Output '  Local export artifact cleanup checks passed.'

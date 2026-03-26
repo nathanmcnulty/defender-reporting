@@ -23,6 +23,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if (-not $IsWindows) {
+    throw 'tests/Invoke-WithPwshMemoryGuard.ps1 currently supports Windows only because it relies on Win32 CIM classes for process and memory sampling.'
+}
+
 function Get-AvailableMemoryGB {
     [CmdletBinding()]
     [OutputType([double])]
@@ -82,7 +86,7 @@ function Get-ProcessTree {
 }
 
 function Stop-ProcessTree {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory = $true)]
         [int]$RootProcessId
@@ -90,7 +94,9 @@ function Stop-ProcessTree {
 
     $processTree = @(Get-ProcessTree -RootProcessId $RootProcessId | Sort-Object Id -Descending)
     foreach ($proc in $processTree) {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        if ($PSCmdlet.ShouldProcess(("process {0} ({1})" -f $proc.Id, $proc.ProcessName), 'Stop-Process')) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 

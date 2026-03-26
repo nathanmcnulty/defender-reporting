@@ -28,6 +28,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if (-not $IsWindows) {
+    throw 'tests/Measure-StressRun.ps1 currently supports Windows only because it relies on Win32 CIM classes for process and memory sampling.'
+}
+
 function Get-AvailableMemoryGB {
     [CmdletBinding()]
     [OutputType([double])]
@@ -37,7 +41,7 @@ function Get-AvailableMemoryGB {
     return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
 }
 
-function Get-TreeProcesses {
+function Get-ProcessTree {
     [CmdletBinding()]
     [OutputType([System.Diagnostics.Process[]])]
     param(
@@ -173,7 +177,7 @@ function Add-MeasurementSample {
         return
     }
 
-    $tree = @(Get-TreeProcesses -RootProcessId $Process.Id)
+    $tree = @(Get-ProcessTree -RootProcessId $Process.Id)
     if ($tree.Count -eq 0) {
         try {
             $null = $Process.WorkingSet64
