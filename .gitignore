@@ -1,2 +1,7 @@
 .github/copilot-instructions.md
+/node_modules
 /dashboard-app
+# Derived dashboard caches are rebuilt from exports on demand and should not be committed.
+/exports/.dashboard-cache/
+/exports-synthetic*
+/stress-output

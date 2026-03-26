@@ -125,6 +125,10 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Skip end-to-end validation (template upload, pipeline run, result check)")]
     [switch]$SkipValidation,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Timeout in seconds for the validation Automation job polling loop")]
+    [ValidateRange(60, 7200)]
+    [int]$ValidationTimeoutSeconds = 1800,
+
     [Parameter(Mandatory = $false, HelpMessage = "Include Azure Container Apps deployment with Easy Auth")]
     [switch]$IncludeContainerApp,
 
@@ -713,8 +717,9 @@ try {
     $rgAction = if ($rgExists) { 'Update resource group tags' } else { 'Create resource group' }
     if ($PSCmdlet.ShouldProcess($ResourceGroupName, $rgAction)) {
         $rgTags = @{}
-        if ($rgExists -and $null -ne $rg.tags) {
-            foreach ($property in $rg.tags.PSObject.Properties) {
+        $existingTags = $rg.PSObject.Properties['tags']?.Value
+        if ($rgExists -and $null -ne $existingTags) {
+            foreach ($property in $existingTags.PSObject.Properties) {
                 $rgTags[$property.Name] = [string]$property.Value
             }
         }
@@ -1352,9 +1357,9 @@ try {
         Invoke-ArmApi -Path $jobPath -Method PUT -Payload $jobPayload -Description "Start validation job" | Out-Null
         Write-Host "  Job $jobId started" -ForegroundColor Gray
 
-        # 14c: Poll for completion (max 5 minutes)
+        # 14c: Poll for completion
         $activeStates = @('New', 'Activating', 'Running', 'Queued')
-        Wait-WithPolling -Description "validation job completion" -IntervalSeconds 15 -TimeoutSeconds 300 -Condition {
+        Wait-WithPolling -Description "validation job completion" -IntervalSeconds 15 -TimeoutSeconds $ValidationTimeoutSeconds -Condition {
             $jobRes = Invoke-ArmApi -Path "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/${jobId}?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Poll job"
             $status = $jobRes.properties.status
             Write-Host "    Job status: $status" -ForegroundColor Gray

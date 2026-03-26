@@ -238,8 +238,10 @@ __DATA_QUALITY_SECTION__
         </div>
     </div>
 
-    <!-- Pako library for decompression (only included if data is compressed) -->
-    __PAKO_CONTENT__
+    <!-- Pako library for decompression -->
+    <script>
+__PAKO_CONTENT__
+    </script>
 
     <!-- Data format marker -->
     <script id="dataFormat" type="text/plain">__DATA_FORMAT__</script>
@@ -256,25 +258,42 @@ __LOOKUPS_DATA__
 __VULNS_DATA__
     </script>
 
-    <!-- Chart.js embedded directly to avoid tracking prevention -->
-    <script>
+    <!-- Embedded libraries are stored as gzip+base64 to keep the page self-contained
+         without forcing the generator to hold raw library strings in memory. -->
+    <script id="chartJsLib" type="application/gzip-base64">
 __CHARTJS_CONTENT__
     </script>
-
-    <!-- PDF libraries - stored as text/plain to defer loading until Export PDF is clicked -->
-    <script id="pdfmakeLib" type="text/plain">
-__PDFMAKE_CONTENT__
-    </script>
-    <script id="vfsfontsLib" type="text/plain">
-__VFSFONTS_CONTENT__
-    </script>
-    <script id="html2pdfLib" type="text/plain">
-__HTML2PDF_CONTENT__
-    </script>
-    <script id="html2canvasLib" type="text/plain">
-__HTML2CANVAS_CONTENT__
+    <script id="pdfExportBundleLib" type="application/gzip-base64">
+__PDF_EXPORT_BUNDLE_CONTENT__
     </script>
 
+    <script>
+        (function () {
+            function inflateEmbeddedScript(scriptId) {
+                const source = document.getElementById(scriptId);
+                if (!source || source.dataset.loaded === 'true') {
+                    return;
+                }
+
+                const compressedBase64 = source.textContent.trim();
+                if (!compressedBase64) {
+                    throw new Error(`Embedded script '${scriptId}' is empty`);
+                }
+
+                const compressedBytes = Uint8Array.from(atob(compressedBase64), c => c.charCodeAt(0));
+                const scriptText = pako.inflate(compressedBytes, { to: 'string' });
+                const execScript = document.createElement('script');
+                execScript.textContent = scriptText;
+                document.head.appendChild(execScript);
+                source.dataset.loaded = 'true';
+            }
+
+            window.__inflateEmbeddedScript = inflateEmbeddedScript;
+            inflateEmbeddedScript('chartJsLib');
+        })();
+    </script>
+
+    <!-- Main dashboard logic -->
     <script>
 __JS_CONTENT__
     </script>
