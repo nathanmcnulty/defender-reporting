@@ -2542,7 +2542,7 @@ function Get-VulnContentTemplateSignature {
     ) -join $valueDelimiter
 }
 
-function New-VulnDeviceProfileTemplate {
+function ConvertTo-VulnDeviceProfileTemplate {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
@@ -2561,7 +2561,7 @@ function New-VulnDeviceProfileTemplate {
     }
 }
 
-function New-VulnContentTemplate {
+function ConvertTo-VulnContentTemplate {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
@@ -2773,14 +2773,14 @@ function Publish-VulnContentStoreUnlocked {
                     $deviceSignature = Get-VulnDeviceProfileSignature -Row $row
                     if (-not $deviceProfileIndex.ContainsKey($deviceSignature)) {
                         $deviceProfileIndex[$deviceSignature] = $deviceProfiles.Count
-                        [void]$deviceProfiles.Add((New-VulnDeviceProfileTemplate -Row $row))
+                        [void]$deviceProfiles.Add((ConvertTo-VulnDeviceProfileTemplate -Row $row))
                     }
                     $deviceIndexValue = [int]$deviceProfileIndex[$deviceSignature]
 
                     $contentSignature = Get-VulnContentTemplateSignature -Row $row
                     if (-not $contentTemplateIndex.ContainsKey($contentSignature)) {
                         $contentTemplateIndex[$contentSignature] = $contentTemplates.Count
-                        [void]$contentTemplates.Add((New-VulnContentTemplate -Row $row))
+                        [void]$contentTemplates.Add((ConvertTo-VulnContentTemplate -Row $row))
                     }
                     $contentIndexValue = [int]$contentTemplateIndex[$contentSignature]
 

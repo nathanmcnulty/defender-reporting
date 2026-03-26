@@ -2657,7 +2657,7 @@ function Get-VulnContentTemplateSignature {
     ) -join $valueDelimiter
 }
 
-function New-VulnDeviceProfileTemplate {
+function ConvertTo-VulnDeviceProfileTemplate {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
@@ -2676,7 +2676,7 @@ function New-VulnDeviceProfileTemplate {
     }
 }
 
-function New-VulnContentTemplate {
+function ConvertTo-VulnContentTemplate {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
@@ -2888,14 +2888,14 @@ function Publish-VulnContentStoreUnlocked {
                     $deviceSignature = Get-VulnDeviceProfileSignature -Row $row
                     if (-not $deviceProfileIndex.ContainsKey($deviceSignature)) {
                         $deviceProfileIndex[$deviceSignature] = $deviceProfiles.Count
-                        [void]$deviceProfiles.Add((New-VulnDeviceProfileTemplate -Row $row))
+                        [void]$deviceProfiles.Add((ConvertTo-VulnDeviceProfileTemplate -Row $row))
                     }
                     $deviceIndexValue = [int]$deviceProfileIndex[$deviceSignature]
 
                     $contentSignature = Get-VulnContentTemplateSignature -Row $row
                     if (-not $contentTemplateIndex.ContainsKey($contentSignature)) {
                         $contentTemplateIndex[$contentSignature] = $contentTemplates.Count
-                        [void]$contentTemplates.Add((New-VulnContentTemplate -Row $row))
+                        [void]$contentTemplates.Add((ConvertTo-VulnContentTemplate -Row $row))
                     }
                     $contentIndexValue = [int]$contentTemplateIndex[$contentSignature]
 
@@ -5394,7 +5394,7 @@ function Compress-FileGzip {
     return $OutputPath
 }
 
-function Write-CombinedTextFiles {
+function Write-CombinedTextBundle {
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -5590,7 +5590,7 @@ function Write-JsonValueToWriter {
     $Writer.WriteValue($Value.ToString())
 }
 
-function New-JsonArrayFileWriter {
+function Open-JsonArrayFileWriter {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
@@ -5697,7 +5697,7 @@ function Write-CompactColumnFileValue {
     Add-CompactVulnColumnValue -ColumnState $WriterState -Value $Value
 }
 
-function New-CompactVulnColumnWriterSet {
+function Open-CompactVulnColumnWriterSet {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
@@ -5728,7 +5728,7 @@ function New-CompactVulnColumnWriterSet {
     }
 }
 
-function Write-CompactVulnRecordColumns {
+function Write-CompactVulnRecordColumnSet {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -5807,7 +5807,7 @@ function Add-CompactVulnColumnValue {
     }
 }
 
-function Flush-CompactVulnColumnWriterSet {
+function Sync-CompactVulnColumnWriterSet {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -5876,7 +5876,7 @@ function Read-CompactJsonReaderValue {
     }
 }
 
-function Convert-VulnRowsToColumnFiles {
+function ConvertTo-VulnColumnFileSet {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -6011,9 +6011,9 @@ function Write-CombinedPayloadGzip {
             $null = New-Item -Path $columnDirectory -ItemType Directory -Force
 
             foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp')) {
-                $columnWriters[$columnName] = New-JsonArrayFileWriter -Path (Join-Path $columnDirectory ($columnName + '.json'))
+                $columnWriters[$columnName] = Open-JsonArrayFileWriter -Path (Join-Path $columnDirectory ($columnName + '.json'))
             }
-            Convert-VulnRowsToColumnFiles -VulnsPath $VulnsPath -ColumnWriters $columnWriters
+            ConvertTo-VulnColumnFileSet -VulnsPath $VulnsPath -ColumnWriters $columnWriters
             foreach ($columnWriter in $columnWriters.Values) {
                 Close-JsonArrayFileWriter -WriterState $columnWriter
             }
@@ -6050,6 +6050,7 @@ function Write-CombinedPayloadGzip {
                 Close-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
             }
             catch {
+                Write-Verbose ("Ignoring temporary compact column writer cleanup failure: {0}" -f $_.Exception.Message)
             }
         }
         else {
@@ -6059,6 +6060,7 @@ function Write-CombinedPayloadGzip {
                         Close-JsonArrayFileWriter -WriterState $columnWriter
                     }
                     catch {
+                        Write-Verbose ("Ignoring temporary JSON array writer cleanup failure: {0}" -f $_.Exception.Message)
                     }
                 }
             }
@@ -6386,7 +6388,7 @@ function Get-VulnObservedWindowCachePath {
     return Join-Path $cacheDirectory ("gap{0}-{1}.json.gz" -f $AllowedGapDays, $Fingerprint)
 }
 
-function Remove-StaleVulnObservedWindowCaches {
+function Clear-StaleVulnObservedWindowCache {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -6436,7 +6438,7 @@ function Publish-VulnObservedWindowCache {
 
     $cachePath = Get-VulnObservedWindowCachePath -BasePath $BasePath -Fingerprint $fingerprint -AllowedGapDays $AllowedGapDays -Create
     if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
-        Remove-StaleVulnObservedWindowCaches -BasePath $BasePath -KeepPath $cachePath
+        Clear-StaleVulnObservedWindowCache -BasePath $BasePath -KeepPath $cachePath
         return $cachePath
     }
 
@@ -6468,11 +6470,11 @@ function Publish-VulnObservedWindowCache {
         Move-Item -LiteralPath $tempPath -Destination $cachePath -Force
     }
 
-    Remove-StaleVulnObservedWindowCaches -BasePath $BasePath -KeepPath $cachePath
+    Clear-StaleVulnObservedWindowCache -BasePath $BasePath -KeepPath $cachePath
     return $cachePath
 }
 
-function Get-MachineFingerprintSourceFiles {
+function Get-MachineFingerprintSourceFileSet {
     [CmdletBinding()]
     [OutputType([System.IO.FileInfo[]])]
     param(
@@ -6507,7 +6509,7 @@ function Get-MachineFingerprintSourceFiles {
     return [System.IO.FileInfo[]]$files.ToArray()
 }
 
-function Get-AdvancedHuntingFingerprintSourceFiles {
+function Get-AdvancedHuntingFingerprintSourceFileSet {
     [CmdletBinding()]
     [OutputType([System.IO.FileInfo[]])]
     param(
@@ -6537,7 +6539,7 @@ function Get-AdvancedHuntingFingerprintSourceFiles {
     return [System.IO.FileInfo[]]$files.ToArray()
 }
 
-function Get-VulnerabilityPayloadFingerprintSourceFiles {
+function Get-VulnerabilityPayloadFingerprintSourceFileSet {
     [CmdletBinding()]
     [OutputType([System.IO.FileInfo[]])]
     param(
@@ -6610,13 +6612,13 @@ function Get-DashboardPayloadCacheFingerprint {
     )
 
     $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-    foreach ($file in @(Get-VulnerabilityPayloadFingerprintSourceFiles -BasePath $BasePath -SkipObservedWindowMerge:$SkipObservedWindowMerge)) {
+    foreach ($file in @(Get-VulnerabilityPayloadFingerprintSourceFileSet -BasePath $BasePath -SkipObservedWindowMerge:$SkipObservedWindowMerge)) {
         if ($null -ne $file) { $files.Add($file) }
     }
-    foreach ($file in @(Get-MachineFingerprintSourceFiles -BasePath $BasePath)) {
+    foreach ($file in @(Get-MachineFingerprintSourceFileSet -BasePath $BasePath)) {
         if ($null -ne $file) { $files.Add($file) }
     }
-    foreach ($file in @(Get-AdvancedHuntingFingerprintSourceFiles -BasePath $BasePath)) {
+    foreach ($file in @(Get-AdvancedHuntingFingerprintSourceFileSet -BasePath $BasePath)) {
         if ($null -ne $file) { $files.Add($file) }
     }
 
@@ -6676,7 +6678,7 @@ function Get-NormalizedPayloadCacheManifestPath {
     return Join-Path $cacheDirectory ("payload-{0}.json" -f $Fingerprint)
 }
 
-function Remove-StaleNormalizedPayloadCaches {
+function Clear-StaleNormalizedPayloadCache {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -6734,7 +6736,7 @@ function Get-NormalizedPayloadCacheEntry {
         return $null
     }
 
-    Remove-StaleNormalizedPayloadCaches -BasePath $BasePath -KeepPaths @($payloadPath, $manifestPath)
+    Clear-StaleNormalizedPayloadCache -BasePath $BasePath -KeepPaths @($payloadPath, $manifestPath)
     return [PSCustomObject]@{
         Fingerprint = $fingerprint
         PayloadPath = $payloadPath
@@ -6793,7 +6795,7 @@ function Publish-NormalizedPayloadCache {
 
     Move-Item -LiteralPath $tempPayloadPath -Destination $cachePayloadPath -Force
     Move-Item -LiteralPath $tempManifestPath -Destination $cacheManifestPath -Force
-    Remove-StaleNormalizedPayloadCaches -BasePath $BasePath -KeepPaths @($cachePayloadPath, $cacheManifestPath)
+    Clear-StaleNormalizedPayloadCache -BasePath $BasePath -KeepPaths @($cachePayloadPath, $cacheManifestPath)
 
     return [PSCustomObject]@{
         Fingerprint = $fingerprint
@@ -7299,7 +7301,7 @@ function Invoke-ContentStoreNormalization {
 
     try {
         if (-not [string]::IsNullOrWhiteSpace($VulnColumnDirectoryPath)) {
-            $columnWriterSet = New-CompactVulnColumnWriterSet -DirectoryPath $VulnColumnDirectoryPath
+            $columnWriterSet = Open-CompactVulnColumnWriterSet -DirectoryPath $VulnColumnDirectoryPath
             $vulnColumnPaths = $columnWriterSet.Paths
         }
         else {
@@ -7375,7 +7377,7 @@ function Invoke-ContentStoreNormalization {
                     $compactRecord[9] = $contentLookup.rp
 
                     if ($columnWriterSet) {
-                        Write-CompactVulnRecordColumns -WriterSet $columnWriterSet -Record $compactRecord
+                        Write-CompactVulnRecordColumnSet -WriterSet $columnWriterSet -Record $compactRecord
                     }
                     else {
                         $jsonWriter.WriteStartArray()
@@ -7410,7 +7412,7 @@ function Invoke-ContentStoreNormalization {
 
                     if (($processedCountRef.Value % 100000) -eq 0) {
                         if ($columnWriterSet) {
-                            Flush-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
+                            Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
                         }
                         else {
                             $jsonWriter.Flush()
@@ -7425,7 +7427,7 @@ function Invoke-ContentStoreNormalization {
         }
 
         if ($columnWriterSet) {
-            Flush-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
+            Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
         }
         else {
             $jsonWriter.WriteEndArray()
@@ -7476,6 +7478,8 @@ function Invoke-RawStoreNormalization {
         [hashtable]$AdvancedHuntingData = @{}
     )
 
+    $normalizationMachines = $Machines
+    $normalizationAdvancedHuntingData = $AdvancedHuntingData
     $lookups = $Context.Lookups
     $vendorIndex = $Context.Indexes.vendors
     $exploitIndex = $Context.Indexes.exploitLevels
@@ -7503,7 +7507,7 @@ function Invoke-RawStoreNormalization {
 
     try {
         if (-not [string]::IsNullOrWhiteSpace($VulnColumnDirectoryPath)) {
-            $columnWriterSet = New-CompactVulnColumnWriterSet -DirectoryPath $VulnColumnDirectoryPath
+            $columnWriterSet = Open-CompactVulnColumnWriterSet -DirectoryPath $VulnColumnDirectoryPath
             $vulnColumnPaths = $columnWriterSet.Paths
         }
         else {
@@ -7546,7 +7550,7 @@ function Invoke-RawStoreNormalization {
                         $processedCountRef.Value++
 
                         $deviceId = [string](Get-JsonElementPropertyValue -Element $root -Name 'DeviceId')
-                        $machine = $Machines[$deviceId]
+                        $machine = $normalizationMachines[$deviceId]
                         $fallbackDeviceName = Get-JsonElementPropertyValue -Element $root -Name 'DeviceName'
                         $fallbackGroupName = Get-JsonElementPropertyValue -Element $root -Name 'RbacGroupName'
                         $fallbackPlatform = Get-JsonElementPropertyValue -Element $root -Name 'OSPlatform'
@@ -7658,7 +7662,7 @@ function Invoke-RawStoreNormalization {
                         ) -join '|'
 
                         if (-not $cveIndex.ContainsKey($cveKey)) {
-                            $ahData = $AdvancedHuntingData[[string]$cveId]
+                            $ahData = $normalizationAdvancedHuntingData[[string]$cveId]
                             $publishedDate = $null
                             $vulnDescription = $null
                             $epssScore = $null
@@ -7771,7 +7775,7 @@ function Invoke-RawStoreNormalization {
                         $compactRecord[9] = $regPathIndices
 
                         if ($columnWriterSet) {
-                            Write-CompactVulnRecordColumns -WriterSet $columnWriterSet -Record $compactRecord
+                            Write-CompactVulnRecordColumnSet -WriterSet $columnWriterSet -Record $compactRecord
                         }
                         else {
                             $jsonWriter.WriteStartArray()
@@ -7806,7 +7810,7 @@ function Invoke-RawStoreNormalization {
 
                         if (($processedCountRef.Value % 100000) -eq 0) {
                             if ($columnWriterSet) {
-                                Flush-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
+                                Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
                             }
                             else {
                                 $jsonWriter.Flush()
@@ -7822,7 +7826,7 @@ function Invoke-RawStoreNormalization {
         } | Out-Null
 
         if ($columnWriterSet) {
-            Flush-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
+            Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
         }
         else {
             $jsonWriter.WriteEndArray()
@@ -8008,7 +8012,8 @@ function Read-NormalizedVulnStoreRow {
         [int]$AllowedGapDays = 1
     )
 
-    foreach ($row in Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $BasePath } -AllowedGapDays $AllowedGapDays) {
+    $normalizedStoreBasePath = $BasePath
+    foreach ($row in Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $normalizedStoreBasePath } -AllowedGapDays $AllowedGapDays) {
         Write-Output $row
     }
 }
@@ -8191,7 +8196,7 @@ function ConvertTo-NormalizedData {
     }
     else {
         if (-not [string]::IsNullOrWhiteSpace($VulnColumnDirectoryPath)) {
-            $columnWriterSet = New-CompactVulnColumnWriterSet -DirectoryPath $VulnColumnDirectoryPath
+            $columnWriterSet = Open-CompactVulnColumnWriterSet -DirectoryPath $VulnColumnDirectoryPath
             $vulnColumnPaths = $columnWriterSet.Paths
         }
 
@@ -8434,7 +8439,7 @@ function ConvertTo-NormalizedData {
             $compactRecord[9] = $regPathIndices
 
             if ($columnWriterSet) {
-                Write-CompactVulnRecordColumns -WriterSet $columnWriterSet -Record $compactRecord
+                Write-CompactVulnRecordColumnSet -WriterSet $columnWriterSet -Record $compactRecord
             }
             else {
                 $jsonWriter.WriteStartArray()
@@ -8469,7 +8474,7 @@ function ConvertTo-NormalizedData {
 
             if (($processedCount % 100000) -eq 0) {
                 if ($columnWriterSet) {
-                    Flush-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
+                    Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
                 }
                 else {
                     $jsonWriter.Flush()
@@ -8479,7 +8484,7 @@ function ConvertTo-NormalizedData {
         }
 
             if ($columnWriterSet) {
-                Flush-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
+                Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
             }
             else {
                 $jsonWriter.WriteEndArray()
@@ -9385,7 +9390,7 @@ try {
     $lib = $Script:LibraryConfig.Pako
     $pakoLibraryPath = Save-JSLibraryFile -Url $lib.Url -Name $lib.Name -OutputPath (Join-Path $tempLibraries 'pako.js') -Critical $true
     $chartJsBundlePath = Compress-FileGzip -InputPath $chartJsLibraryPath -OutputPath (Join-Path $tempLibraries 'chart.js.gz')
-    $pdfExportBundleSourcePath = Write-CombinedTextFiles -InputPaths @(
+    $pdfExportBundleSourcePath = Write-CombinedTextBundle -InputPaths @(
         $html2canvasLibraryPath
         $pdfmakeLibraryPath
         $vfsfontsLibraryPath

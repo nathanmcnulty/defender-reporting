@@ -937,7 +937,7 @@ try {
     $lib = $Script:LibraryConfig.Pako
     $pakoLibraryPath = Save-JSLibraryFile -Url $lib.Url -Name $lib.Name -OutputPath (Join-Path $tempLibraries 'pako.js') -Critical $true
     $chartJsBundlePath = Compress-FileGzip -InputPath $chartJsLibraryPath -OutputPath (Join-Path $tempLibraries 'chart.js.gz')
-    $pdfExportBundleSourcePath = Write-CombinedTextFiles -InputPaths @(
+    $pdfExportBundleSourcePath = Write-CombinedTextBundle -InputPaths @(
         $html2canvasLibraryPath
         $pdfmakeLibraryPath
         $vfsfontsLibraryPath
