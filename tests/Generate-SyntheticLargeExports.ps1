@@ -618,7 +618,7 @@ function Add-SourceRowContentTemplateIndex {
     $contentSignature = Get-VulnContentTemplateSignature -Row $Row
     if (-not $ContentTemplateIndex.ContainsKey($contentSignature)) {
         $ContentTemplateIndex[$contentSignature] = $ContentTemplates.Count
-        [void]$ContentTemplates.Add((New-VulnContentTemplate -Row $Row))
+        [void]$ContentTemplates.Add((ConvertTo-VulnContentTemplate -Row $Row))
     }
 
     $contentIndexValue = [int]$ContentTemplateIndex[$contentSignature]
@@ -911,7 +911,7 @@ try {
         $deviceSignature = Get-VulnDeviceProfileSignature -Row $planDeviceProfileRow
         if (-not $deviceProfileIndex.ContainsKey($deviceSignature)) {
             $deviceProfileIndex[$deviceSignature] = $deviceProfiles.Count
-            [void]$deviceProfiles.Add((New-VulnDeviceProfileTemplate -Row $planDeviceProfileRow))
+            [void]$deviceProfiles.Add((ConvertTo-VulnDeviceProfileTemplate -Row $planDeviceProfileRow))
         }
         $deviceIndexValue = [int]$deviceProfileIndex[$deviceSignature]
         $syntheticDeviceId = [string]$planDeviceProfileRow.DeviceId
