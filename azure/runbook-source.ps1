@@ -53,6 +53,9 @@ param(
     [bool]$IncludeAdvancedHunting = $true,
 
     [Parameter(Mandatory = $false)]
+    [bool]$UseExistingExportsOnly = $false,
+
+    [Parameter(Mandatory = $false)]
     [ValidateSet('BlobStorage', 'SharePoint', 'StaticWebApp')]
     [string]$Export = 'BlobStorage'
 )
@@ -95,11 +98,6 @@ $Script:LibraryConfig = @{
     VfsFonts = @{
         Url = "https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/vfs_fonts.min.js"
         Name = "vfs_fonts"
-        Critical = $false
-    }
-    Html2Pdf = @{
-        Url = "https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"
-        Name = "html2pdf.js"
         Critical = $false
     }
     Html2Canvas = @{
@@ -517,24 +515,36 @@ function Export-ToBlobStorage {
     Write-Output "`nUploading results to blob storage..."
 
     # Upload new export files (compressed)
-    $exportFiles = Get-ChildItem -Path $ExportsPath -File | Where-Object { $_.Extension -in @('.json', '.gz') }
-    $canonicalStoreFileNames = @(Get-CanonicalExportStoreFileNames -BasePath $ExportsPath)
+    $exportFiles = @(
+        Get-ChildItem -Path $ExportsPath -File -Recurse -Force |
+            Where-Object {
+                $relativeBlobName = [System.IO.Path]::GetRelativePath($ExportsPath, $_.FullName).Replace('\', '/')
+                Test-IsExportTransferArtifactName -Name $relativeBlobName
+            }
+    )
+    $canonicalStoreFileNames = @(Get-ExportTransferArtifactNames -BasePath $ExportsPath)
     $canonicalStoreFileNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($canonicalStoreFileName in $canonicalStoreFileNames) {
         [void]$canonicalStoreFileNameSet.Add($canonicalStoreFileName)
     }
     foreach ($file in $exportFiles) {
-        $isCanonicalStoreFile = $canonicalStoreFileNameSet.Contains($file.Name)
+        if (-not (Test-Path -LiteralPath $file.FullName -PathType Leaf)) {
+            Write-Output "  Skipping missing file $($file.FullName)..."
+            continue
+        }
+
+        $relativeBlobName = [System.IO.Path]::GetRelativePath($ExportsPath, $file.FullName).Replace('\', '/')
+        $isCanonicalStoreFile = $canonicalStoreFileNameSet.Contains($relativeBlobName)
         if ($UseGzip) {
             if ($file.Extension -eq '.gz') {
-                $blobName = $file.Name
+                $blobName = $relativeBlobName
                 Write-Output "  Uploading $blobName..."
                 Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -SourcePath $file.FullName -StorageToken $StorageToken -ContentType 'application/gzip' -AccessTier $Script:BlobAccessTiers.Exports
                 continue
             }
 
             $gzPath = "$($file.FullName).gz"
-            $blobName = "$($file.Name).gz"
+            $blobName = "$relativeBlobName.gz"
 
             # Skip if this blob already exists
             if ((-not $isCanonicalStoreFile) -and (Test-BlobExistence -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken)) {
@@ -553,7 +563,7 @@ function Export-ToBlobStorage {
             Remove-Item -Path $gzPath -Force
         }
         else {
-            $blobName = $file.Name
+            $blobName = $relativeBlobName
             if ((-not $isCanonicalStoreFile) -and (Test-BlobExistence -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken)) {
                 Write-Output "  Skipping $blobName (already exists)"
                 continue
@@ -658,9 +668,15 @@ try {
 
     Write-Output "  Acquiring tokens..."
     $storageToken = Get-PlainToken -ResourceUrl 'https://storage.azure.com/'
-    $mdeToken = Get-PlainToken -ResourceUrl 'https://api.securitycenter.microsoft.com'
-    $mdeHeaders = Get-MdeHeaderCollection -AccessToken $mdeToken
-    Write-Output "  Tokens acquired"
+    if ($UseExistingExportsOnly) {
+        $mdeHeaders = $null
+        Write-Output "  Stress mode enabled: using existing exports from blob storage only"
+    }
+    else {
+        $mdeToken = Get-PlainToken -ResourceUrl 'https://api.securitycenter.microsoft.com'
+        $mdeHeaders = Get-MdeHeaderCollection -AccessToken $mdeToken
+        Write-Output "  Tokens acquired"
+    }
 
     # Test GZip support
     $useGzip = Test-GzipSupport
@@ -682,23 +698,31 @@ try {
     $tempExports = Join-Path -Path $tempRoot -ChildPath "exports"
     $tempTemplates = Join-Path -Path $tempRoot -ChildPath "templates"
     $tempDashboards = Join-Path -Path $tempRoot -ChildPath "dashboards"
+    $tempLibraries = Join-Path -Path $tempRoot -ChildPath "libraries"
 
     New-Item -Path $tempExports -ItemType Directory -Force | Out-Null
     New-Item -Path $tempTemplates -ItemType Directory -Force | Out-Null
     New-Item -Path $tempDashboards -ItemType Directory -Force | Out-Null
+    New-Item -Path $tempLibraries -ItemType Directory -Force | Out-Null
 
     # Download historical export files
     Write-Output "Downloading historical exports..."
     $existingBlobs = @(Get-BlobList -AccountName $StorageAccountName -Container $Script:BlobContainers.Exports -StorageToken $storageToken)
+    $downloadableBlobs = @($existingBlobs | Where-Object { Test-IsExportTransferArtifactName -Name $_ })
     $legacyMachineBlobs = @($existingBlobs | Where-Object { $_ -match '^Machines_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
     $legacyAdvancedHuntingBlobs = @($existingBlobs | Where-Object { $_ -match '^AdvancedHunting_\d+_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
     $legacyVulnerabilityBlobs = @($existingBlobs | Where-Object { $_ -match '^VulnExport_\d+_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
-    $hasMachineCurrentBlob = $existingBlobs -contains $Script:MachineCurrentFileName
-    $hasAdvancedHuntingCurrentBlob = $existingBlobs -contains $Script:AdvancedHuntingCurrentFileName
-    $hasCanonicalVulnStore = ($existingBlobs -contains $Script:VulnCurrentFileName) -or (@($existingBlobs | Where-Object { Test-IsVulnHistoryFileName -Name $_ }).Count -gt 0)
+    $hasMachineCurrentBlob = $downloadableBlobs -contains $Script:MachineCurrentFileName
+    $hasAdvancedHuntingCurrentBlob = $downloadableBlobs -contains $Script:AdvancedHuntingCurrentFileName
+    $hasCanonicalVulnStore = ($downloadableBlobs -contains $Script:VulnCurrentFileName) -or (@($downloadableBlobs | Where-Object { Test-IsVulnHistoryFileName -Name $_ }).Count -gt 0)
     Write-Output "  Found $($existingBlobs.Count) existing blob(s)"
 
     foreach ($blobName in $existingBlobs) {
+        if (-not (Test-IsExportTransferArtifactName -Name $blobName)) {
+            Write-Output "  Skipping $blobName (transient/non-canonical export artifact)"
+            continue
+        }
+
         $shouldDownload = $true
         if (($blobName -in $legacyMachineBlobs) -and $hasMachineCurrentBlob) {
             $shouldDownload = $false
@@ -719,11 +743,15 @@ try {
         }
 
         $localFile = Join-Path -Path $tempExports -ChildPath $blobName
+        $localDirectory = Split-Path -Path $localFile -Parent
+        if (-not [string]::IsNullOrWhiteSpace($localDirectory)) {
+            New-Item -Path $localDirectory -ItemType Directory -Force | Out-Null
+        }
         Write-Output "  Downloading $blobName..."
         Get-BlobContent -AccountName $StorageAccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -DestinationPath $localFile -StorageToken $storageToken
 
         # Decompress .gz files
-        if (Test-IsNativeCompressedStoreFileName -Name $blobName) {
+        if (($blobName -like '.dashboard-cache/*') -or (Test-IsNativeCompressedStoreFileName -Name $blobName)) {
             continue
         }
 
@@ -756,43 +784,64 @@ try {
     # -----------------------------------------------------------------
     Write-Output "`n--- Stage C: Export fresh MDE data ---"
 
-    # Bulk vulnerability export
-    Write-Output 'Requesting bulk vulnerability export...'
-    $bulkExport = Invoke-MdeBulkVulnerabilitySnapshotDownload -Headers $mdeHeaders -OutputPath $tempExports -ExportUrl $Script:MdeBulkExportUrl
-    Write-Output "  Downloading $($bulkExport.ExportFileCount) export file(s)..."
-    foreach ($downloadedFile in $bulkExport.DownloadedFiles) {
-        Write-Output "  Downloading $(Split-Path -Leaf $downloadedFile)..."
-    }
-
-    Write-Output "Updating vulnerability current/history store..."
-    $vulnStore = Publish-VulnStoreFromLegacySnapshot -BasePath $tempExports -RemoveLegacyFiles
-    Write-Output "  Saved vulnerability current/history store with $($vulnStore.CurrentRows) current row(s) across $($vulnStore.HistoryYears) history period file(s)"
-
-    # Machine data
-    Write-Output 'Exporting machine data from MDE API...'
-    $machineExport = Invoke-MdeMachineStoreRefresh -Headers $mdeHeaders -OutputPath $tempExports -BaseApiUrl $Script:MdeApiUrl
-    if ($machineExport.MigratedLegacy) {
-        Write-Output '  Migrated legacy machine snapshots to current/history store'
-    }
-    $machineOutputFiles = @($machineExport.OutputFiles | ForEach-Object { Split-Path -Leaf $_ })
-    Write-Output "  Saved machine current/history store to $($machineOutputFiles -join ' and ')"
-
-    # Advanced Hunting (optional)
-    if ($IncludeAdvancedHunting) {
-        Write-Output 'Exporting Advanced Hunting data...'
-        $advancedHuntingExport = Invoke-MdeAdvancedHuntingStoreRefresh -Headers $mdeHeaders -OutputPath $tempExports -QueryUrl $Script:AdvancedHuntingUrl
-        if (-not $advancedHuntingExport.Success) {
-            Write-Warning 'Advanced Hunting query returned no results.'
+    if ($UseExistingExportsOnly) {
+        Write-Output 'Skipping fresh MDE export and reusing downloaded exports.'
+        $hasExistingVulnerabilityData = (Test-VulnStoreExistence -BasePath $tempExports) -or (Test-VulnContentStoreExistence -BasePath $tempExports)
+        if (-not $hasExistingVulnerabilityData) {
+            throw "UseExistingExportsOnly was specified, but no vulnerability store or content-store sidecars were found in '$tempExports'."
         }
-        else {
-            if ($advancedHuntingExport.MigratedLegacy) {
-                Write-Output '  Migrated legacy Advanced Hunting snapshots to current cache'
+
+        $machineCurrentPath = Get-MachineCurrentPath -BasePath $tempExports
+        if (-not (Test-Path -LiteralPath $machineCurrentPath -PathType Leaf)) {
+            throw "UseExistingExportsOnly was specified, but '$($Script:MachineCurrentFileName)' was not found in '$tempExports'."
+        }
+
+        if ($IncludeAdvancedHunting) {
+            $advancedHuntingCurrentPath = Get-AdvancedHuntingCurrentPath -BasePath $tempExports
+            if (-not (Test-Path -LiteralPath $advancedHuntingCurrentPath -PathType Leaf)) {
+                Write-Warning "IncludeAdvancedHunting is enabled, but '$($Script:AdvancedHuntingCurrentFileName)' was not found in '$tempExports'. Continuing without fresh enrichment export."
             }
-            Write-Output "  Saved Advanced Hunting cache to $(Split-Path -Leaf $advancedHuntingExport.OutputFile)"
         }
     }
     else {
-        Write-Output "Skipping Advanced Hunting export (IncludeAdvancedHunting = false)"
+        # Bulk vulnerability export
+        Write-Output 'Requesting bulk vulnerability export...'
+        $bulkExport = Invoke-MdeBulkVulnerabilitySnapshotDownload -Headers $mdeHeaders -OutputPath $tempExports -ExportUrl $Script:MdeBulkExportUrl
+        Write-Output "  Downloading $($bulkExport.ExportFileCount) export file(s)..."
+        foreach ($downloadedFile in $bulkExport.DownloadedFiles) {
+            Write-Output "  Downloading $(Split-Path -Leaf $downloadedFile)..."
+        }
+
+        Write-Output "Updating vulnerability current/history store..."
+        $vulnStore = Publish-VulnStoreFromLegacySnapshot -BasePath $tempExports -RemoveLegacyFiles
+        Write-Output "  Saved vulnerability current/history store with $($vulnStore.CurrentRows) current row(s) across $($vulnStore.HistoryYears) history period file(s)"
+
+        # Machine data
+        Write-Output 'Exporting machine data from MDE API...'
+        $machineExport = Invoke-MdeMachineStoreRefresh -Headers $mdeHeaders -OutputPath $tempExports -BaseApiUrl $Script:MdeApiUrl
+        if ($machineExport.MigratedLegacy) {
+            Write-Output '  Migrated legacy machine snapshots to current/history store'
+        }
+        $machineOutputFiles = @($machineExport.OutputFiles | ForEach-Object { Split-Path -Leaf $_ })
+        Write-Output "  Saved machine current/history store to $($machineOutputFiles -join ' and ')"
+
+        # Advanced Hunting (optional)
+        if ($IncludeAdvancedHunting) {
+            Write-Output 'Exporting Advanced Hunting data...'
+            $advancedHuntingExport = Invoke-MdeAdvancedHuntingStoreRefresh -Headers $mdeHeaders -OutputPath $tempExports -QueryUrl $Script:AdvancedHuntingUrl
+            if (-not $advancedHuntingExport.Success) {
+                Write-Warning 'Advanced Hunting query returned no results.'
+            }
+            else {
+                if ($advancedHuntingExport.MigratedLegacy) {
+                    Write-Output '  Migrated legacy Advanced Hunting snapshots to current cache'
+                }
+                Write-Output "  Saved Advanced Hunting cache to $(Split-Path -Leaf $advancedHuntingExport.OutputFile)"
+            }
+        }
+        else {
+            Write-Output "Skipping Advanced Hunting export (IncludeAdvancedHunting = false)"
+        }
     }
 
     Write-MemoryUsage -Label "Post-MdeExport"
@@ -810,33 +859,59 @@ try {
     # -----------------------------------------------------------------
     Write-Output "`n--- Stage D: Generate dashboard ---"
 
-    # Step 1: Read machine and Advanced Hunting data
-    $machines = Read-MachineData -Path $tempExports
-    $advancedHuntingData = Read-AdvancedHuntingData -Path $tempExports
-
-    # Step 2: Normalize data while the working set is still lean
-    Write-Output "Normalizing data..."
     $tempVulnsPath = Join-Path -Path $tempRoot -ChildPath 'vulns.json'
     $tempPayloadPath = Join-Path -Path $tempRoot -ChildPath 'payload.json.gz'
-    $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -Machines $machines -AdvancedHuntingData $advancedHuntingData
+    $syntheticManifestPath = Join-Path -Path $tempExports -ChildPath 'synthetic-manifest.json'
+    $skipObservedWindowMerge = (Test-Path -LiteralPath $syntheticManifestPath -PathType Leaf)
+    $payloadCacheEntry = Get-NormalizedPayloadCacheEntry -BasePath $tempExports -SkipObservedWindowMerge:$skipObservedWindowMerge
     $machines = $null
     $advancedHuntingData = $null
-    Invoke-FullGarbageCollection
+    $normalizedQuality = $null
+    if ($payloadCacheEntry) {
+        Write-Output "Preparing data for embedding..."
+        Write-Output ("  Reusing cached normalized payload ({0})..." -f $payloadCacheEntry.Fingerprint.Substring(0, 12))
+        Copy-Item -LiteralPath $payloadCacheEntry.PayloadPath -Destination $tempPayloadPath -Force
+        $vulnCount = [int]$payloadCacheEntry.Manifest.VulnCount
+        $deviceCount = [int]$payloadCacheEntry.Manifest.DeviceCount
+        $cveCount = [int]$payloadCacheEntry.Manifest.CveCount
+        $normalizedQuality = $payloadCacheEntry.Manifest.Quality
+    }
+    else {
+        # Step 1: Read machine and Advanced Hunting data
+        $machines = Read-MachineData -Path $tempExports
+        $advancedHuntingData = Read-AdvancedHuntingData -Path $tempExports
 
-    # Step 3: Prepare payload for embedding
-    Write-Output "Preparing data for embedding..."
-    $vulnCount = $normalizedResult.VulnCount
-    $deviceCount = $normalizedResult.Lookups.devices.Count
-    $cveCount = $normalizedResult.Lookups.cves.Count
-    $vulnsFileSize = [math]::Round((Get-Item $normalizedResult.VulnsPath).Length / 1KB, 1)
-    Write-Output "  Vulns JSON file: ${vulnsFileSize}KB"
+        # Step 2: Normalize data while the working set is still lean
+        Write-Output "Normalizing data..."
+        if ($skipObservedWindowMerge) {
+            Write-Output "Synthetic manifest detected. Skipping observed-window merge for stress normalization."
+        }
+        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -SkipObservedWindowMerge:$skipObservedWindowMerge
+        $machines = $null
+        $advancedHuntingData = $null
+        Invoke-FullGarbageCollection
 
-    Write-Output "  Compressing embedded data..."
-    $normalizedQuality = $normalizedResult['Quality']
-    Write-CombinedPayloadGzip -Lookups $normalizedResult.Lookups -VulnsPath $normalizedResult.VulnsPath -OutputPath $tempPayloadPath
-    $normalizedResult = $null
-    if (Test-Path -LiteralPath $tempVulnsPath -PathType Leaf) {
-        Remove-Item -LiteralPath $tempVulnsPath -Force -ErrorAction SilentlyContinue
+        # Step 3: Prepare payload for embedding
+        Write-Output "Preparing data for embedding..."
+        $vulnCount = $normalizedResult.VulnCount
+        $deviceCount = $normalizedResult.Lookups.devices.Count
+        $cveCount = $normalizedResult.Lookups.cves.Count
+        $vulnsFileSize = [math]::Round((Get-Item $normalizedResult.VulnsPath).Length / 1KB, 1)
+        Write-Output "  Vulns JSON file: ${vulnsFileSize}KB"
+
+        Write-Output "  Compressing embedded data..."
+        $normalizedQuality = $normalizedResult['Quality']
+        Write-CombinedPayloadGzip -Lookups $normalizedResult.Lookups -VulnsPath $normalizedResult.VulnsPath -OutputPath $tempPayloadPath
+        $normalizedResult = $null
+        if (Test-Path -LiteralPath $tempVulnsPath -PathType Leaf) {
+            Remove-Item -LiteralPath $tempVulnsPath -Force -ErrorAction SilentlyContinue
+        }
+        Invoke-FullGarbageCollection
+
+        $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempExports -PayloadPath $tempPayloadPath -VulnCount $vulnCount -DeviceCount $deviceCount -CveCount $cveCount -Quality $normalizedQuality -SkipObservedWindowMerge:$skipObservedWindowMerge
+        if ($cacheEntry) {
+            Write-Output ("  Cached normalized payload as {0}" -f $cacheEntry.Fingerprint.Substring(0, 12))
+        }
     }
     Invoke-FullGarbageCollection
     Write-MemoryUsage -Label "Post-Normalize"
@@ -845,25 +920,29 @@ try {
     Write-Output "  Compressed: ${compressedSize}KB"
 
     # Step 4: Download JavaScript libraries
-    Write-Output "Downloading JavaScript libraries..."
+    Write-Output "Preparing embedded client libraries..."
     $lib = $Script:LibraryConfig.ChartJs
-    $chartJsContent = Get-JSLibrary -Url $lib.Url -Name $lib.Name -Critical $lib.Critical
+    $chartJsLibraryPath = Save-JSLibraryFile -Url $lib.Url -Name $lib.Name -OutputPath (Join-Path $tempLibraries 'chart.js') -Critical $lib.Critical
 
     $lib = $Script:LibraryConfig.PdfMake
-    $pdfmakeContent = Get-JSLibrary -Url $lib.Url -Name $lib.Name -Critical $lib.Critical
+    $pdfmakeLibraryPath = Save-JSLibraryFile -Url $lib.Url -Name $lib.Name -OutputPath (Join-Path $tempLibraries 'pdfmake.js') -Critical $lib.Critical
 
     $lib = $Script:LibraryConfig.VfsFonts
-    $vfsfontsContent = Get-JSLibrary -Url $lib.Url -Name $lib.Name -Critical $lib.Critical
-
-    $lib = $Script:LibraryConfig.Html2Pdf
-    $html2pdfContent = Get-JSLibrary -Url $lib.Url -Name $lib.Name -Critical $lib.Critical
+    $vfsfontsLibraryPath = Save-JSLibraryFile -Url $lib.Url -Name $lib.Name -OutputPath (Join-Path $tempLibraries 'vfs_fonts.js') -Critical $lib.Critical
 
     $lib = $Script:LibraryConfig.Html2Canvas
-    $html2canvasContent = Get-JSLibrary -Url $lib.Url -Name $lib.Name -Critical $lib.Critical
+    $html2canvasLibraryPath = Save-JSLibraryFile -Url $lib.Url -Name $lib.Name -OutputPath (Join-Path $tempLibraries 'html2canvas.js') -Critical $lib.Critical
 
     # Download pako for data decompression
     $lib = $Script:LibraryConfig.Pako
-    $pakoContent = Get-JSLibrary -Url $lib.Url -Name $lib.Name -Critical $false
+    $pakoLibraryPath = Save-JSLibraryFile -Url $lib.Url -Name $lib.Name -OutputPath (Join-Path $tempLibraries 'pako.js') -Critical $true
+    $chartJsBundlePath = Compress-FileGzip -InputPath $chartJsLibraryPath -OutputPath (Join-Path $tempLibraries 'chart.js.gz')
+    $pdfExportBundleSourcePath = Write-CombinedTextFiles -InputPaths @(
+        $html2canvasLibraryPath
+        $pdfmakeLibraryPath
+        $vfsfontsLibraryPath
+    ) -OutputPath (Join-Path $tempLibraries 'pdf-export.bundle.js')
+    $pdfExportBundlePath = Compress-FileGzip -InputPath $pdfExportBundleSourcePath -OutputPath (Join-Path $tempLibraries 'pdf-export.bundle.js.gz')
     Write-MemoryUsage -Label "JS Libraries"
 
     # Step 5: Load templates
@@ -906,32 +985,29 @@ try {
     # Step 8: Assemble final HTML
     Write-Output "Assembling dashboard HTML..."
     $dataFormatMarker = "compressed"
-    $pakoScript = if ($pakoContent) { "<script>$pakoContent</script>" } else { "" }
-
     $segments = @(
         @{ Placeholder = '__CSS_CONTENT__'; Value = $cssContent },
         @{ Placeholder = '__DATA_QUALITY_SECTION__'; Value = $dataQualitySectionHtml },
-        @{ Placeholder = '__PAKO_CONTENT__'; Value = $pakoScript },
+        @{ Placeholder = '__PAKO_CONTENT__'; FilePath = $pakoLibraryPath },
         @{ Placeholder = '__DATA_FORMAT__'; Value = $dataFormatMarker },
         @{ Placeholder = '__DATA_QUALITY_META_SCRIPT__'; Value = $dataQualityMetaScript },
         @{ Placeholder = '__LOOKUPS_DATA__'; Value = $lookupsJsonEscaped },
         @{ Placeholder = '__VULNS_DATA__'; Base64FilePath = $tempPayloadPath },
-        @{ Placeholder = '__CHARTJS_CONTENT__'; Value = $chartJsContent },
-        @{ Placeholder = '__PDFMAKE_CONTENT__'; Value = $pdfmakeContent },
-        @{ Placeholder = '__VFSFONTS_CONTENT__'; Value = $vfsfontsContent },
-        @{ Placeholder = '__HTML2PDF_CONTENT__'; Value = $html2pdfContent },
-        @{ Placeholder = '__HTML2CANVAS_CONTENT__'; Value = $html2canvasContent },
+        @{ Placeholder = '__CHARTJS_CONTENT__'; Base64FilePath = $chartJsBundlePath },
+        @{ Placeholder = '__PDF_EXPORT_BUNDLE_CONTENT__'; Base64FilePath = $pdfExportBundlePath },
         @{ Placeholder = '__JS_CONTENT__'; Value = $jsContent }
     )
     $cssContent = $null
     $jsContent = $null
     $lookupsJsonEscaped = $null
-    $pakoScript = $null
-    $chartJsContent = $null
-    $pdfmakeContent = $null
-    $vfsfontsContent = $null
-    $html2pdfContent = $null
-    $html2canvasContent = $null
+    $chartJsLibraryPath = $null
+    $pdfmakeLibraryPath = $null
+    $vfsfontsLibraryPath = $null
+    $html2canvasLibraryPath = $null
+    $pakoLibraryPath = $null
+    $chartJsBundlePath = $null
+    $pdfExportBundleSourcePath = $null
+    $pdfExportBundlePath = $null
 
     $dashboardOutputPath = Join-Path -Path $tempDashboards -ChildPath "VulnerabilityDashboard.html"
     Write-TemplatedHtml -Template $htmlTemplate -Segments $segments -OutputPath $dashboardOutputPath
