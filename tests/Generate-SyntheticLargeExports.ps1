@@ -642,29 +642,31 @@ if (-not (Test-Path -LiteralPath $OutputPath -PathType Container)) {
     [void](New-Item -Path $OutputPath -ItemType Directory -Force)
 }
 elseif ($CleanOutput) {
-    $pathsToRemove = @(
-        Get-ChildItem -Path $OutputPath -File -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.Name -like 'VulnExport_*' -or
-                $_.Name -like 'VulnHistory_*' -or
-                $_.Name -like 'VulnHistoryRows_*' -or
-                $_.Name -like 'VulnCurrentRefs*' -or
-                $_.Name -like 'VulnHistoryRefs_*' -or
-                $_.Name -eq 'VulnContentDictionary.json.gz' -or
-                $_.Name -like 'Machines_*' -or
-                $_.Name -like 'AdvancedHunting_*' -or
-                $_.Name -eq 'synthetic-manifest.json' -or
-                $_.Name -eq '.synthetic-progress.json' -or
-                $_.Name -eq 'stress-validation-report.json'
-            } |
-            ForEach-Object { $_.FullName }
-    )
+    $pathsToRemove = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in @(Get-ChildItem -Path $OutputPath -Force -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName -Descending)) {
+        $relativeName = [System.IO.Path]::GetRelativePath($OutputPath, $item.FullName).Replace('\', '/')
+        if ($item.PSIsContainer) {
+            if (Test-IsTransientExportArtifactName -Name ($relativeName + '/')) {
+                $pathsToRemove.Add($item.FullName)
+            }
+            continue
+        }
 
-    foreach ($path in $pathsToRemove) {
+        if ((Test-IsExportTransferArtifactName -Name $relativeName) -or (Test-IsTransientExportArtifactName -Name $relativeName)) {
+            $pathsToRemove.Add($item.FullName)
+        }
+    }
+
+    foreach ($path in @($pathsToRemove | Sort-Object -Unique)) {
         $removed = $false
         for ($attempt = 1; $attempt -le 5 -and -not $removed; $attempt++) {
             try {
-                Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+                if (Test-Path -LiteralPath $path -PathType Container) {
+                    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+                }
+                else {
+                    Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+                }
                 $removed = $true
             }
             catch {

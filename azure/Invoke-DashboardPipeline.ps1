@@ -502,17 +502,26 @@ function Test-VulnContentStoreExistence {
         return $false
     }
 
-    $currentPath = Get-VulnCurrentPath -BasePath $BasePath
     $currentRefsPath = Get-VulnCurrentRefsPath -BasePath $BasePath
-    if ((Test-Path -LiteralPath $currentPath -PathType Leaf) -and -not (Test-Path -LiteralPath $currentRefsPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $currentRefsPath -PathType Leaf)) {
         return $false
     }
 
+    $historyPeriodKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($historyRowsFile in @(Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRows_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
         $match = [regex]::Match($historyRowsFile.Name, '^VulnHistoryRows_(?<period>\d{4}Q[1-4]|\d{4})\.json\.gz$')
         if (-not $match.Success) { continue }
+        [void]$historyPeriodKeys.Add($match.Groups['period'].Value)
+    }
 
-        $historyRefsPath = Get-VulnHistoryRefsPath -BasePath $BasePath -PeriodKey $match.Groups['period'].Value
+    foreach ($historyFile in @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        $match = [regex]::Match($historyFile.Name, '^VulnHistory_(?<period>\d{4}Q[1-4]|\d{4})\.json\.gz$')
+        if (-not $match.Success) { continue }
+        [void]$historyPeriodKeys.Add($match.Groups['period'].Value)
+    }
+
+    foreach ($periodKey in @($historyPeriodKeys | Sort-Object)) {
+        $historyRefsPath = Get-VulnHistoryRefsPath -BasePath $BasePath -PeriodKey $periodKey
         if (-not (Test-Path -LiteralPath $historyRefsPath -PathType Leaf)) {
             return $false
         }
@@ -909,6 +918,149 @@ function Get-CanonicalExportStoreFileNames {
     )
 }
 
+function Resolve-RelativeExportArtifactName {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $normalizedName = $Name.Replace('\', '/')
+    while ($normalizedName.StartsWith('./', [System.StringComparison]::Ordinal)) {
+        $normalizedName = $normalizedName.Substring(2)
+    }
+
+    return $normalizedName
+}
+
+function Test-IsExportTransferArtifactName {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $normalizedName = Resolve-RelativeExportArtifactName -Name $Name
+    if ([string]::IsNullOrWhiteSpace($normalizedName)) {
+        return $false
+    }
+
+    return (
+        (Test-IsCanonicalExportStoreFileName -Name $normalizedName) -or
+        ($normalizedName -eq 'synthetic-manifest.json')
+    )
+}
+
+function Test-IsTransientExportArtifactName {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $normalizedName = Resolve-RelativeExportArtifactName -Name $Name
+    if ([string]::IsNullOrWhiteSpace($normalizedName)) {
+        return $false
+    }
+
+    return (
+        ($normalizedName -like '.dashboard-cache/*') -or
+        ($normalizedName -match '(^|/)\.vuln-content-store-staging-[^/]+(?:/|$)') -or
+        ($normalizedName -in @(
+            '.synthetic-progress.json',
+            '.synthetic-progress.json.gz',
+            'stress-validation-report.json',
+            'stress-validation-report.json.gz'
+        ))
+    )
+}
+
+function Get-ExportTransferArtifactNames {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in @(Get-CanonicalExportStoreFileNames -BasePath $BasePath)) {
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $names.Add($name)
+        }
+    }
+
+    $syntheticManifestPath = Join-Path -Path $BasePath -ChildPath 'synthetic-manifest.json'
+    if (Test-Path -LiteralPath $syntheticManifestPath -PathType Leaf) {
+        $names.Add('synthetic-manifest.json')
+    }
+
+    return [string[]]@($names | Sort-Object -Unique)
+}
+
+function Clear-StaleLocalExportArtifact {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$KeepNames = @()
+    )
+
+    if (-not (Test-Path -LiteralPath $BasePath -PathType Container)) {
+        return
+    }
+
+    $keepNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in @($KeepNames)) {
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        [void]$keepNameSet.Add((Resolve-RelativeExportArtifactName -Name $name))
+    }
+
+    $pathsToRemove = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in @(Get-ChildItem -Path $BasePath -Force -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName -Descending)) {
+        $relativeName = [System.IO.Path]::GetRelativePath($BasePath, $item.FullName).Replace('\', '/')
+        if ($keepNameSet.Contains($relativeName)) {
+            continue
+        }
+
+        if ($item.PSIsContainer) {
+            if (Test-IsTransientExportArtifactName -Name ($relativeName + '/')) {
+                $pathsToRemove.Add($item.FullName)
+            }
+            continue
+        }
+
+        if ((Test-IsTransientExportArtifactName -Name $relativeName) -or ((Test-IsExportTransferArtifactName -Name $relativeName) -and -not $keepNameSet.Contains($relativeName))) {
+            $pathsToRemove.Add($item.FullName)
+        }
+    }
+
+    foreach ($path in @($pathsToRemove | Sort-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $path)) {
+            continue
+        }
+
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) {
+            continue
+        }
+
+        if ($item.PSIsContainer) {
+            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-StaleExportStoreArtifactNames {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
     [CmdletBinding()]
@@ -933,6 +1085,8 @@ function Get-StaleExportStoreArtifactNames {
         if ($canonicalNameSet.Contains($name)) { continue }
 
         if (
+            (Test-IsExportTransferArtifactName -Name $name) -or
+            (Test-IsTransientExportArtifactName -Name $name) -or
             (Test-IsVulnHistoryFileName -Name $name) -or
             (Test-IsVulnHistoryRowsFileName -Name $name) -or
             (Test-IsVulnHistoryRefsFileName -Name $name) -or
@@ -8809,8 +8963,14 @@ function Export-ToBlobStorage {
     Write-Output "`nUploading results to blob storage..."
 
     # Upload new export files (compressed)
-    $exportFiles = @(Get-ChildItem -Path $ExportsPath -File -Recurse -Force | Where-Object { $_.Extension -in @('.json', '.gz') })
-    $canonicalStoreFileNames = @(Get-CanonicalExportStoreFileNames -BasePath $ExportsPath)
+    $exportFiles = @(
+        Get-ChildItem -Path $ExportsPath -File -Recurse -Force |
+            Where-Object {
+                $relativeBlobName = [System.IO.Path]::GetRelativePath($ExportsPath, $_.FullName).Replace('\', '/')
+                Test-IsExportTransferArtifactName -Name $relativeBlobName
+            }
+    )
+    $canonicalStoreFileNames = @(Get-ExportTransferArtifactNames -BasePath $ExportsPath)
     $canonicalStoreFileNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($canonicalStoreFileName in $canonicalStoreFileNames) {
         [void]$canonicalStoreFileNameSet.Add($canonicalStoreFileName)
@@ -8996,15 +9156,21 @@ try {
     # Download historical export files
     Write-Output "Downloading historical exports..."
     $existingBlobs = @(Get-BlobList -AccountName $StorageAccountName -Container $Script:BlobContainers.Exports -StorageToken $storageToken)
+    $downloadableBlobs = @($existingBlobs | Where-Object { Test-IsExportTransferArtifactName -Name $_ })
     $legacyMachineBlobs = @($existingBlobs | Where-Object { $_ -match '^Machines_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
     $legacyAdvancedHuntingBlobs = @($existingBlobs | Where-Object { $_ -match '^AdvancedHunting_\d+_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
     $legacyVulnerabilityBlobs = @($existingBlobs | Where-Object { $_ -match '^VulnExport_\d+_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
-    $hasMachineCurrentBlob = $existingBlobs -contains $Script:MachineCurrentFileName
-    $hasAdvancedHuntingCurrentBlob = $existingBlobs -contains $Script:AdvancedHuntingCurrentFileName
-    $hasCanonicalVulnStore = ($existingBlobs -contains $Script:VulnCurrentFileName) -or (@($existingBlobs | Where-Object { Test-IsVulnHistoryFileName -Name $_ }).Count -gt 0)
+    $hasMachineCurrentBlob = $downloadableBlobs -contains $Script:MachineCurrentFileName
+    $hasAdvancedHuntingCurrentBlob = $downloadableBlobs -contains $Script:AdvancedHuntingCurrentFileName
+    $hasCanonicalVulnStore = ($downloadableBlobs -contains $Script:VulnCurrentFileName) -or (@($downloadableBlobs | Where-Object { Test-IsVulnHistoryFileName -Name $_ }).Count -gt 0)
     Write-Output "  Found $($existingBlobs.Count) existing blob(s)"
 
     foreach ($blobName in $existingBlobs) {
+        if (-not (Test-IsExportTransferArtifactName -Name $blobName)) {
+            Write-Output "  Skipping $blobName (transient/non-canonical export artifact)"
+            continue
+        }
+
         $shouldDownload = $true
         if (($blobName -in $legacyMachineBlobs) -and $hasMachineCurrentBlob) {
             $shouldDownload = $false

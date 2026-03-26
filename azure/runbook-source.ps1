@@ -515,8 +515,14 @@ function Export-ToBlobStorage {
     Write-Output "`nUploading results to blob storage..."
 
     # Upload new export files (compressed)
-    $exportFiles = @(Get-ChildItem -Path $ExportsPath -File -Recurse -Force | Where-Object { $_.Extension -in @('.json', '.gz') })
-    $canonicalStoreFileNames = @(Get-CanonicalExportStoreFileNames -BasePath $ExportsPath)
+    $exportFiles = @(
+        Get-ChildItem -Path $ExportsPath -File -Recurse -Force |
+            Where-Object {
+                $relativeBlobName = [System.IO.Path]::GetRelativePath($ExportsPath, $_.FullName).Replace('\', '/')
+                Test-IsExportTransferArtifactName -Name $relativeBlobName
+            }
+    )
+    $canonicalStoreFileNames = @(Get-ExportTransferArtifactNames -BasePath $ExportsPath)
     $canonicalStoreFileNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($canonicalStoreFileName in $canonicalStoreFileNames) {
         [void]$canonicalStoreFileNameSet.Add($canonicalStoreFileName)
@@ -702,15 +708,21 @@ try {
     # Download historical export files
     Write-Output "Downloading historical exports..."
     $existingBlobs = @(Get-BlobList -AccountName $StorageAccountName -Container $Script:BlobContainers.Exports -StorageToken $storageToken)
+    $downloadableBlobs = @($existingBlobs | Where-Object { Test-IsExportTransferArtifactName -Name $_ })
     $legacyMachineBlobs = @($existingBlobs | Where-Object { $_ -match '^Machines_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
     $legacyAdvancedHuntingBlobs = @($existingBlobs | Where-Object { $_ -match '^AdvancedHunting_\d+_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
     $legacyVulnerabilityBlobs = @($existingBlobs | Where-Object { $_ -match '^VulnExport_\d+_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
-    $hasMachineCurrentBlob = $existingBlobs -contains $Script:MachineCurrentFileName
-    $hasAdvancedHuntingCurrentBlob = $existingBlobs -contains $Script:AdvancedHuntingCurrentFileName
-    $hasCanonicalVulnStore = ($existingBlobs -contains $Script:VulnCurrentFileName) -or (@($existingBlobs | Where-Object { Test-IsVulnHistoryFileName -Name $_ }).Count -gt 0)
+    $hasMachineCurrentBlob = $downloadableBlobs -contains $Script:MachineCurrentFileName
+    $hasAdvancedHuntingCurrentBlob = $downloadableBlobs -contains $Script:AdvancedHuntingCurrentFileName
+    $hasCanonicalVulnStore = ($downloadableBlobs -contains $Script:VulnCurrentFileName) -or (@($downloadableBlobs | Where-Object { Test-IsVulnHistoryFileName -Name $_ }).Count -gt 0)
     Write-Output "  Found $($existingBlobs.Count) existing blob(s)"
 
     foreach ($blobName in $existingBlobs) {
+        if (-not (Test-IsExportTransferArtifactName -Name $blobName)) {
+            Write-Output "  Skipping $blobName (transient/non-canonical export artifact)"
+            continue
+        }
+
         $shouldDownload = $true
         if (($blobName -in $legacyMachineBlobs) -and $hasMachineCurrentBlob) {
             $shouldDownload = $false
