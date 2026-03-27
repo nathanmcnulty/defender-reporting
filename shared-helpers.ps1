@@ -5842,9 +5842,6 @@ function Write-CombinedPayloadGzip {
     $gzipStream = $null
     $writer = $null
     $jsonWriter = $null
-    $columnDirectory = $null
-    $columnWriters = @{}
-    $columnWriterSet = $null
     $columnReaders = [System.Collections.Generic.List[System.IDisposable]]::new()
     $activeColumnPaths = $null
 
@@ -5886,42 +5883,34 @@ function Write-CombinedPayloadGzip {
 
         if ($VulnColumnPaths) {
             $activeColumnPaths = $VulnColumnPaths
+            $jsonWriter.WritePropertyName('vulnsFormat')
+            $jsonWriter.WriteValue('columns-v1')
+            $jsonWriter.WritePropertyName('vulns')
+            $jsonWriter.WriteStartObject()
+            foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp')) {
+                $jsonWriter.WritePropertyName($columnName)
+                $columnReader = [System.IO.StreamReader]::new([string]$activeColumnPaths[$columnName], [System.Text.Encoding]::UTF8)
+                $columnJsonReader = [Newtonsoft.Json.JsonTextReader]::new($columnReader)
+                [void]$columnReaders.Add($columnJsonReader)
+                [void]$columnReaders.Add($columnReader)
+                $jsonWriter.WriteToken($columnJsonReader)
+            }
+            $jsonWriter.WriteEndObject()
         }
         else {
             if ([string]::IsNullOrWhiteSpace($VulnsPath) -or -not (Test-Path -LiteralPath $VulnsPath -PathType Leaf)) {
                 throw 'Write-CombinedPayloadGzip requires either -VulnsPath or -VulnColumnPaths.'
             }
 
-            $columnDirectory = Join-Path ([System.IO.Path]::GetDirectoryName($OutputPath)) ('payload-columns-' + [System.Guid]::NewGuid().ToString('N'))
-            $null = New-Item -Path $columnDirectory -ItemType Directory -Force
-
-            foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp')) {
-                $columnWriters[$columnName] = Open-JsonArrayFileWriter -Path (Join-Path $columnDirectory ($columnName + '.json'))
-            }
-            ConvertTo-VulnColumnFileSet -VulnsPath $VulnsPath -ColumnWriters $columnWriters
-            foreach ($columnWriter in $columnWriters.Values) {
-                Close-JsonArrayFileWriter -WriterState $columnWriter
-            }
-
-            $activeColumnPaths = @{}
-            foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp')) {
-                $activeColumnPaths[$columnName] = $columnWriters[$columnName].Path
-            }
+            $jsonWriter.WritePropertyName('vulnsFormat')
+            $jsonWriter.WriteValue('rows-v1')
+            $jsonWriter.WritePropertyName('vulns')
+            $vulnsReader = [System.IO.StreamReader]::new($VulnsPath, [System.Text.Encoding]::UTF8)
+            $vulnsJsonReader = [Newtonsoft.Json.JsonTextReader]::new($vulnsReader)
+            [void]$columnReaders.Add($vulnsJsonReader)
+            [void]$columnReaders.Add($vulnsReader)
+            $jsonWriter.WriteToken($vulnsJsonReader)
         }
-
-        $jsonWriter.WritePropertyName('vulnsFormat')
-        $jsonWriter.WriteValue('columns-v1')
-        $jsonWriter.WritePropertyName('vulns')
-        $jsonWriter.WriteStartObject()
-        foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp')) {
-            $jsonWriter.WritePropertyName($columnName)
-            $columnReader = [System.IO.StreamReader]::new([string]$activeColumnPaths[$columnName], [System.Text.Encoding]::UTF8)
-            $columnJsonReader = [Newtonsoft.Json.JsonTextReader]::new($columnReader)
-            [void]$columnReaders.Add($columnJsonReader)
-            [void]$columnReaders.Add($columnReader)
-            $jsonWriter.WriteToken($columnJsonReader)
-        }
-        $jsonWriter.WriteEndObject()
 
         $jsonWriter.WriteEndObject()
         $jsonWriter.Flush()
@@ -5929,29 +5918,6 @@ function Write-CombinedPayloadGzip {
     finally {
         foreach ($columnDisposable in $columnReaders) {
             $columnDisposable.Dispose()
-        }
-        if ($columnWriterSet) {
-            try {
-                Close-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
-            }
-            catch {
-                Write-Verbose ("Ignoring temporary compact column writer cleanup failure: {0}" -f $_.Exception.Message)
-            }
-        }
-        else {
-            foreach ($columnWriter in $columnWriters.Values) {
-                if ($columnWriter.JsonWriter -or $columnWriter.StreamWriter) {
-                    try {
-                        Close-JsonArrayFileWriter -WriterState $columnWriter
-                    }
-                    catch {
-                        Write-Verbose ("Ignoring temporary JSON array writer cleanup failure: {0}" -f $_.Exception.Message)
-                    }
-                }
-            }
-        }
-        if ($columnDirectory -and (Test-Path -LiteralPath $columnDirectory -PathType Container)) {
-            Remove-Item -LiteralPath $columnDirectory -Recurse -Force -ErrorAction SilentlyContinue
         }
         if ($jsonWriter) { $jsonWriter.Close() }
         elseif ($writer) { $writer.Dispose() }
