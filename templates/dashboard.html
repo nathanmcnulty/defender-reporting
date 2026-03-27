@@ -275,7 +275,7 @@ __PDF_EXPORT_BUNDLE_CONTENT__
                     return;
                 }
 
-                const compressedBase64 = source.textContent.trim();
+                const compressedBase64 = source.textContent.replace(/\s+/g, '');
                 if (!compressedBase64) {
                     throw new Error(`Embedded script '${scriptId}' is empty`);
                 }
