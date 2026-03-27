@@ -180,6 +180,8 @@ function createEmptyAggregateCache() {
     return {
         activeRowsAsOfDate: null,
         activeRowsAsOfDateKey: null,
+        activeRowsForCurrentSelection: null,
+        activeRowsForCurrentSelectionKey: null,
         provenRemediationRows: null,
         provenRemediationRowsKey: null,
         remediationTableData: null,
@@ -1713,7 +1715,7 @@ function applyFilters() {
  * Update the statistics summary cards
  */
 function updateStats() {
-    const statsRows = getPointInTimeActiveRows();
+    const statsRows = getActiveRowsForCurrentSelection();
     const severityCounts = {
         'Critical': 0,
         'High': 0,
@@ -1826,6 +1828,10 @@ function getPointInTimeReferenceDate() {
     return filterState.endDate || mostRecentLastSeenDate;
 }
 
+function hasSelectedDateWindow(state = filterState) {
+    return Boolean(state.startDate || state.endDate);
+}
+
 function getPointInTimeActiveRows(asOfDate = getPointInTimeReferenceDate()) {
     const cache = getAggregateCache();
     if (cache.activeRowsAsOfDateKey === asOfDate && cache.activeRowsAsOfDate) {
@@ -1835,6 +1841,23 @@ function getPointInTimeActiveRows(asOfDate = getPointInTimeReferenceDate()) {
     cache.activeRowsAsOfDateKey = asOfDate;
     cache.activeRowsAsOfDate = filteredData.filter(v => isVulnerabilityActiveOnDate(v, asOfDate));
     return cache.activeRowsAsOfDate;
+}
+
+function getActiveRowsForCurrentSelection() {
+    const cache = getAggregateCache();
+    const cacheKey = hasSelectedDateWindow()
+        ? `range:${filterState.startDate || ''}:${filterState.endDate || ''}`
+        : `point:${getPointInTimeReferenceDate()}`;
+
+    if (cache.activeRowsForCurrentSelectionKey === cacheKey && cache.activeRowsForCurrentSelection) {
+        return cache.activeRowsForCurrentSelection;
+    }
+
+    cache.activeRowsForCurrentSelectionKey = cacheKey;
+    cache.activeRowsForCurrentSelection = hasSelectedDateWindow()
+        ? filteredData
+        : getPointInTimeActiveRows();
+    return cache.activeRowsForCurrentSelection;
 }
 
 function getProvenRemediationRows() {
@@ -1952,17 +1975,33 @@ function isVulnerabilityActiveOnDate(v, dateStr) {
 function applyDerivedVulnerabilityFields(rows) {
     if (!Array.isArray(rows)) return;
 
+    const earliestEnvironmentFirstSeenByIssue = new Map();
+
+    rows.forEach(v => {
+        const issueKey = getEnvironmentIssueKey(v);
+        const firstSeenDate = getFirstSeenDate(v);
+        if (!issueKey || !firstSeenDate) return;
+
+        const existing = earliestEnvironmentFirstSeenByIssue.get(issueKey);
+        if (!existing || firstSeenDate < existing) {
+            earliestEnvironmentFirstSeenByIssue.set(issueKey, firstSeenDate);
+        }
+    });
+
     rows.forEach(v => {
         const machineLastSeenDate = getMachineLastSeenDate(v);
         const latestActivityDate = getRowLatestActivityDate(v);
         const remediationEvidence = hasKnownPatchEvidence(v);
         const effectiveOpenEndDate = getEffectiveOpenEndDate(v);
+        const environmentFirstSeenDate = earliestEnvironmentFirstSeenByIssue.get(getEnvironmentIssueKey(v)) || getFirstSeenDate(v);
 
         v._machineLastSeenDate = machineLastSeenDate;
         v._latestActivityDate = latestActivityDate;
         v._hasPatchEvidence = remediationEvidence;
         v._effectiveOpenEndDate = effectiveOpenEndDate;
         v._remediationDate = remediationEvidence ? getLastSeenDate(v) : '';
+        v._environmentFirstSeenDate = environmentFirstSeenDate;
+        v.EnvironmentFirstSeenTimestamp = environmentFirstSeenDate;
     });
 }
 
@@ -2031,6 +2070,20 @@ function getFirstSeenDate(v) {
     return normalized === '-' ? '' : normalized;
 }
 
+function getEnvironmentIssueKey(v) {
+    return [
+        v.CveId || '',
+        v.SoftwareVendor || '',
+        v.SoftwareName || '',
+        v.SoftwareVersion || ''
+    ].join('|');
+}
+
+function getEnvironmentFirstSeenDate(v) {
+    const normalized = formatDateYMD(v._environmentFirstSeenDate || v.EnvironmentFirstSeenTimestamp || v._firstSeenDate || v.FirstSeenTimestamp);
+    return normalized === '-' ? '' : normalized;
+}
+
 /**
  * Get last-seen date as normalized YYYY-MM-DD (or empty string).
  * @param {Object} v - Vulnerability object
@@ -2057,6 +2110,19 @@ function getMostRecentYmdDate(dates) {
         }
     }
     return maxDate;
+}
+
+function getEarliestYmdDate(dates) {
+    if (!dates || dates.length === 0) return null;
+    let minDate = null;
+    for (let i = 0; i < dates.length; i++) {
+        const normalized = formatDateYMD(dates[i]);
+        if (!normalized || normalized === '-') continue;
+        if (!minDate || normalized < minDate) {
+            minDate = normalized;
+        }
+    }
+    return minDate;
 }
 
 /**
@@ -2388,7 +2454,7 @@ function getRemediationTableData() {
     if (cache.remediationTableData) return cache.remediationTableData;
 
     const remediationMap = {};
-    const activeRows = getPointInTimeActiveRows();
+    const activeRows = getActiveRowsForCurrentSelection();
 
     activeRows.forEach(v => {
         const remediation = buildRemediationString(v);
@@ -2475,7 +2541,7 @@ function getImpactAnalysisData() {
     if (cache.impactData) return cache.impactData;
 
     const remediationMap = {};
-    const activeRows = getPointInTimeActiveRows();
+    const activeRows = getActiveRowsForCurrentSelection();
     activeRows.forEach(v => {
         const remediation = buildRemediationString(v);
 
@@ -3499,7 +3565,7 @@ function generateCveTooltipContent(cveDetail) {
     tooltip += `<div class="tooltip-row"><strong>Versions:</strong> ${escapeHtml(versions)}</div>`;
     tooltip += `<div class="tooltip-row"><strong>Severity:</strong> ${escapeHtml(cvssScore)} (${escapeHtml(severity)})</div>`;
     tooltip += `<div class="tooltip-row"><strong>Published:</strong> ${escapeHtml(published)}</div>`;
-    tooltip += `<div class="tooltip-row"><strong>First Seen:</strong> ${escapeHtml(firstSeen)}</div>`;
+    tooltip += `<div class="tooltip-row"><strong>Environment First Seen:</strong> ${escapeHtml(firstSeen)}</div>`;
     tooltip += `<div class="tooltip-row"><strong>Last Seen:</strong> ${escapeHtml(lastSeen)}</div>`;
     
     if (parsed.summary) {
@@ -3532,7 +3598,7 @@ function renderDevicesByRemediationTable() {
     const cache = getAggregateCache();
     if (!cache.devicesByRemediationData) {
         const remediationByKey = {};
-        const activeRows = getPointInTimeActiveRows();
+        const activeRows = getActiveRowsForCurrentSelection();
 
         activeRows.forEach(v => {
             const updateName = v.RecommendedSecurityUpdate || 'Unknown';
@@ -3578,7 +3644,7 @@ function renderDevicesByRemediationTable() {
                     severityLevel: v.VulnerabilitySeverityLevel,
                     cvssScore: v.CvssScore,
                     epssScore: v.EpssScore,
-                    firstSeenTimestamp: v.FirstSeenTimestamp,
+                    firstSeenTimestamp: getEnvironmentFirstSeenDate(v),
                     lastSeenTimestamp: v.LastSeenTimestamp,
                     exploitabilityLevel: v.ExploitabilityLevel,
                     softwareVendor: v.SoftwareVendor,
@@ -3587,8 +3653,12 @@ function renderDevicesByRemediationTable() {
                 });
             }
 
+            const cveDetails = remediationByKey[key].cveDetails.get(v.CveId);
+            cveDetails.firstSeenTimestamp = getEarliestYmdDate([cveDetails.firstSeenTimestamp, getEnvironmentFirstSeenDate(v)]);
+            cveDetails.lastSeenTimestamp = getMostRecentYmdDate([cveDetails.lastSeenTimestamp, getLastSeenDate(v)]);
+
             if (v.SoftwareVersion) {
-                remediationByKey[key].cveDetails.get(v.CveId).versions.add(v.SoftwareVersion);
+                cveDetails.versions.add(v.SoftwareVersion);
             }
         });
 
@@ -4040,7 +4110,7 @@ function renderRemediationsByDeviceTable() {
     if (!cache.remediationsByDeviceData) {
         const deviceByKey = {};
         const deviceCveDetails = {};
-        const activeRows = getPointInTimeActiveRows();
+        const activeRows = getActiveRowsForCurrentSelection();
 
         activeRows.forEach(v => {
             const deviceId = getDeviceIdentityKey(v);
@@ -4530,7 +4600,7 @@ function buildCveLinkHtml(v) {
         cvssScore: v.CvssScore,
         severity: v.VulnerabilitySeverityLevel || 'Unknown',
         publishedDate: v.PublishedDate,
-        firstSeen: v._firstSeenDate || v.FirstSeenTimestamp,
+        firstSeen: getEnvironmentFirstSeenDate(v),
         lastSeen: v._lastSeenDate || v.LastSeenTimestamp
     });
 
@@ -4547,6 +4617,40 @@ function buildCveLinkHtml(v) {
  * @returns {Array} Array of { signature, deviceBubbles: [{DeviceName,DeviceId,MachineInfo}], vulns: [unique vuln per CVE] }
  */
 function groupDevicesByCveSignature(details) {
+    const mergeModalObservationRow = (existing, candidate) => {
+        const existingFirstSeen = getFirstSeenDate(existing);
+        const candidateFirstSeen = getFirstSeenDate(candidate);
+        const existingLastSeen = getLastSeenDate(existing);
+        const candidateLastSeen = getLastSeenDate(candidate);
+        const existingRecency = getMostRecentYmdDate([existingLastSeen, getRowLatestActivityDate(existing)]);
+        const candidateRecency = getMostRecentYmdDate([candidateLastSeen, getRowLatestActivityDate(candidate)]);
+        const useCandidateMetadata = Boolean(candidateRecency && (!existingRecency || candidateRecency >= existingRecency));
+        const merged = useCandidateMetadata
+            ? { ...existing, ...candidate }
+            : { ...candidate, ...existing };
+
+        const earliestFirstSeen = getEarliestYmdDate([existingFirstSeen, candidateFirstSeen]);
+        const latestLastSeen = getMostRecentYmdDate([existingLastSeen, candidateLastSeen]);
+
+        if (earliestFirstSeen) {
+            merged.FirstSeenTimestamp = earliestFirstSeen;
+            merged._firstSeenDate = earliestFirstSeen;
+        }
+
+        if (latestLastSeen) {
+            merged.LastSeenTimestamp = latestLastSeen;
+            merged._lastSeenDate = latestLastSeen;
+        }
+
+        merged.DiskPaths = Array.from(new Set([...(existing.DiskPaths || []), ...(candidate.DiskPaths || [])]));
+        merged.RegistryPaths = Array.from(new Set([...(existing.RegistryPaths || []), ...(candidate.RegistryPaths || [])]));
+        merged.AffectedSoftware = Array.from(new Set([...(existing.AffectedSoftware || []), ...(candidate.AffectedSoftware || [])]));
+        merged.MachineTags = Array.from(new Set([...(existing.MachineTags || []), ...(candidate.MachineTags || [])]));
+        merged._observationWindowCount = Number(existing._observationWindowCount || 1) + Number(candidate._observationWindowCount || 1);
+
+        return merged;
+    };
+
     // Build per-device CVE map
     const deviceMap = new Map();
     for (let i = 0; i < details.length; i++) {
@@ -4566,6 +4670,8 @@ function groupDevicesByCveSignature(details) {
         dev.cveIds.add(d.CveId);
         if (!dev.vulnsByCve[d.CveId]) {
             dev.vulnsByCve[d.CveId] = d;
+        } else {
+            dev.vulnsByCve[d.CveId] = mergeModalObservationRow(dev.vulnsByCve[d.CveId], d);
         }
     }
 
@@ -4663,7 +4769,7 @@ function buildDetailRow(v, includeEvidenceColumn) {
     const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
     const publishedDisplay = formatDateYMD(v.PublishedDate);
-    const firstSeenDisplay = formatDateYMD(v._firstSeenDate || v.FirstSeenTimestamp);
+    const firstSeenDisplay = getEnvironmentFirstSeenDate(v);
 
     return '<tr>' +
         buildCveLinkHtml(v) +
@@ -4685,7 +4791,7 @@ function buildRemediationRow(v, includeEvidenceColumn) {
     const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
     const publishedDisplay = formatDateYMD(v.PublishedDate);
-    const firstSeenDisplay = formatDateYMD(v._firstSeenDate || v.FirstSeenTimestamp);
+    const firstSeenDisplay = getEnvironmentFirstSeenDate(v);
 
     return '<tr>' +
         buildCveLinkHtml(v) +
@@ -4806,7 +4912,7 @@ function showDetails(remediationData) {
             parts.push('<div class="modal-table-container"><table class="detail-table"><thead><tr>',
                 '<th>CVE ID</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th><th>Exploitability</th>' +
                 (includeEvidenceColumn ? '<th>Evidence</th>' : '') +
-                '<th class="modal-date-col">Published</th><th class="modal-date-col">First Seen</th>',
+                '<th class="modal-date-col">Published</th><th class="modal-date-col">Environment First Seen</th>',
                 '</tr></thead><tbody data-vt-id="', vtId, '"></tbody></table></div>');
 
             vtRowData[vtId] = {
@@ -4873,7 +4979,7 @@ function showRemediationDetails(data) {
             parts.push('<div class="modal-table-container"><table class="detail-table"><thead><tr>',
                 '<th>CVE ID</th><th>Version</th><th>Severity</th><th>CVSS</th><th>EPSS</th>' +
                 (includeEvidenceColumn ? '<th>Evidence</th>' : '') +
-                '<th class="modal-date-col">Published</th><th class="modal-date-col">First Seen</th>',
+                '<th class="modal-date-col">Published</th><th class="modal-date-col">Environment First Seen</th>',
                 '</tr></thead><tbody data-vt-id="', vtId, '"></tbody></table></div>');
 
             vtRowData[vtId] = {
