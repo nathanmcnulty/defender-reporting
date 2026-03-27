@@ -395,6 +395,112 @@ function Test-DashboardValidationUsesStableFallbackDeviceProfile {
     }
 }
 
+function Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-open-state-audit-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $dashboardScriptPath = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Generate-VulnerabilityDashboard.ps1'
+    $outputPath = Join-Path $tempRoot 'dashboard.html'
+    $auditPath = Join-Path $tempRoot 'audit.json'
+
+    try {
+        $patchedRow = Get-TestVulnRow -Id 'patched-001' -CveId 'CVE-2026-0201' -SnapshotDate '2026-03-01' -Version '1.0.0'
+        $patchedRow.DeviceId = 'device-patched'
+        $patchedRow.DeviceName = 'device-patched.contoso.com'
+
+        $assumedOpenRow = Get-TestVulnRow -Id 'open-001' -CveId 'CVE-2026-0202' -SnapshotDate '2026-03-01' -Version '1.1.0'
+        $assumedOpenRow.DeviceId = 'device-open'
+        $assumedOpenRow.DeviceName = 'device-open.contoso.com'
+
+        $staleRow = Get-TestVulnRow -Id 'stale-001' -CveId 'CVE-2026-0203' -SnapshotDate '2026-01-01' -Version '1.2.0'
+        $staleRow.DeviceId = 'device-stale'
+        $staleRow.DeviceName = 'device-stale.contoso.com'
+        $staleRow.FirstSeenTimestamp = '2026-01-01'
+        $staleRow.LastSeenTimestamp = '2026-01-01'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($assumedOpenRow, $staleRow)
+        [void](New-Item -Path (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -ItemType File -Force)
+        Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($patchedRow)
+
+        $machines = @(
+            [PSCustomObject]@{
+                id = 'device-patched'
+                computerDnsName = 'device-patched.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows 11'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = '10.0.0.10'
+                lastExternalIpAddress = ''
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'Medium'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-10'
+                firstSeen = '2026-02-01'
+            }
+            [PSCustomObject]@{
+                id = 'device-open'
+                computerDnsName = 'device-open.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows 11'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = '10.0.0.11'
+                lastExternalIpAddress = ''
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'Medium'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-01'
+                firstSeen = '2026-02-01'
+            }
+            [PSCustomObject]@{
+                id = 'device-stale'
+                computerDnsName = 'device-stale.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows 11'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = '10.0.0.12'
+                lastExternalIpAddress = ''
+                healthStatus = 'Inactive'
+                riskScore = 'Low'
+                exposureLevel = 'Low'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-01-01'
+                firstSeen = '2025-12-01'
+            }
+        )
+
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), ($machines | ConvertTo-Json -Compress -Depth 20), [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'AdvancedHunting_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
+
+        & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
+
+        $audit = Get-Content -Path $auditPath -Raw | ConvertFrom-Json -Depth 100
+        Assert-True ([string]$audit.OpenStateAudit.LatestObservedDate -eq '2026-03-10') 'Expected latest observed date to follow the most recent machine heartbeat.'
+        Assert-True ($audit.OpenStateAudit.ProvenPatchedRowCount -eq 1) 'Expected exactly one row with positive patch evidence.'
+        Assert-True ($audit.OpenStateAudit.AssumedOpenRowCount -eq 2) 'Expected two rows to remain in the assumed-open bucket.'
+        Assert-True ($audit.OpenStateAudit.InactiveSuppressedRowCount -eq 1) 'Expected one assumed-open row to age out after the inactivity cutoff.'
+        Assert-True ($audit.OpenStateAudit.CurrentOpenRowCount -eq 1) 'Expected only one row to remain open at the latest observed date.'
+        Assert-True ($audit.OpenStateAudit.CurrentOpenDeviceCount -eq 1) 'Expected only one device to contribute to the current open backlog.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-VulnContentStoreRoundTrip {
     [CmdletBinding()]
     param()
@@ -533,6 +639,8 @@ Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
 Write-Output '  Stable device fallback identity checks passed.'
 Test-DashboardValidationUsesStableFallbackDeviceProfile
 Write-Output '  Dashboard validation fallback device profile checks passed.'
+Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff
+Write-Output '  Dashboard open-state audit checks passed.'
 Test-VulnContentStoreRoundTrip
 Write-Output '  Vulnerability content store round-trip checks passed.'
 Test-VulnObservedWindowCacheRoundTrip
