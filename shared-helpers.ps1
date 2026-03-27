@@ -5822,6 +5822,47 @@ function ConvertTo-VulnColumnFileSet {
     }
 }
 
+function Get-CompactVulnJsonRowCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $reader = $null
+    $jsonReader = $null
+    $rowCount = 0
+
+    try {
+        $reader = [System.IO.StreamReader]::new($Path, [System.Text.Encoding]::UTF8)
+        $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
+
+        if (-not $jsonReader.Read() -or $jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartArray) {
+            throw "Expected compact vulnerability JSON '$Path' to start with a JSON array."
+        }
+
+        while ($jsonReader.Read()) {
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndArray) {
+                break
+            }
+
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartArray) {
+                throw "Expected compact vulnerability row array in '$Path', found '$($jsonReader.TokenType)'."
+            }
+
+            [void](Read-CompactJsonReaderValue -Reader $jsonReader)
+            $rowCount++
+        }
+
+        return $rowCount
+    }
+    finally {
+        if ($jsonReader) { $jsonReader.Close() }
+        if ($reader) { $reader.Dispose() }
+    }
+}
+
 function Write-CombinedPayloadGzip {
     [CmdletBinding()]
     param(
@@ -8024,6 +8065,7 @@ function ConvertTo-NormalizedData {
     $jsonWriter = $null
     $columnWriterSet = $null
     $vulnColumnPaths = $null
+    $compactRecordBuffer = $null
     $syntheticManifestPath = Join-Path $DataPath 'synthetic-manifest.json'
     $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-Path -LiteralPath $syntheticManifestPath -PathType Leaf))
     $contentStoreExists = (Test-VulnContentStoreExistence -BasePath $DataPath)
@@ -8057,6 +8099,7 @@ function ConvertTo-NormalizedData {
                 $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($vulnWriter)
                 $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
                 $jsonWriter.WriteStartArray()
+                $compactRecordBuffer = [System.Collections.Generic.List[object]]::new()
             }
 
             foreach ($v in Get-NormalizationSourceRows -DataPath $DataPath -SkipObservedWindowMerge:$effectiveSkipObservedWindowMerge) {
@@ -8294,6 +8337,9 @@ function ConvertTo-NormalizedData {
                 Write-CompactVulnRecordColumnSet -WriterSet $columnWriterSet -Record $compactRecord
             }
             else {
+                if ($compactRecordBuffer) {
+                    [void]$compactRecordBuffer.Add(@($compactRecord))
+                }
                 $jsonWriter.WriteStartArray()
                 foreach ($compactValue in $compactRecord) {
                     if ($null -eq $compactValue) {
@@ -8352,6 +8398,25 @@ function ConvertTo-NormalizedData {
             }
             if ($columnWriterSet) {
                 Close-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
+            }
+        }
+    }
+
+    if ((-not $columnWriterSet) -and -not [string]::IsNullOrWhiteSpace($VulnOutputPath) -and (Test-Path -LiteralPath $VulnOutputPath -PathType Leaf)) {
+        $actualVulnRowCount = Get-CompactVulnJsonRowCount -Path $VulnOutputPath
+        if ($actualVulnRowCount -ne $processedCount) {
+            Write-Warning ("  Normalized vulnerability payload row count mismatch (expected {0}, found {1}); rewriting via buffered fallback serializer." -f $processedCount, $actualVulnRowCount)
+            if ($compactRecordBuffer) {
+                [System.IO.File]::WriteAllText(
+                    $VulnOutputPath,
+                    ($compactRecordBuffer | ConvertTo-Json -Compress -Depth 6),
+                    [System.Text.UTF8Encoding]::new($false)
+                )
+                $actualVulnRowCount = Get-CompactVulnJsonRowCount -Path $VulnOutputPath
+            }
+
+            if ($actualVulnRowCount -ne $processedCount) {
+                throw ("Normalized vulnerability payload row count mismatch after rewrite fallback. Expected {0}, found {1} in '{2}'." -f $processedCount, $actualVulnRowCount, $VulnOutputPath)
             }
         }
     }
