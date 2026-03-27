@@ -6088,6 +6088,64 @@ function Read-AdvancedHuntingData {
         [string]$Path
     )
 
+    function ConvertTo-AdvancedHuntingStringArray {
+        [CmdletBinding()]
+        [OutputType([string[]])]
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $Value
+        )
+
+        if ($null -eq $Value) {
+            return @()
+        }
+
+        $values = [System.Collections.Generic.List[string]]::new()
+        if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+            foreach ($item in $Value) {
+                if ($null -eq $item) { continue }
+                $text = [string]$item
+                if (-not [string]::IsNullOrWhiteSpace($text)) {
+                    $values.Add($text)
+                }
+            }
+        }
+        else {
+            $text = [string]$Value
+            if (-not [string]::IsNullOrWhiteSpace($text)) {
+                $values.Add($text)
+            }
+        }
+
+        return [string[]]$values.ToArray()
+    }
+
+    function ConvertTo-AdvancedHuntingDescriptionValue {
+        [CmdletBinding()]
+        [OutputType([string])]
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $Value
+        )
+
+        if ($null -eq $Value) {
+            return $null
+        }
+
+        if ($Value -is [string]) {
+            return $Value
+        }
+
+        $parts = @(ConvertTo-AdvancedHuntingStringArray -Value $Value)
+        if ($parts.Count -eq 0) {
+            return $null
+        }
+
+        return ($parts -join "`n")
+    }
+
     return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
         Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
 
@@ -6126,11 +6184,14 @@ function Read-AdvancedHuntingData {
                     $cveId = $record.CveId
                     if ($cveId -and -not $ahData.ContainsKey($cveId)) {
                         $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
+                        $rawDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
+                        $rawAffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
+                        $affectedSoftware = @(ConvertTo-AdvancedHuntingStringArray -Value $rawAffectedSoftware)
                         $ahData[$cveId] = @{
                             PublishedDate = Convert-ToYmdDate -DateValue $pdRaw
-                            VulnerabilityDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
+                            VulnerabilityDescription = ConvertTo-AdvancedHuntingDescriptionValue -Value $rawDescription
                             EpssScore = $record.PSObject.Properties['EpssScore']?.Value
-                            AffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
+                            AffectedSoftware = if ($affectedSoftware.Count -gt 0) { @($affectedSoftware) } else { $null }
                         }
                     }
                 }
@@ -7108,9 +7169,9 @@ function Invoke-ContentStoreNormalization {
                 $publishedDate = $ahData.PublishedDate
                 $vulnDescription = $ahData.VulnerabilityDescription
                 $epssScore = $ahData.EpssScore
-                if ($ahData.AffectedSoftware -and $ahData.AffectedSoftware.Count -gt 0) {
+                if ($ahData.AffectedSoftware -and @($ahData.AffectedSoftware).Count -gt 0) {
                     $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
-                    foreach ($sw in $ahData.AffectedSoftware) {
+                    foreach ($sw in @($ahData.AffectedSoftware)) {
                         $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
                         if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
                     }
@@ -7563,9 +7624,9 @@ function Invoke-RawStoreNormalization {
                                 $publishedDate = $ahData.PublishedDate
                                 $vulnDescription = $ahData.VulnerabilityDescription
                                 $epssScore = $ahData.EpssScore
-                                if ($ahData.AffectedSoftware -and $ahData.AffectedSoftware.Count -gt 0) {
+                                if ($ahData.AffectedSoftware -and @($ahData.AffectedSoftware).Count -gt 0) {
                                     $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
-                                    foreach ($sw in $ahData.AffectedSoftware) {
+                                    foreach ($sw in @($ahData.AffectedSoftware)) {
                                         $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
                                         if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
                                     }
@@ -8230,9 +8291,9 @@ function ConvertTo-NormalizedData {
                         $publishedDate = $ahData.PublishedDate
                         $vulnDescription = $ahData.VulnerabilityDescription
                         $epssScore = $ahData.EpssScore
-                        if ($ahData.AffectedSoftware -and $ahData.AffectedSoftware.Count -gt 0) {
+                        if ($ahData.AffectedSoftware -and @($ahData.AffectedSoftware).Count -gt 0) {
                             $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
-                            foreach ($sw in $ahData.AffectedSoftware) {
+                            foreach ($sw in @($ahData.AffectedSoftware)) {
                                 $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
                                 if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
                             }
