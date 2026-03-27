@@ -357,6 +357,44 @@ function Test-ConvertToNormalizedDataUsesStableDeviceIdFallback {
     }
 }
 
+function Test-DashboardValidationUsesStableFallbackDeviceProfile {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-validation-device-profile-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $dashboardScriptPath = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Generate-VulnerabilityDashboard.ps1'
+    $outputPath = Join-Path $tempRoot 'dashboard.html'
+    $auditPath = Join-Path $tempRoot 'audit.json'
+
+    try {
+        $first = Get-TestVulnRow -Id 'device-profile-001' -CveId 'CVE-2026-0107' -SnapshotDate '2026-03-20' -Version '1.0.0'
+        $second = Get-TestVulnRow -Id 'device-profile-002' -CveId 'CVE-2026-0108' -SnapshotDate '2026-03-20' -Version '1.1.0'
+        $second.DeviceName = 'device01-renamed.contoso.com'
+        $second.RbacGroupName = 'Pilot'
+        $second.OSVersion = '10.0.99999'
+        $second.MachineTags = @('Pilot')
+        $second.DiskPaths = @('C:\Program Files\Legacy Agent\agent-renamed.exe')
+        $second.RegistryPaths = @('HKLM\Software\Contoso\LegacyAgentRenamed')
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($first, $second)
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'AdvancedHunting_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
+
+        & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
+
+        $audit = Get-Content -Path $auditPath -Raw | ConvertFrom-Json -Depth 100
+        Assert-True ($audit.RowComparison.Match -eq $true) 'Expected dashboard validation to reuse the stable fallback device profile for machine-less rows.'
+        Assert-True ($audit.RowComparison.MissingCount -eq 0) 'Expected no missing rows when fallback device metadata varies across rows.'
+        Assert-True ($audit.RowComparison.ExtraCount -eq 0) 'Expected no extra rows when fallback device metadata varies across rows.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-VulnContentStoreRoundTrip {
     [CmdletBinding()]
     param()
@@ -493,6 +531,8 @@ Test-ReadNormalizedVulnStoreRow
 Write-Output '  Normalized vulnerability store reader checks passed.'
 Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
 Write-Output '  Stable device fallback identity checks passed.'
+Test-DashboardValidationUsesStableFallbackDeviceProfile
+Write-Output '  Dashboard validation fallback device profile checks passed.'
 Test-VulnContentStoreRoundTrip
 Write-Output '  Vulnerability content store round-trip checks passed.'
 Test-VulnObservedWindowCacheRoundTrip
