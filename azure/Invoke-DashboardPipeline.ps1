@@ -6627,7 +6627,7 @@ function Get-DashboardPayloadCacheFingerprint {
     }
 
     $builder = [System.Text.StringBuilder]::new()
-    [void]$builder.AppendLine('dashboard-payload-cache-v1')
+    [void]$builder.AppendLine('dashboard-payload-cache-v2')
     [void]$builder.AppendLine(('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true)))
     foreach ($file in @($files | Sort-Object FullName -Unique)) {
         $hash = Get-FileSha256Hex -Path $file.FullName
@@ -6783,7 +6783,7 @@ function Publish-NormalizedPayloadCache {
 
     Copy-Item -LiteralPath $PayloadPath -Destination $tempPayloadPath -Force
     $manifest = [ordered]@{
-        Version = 'dashboard-payload-cache-v1'
+        Version = 'dashboard-payload-cache-v2'
         Fingerprint = $fingerprint
         GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
         VulnCount = $VulnCount
@@ -6865,7 +6865,7 @@ function Get-NormalizationContext {
     return [PSCustomObject]@{
         Lookups = @{
             vendors = [System.Collections.Generic.List[string]]::new()
-            severities = @('Critical', 'High', 'Medium', 'Low')
+            severities = @('Critical', 'High', 'Medium', 'Low', 'None')
             exploitLevels = [System.Collections.Generic.List[string]]::new()
             groups = [System.Collections.Generic.List[string]]::new()
             platforms = [System.Collections.Generic.List[string]]::new()
@@ -8308,6 +8308,7 @@ function ConvertTo-NormalizedData {
                 'High' { 1 }
                 'Medium' { 2 }
                 'Low' { 3 }
+                'None' { 4 }
                 default { -1 }
             }
 

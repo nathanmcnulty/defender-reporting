@@ -1,0 +1,22 @@
+[
+  {
+    "id": "device-none-001",
+    "computerDnsName": "device-none-001.contoso.com",
+    "rbacGroupName": "Endpoints",
+    "osPlatform": "macOS",
+    "osVersion": "",
+    "machineTags": [
+      "macOS"
+    ],
+    "lastIpAddress": "192.168.1.10",
+    "lastExternalIpAddress": "",
+    "healthStatus": "Active",
+    "riskScore": "Low",
+    "exposureLevel": "Low",
+    "deviceValue": "Normal",
+    "managedBy": "Intune",
+    "isAadJoined": false,
+    "lastSeen": "2026-03-26",
+    "firstSeen": "2026-03-01"
+  }
+]

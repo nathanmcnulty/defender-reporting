@@ -501,6 +501,34 @@ function Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff {
     }
 }
 
+function Test-DashboardValidationPreservesNoneSeverityRows {
+    [CmdletBinding()]
+    param()
+
+    $fixturePath = Join-Path $PSScriptRoot 'fixtures\legacy-migration-none-severity'
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-none-severity-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $dashboardScriptPath = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Generate-VulnerabilityDashboard.ps1'
+    $outputPath = Join-Path $tempRoot 'dashboard.html'
+    $auditPath = Join-Path $tempRoot 'audit.json'
+
+    try {
+        Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
+
+        & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
+
+        $audit = Get-Content -Path $auditPath -Raw | ConvertFrom-Json -Depth 100
+        Assert-True ($audit.RowComparison.Match -eq $true) 'Expected dashboard validation to preserve rows with VulnerabilitySeverityLevel=None.'
+        Assert-True ($audit.RowComparison.MissingCount -eq 0) 'Expected no missing rows for none-severity data.'
+        Assert-True ($audit.RowComparison.ExtraCount -eq 0) 'Expected no extra rows for none-severity data.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-VulnContentStoreRoundTrip {
     [CmdletBinding()]
     param()
@@ -641,6 +669,8 @@ Test-DashboardValidationUsesStableFallbackDeviceProfile
 Write-Output '  Dashboard validation fallback device profile checks passed.'
 Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff
 Write-Output '  Dashboard open-state audit checks passed.'
+Test-DashboardValidationPreservesNoneSeverityRows
+Write-Output '  Dashboard none-severity validation checks passed.'
 Test-VulnContentStoreRoundTrip
 Write-Output '  Vulnerability content store round-trip checks passed.'
 Test-VulnObservedWindowCacheRoundTrip
