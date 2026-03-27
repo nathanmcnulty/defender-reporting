@@ -501,7 +501,7 @@ function Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff {
     }
 }
 
-function Test-DashboardValidationPreservesNoneSeverityRows {
+function Test-DashboardValidationPreservesNoneSeverityData {
     [CmdletBinding()]
     param()
 
@@ -669,7 +669,7 @@ Test-DashboardValidationUsesStableFallbackDeviceProfile
 Write-Output '  Dashboard validation fallback device profile checks passed.'
 Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff
 Write-Output '  Dashboard open-state audit checks passed.'
-Test-DashboardValidationPreservesNoneSeverityRows
+Test-DashboardValidationPreservesNoneSeverityData
 Write-Output '  Dashboard none-severity validation checks passed.'
 Test-VulnContentStoreRoundTrip
 Write-Output '  Vulnerability content store round-trip checks passed.'
