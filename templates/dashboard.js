@@ -758,7 +758,7 @@ function loadData() {
     
     if (dataFormat === 'compressed') {
         // Decompress using pako
-        const compressedBase64 = document.getElementById('vulnsData').textContent.trim();
+        const compressedBase64 = document.getElementById('vulnsData').textContent.replace(/\s+/g, '');
         const compressedBytes = Uint8Array.from(atob(compressedBase64), c => c.charCodeAt(0));
         const decompressed = pako.inflate(compressedBytes, { to: 'string' });
         const data = JSON.parse(decompressed);

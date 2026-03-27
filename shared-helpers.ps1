@@ -5337,6 +5337,7 @@ function Write-Base64FileContent {
             $encodableCount = $totalCount - ($totalCount % 3)
             if ($encodableCount -gt 0) {
                 $Writer.Write([System.Convert]::ToBase64String($workBuffer, 0, $encodableCount))
+                $Writer.WriteLine()
             }
 
             $carryCount = $totalCount - $encodableCount
@@ -5347,6 +5348,7 @@ function Write-Base64FileContent {
 
         if ($carryCount -gt 0) {
             $Writer.Write([System.Convert]::ToBase64String($carry, 0, $carryCount))
+            $Writer.WriteLine()
         }
     }
     finally {
