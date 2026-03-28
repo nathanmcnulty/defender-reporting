@@ -5431,44 +5431,15 @@ function Write-Base64FileContent {
         [System.IO.TextWriter]$Writer,
 
         [Parameter(Mandatory = $true)]
-        [string]$FilePath
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$InsertLineBreaks
     )
 
-    $stream = [System.IO.File]::OpenRead($FilePath)
-    try {
-        $buffer = New-Object byte[] 12288
-        $carry = New-Object byte[] 2
-        $carryCount = 0
-
-        while (($bytesRead = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
-            $totalCount = $carryCount + $bytesRead
-            $workBuffer = New-Object byte[] $totalCount
-
-            if ($carryCount -gt 0) {
-                [System.Array]::Copy($carry, 0, $workBuffer, 0, $carryCount)
-            }
-            [System.Array]::Copy($buffer, 0, $workBuffer, $carryCount, $bytesRead)
-
-            $encodableCount = $totalCount - ($totalCount % 3)
-            if ($encodableCount -gt 0) {
-                $Writer.Write([System.Convert]::ToBase64String($workBuffer, 0, $encodableCount))
-                $Writer.WriteLine()
-            }
-
-            $carryCount = $totalCount - $encodableCount
-            if ($carryCount -gt 0) {
-                [System.Array]::Copy($workBuffer, $encodableCount, $carry, 0, $carryCount)
-            }
-        }
-
-        if ($carryCount -gt 0) {
-            $Writer.Write([System.Convert]::ToBase64String($carry, 0, $carryCount))
-            $Writer.WriteLine()
-        }
-    }
-    finally {
-        $stream.Dispose()
-    }
+    $bytes = [System.IO.File]::ReadAllBytes($FilePath)
+    $formatting = if ($InsertLineBreaks) { [System.Base64FormattingOptions]::InsertLineBreaks } else { [System.Base64FormattingOptions]::None }
+    $Writer.Write([System.Convert]::ToBase64String($bytes, $formatting))
 }
 
 function Write-JsonValueToWriter {
@@ -6094,7 +6065,10 @@ function Write-TemplatedHtml {
         [array]$Segments,
 
         [Parameter(Mandatory = $true)]
-        [string]$OutputPath
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$InsertBase64LineBreaks
     )
 
     $writer = [System.IO.StreamWriter]::new($OutputPath, $false, [System.Text.UTF8Encoding]::new($false))
@@ -6109,7 +6083,7 @@ function Write-TemplatedHtml {
 
             $writer.Write($Template.Substring($position, $index - $position))
             if ($segment.ContainsKey('Base64FilePath')) {
-                Write-Base64FileContent -Writer $writer -FilePath $segment.Base64FilePath
+                Write-Base64FileContent -Writer $writer -FilePath $segment.Base64FilePath -InsertLineBreaks:$InsertBase64LineBreaks
             }
             elseif ($segment.ContainsKey('FilePath')) {
                 Write-FileContent -Writer $writer -FilePath $segment.FilePath
