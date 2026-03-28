@@ -5327,6 +5327,22 @@ function Write-Base64FileContent {
     $Writer.Write([System.Convert]::ToBase64String($bytes, $formatting))
 }
 
+function Get-Base64FileContent {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$InsertLineBreaks
+    )
+
+    $bytes = [System.IO.File]::ReadAllBytes($FilePath)
+    $formatting = if ($InsertLineBreaks) { [System.Base64FormattingOptions]::InsertLineBreaks } else { [System.Base64FormattingOptions]::None }
+    return [System.Convert]::ToBase64String($bytes, $formatting)
+}
+
 function Write-JsonValueToWriter {
     [CmdletBinding()]
     param(
@@ -5956,35 +5972,31 @@ function Write-TemplatedHtml {
         [switch]$InsertBase64LineBreaks
     )
 
-    $writer = [System.IO.StreamWriter]::new($OutputPath, $false, [System.Text.UTF8Encoding]::new($false))
-    try {
-        $position = 0
-        foreach ($segment in $Segments) {
-            $placeholder = $segment.Placeholder
-            $index = $Template.IndexOf($placeholder, $position, [System.StringComparison]::Ordinal)
-            if ($index -lt 0) {
-                throw "Template placeholder not found: $placeholder"
-            }
-
-            $writer.Write($Template.Substring($position, $index - $position))
-            if ($segment.ContainsKey('Base64FilePath')) {
-                Write-Base64FileContent -Writer $writer -FilePath $segment.Base64FilePath -InsertLineBreaks:$InsertBase64LineBreaks
-            }
-            elseif ($segment.ContainsKey('FilePath')) {
-                Write-FileContent -Writer $writer -FilePath $segment.FilePath
-            }
-            else {
-                $writer.Write([string]$segment.Value)
-            }
-
-            $position = $index + $placeholder.Length
+    $builder = [System.Text.StringBuilder]::new($Template.Length + 262144)
+    $position = 0
+    foreach ($segment in $Segments) {
+        $placeholder = $segment.Placeholder
+        $index = $Template.IndexOf($placeholder, $position, [System.StringComparison]::Ordinal)
+        if ($index -lt 0) {
+            throw "Template placeholder not found: $placeholder"
         }
 
-        $writer.Write($Template.Substring($position))
+        [void]$builder.Append($Template.Substring($position, $index - $position))
+        if ($segment.ContainsKey('Base64FilePath')) {
+            [void]$builder.Append((Get-Base64FileContent -FilePath $segment.Base64FilePath -InsertLineBreaks:$InsertBase64LineBreaks))
+        }
+        elseif ($segment.ContainsKey('FilePath')) {
+            [void]$builder.Append([System.IO.File]::ReadAllText([string]$segment.FilePath, [System.Text.Encoding]::UTF8))
+        }
+        else {
+            [void]$builder.Append([string]$segment.Value)
+        }
+
+        $position = $index + $placeholder.Length
     }
-    finally {
-        $writer.Dispose()
-    }
+
+    [void]$builder.Append($Template.Substring($position))
+    [System.IO.File]::WriteAllText($OutputPath, $builder.ToString(), [System.Text.UTF8Encoding]::new($false))
 }
 
 function Read-MachineData {
