@@ -6180,7 +6180,7 @@ function Get-DashboardAssetUrl {
     return ((Get-DashboardAssetsDirectoryName -HtmlPath $HtmlPath) + '/' + $AssetFileName)
 }
 
-function Write-DashboardArtifacts {
+function Write-DashboardArtifactBundle {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
@@ -6237,11 +6237,11 @@ function Write-DashboardArtifacts {
 
     if (-not $SplitAssets) {
         if ([string]::IsNullOrWhiteSpace($ChartJsBundlePath) -or -not (Test-Path -LiteralPath $ChartJsBundlePath -PathType Leaf)) {
-            throw 'Write-DashboardArtifacts requires ChartJsBundlePath when SplitAssets is false.'
+            throw 'Write-DashboardArtifactBundle requires ChartJsBundlePath when SplitAssets is false.'
         }
 
         if ([string]::IsNullOrWhiteSpace($PdfExportBundlePath) -or -not (Test-Path -LiteralPath $PdfExportBundlePath -PathType Leaf)) {
-            throw 'Write-DashboardArtifacts requires PdfExportBundlePath when SplitAssets is false.'
+            throw 'Write-DashboardArtifactBundle requires PdfExportBundlePath when SplitAssets is false.'
         }
     }
 
@@ -9809,7 +9809,7 @@ try {
     # Step 8: Assemble final HTML
     Write-Output "Assembling dashboard HTML..."
     $dashboardOutputPath = Join-Path -Path $tempDashboards -ChildPath $Script:DashboardBlobName
-    $dashboardArtifacts = Write-DashboardArtifacts `
+    $dashboardArtifacts = Write-DashboardArtifactBundle `
         -TemplateHtml $htmlTemplate `
         -TemplateCss $cssContent `
         -TemplateJs $jsContent `

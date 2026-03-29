@@ -1088,7 +1088,7 @@ try {
     # Step 8: Assemble final HTML
     Write-Output "Assembling dashboard HTML..."
     $dashboardOutputPath = Join-Path -Path $tempDashboards -ChildPath $Script:DashboardBlobName
-    $dashboardArtifacts = Write-DashboardArtifacts `
+    $dashboardArtifacts = Write-DashboardArtifactBundle `
         -TemplateHtml $htmlTemplate `
         -TemplateCss $cssContent `
         -TemplateJs $jsContent `
