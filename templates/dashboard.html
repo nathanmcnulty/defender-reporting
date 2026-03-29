@@ -4,26 +4,26 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Vulnerability Dashboard</title>
-    <style>
-__CSS_CONTENT__
-    </style>
+__CSS_BLOCK__
 </head>
 <body>
-    <div class="container">
+    <main class="container" id="dashboardMain">
         <h1>
             <span>🛡️ Vulnerability Dashboard</span>
             <div class="report-selector-container">
                 <label for="reportSelector">Report:</label>
-                <select id="reportSelector" onchange="handleReportChange()">
+                <select id="reportSelector">
                     <option value="active-vulnerabilities">Active Vulnerabilities</option>
                     <option value="remediation-activity">Remediation Activity</option>
                     <option value="impact-analysis">Impact Analysis</option>
                     <option value="devices-by-remediation">Devices by Remediation</option>
                     <option value="remediations-by-device">Remediations by Device</option>
                 </select>
-                <button class="export-pdf-btn" onclick="exportToPDF()">📄 Export to PDF</button>
+                <button id="exportPdfButton" type="button" class="export-pdf-btn">📄 Export to PDF</button>
             </div>
         </h1>
+
+        <div id="dashboardStatus" class="dashboard-status" role="status" aria-live="polite" hidden></div>
 
         <!-- Stats Summary -->
         <div class="stats-summary" id="statsSummary" aria-live="polite" aria-label="Vulnerability statistics">
@@ -59,22 +59,12 @@ __CSS_CONTENT__
                     </div>
                 </div>
                 <div class="checkbox-container" id="filterDateRange">
-                    <table class="date-range-table">
-                        <tbody>
-                            <tr data-range="1m" class="selected">
-                                <td>1 Month</td>
-                            </tr>
-                            <tr data-range="3m">
-                                <td>3 Months</td>
-                            </tr>
-                            <tr data-range="6m">
-                                <td>6 Months</td>
-                            </tr>
-                            <tr data-range="12m">
-                                <td>12 Months</td>
-                            </tr>
-                        </tbody>
-                    </table>
+                    <div class="date-range-options" role="group" aria-label="Date range presets">
+                        <button type="button" class="date-range-option selected" data-range="1m" aria-pressed="true">1 Month</button>
+                        <button type="button" class="date-range-option" data-range="3m" aria-pressed="false">3 Months</button>
+                        <button type="button" class="date-range-option" data-range="6m" aria-pressed="false">6 Months</button>
+                        <button type="button" class="date-range-option" data-range="12m" aria-pressed="false">12 Months</button>
+                    </div>
                 </div>
             </div>
             <div class="filter-group filter-group-dynamic" role="group" aria-label="Device Group filter">
@@ -116,13 +106,13 @@ __CSS_CONTENT__
                 <table id="remediationTable">
                     <thead>
                         <tr>
-                            <th onclick="sortTable(0)">Vendor</th>
-                            <th onclick="sortTable(1)">Software</th>
-                            <th onclick="sortTable(2)">Remediation</th>
-                            <th onclick="sortTable(3)">Assets</th>
-                            <th onclick="sortTable(4)">Vulnerabilities</th>
-                            <th onclick="sortTable(5)">Exploits</th>
-                            <th onclick="sortTable(6)">Kits</th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="0">Vendor</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="1">Software</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="2">Remediation</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="3">Assets</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="4">Vulnerabilities</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="5">Exploits</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="6">Kits</button></th>
                         </tr>
                     </thead>
                     <tbody id="remediationTableBody">
@@ -149,11 +139,11 @@ __CSS_CONTENT__
                 <table id="remediationDetailsTable">
                     <thead>
                         <tr>
-                            <th onclick="sortRemediationDetailsTable(0)">Date</th>
-                            <th onclick="sortRemediationDetailsTable(1)">Remediation</th>
-                            <th onclick="sortRemediationDetailsTable(2)">Assets Remediated</th>
-                            <th onclick="sortRemediationDetailsTable(3)">Vulnerabilities Remediated</th>
-                            <th onclick="sortRemediationDetailsTable(4)">Total Vulnerabilities Remediated</th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="0">Date</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="1">Remediation</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="2">Assets Remediated</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="3">Vulnerabilities Remediated</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="4">Total Vulnerabilities Remediated</button></th>
                         </tr>
                     </thead>
                     <tbody id="remediationDetailsTableBody">
@@ -180,11 +170,11 @@ __CSS_CONTENT__
                 <table id="impactAnalysisTable">
                     <thead>
                         <tr>
-                            <th onclick="sortImpactAnalysisTable(0)">Rank</th>
-                            <th onclick="sortImpactAnalysisTable(1)">Remediation</th>
-                            <th onclick="sortImpactAnalysisTable(2)">Devices</th>
-                            <th onclick="sortImpactAnalysisTable(3)">CVE IDs</th>
-                            <th onclick="sortImpactAnalysisTable(4)">Impact Score</th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="0">Rank</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="1">Remediation</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="2">Devices</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="3">CVE IDs</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="4">Impact Score</button></th>
                         </tr>
                     </thead>
                     <tbody id="impactAnalysisTableBody">
@@ -225,22 +215,25 @@ __DATA_QUALITY_SECTION__
         </details>
     </div>
 
+    </main>
+
     <!-- Modal -->
     <div id="detailModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-hidden="true">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2 id="modalTitle">Vulnerability Details</h2>
-                <button class="close-btn" onclick="closeModal()" aria-label="Close dialog">&times;</button>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 id="modalTitle">Vulnerability Details</h2>
+                    <button id="closeModalButton" type="button" class="close-btn" aria-label="Close dialog">&times;</button>
+                </div>
+                <div class="modal-body" id="modalBody">
+                    <!-- Details will be populated here -->
+                </div>
             </div>
-            <div class="modal-body" id="modalBody">
-                <!-- Details will be populated here -->
-            </div>
-        </div>
     </div>
 
-    <!-- Pako library for decompression -->
-    <script>
-__PAKO_CONTENT__
+__PAKO_BLOCK__
+
+    <script id="dashboardConfig" type="application/json">
+__DASHBOARD_CONFIG__
     </script>
 
     <!-- Data format marker -->
@@ -289,13 +282,9 @@ __PDF_EXPORT_BUNDLE_CONTENT__
             }
 
             window.__inflateEmbeddedScript = inflateEmbeddedScript;
-            inflateEmbeddedScript('chartJsLib');
         })();
     </script>
 
-    <!-- Main dashboard logic -->
-    <script>
-__JS_CONTENT__
-    </script>
+__DASHBOARD_JS_BLOCK__
 </body>
 </html>
