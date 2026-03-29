@@ -5999,6 +5999,210 @@ function Write-TemplatedHtml {
     [System.IO.File]::WriteAllText($OutputPath, $builder.ToString(), [System.Text.UTF8Encoding]::new($false))
 }
 
+function Write-Utf8File {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Content
+    )
+
+    [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Get-DashboardAssetsDirectoryPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HtmlPath
+    )
+
+    $resolvedHtmlPath = [System.IO.Path]::GetFullPath($HtmlPath)
+    $parentPath = Split-Path -Path $resolvedHtmlPath -Parent
+    $assetsDirectoryName = ([System.IO.Path]::GetFileNameWithoutExtension($resolvedHtmlPath) + '.assets')
+    return (Join-Path $parentPath $assetsDirectoryName)
+}
+
+function Get-DashboardAssetsDirectoryName {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HtmlPath
+    )
+
+    return ([System.IO.Path]::GetFileNameWithoutExtension([System.IO.Path]::GetFullPath($HtmlPath)) + '.assets')
+}
+
+function Get-DashboardAssetUrl {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HtmlPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AssetFileName
+    )
+
+    return ((Get-DashboardAssetsDirectoryName -HtmlPath $HtmlPath) + '/' + $AssetFileName)
+}
+
+function Write-DashboardArtifactBundle {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TemplateHtml,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TemplateCss,
+
+        [Parameter(Mandatory = $true)]
+        [string]$TemplateJs,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PakoLibraryPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ChartJsLibraryPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$ChartJsBundlePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PdfExportBundleSourcePath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$PdfExportBundlePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PayloadPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$LookupsJsonEscaped = '',
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$DataQualitySectionHtml = '',
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$DataQualityMetaScript = '',
+
+        [Parameter(Mandatory = $false)]
+        [bool]$SplitAssets = $false,
+
+        [Parameter(Mandatory = $false)]
+        [bool]$InsertBase64LineBreaks = $false
+    )
+
+    if (-not $SplitAssets) {
+        if ([string]::IsNullOrWhiteSpace($ChartJsBundlePath) -or -not (Test-Path -LiteralPath $ChartJsBundlePath -PathType Leaf)) {
+            throw 'Write-DashboardArtifactBundle requires ChartJsBundlePath when SplitAssets is false.'
+        }
+
+        if ([string]::IsNullOrWhiteSpace($PdfExportBundlePath) -or -not (Test-Path -LiteralPath $PdfExportBundlePath -PathType Leaf)) {
+            throw 'Write-DashboardArtifactBundle requires PdfExportBundlePath when SplitAssets is false.'
+        }
+    }
+
+    $dataFormatMarker = if ($SplitAssets) { 'external-compressed' } else { 'compressed' }
+    $dashboardAssetsConfig = [ordered]@{
+        deliveryMode = if ($SplitAssets) { 'split-assets' } else { 'self-contained' }
+        chartJsMode = if ($SplitAssets) { 'external' } else { 'embedded' }
+        pdfExportBundleMode = if ($SplitAssets) { 'external' } else { 'embedded' }
+        debugLogging = $false
+    }
+
+    $cssBlock = $null
+    $pakoBlock = $null
+    $dashboardJsBlock = $null
+    $vulnsDataSegment = $null
+    $chartJsSegment = $null
+    $pdfExportBundleSegment = $null
+    $dashboardAssetsPath = $null
+
+    if ($SplitAssets) {
+        $dashboardAssetsPath = Get-DashboardAssetsDirectoryPath -HtmlPath $OutputPath
+        [void](New-Item -Path $dashboardAssetsPath -ItemType Directory -Force)
+
+        $cssAssetFileName = 'dashboard.css'
+        $jsAssetFileName = 'dashboard.js'
+        $pakoAssetFileName = 'pako.js'
+        $chartJsAssetFileName = 'chart.js'
+        $pdfBundleAssetFileName = 'pdf-export.bundle.js'
+        $payloadAssetFileName = 'payload.json.gz'
+
+        $cssAssetPath = Join-Path $dashboardAssetsPath $cssAssetFileName
+        $jsAssetPath = Join-Path $dashboardAssetsPath $jsAssetFileName
+        $pakoAssetPath = Join-Path $dashboardAssetsPath $pakoAssetFileName
+        $chartJsAssetPath = Join-Path $dashboardAssetsPath $chartJsAssetFileName
+        $pdfBundleAssetPath = Join-Path $dashboardAssetsPath $pdfBundleAssetFileName
+        $payloadAssetPath = Join-Path $dashboardAssetsPath $payloadAssetFileName
+
+        Write-Utf8File -Path $cssAssetPath -Content $TemplateCss
+        Write-Utf8File -Path $jsAssetPath -Content $TemplateJs
+        Copy-Item -LiteralPath $PakoLibraryPath -Destination $pakoAssetPath -Force
+        Copy-Item -LiteralPath $ChartJsLibraryPath -Destination $chartJsAssetPath -Force
+        Copy-Item -LiteralPath $PdfExportBundleSourcePath -Destination $pdfBundleAssetPath -Force
+        Copy-Item -LiteralPath $PayloadPath -Destination $payloadAssetPath -Force
+
+        $dashboardAssetsConfig.payloadUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $payloadAssetFileName
+        $dashboardAssetsConfig.chartJsUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $chartJsAssetFileName
+        $dashboardAssetsConfig.pdfExportBundleUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $pdfBundleAssetFileName
+
+        $cssBlock = '<link rel="stylesheet" href="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $cssAssetFileName) + '">'
+        $pakoBlock = '<script src="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $pakoAssetFileName) + '"></script>'
+        $dashboardJsBlock = '<script src="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $jsAssetFileName) + '"></script>'
+        $vulnsDataSegment = @{ Placeholder = '__VULNS_DATA__'; Value = '' }
+        $chartJsSegment = @{ Placeholder = '__CHARTJS_CONTENT__'; Value = '' }
+        $pdfExportBundleSegment = @{ Placeholder = '__PDF_EXPORT_BUNDLE_CONTENT__'; Value = '' }
+    }
+    else {
+        $cssBlock = "<style>`r`n$TemplateCss`r`n    </style>"
+        $pakoBlock = "<script>`r`n$(Get-Content -LiteralPath $PakoLibraryPath -Raw)`r`n    </script>"
+        $dashboardJsBlock = "<script>`r`n$TemplateJs`r`n    </script>"
+        $vulnsDataSegment = @{ Placeholder = '__VULNS_DATA__'; Base64FilePath = $PayloadPath }
+        $chartJsSegment = @{ Placeholder = '__CHARTJS_CONTENT__'; Base64FilePath = $ChartJsBundlePath }
+        $pdfExportBundleSegment = @{ Placeholder = '__PDF_EXPORT_BUNDLE_CONTENT__'; Base64FilePath = $PdfExportBundlePath }
+    }
+
+    $dashboardConfigJson = $dashboardAssetsConfig | ConvertTo-Json -Compress -Depth 20
+    $segments = @(
+        @{ Placeholder = '__CSS_BLOCK__'; Value = $cssBlock },
+        @{ Placeholder = '__DATA_QUALITY_SECTION__'; Value = $DataQualitySectionHtml },
+        @{ Placeholder = '__PAKO_BLOCK__'; Value = $pakoBlock },
+        @{ Placeholder = '__DASHBOARD_CONFIG__'; Value = $dashboardConfigJson },
+        @{ Placeholder = '__DATA_FORMAT__'; Value = $dataFormatMarker },
+        @{ Placeholder = '__DATA_QUALITY_META_SCRIPT__'; Value = $DataQualityMetaScript },
+        @{ Placeholder = '__LOOKUPS_DATA__'; Value = $LookupsJsonEscaped },
+        $vulnsDataSegment,
+        $chartJsSegment,
+        $pdfExportBundleSegment,
+        @{ Placeholder = '__DASHBOARD_JS_BLOCK__'; Value = $dashboardJsBlock }
+    )
+
+    Write-TemplatedHtml -Template $TemplateHtml -Segments $segments -OutputPath $OutputPath -InsertBase64LineBreaks:$InsertBase64LineBreaks
+
+    return [PSCustomObject]@{
+        OutputPath = $OutputPath
+        AssetsPath = $dashboardAssetsPath
+        DataFormat = $dataFormatMarker
+        DeliveryMode = [string]$dashboardAssetsConfig.deliveryMode
+    }
+}
+
 function Read-MachineData {
     [CmdletBinding()]
     [OutputType([hashtable])]

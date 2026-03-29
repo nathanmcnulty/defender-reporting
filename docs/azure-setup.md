@@ -44,6 +44,24 @@ This page covers the Azure-specific parts of the project: permissions, authentic
 
 `-SecurityGroup` accepts either an Entra object ID or a display name.
 
+## Hosted split-assets mode in Azure
+
+`Setup-AzureResources.ps1` resolves the Azure dashboard packaging mode automatically:
+
+- With `-IncludeContainerApp`, the default is `Hosted`.
+- Without `-IncludeContainerApp`, the default is `SelfContained`.
+- Use `-DashboardDeliveryMode` to override either default.
+
+If you want to use the split-assets hosted dashboard in Azure, serve the hosted HTML and its sibling `.assets/` directory from the same HTTPS origin. That avoids browser cross-origin requests and keeps Easy Auth in front of the whole site.
+
+Using blob CORS alone is not sufficient for the current secured setup:
+
+- The provisioned storage account keeps blob public access disabled.
+- The current Container App uses managed identity to fetch content server-side.
+- A browser cannot reuse the Container App managed identity to fetch private blob assets directly.
+
+For local validation of the hosted split-assets build, use a local HTTP server instead of opening the HTML with a `file://` URL.
+
 ## Common parameters
 
 | Parameter | Required | Purpose |
@@ -54,6 +72,7 @@ This page covers the Azure-specific parts of the project: permissions, authentic
 | `-Location` | No | Azure region, default `westus2` |
 | `-SkipMdePermissions` | No | Skip automatic MDE app role assignment |
 | `-SkipValidation` | No | Skip the post-provisioning validation run |
+| `-DashboardDeliveryMode` | No | `Auto`, `SelfContained`, or `Hosted`; `Auto` chooses `Hosted` with `-IncludeContainerApp`, otherwise `SelfContained` |
 | `-IncludeContainerApp` | No | Deploy the Entra-protected Container App |
 | `-SecurityGroup` | With `-IncludeContainerApp` | Group allowed to access the Container App |
 | `-ContainerAppName` | No | Override the derived Container App name |

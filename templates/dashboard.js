@@ -13,8 +13,44 @@
 // GLOBAL STATE
 // =============================================================================
 
-// Data format: 'normalized' or 'compressed'
-const dataFormat = document.getElementById('dataFormat').textContent.trim();
+function getScriptElementText(id) {
+    const element = document.getElementById(id);
+    return element ? element.textContent.trim() : '';
+}
+
+function parseDashboardConfig() {
+    const configText = getScriptElementText('dashboardConfig');
+    if (!configText) {
+        return {
+            deliveryMode: 'self-contained',
+            chartJsMode: 'embedded',
+            pdfExportBundleMode: 'embedded'
+        };
+    }
+
+    try {
+        return JSON.parse(configText);
+    } catch (error) {
+        console.error('Failed to parse dashboard configuration:', error);
+        return {
+            deliveryMode: 'self-contained',
+            chartJsMode: 'embedded',
+            pdfExportBundleMode: 'embedded'
+        };
+    }
+}
+
+const dashboardConfig = parseDashboardConfig();
+const debugLoggingEnabled = Boolean(dashboardConfig.debugLogging);
+
+function logDebug(...args) {
+    if (debugLoggingEnabled) {
+        console.log(...args);
+    }
+}
+
+// Data format: 'normalized', 'compressed', or 'external-compressed'
+const dataFormat = getScriptElementText('dataFormat');
 
 // Lookup tables and raw vulnerability array (loaded from embedded data)
 let lookups = null;
@@ -34,6 +70,8 @@ let mostRecentLastSeenDate = '';
 let chartInstance = null;
 let remediationChartInstance = null;
 let impactChartInstance = null;
+let chartJsLoadPromise = null;
+const loadedScriptPromises = new Map();
 
 // Device facet catalog used by cascading device filters
 let deviceFilterCatalog = [];
@@ -123,6 +161,8 @@ const dirtyReports = new Set(REPORT_IDS);
 let filterState = createEmptyFilterState();
 let aggregateCacheKey = null;
 let aggregateCache = createEmptyAggregateCache();
+let cascadingFilterCountCacheKey = null;
+let cascadingFilterCountCache = null;
 
 // Remediation table scroll state
 let remediationLoadedCount = 0;
@@ -152,6 +192,7 @@ let remediationsByDeviceAllData = [];
 let remediationsByDeviceExpanded = false;
 let remediationsByDeviceSortDirection = {};
 let expandedDevices = {};
+let lastFocusedElementBeforeModal = null;
 
 function createEmptyFilterState() {
     return {
@@ -272,6 +313,8 @@ function hasAnyCascadingFilterSelection(filterId) {
 function invalidateAggregateCache() {
     aggregateCacheKey = null;
     aggregateCache = createEmptyAggregateCache();
+    cascadingFilterCountCacheKey = null;
+    cascadingFilterCountCache = null;
 }
 
 function markAllReportsDirty() {
@@ -361,6 +404,82 @@ function clearTooltipCaches() {
         tooltip.style.display = 'none';
         tooltip.innerHTML = '';
     }
+}
+
+function setDashboardStatus(message, kind = 'info') {
+    const status = document.getElementById('dashboardStatus');
+    if (!status) {
+        return;
+    }
+
+    if (!message) {
+        status.hidden = true;
+        status.removeAttribute('data-status-kind');
+        status.textContent = '';
+        return;
+    }
+
+    status.hidden = false;
+    status.dataset.statusKind = kind;
+    status.textContent = message;
+}
+
+function clearDashboardStatus() {
+    setDashboardStatus('');
+}
+
+function loadExternalScript(url) {
+    if (!url) {
+        return Promise.reject(new Error('A script URL is required.'));
+    }
+
+    if (loadedScriptPromises.has(url)) {
+        return loadedScriptPromises.get(url);
+    }
+
+    const promise = new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = url;
+        script.async = false;
+        script.dataset.runtimeSrc = url;
+        script.onload = () => resolve();
+        script.onerror = () => {
+            loadedScriptPromises.delete(url);
+            reject(new Error(`Failed to load script: ${url}`));
+        };
+        document.head.appendChild(script);
+    });
+
+    loadedScriptPromises.set(url, promise);
+    return promise;
+}
+
+function ensureChartJsLoaded() {
+    if (typeof Chart !== 'undefined') {
+        return Promise.resolve();
+    }
+
+    if (chartJsLoadPromise) {
+        return chartJsLoadPromise;
+    }
+
+    const chartJsMode = dashboardConfig.chartJsMode || 'embedded';
+    chartJsLoadPromise = (chartJsMode === 'external'
+        ? loadExternalScript(dashboardConfig.chartJsUrl)
+        : Promise.resolve().then(() => {
+            if (typeof window.__inflateEmbeddedScript !== 'function') {
+                throw new Error('Embedded script inflater is unavailable');
+            }
+
+            window.__inflateEmbeddedScript('chartJsLib');
+        }))
+        .then(() => {
+            if (typeof Chart === 'undefined') {
+                throw new Error('Chart.js did not initialize correctly.');
+            }
+        });
+
+    return chartJsLoadPromise;
 }
 
 // =============================================================================
@@ -753,10 +872,25 @@ let activeVirtualTables = [];
 /**
  * Load and decompress data from embedded scripts
  */
-function loadData() {
-    console.log('Loading data, format:', dataFormat);
-    
-    if (dataFormat === 'compressed') {
+async function loadData() {
+    logDebug('Loading data, format:', dataFormat);
+
+    if (dataFormat === 'external-compressed') {
+        if (!dashboardConfig.payloadUrl) {
+            throw new Error('Split-assets mode requires dashboardConfig.payloadUrl.');
+        }
+
+        const response = await fetch(dashboardConfig.payloadUrl, { cache: 'no-cache' });
+        if (!response.ok) {
+            throw new Error(`Failed to load dashboard payload (${response.status} ${response.statusText}).`);
+        }
+
+        const compressedBytes = new Uint8Array(await response.arrayBuffer());
+        const decompressed = pako.inflate(compressedBytes, { to: 'string' });
+        const data = JSON.parse(decompressed);
+        lookups = data.lookups;
+        rawVulns = data.vulns;
+    } else if (dataFormat === 'compressed') {
         // Decompress using pako
         const compressedBase64 = document.getElementById('vulnsData').textContent.replace(/\s+/g, '');
         const compressedBytes = Uint8Array.from(atob(compressedBase64), c => c.charCodeAt(0));
@@ -784,8 +918,8 @@ function loadData() {
         console.warn('Failed to parse data quality metadata:', err);
     }
     
-    console.log('Loaded lookups:', Object.keys(lookups));
-    console.log('Loaded', getRawVulnCount(), 'vulnerability records');
+    logDebug('Loaded lookups:', Object.keys(lookups));
+    logDebug('Loaded', getRawVulnCount(), 'vulnerability records');
 }
 
 function isColumnarRawVulnData(value) {
@@ -921,7 +1055,7 @@ function denormalizeVuln(v, index) {
  */
 function denormalizeAllVulns() {
     const rawCount = getRawVulnCount();
-    console.log('Denormalizing', rawCount, 'records (main thread)...');
+    logDebug('Denormalizing', rawCount, 'records (main thread)...');
     const startTime = performance.now();
 
     vulnerabilityData = new Array(rawCount);
@@ -930,7 +1064,7 @@ function denormalizeAllVulns() {
     }
     
     const elapsed = Math.round(performance.now() - startTime);
-    console.log('Denormalization complete in', elapsed, 'ms');
+    logDebug('Denormalization complete in', elapsed, 'ms');
 }
 
 /**
@@ -941,12 +1075,12 @@ function denormalizeAllVulns() {
 async function denormalizeWithCaching() {
     const fingerprint = computeDataFingerprint();
     const rawCount = getRawVulnCount();
-    console.log('Data fingerprint:', fingerprint);
+    logDebug('Data fingerprint:', fingerprint);
 
     // 1. Try IndexedDB cache
     const cached = await getCachedData(fingerprint);
     if (cached && cached.length === rawCount) {
-        console.log('Loaded', cached.length, 'records from IndexedDB cache');
+        logDebug('Loaded', cached.length, 'records from IndexedDB cache');
         vulnerabilityData = cached;
         applyDerivedVulnerabilityFields(vulnerabilityData);
         return;
@@ -954,11 +1088,11 @@ async function denormalizeWithCaching() {
 
     // 2. Try Web Worker
     try {
-        console.log('Denormalizing', rawCount, 'records via Web Worker...');
+        logDebug('Denormalizing', rawCount, 'records via Web Worker...');
         const startTime = performance.now();
         vulnerabilityData = await denormalizeInWorker();
         const elapsed = Math.round(performance.now() - startTime);
-        console.log('Worker denormalization complete in', elapsed, 'ms');
+        logDebug('Worker denormalization complete in', elapsed, 'ms');
     } catch (err) {
         console.warn('Web Worker failed, falling back to main thread:', err);
         denormalizeAllVulns();
@@ -978,12 +1112,15 @@ async function denormalizeWithCaching() {
  * Initialize the dashboard on page load
  */
 async function init() {
+    setDashboardStatus('Loading dashboard data...');
+
     // Load and process data
-    loadData();
+    await loadData();
     await denormalizeWithCaching();
+    await ensureChartJsLoaded();
     mostRecentLastSeenDate = getMostRecentLastSeen();
     
-    console.log('Initializing dashboard with', vulnerabilityData.length, 'vulnerabilities');
+    logDebug('Initializing dashboard with', vulnerabilityData.length, 'vulnerabilities');
     buildDeviceFilterCatalog();
     populateFilters();
     updateDataQualitySummary();
@@ -991,6 +1128,7 @@ async function init() {
     setupInfiniteScroll();
     activeReportId = getCurrentReportId();
     setDateRange('1m');
+    clearDashboardStatus();
 }
 
 function renderActiveVulnerabilitiesReport() {
@@ -1052,15 +1190,29 @@ function renderActiveReport(force = false) {
 /**
  * Set up infinite scroll event listeners using window scroll
  */
+let scrollLoadScheduled = false;
+
 function setupInfiniteScroll() {
     // Use window scroll since tables don't have fixed height containers
-    window.addEventListener('scroll', handleWindowScroll);
+    window.addEventListener('scroll', handleWindowScroll, { passive: true });
 }
 
 /**
  * Handle window scroll for infinite loading
  */
 function handleWindowScroll() {
+    if (scrollLoadScheduled) {
+        return;
+    }
+
+    scrollLoadScheduled = true;
+    window.requestAnimationFrame(() => {
+        scrollLoadScheduled = false;
+        processInfiniteScroll();
+    });
+}
+
+function processInfiniteScroll() {
     // Check if we're near the bottom of the page (within 200px)
     const scrollBottom = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
     
@@ -1140,16 +1292,16 @@ function handleReportChange() {
  * Handle date range preset selection
  */
 function handleDateRangeChange(event) {
-    const row = event.currentTarget;
-    const range = row.getAttribute('data-range');
+    const button = event.currentTarget;
+    const range = button.getAttribute('data-range');
     
-    // Remove selected class from all rows
-    document.querySelectorAll('.date-range-table tr').forEach(tr => {
-        tr.classList.remove('selected');
+    document.querySelectorAll('.date-range-option').forEach(option => {
+        option.classList.remove('selected');
+        option.setAttribute('aria-pressed', 'false');
     });
     
-    // Add selected class to clicked row
-    row.classList.add('selected');
+    button.classList.add('selected');
+    button.setAttribute('aria-pressed', 'true');
     
     // Update dates based on selection
     setDateRange(range);
@@ -1159,9 +1311,9 @@ function handleDateRangeChange(event) {
  * Handle manual date input change
  */
 function handleManualDateChange() {
-    // Remove selected class from all rows when dates are manually changed
-    document.querySelectorAll('.date-range-table tr').forEach(tr => {
-        tr.classList.remove('selected');
+    document.querySelectorAll('.date-range-option').forEach(option => {
+        option.classList.remove('selected');
+        option.setAttribute('aria-pressed', 'false');
     });
     scheduleApplyFilters(true);
 }
@@ -1201,17 +1353,41 @@ function handleSeverityChange() {
     scheduleApplyFilters();
 }
 
+function handleSortButtonClick(event) {
+    const button = event.currentTarget;
+    const columnIndex = Number(button.dataset.columnIndex);
+
+    switch (button.dataset.sortTable) {
+        case 'remediation':
+            sortTable(columnIndex);
+            break;
+        case 'remediation-details':
+            sortRemediationDetailsTable(columnIndex);
+            break;
+        case 'impact-analysis':
+            sortImpactAnalysisTable(columnIndex);
+            break;
+    }
+}
+
 /**
  * Attach event listeners to filter controls
  */
 function attachEventListeners() {
-    document.querySelectorAll('.date-range-table tr').forEach(row => {
-        row.addEventListener('click', handleDateRangeChange);
+    document.querySelectorAll('.date-range-option').forEach(option => {
+        option.addEventListener('click', handleDateRangeChange);
     });
     document.getElementById('filterStartDate').addEventListener('change', handleManualDateChange);
     document.getElementById('filterEndDate').addEventListener('change', handleManualDateChange);
+    document.getElementById('reportSelector').addEventListener('change', handleReportChange);
+    document.getElementById('exportPdfButton').addEventListener('click', exportToPDF);
+    document.getElementById('closeModalButton').addEventListener('click', closeModal);
+    document.querySelectorAll('.sort-button').forEach(button => {
+        button.addEventListener('click', handleSortButtonClick);
+    });
 
     document.getElementById('remediationTableBody').addEventListener('click', function(event) {
+        if (event.target.closest('a')) return;
         const row = event.target.closest('tr[data-row-index]');
         if (!row) return;
         const index = Number(row.dataset.rowIndex);
@@ -1220,6 +1396,7 @@ function attachEventListeners() {
     });
 
     document.getElementById('remediationDetailsTableBody').addEventListener('click', function(event) {
+        if (event.target.closest('a')) return;
         const row = event.target.closest('tr[data-row-index]');
         if (!row) return;
         const index = Number(row.dataset.rowIndex);
@@ -1228,6 +1405,7 @@ function attachEventListeners() {
     });
 
     document.getElementById('impactAnalysisTableBody').addEventListener('click', function(event) {
+        if (event.target.closest('a')) return;
         const row = event.target.closest('tr[data-row-index]');
         if (!row) return;
         const index = Number(row.dataset.rowIndex);
@@ -1556,7 +1734,12 @@ function updateAllCheckbox(containerId) {
  * Re-render the cascading device filters using the current explicit state.
  */
 function refreshCascadingFilters() {
-    const countMaps = buildCascadingFilterCountMaps();
+    const countMaps = cascadingFilterCountCacheKey === filterState.key && cascadingFilterCountCache
+        ? cascadingFilterCountCache
+        : buildCascadingFilterCountMaps();
+
+    cascadingFilterCountCacheKey = filterState.key;
+    cascadingFilterCountCache = countMaps;
     CASCADING_FILTER_IDS.forEach(filterId => {
         renderCascadingFilter(filterId, countMaps[filterId]);
     });
@@ -1573,7 +1756,14 @@ function buildCascadingFilterCountMaps() {
         new Map((cascadingFilterOptions[filterId] || []).map(option => [option.value, new Set()]))
     ]));
 
-    vulnerabilityData.forEach(v => {
+    const baseRows = vulnerabilityData.filter(v => {
+        if (!matchesFilterStateDate(v, filterState)) return false;
+        if (filterState.severitySet.size > 0 && !filterState.severitySet.has(v.VulnerabilitySeverityLevel)) return false;
+        if (filterState.osPlatformSet.size > 0 && !filterState.osPlatformSet.has(v.OSPlatform)) return false;
+        return true;
+    });
+
+    baseRows.forEach(v => {
         CASCADING_FILTER_IDS.forEach(targetFilterId => {
             if (!matchesFiltersForFacetCount(v, targetFilterId)) return;
 
@@ -1594,10 +1784,6 @@ function buildCascadingFilterCountMaps() {
 }
 
 function matchesFiltersForFacetCount(v, targetFilterId) {
-    if (!matchesFilterStateDate(v, filterState)) return false;
-    if (filterState.severitySet.size > 0 && !filterState.severitySet.has(v.VulnerabilitySeverityLevel)) return false;
-    if (filterState.osPlatformSet.size > 0 && !filterState.osPlatformSet.has(v.OSPlatform)) return false;
-
     if (targetFilterId !== 'filterDeviceName' && filterState.deviceNameSet.size > 0 && !filterState.deviceNameSet.has(getDeviceNameFilterValue(v))) {
         return false;
     }
@@ -2192,7 +2378,7 @@ function buildRemediationString(v) {
 function buildRemediationHtml(v) {
     const text = buildRemediationString(v);
     if (v.RecommendedSecurityUpdateUrl) {
-        return `<a href="${escapeHtml(v.RecommendedSecurityUpdateUrl)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${escapeHtml(text)}</a>`;
+        return `<a href="${escapeHtml(v.RecommendedSecurityUpdateUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
     }
     return escapeHtml(text);
 }
@@ -2213,7 +2399,7 @@ function renderChart() {
     const { startDate, endDate } = filterState;
     
     if (!startDate || !endDate) {
-        console.log('No date range selected');
+        logDebug('No date range selected');
         return;
     }
 
@@ -2582,6 +2768,16 @@ function getImpactAnalysisData() {
     return cache.impactData;
 }
 
+function updateTableSortState(tableId, activeColumnIndex, ascending) {
+    const headers = document.querySelectorAll(`#${tableId} thead th`);
+    headers.forEach((header, index) => {
+        header.setAttribute(
+            'aria-sort',
+            index === activeColumnIndex ? (ascending ? 'ascending' : 'descending') : 'none'
+        );
+    });
+}
+
 /**
  * Render the remediation table
  */
@@ -2705,6 +2901,7 @@ function sortTable(columnIndex) {
     // Reset scroll and re-render
     remediationLoadedCount = 0;
     renderRemediationTablePage();
+    updateTableSortState('remediationTable', columnIndex, ascending);
 }
 
 // =============================================================================
@@ -2723,7 +2920,7 @@ function renderRemediationChart() {
     const { startDate, endDate } = filterState;
     
     if (!startDate || !endDate) {
-        console.log('No date range selected for remediation chart');
+        logDebug('No date range selected for remediation chart');
         return;
     }
     
@@ -3051,6 +3248,7 @@ function sortRemediationDetailsTable(columnIndex) {
     // Reset scroll and re-render
     remediationDetailsLoadedCount = 0;
     renderRemediationDetailsTablePage();
+    updateTableSortState('remediationDetailsTable', columnIndex, ascending);
 }
 
 // =============================================================================
@@ -3072,7 +3270,7 @@ function renderImpactChart() {
     const { startDate, endDate } = filterState;
     
     if (!startDate || !endDate) {
-        console.log('No date range selected for impact chart');
+        logDebug('No date range selected for impact chart');
         return;
     }
     
@@ -3501,6 +3699,7 @@ function sortImpactAnalysisTable(columnIndex) {
     // Reset scroll and re-render
     impactAnalysisLoadedCount = 0;
     renderImpactAnalysisTablePage();
+    updateTableSortState('impactAnalysisTable', columnIndex, ascending);
 }
 
 // =============================================================================
@@ -4850,6 +5049,23 @@ function buildModalGroupCache(details) {
     };
 }
 
+function focusModalCloseButton() {
+    const closeButton = document.getElementById('closeModalButton');
+    if (closeButton) {
+        closeButton.focus();
+    }
+}
+
+function getModalFocusableElements() {
+    const modal = document.getElementById('detailModal');
+    if (!modal || !modal.classList.contains('active')) {
+        return [];
+    }
+
+    return Array.from(modal.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+        .filter(element => !element.hasAttribute('disabled') && !element.getAttribute('aria-hidden'));
+}
+
 /**
  * Show vulnerability details modal
  * @param {Object} remediationData - Remediation aggregate row
@@ -4863,9 +5079,11 @@ function showDetails(remediationData) {
 
     modalTitle.textContent = remediation;
     modalBody.innerHTML = '<p class="loading">Loading details...</p>';
+    lastFocusedElementBeforeModal = (typeof HTMLElement !== 'undefined' && document.activeElement instanceof HTMLElement) ? document.activeElement : null;
     modal.classList.add('active');
     modal.setAttribute('aria-hidden', 'false');
     clearTooltipCaches();
+    focusModalCloseButton();
 
     if (!document.getElementById('cve-global-tooltip')) {
         initCveTooltips();
@@ -4940,9 +5158,11 @@ function showRemediationDetails(data) {
     
     modalTitle.textContent = `Remediation on ${data.date}: ${data.remediation}`;
     modalBody.innerHTML = '<p class="loading">Loading details...</p>';
+    lastFocusedElementBeforeModal = (typeof HTMLElement !== 'undefined' && document.activeElement instanceof HTMLElement) ? document.activeElement : null;
     modal.classList.add('active');
     modal.setAttribute('aria-hidden', 'false');
     clearTooltipCaches();
+    focusModalCloseButton();
 
     if (!document.getElementById('cve-global-tooltip')) {
         initCveTooltips();
@@ -5048,8 +5268,10 @@ function showImpactAnalysisDetails(item) {
     html += '</tbody></table></div>';
     
     modalBody.innerHTML = html;
+    lastFocusedElementBeforeModal = (typeof HTMLElement !== 'undefined' && document.activeElement instanceof HTMLElement) ? document.activeElement : null;
     modal.classList.add('active');
     modal.setAttribute('aria-hidden', 'false');
+    focusModalCloseButton();
 }
 
 /**
@@ -5062,6 +5284,10 @@ function closeModal() {
     const modal = document.getElementById('detailModal');
     modal.classList.remove('active');
     modal.setAttribute('aria-hidden', 'true');
+    if (lastFocusedElementBeforeModal && typeof document.contains === 'function' && document.contains(lastFocusedElementBeforeModal)) {
+        lastFocusedElementBeforeModal.focus();
+    }
+    lastFocusedElementBeforeModal = null;
 }
 
 // Close modal when clicking outside
@@ -5074,11 +5300,36 @@ window.addEventListener('click', function(event) {
 
 // Close modal on Escape key
 window.addEventListener('keydown', function(event) {
-    if (event.key === 'Escape') {
-        const modal = document.getElementById('detailModal');
-        if (modal && modal.classList.contains('active')) {
-            closeModal();
+    const modal = document.getElementById('detailModal');
+    if (!modal || !modal.classList.contains('active')) {
+        return;
+    }
+
+    if (event.key === 'Tab') {
+        const focusableElements = getModalFocusableElements();
+        if (focusableElements.length === 0) {
+            event.preventDefault();
+            return;
         }
+
+        const firstElement = focusableElements[0];
+        const lastElement = focusableElements[focusableElements.length - 1];
+
+        if (event.shiftKey && document.activeElement === firstElement) {
+            event.preventDefault();
+            lastElement.focus();
+            return;
+        }
+
+        if (!event.shiftKey && document.activeElement === lastElement) {
+            event.preventDefault();
+            firstElement.focus();
+            return;
+        }
+    }
+
+    if (event.key === 'Escape') {
+        closeModal();
     }
 });
 
@@ -5100,6 +5351,18 @@ function loadPdfLibraries() {
     
     return new Promise((resolve, reject) => {
         try {
+            const pdfBundleMode = dashboardConfig.pdfExportBundleMode || 'embedded';
+            if (pdfBundleMode === 'external') {
+                loadExternalScript(dashboardConfig.pdfExportBundleUrl)
+                    .then(() => {
+                        pdfLibrariesLoaded = true;
+                        logDebug('PDF libraries loaded successfully');
+                        resolve();
+                    })
+                    .catch(reject);
+                return;
+            }
+
             if (typeof window.__inflateEmbeddedScript !== 'function') {
                 throw new Error('Embedded script inflater is unavailable');
             }
@@ -5113,7 +5376,7 @@ function loadPdfLibraries() {
                 if (typeof pdfMake !== 'undefined' && typeof pdfMake.createPdf === 'function' && typeof html2canvas === 'function') {
                     clearInterval(checkPdfMake);
                     pdfLibrariesLoaded = true;
-                    console.log('PDF libraries loaded successfully');
+                    logDebug('PDF libraries loaded successfully');
                     resolve();
                 } else if (attempts > 50) { // 5 seconds timeout
                     clearInterval(checkPdfMake);
@@ -5642,12 +5905,13 @@ async function exportToPDF() {
     const button = document.querySelector('.export-pdf-btn');
     button.disabled = true;
     button.textContent = '📄 Loading libraries...';
+    setDashboardStatus('Preparing PDF export...');
     
     try {
         await loadPdfLibraries();
     } catch (error) {
         console.error('Failed to load PDF libraries:', error);
-        alert('Failed to load PDF export libraries. Please try again.');
+        setDashboardStatus('Failed to load PDF export libraries. Please try again from a hosted dashboard or retry the export.', 'error');
         button.disabled = false;
         button.textContent = '📄 Export to PDF';
         return;
@@ -5679,7 +5943,7 @@ async function exportToPDF() {
         // Add filter information  
         const startDate = document.getElementById('filterStartDate').value;
         const endDate = document.getElementById('filterEndDate').value;
-        const selectedDateRange = document.querySelector('#filterDateRange tr.selected');
+        const selectedDateRange = document.querySelector('#filterDateRange .date-range-option.selected');
         const dateRangeText = selectedDateRange ? selectedDateRange.textContent.trim() : 'Custom';
         
         const deviceGroups = getSelectedFilterValuesForExport('filterRbacGroup');
@@ -5776,9 +6040,10 @@ async function exportToPDF() {
         docDefinition.content.push(...filterContent);
         
         pdfMake.createPdf(docDefinition).download(fileName);
+        clearDashboardStatus();
     } catch (err) {
         console.error('PDF generation failed:', err);
-        alert('Failed to generate PDF: ' + err.message);
+        setDashboardStatus('Failed to generate PDF: ' + err.message, 'error');
     } finally {
         document.body.classList.remove('pdf-export-active');
         restoreReportState(selectedReport, wasExpanded);
@@ -5792,12 +6057,9 @@ async function exportToPDF() {
 // =============================================================================
 
 window.addEventListener('DOMContentLoaded', function() {
-    console.log('DOM loaded, checking for Chart.js...');
-    if (typeof Chart === 'undefined') {
-        console.error('Chart.js not loaded!');
-    } else {
-        console.log('Chart.js loaded successfully');
-    }
     initEvidenceTooltips();
-    init();
+    init().catch(error => {
+        console.error('Dashboard initialization failed:', error);
+        setDashboardStatus('Failed to initialize the dashboard. If you are using split-assets mode, open it from an HTTP host with the required asset files.', 'error');
+    });
 });

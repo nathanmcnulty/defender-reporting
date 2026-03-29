@@ -2,7 +2,7 @@
 
 <img width="2785" height="1640" alt="Dashboard screenshot" src="https://github.com/user-attachments/assets/cc006078-530a-4587-924b-a94a9549a666" />
 
-Defender for Endpoint vulnerability reporting has always been a pain point, and this felt like a great opportunity to use AI-assisted coding to build a dashboard without a dependency on Power BI or other expensive tools. The result is a self-contained HTML dashboard built with PowerShell, along with local scripts, validation tooling, Azure automation assets, GitHub Actions workflows, and sample PDF report outputs.
+Defender for Endpoint vulnerability reporting has always been a pain point, and this felt like a great opportunity to use AI-assisted coding to build a dashboard without a dependency on Power BI or other expensive tools. The result is a PowerShell-built dashboard that defaults to a self-contained HTML artifact for direct-open use, with an opt-in split-assets mode for hosted deployments, along with validation tooling, Azure automation assets, GitHub Actions workflows, and sample PDF report outputs.
 
 I have provided the starting prompt and much of the creation history for anyone interested in how it came together here: [`copilot_all_prompts_2025-12-30T05-04-10.chatreplay.json`](copilot_all_prompts_2025-12-30T05-04-10.chatreplay.json)
 
@@ -37,7 +37,7 @@ $secret = Read-Host -AsSecureString -Prompt 'Enter client secret'
     -IncludeAdvancedHunting
 ```
 
-2. Generate and validate the dashboard.
+2. Generate and validate the default self-contained dashboard.
 
 ```powershell
 .\Generate-VulnerabilityDashboard.ps1 `
@@ -47,7 +47,20 @@ $secret = Read-Host -AsSecureString -Prompt 'Enter client secret'
     -Validate
 ```
 
-3. Re-run validation later without regenerating the HTML.
+3. Generate the hosted split-assets variant when you want browser caching and smaller HTML.
+
+```powershell
+.\Generate-VulnerabilityDashboard.ps1 `
+    -DirectoryPath .\exports `
+    -OutputPath .\VulnerabilityDashboard.Hosted.html `
+    -ExportMachineData $false `
+    -SplitAssets `
+    -Validate
+```
+
+Recommended convention: keep `VulnerabilityDashboard.html` as the direct-open artifact, and use `VulnerabilityDashboard.Hosted.html` for the hosted build. The hosted build writes a sibling `VulnerabilityDashboard.Hosted.assets\` directory containing the dashboard CSS, JavaScript, libraries, and compressed payload.
+
+4. Re-run validation later without regenerating the HTML.
 
 ```powershell
 .\Generate-VulnerabilityDashboard.ps1 `
@@ -57,6 +70,24 @@ $secret = Read-Host -AsSecureString -Prompt 'Enter client secret'
 ```
 
 For managed identity auth, Azure provisioning, and GitHub workflow setup, use the linked docs below.
+
+## Dashboard packaging modes
+
+`Generate-VulnerabilityDashboard.ps1` supports two delivery modes:
+
+- Default: a self-contained HTML dashboard that can be opened directly from disk and works well for offline or file-share workflows.
+- `-SplitAssets`: a hosted variant that writes relative asset files beside the HTML so browsers can cache the CSS, JavaScript, libraries, and compressed payload independently.
+
+Recommended project convention:
+
+- Commit `VulnerabilityDashboard.html` as the canonical repo artifact.
+- Generate `VulnerabilityDashboard.Hosted.html` only for hosted publishing, release artifacts, or deployment packaging.
+
+Azure note: `Setup-AzureResources.ps1` resolves this automatically. With `-IncludeContainerApp`, Azure defaults to the hosted split-assets mode. Without a Container App, Azure defaults to the self-contained mode unless you override it.
+
+Use the split-assets mode when you plan to serve the dashboard over HTTP or HTTPS. Browsers commonly restrict `fetch` from `file://` URLs, so the split-assets variant is not intended to replace the direct-open self-contained output.
+
+For local testing of the split-assets build, use a local HTTP server instead of opening the HTML file directly from disk.
 
 ## Documentation
 
@@ -72,7 +103,7 @@ For managed identity auth, Azure provisioning, and GitHub workflow setup, use th
 | Script | Purpose |
 |---|---|
 | `Invoke-VulnerabilityExport.ps1` | Downloads Defender exports and writes the canonical gzip data store |
-| `Generate-VulnerabilityDashboard.ps1` | Builds the self-contained HTML dashboard and can validate the result |
+| `Generate-VulnerabilityDashboard.ps1` | Builds the dashboard in self-contained or split-assets form and can validate the result |
 | `Validate-DashboardReports.ps1` | Validates an existing dashboard HTML against committed exports |
 | `Setup-AzureResources.ps1` | Provisions Azure Automation, storage, scheduling, and optional Container App hosting |
 | `Setup-GitHubActionServicePrincipal.ps1` | Creates the Entra app and federated credential for GitHub Actions OIDC |
