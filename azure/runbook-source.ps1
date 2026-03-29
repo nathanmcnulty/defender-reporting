@@ -958,6 +958,8 @@ try {
     $syntheticManifestPath = Join-Path -Path $tempExports -ChildPath 'synthetic-manifest.json'
     $skipObservedWindowMerge = (Test-Path -LiteralPath $syntheticManifestPath -PathType Leaf)
     $payloadCacheEntry = Get-NormalizedPayloadCacheEntry -BasePath $tempExports -SkipObservedWindowMerge:$skipObservedWindowMerge
+    Invoke-FullGarbageCollection
+    Write-MemoryUsage -Label "Post-PayloadCacheCheck"
     $machines = $null
     $advancedHuntingData = $null
     $normalizedQuality = $null
@@ -974,6 +976,7 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         $machines = Read-MachineData -Path $tempExports
         $advancedHuntingData = Read-AdvancedHuntingData -Path $tempExports
+        Write-MemoryUsage -Label "Post-NormalizationInputs"
 
         # Step 2: Normalize data while the working set is still lean
         Write-Output "Normalizing data..."

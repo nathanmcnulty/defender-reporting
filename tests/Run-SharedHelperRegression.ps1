@@ -357,6 +357,35 @@ function Test-ConvertToNormalizedDataUsesStableDeviceIdFallback {
     }
 }
 
+function Test-ConvertToNormalizedDataWritesExpectedRowCount {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-row-count-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'row-count-001' -CveId 'CVE-2026-0009' -SnapshotDate '2026-03-20' -Version '1.0.0'
+        $historyRow = Get-TestVulnRow -Id 'row-count-002' -CveId 'CVE-2026-0010' -SnapshotDate '2026-03-18' -Version '1.1.0'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        [void](New-Item -Path (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -ItemType File -Force)
+        Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
+
+        $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -Machines @{} -AdvancedHuntingData @{}
+        $writtenRowCount = Get-CompactVulnJsonRowCount -Path $result.VulnsPath
+
+        Assert-True ($result.VulnCount -eq 2) 'Expected normalized data to include both current and history vulnerability rows.'
+        Assert-True ($writtenRowCount -eq $result.VulnCount) 'Expected normalized vuln file row count to match the processed vulnerability count.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-DashboardValidationUsesStableFallbackDeviceProfile {
     [CmdletBinding()]
     param()
@@ -715,6 +744,8 @@ Test-ReadNormalizedVulnStoreRow
 Write-Output '  Normalized vulnerability store reader checks passed.'
 Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
 Write-Output '  Stable device fallback identity checks passed.'
+Test-ConvertToNormalizedDataWritesExpectedRowCount
+Write-Output '  Normalized vuln row-count checks passed.'
 Test-DashboardValidationUsesStableFallbackDeviceProfile
 Write-Output '  Dashboard validation fallback device profile checks passed.'
 Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff
