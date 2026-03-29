@@ -34,7 +34,7 @@ Key behavior:
 
 - Uses Azure OIDC authentication
 - Calls `Invoke-VulnerabilityExport.ps1` with `-IncludeAdvancedHunting`
-- Calls `Generate-VulnerabilityDashboard.ps1` with `-Validate`
+- Calls `Generate-VulnerabilityDashboard.ps1` with `-Validate` to regenerate the canonical self-contained `VulnerabilityDashboard.html`
 - Uploads `dashboard-audit.json` as an artifact
 - Commits `exports/` and `VulnerabilityDashboard.html` unless the run is a dry run
 
@@ -71,6 +71,7 @@ Key behavior:
 - Use the update workflow for the regular daily refresh
 - Let the validation workflow protect changes to scripts and templates
 - Run the PDF workflow only when the HTML dashboard changes enough to warrant fresh report exports
+- Keep `VulnerabilityDashboard.html` as the committed repo artifact; publish a separate split-assets build such as `VulnerabilityDashboard.Hosted.html` only when you need an HTTP-hosted bundle
 
 ## Related docs
 

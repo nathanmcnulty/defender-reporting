@@ -53,6 +53,12 @@
     Requires -SecurityGroup. The container uses an init container to fetch
     the dashboard from blob storage on each cold start (scale-to-zero).
 
+.PARAMETER DashboardDeliveryMode
+    Controls which dashboard packaging mode Azure Automation publishes.
+    Auto uses Hosted when -IncludeContainerApp is set, otherwise SelfContained.
+    Hosted publishes the HTML plus a sibling asset directory for same-origin
+    delivery through the Container App or another HTTP host.
+
 .PARAMETER SecurityGroup
     Entra ID security group that is allowed to access the Container App
     dashboard. Accepts either an Object ID (GUID) or a display name.
@@ -128,6 +134,10 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Timeout in seconds for the validation Automation job polling loop")]
     [ValidateRange(60, 7200)]
     [int]$ValidationTimeoutSeconds = 1800,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Dashboard packaging mode. Auto uses Hosted when -IncludeContainerApp is set, otherwise SelfContained")]
+    [ValidateSet('Auto', 'SelfContained', 'Hosted')]
+    [string]$DashboardDeliveryMode = 'Auto',
 
     [Parameter(Mandatory = $false, HelpMessage = "Include Azure Container Apps deployment with Easy Auth")]
     [switch]$IncludeContainerApp,
@@ -213,6 +223,15 @@ if ($IncludeContainerApp) {
     if ($ContainerAppEnvName.Length -gt 60) { $ContainerAppEnvName = $ContainerAppEnvName.Substring(0, 60).TrimEnd('-') }
 }
 
+$effectiveDashboardDeliveryMode = switch ($DashboardDeliveryMode) {
+    'Auto' {
+        if ($IncludeContainerApp) { 'Hosted' } else { 'SelfContained' }
+    }
+    default { $DashboardDeliveryMode }
+}
+
+Write-Host "Dashboard delivery mode resolved to '$effectiveDashboardDeliveryMode'" -ForegroundColor Cyan
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
@@ -248,6 +267,8 @@ $Script:ArmApiVersions.ContainerApp = '2024-03-01'
 $Script:StorageBlobDataReaderRoleId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
 $Script:CaddyImage = 'docker.io/library/caddy:alpine'
 $Script:DashboardBlobName = 'VulnerabilityDashboard.html'
+$Script:DashboardAssetsDirectoryName = ([System.IO.Path]::GetFileNameWithoutExtension($Script:DashboardBlobName) + '.assets')
+$Script:DashboardHostedAssetFileNames = @('dashboard.css', 'dashboard.js', 'pako.js', 'chart.js', 'pdf-export.bundle.js', 'payload.json.gz')
 $Script:ProvisioningTags = @{
     workload = 'defender-reporting'
 }
@@ -333,6 +354,37 @@ function Invoke-ArmApi {
     }
 
     throw "$Description failed (HTTP $($response.StatusCode)): $errorDetail"
+}
+
+function Get-ErrorMessageText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    if ($ErrorRecord.Exception -and -not [string]::IsNullOrWhiteSpace($ErrorRecord.Exception.Message)) {
+        $parts.Add($ErrorRecord.Exception.Message)
+    }
+    if ($ErrorRecord.ErrorDetails -and -not [string]::IsNullOrWhiteSpace($ErrorRecord.ErrorDetails.Message)) {
+        $parts.Add($ErrorRecord.ErrorDetails.Message)
+    }
+
+    return ($parts -join "`n")
+}
+
+function Test-IsArmNotFoundError {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $text = Get-ErrorMessageText -ErrorRecord $ErrorRecord
+    return ($text -match '(?i)\b(HTTP\s*404|StatusCode\s*:?\s*404|ResourceGroupNotFound|ResourceNotFound|NotFound|could not be found|was not found)\b')
 }
 
 function Remove-AutomationJobSchedulesByScheduleName {
@@ -704,6 +756,7 @@ try {
 
     $rgPath = "$subPath/resourceGroups/${ResourceGroupName}?api-version=$($Script:ArmApiVersions.ResourceGroups)"
 
+    $rg = $null
     $rgExists = $false
     try {
         $rg = Invoke-ArmApi -Path $rgPath -Method GET -Description "Check resource group"
@@ -711,13 +764,18 @@ try {
         Write-Host "  Resource group already exists in $($rg.location)" -ForegroundColor Green
     }
     catch {
-        Write-Host "  Resource group not found, creating..." -ForegroundColor Gray
+        if (Test-IsArmNotFoundError -ErrorRecord $_) {
+            Write-Host "  Resource group not found, creating..." -ForegroundColor Gray
+        }
+        else {
+            throw
+        }
     }
 
     $rgAction = if ($rgExists) { 'Update resource group tags' } else { 'Create resource group' }
     if ($PSCmdlet.ShouldProcess($ResourceGroupName, $rgAction)) {
         $rgTags = @{}
-        $existingTags = $rg.PSObject.Properties['tags']?.Value
+        $existingTags = if ($rgExists -and $null -ne $rg) { $rg.PSObject.Properties['tags']?.Value } else { $null }
         if ($rgExists -and $null -ne $existingTags) {
             foreach ($property in $existingTags.PSObject.Properties) {
                 $rgTags[$property.Name] = [string]$property.Value
@@ -803,18 +861,30 @@ try {
             Write-Host "  Storage account '$StorageAccountName' already exists in resource group" -ForegroundColor Green
         }
         catch {
-            # Exact name not found — check if there's any storage account with the base name prefix
-            $saListPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts?api-version=$($Script:ArmApiVersions.StorageAccount)"
-            try {
-                $saList = Invoke-ArmApi -Path $saListPath -Method GET -Description "List storage accounts in RG"
-                $matchingSa = $saList.value | Where-Object { $_.name -like "${StorageAccountName}*" } | Select-Object -First 1
-                if ($matchingSa) {
-                    $storageNameFinal = $matchingSa.name
-                    $existingStorageFound = $true
-                    Write-Host "  Found existing storage account '$storageNameFinal' in resource group" -ForegroundColor Green
-                }
+            if (-not (Test-IsArmNotFoundError -ErrorRecord $_)) {
+                throw
             }
-            catch { $null = $_ <# No storage accounts found, proceed with creation #> }
+
+            # Exact name not found — only reuse a single tagged account that clearly belongs to this deployment.
+            $saListPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts?api-version=$($Script:ArmApiVersions.StorageAccount)"
+            $saList = Invoke-ArmApi -Path $saListPath -Method GET -Description "List storage accounts in RG"
+            $matchingSa = @(
+                @($saList.value) | Where-Object {
+                    $_.name -like "${StorageAccountName}*" -and
+                    $_.tags -and
+                    $_.tags.workload -eq $Script:ProvisioningTags.workload
+                }
+            )
+
+            if ($matchingSa.Count -eq 1) {
+                $storageNameFinal = $matchingSa[0].name
+                $existingStorageFound = $true
+                Write-Host "  Reusing tagged storage account '$storageNameFinal' in resource group" -ForegroundColor Green
+            }
+            elseif ($matchingSa.Count -gt 1) {
+                $candidateNames = ($matchingSa | ForEach-Object { $_.name }) -join ', '
+                throw "Multiple tagged storage accounts matched prefix '$StorageAccountName' in '$ResourceGroupName': $candidateNames. Re-run with the exact -StorageAccountName you want to use."
+            }
         }
     }
 
@@ -1164,23 +1234,37 @@ try {
     }
 
     # -------------------------------------------------------------------------
-    # Step 11: Create Automation variable for StorageAccountName
+    # Step 11: Create Automation variables
     # -------------------------------------------------------------------------
-    Write-Host "`nStep 11: Creating Automation variable..." -ForegroundColor Cyan
+    Write-Host "`nStep 11: Creating Automation variables..." -ForegroundColor Cyan
 
-    $variablePath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/variables/StorageAccountName?api-version=$($Script:ArmApiVersions.AutomationAccount)"
-
-    $variablePayload = @{
-        properties = @{
-            value       = "`"$StorageAccountName`""
-            isEncrypted = $false
-            description = "Storage account name for the dashboard pipeline"
+    $automationVariables = @(
+        [PSCustomObject]@{
+            Name = 'StorageAccountName'
+            Value = $StorageAccountName
+            Description = 'Storage account name for the dashboard pipeline'
         }
-    } | ConvertTo-Json -Depth 5
+        [PSCustomObject]@{
+            Name = 'DashboardDeliveryMode'
+            Value = $effectiveDashboardDeliveryMode
+            Description = 'Dashboard packaging mode for the pipeline (SelfContained or Hosted)'
+        }
+    )
 
-    if ($PSCmdlet.ShouldProcess("StorageAccountName", "Create Automation variable")) {
-        Invoke-ArmApi -Path $variablePath -Method PUT -Payload $variablePayload -Description "Create Automation variable" | Out-Null
-        Write-Host "  Variable 'StorageAccountName' = '$StorageAccountName'" -ForegroundColor Green
+    foreach ($automationVariable in $automationVariables) {
+        $variablePath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/variables/$($automationVariable.Name)?api-version=$($Script:ArmApiVersions.AutomationAccount)"
+        $variablePayload = @{
+            properties = @{
+                value       = "`"$($automationVariable.Value)`""
+                isEncrypted = $false
+                description = $automationVariable.Description
+            }
+        } | ConvertTo-Json -Depth 5
+
+        if ($PSCmdlet.ShouldProcess($automationVariable.Name, "Create Automation variable")) {
+            Invoke-ArmApi -Path $variablePath -Method PUT -Payload $variablePayload -Description "Create Automation variable '$($automationVariable.Name)'" | Out-Null
+            Write-Host "  Variable '$($automationVariable.Name)' = '$($automationVariable.Value)'" -ForegroundColor Green
+        }
     }
 
     # -------------------------------------------------------------------------
@@ -1233,6 +1317,7 @@ try {
                 schedule   = @{ name = $scheduleName }
                 parameters = @{
                     StorageAccountName = $StorageAccountName
+                    DashboardDeliveryMode = $effectiveDashboardDeliveryMode
                 }
             }
         } | ConvertTo-Json -Depth 5
@@ -1350,7 +1435,10 @@ try {
         $jobPayload = @{
             properties = @{
                 runbook    = @{ name = $runbookName }
-                parameters = @{ StorageAccountName = $StorageAccountName }
+                parameters = @{
+                    StorageAccountName = $StorageAccountName
+                    DashboardDeliveryMode = $effectiveDashboardDeliveryMode
+                }
             }
         } | ConvertTo-Json -Depth 5
 
@@ -1424,6 +1512,8 @@ try {
                     catch { $null = $_ <# Stream detail unavailable #> }
                 }
             }
+
+            throw "Validation job '$jobId' failed with status '$finalStatus'. Review the Automation job output above or re-run with -SkipValidation if you intentionally want to continue without a verified pipeline."
         }
     }
     else {
@@ -1565,19 +1655,62 @@ try {
         # then starts Caddy to serve it. The script is base64-encoded to avoid JSON/shell
         # escaping issues. NOTE: We download in the main container (not an init container)
         # because the Container Apps identity sidecar is only available after init containers finish.
+        $assetDownloadLines = @(
+            foreach ($assetFileName in $Script:DashboardHostedAssetFileNames) {
+                                '  download_blob /data/{0}/{1} "{0}/{1}" || true' -f $Script:DashboardAssetsDirectoryName, $assetFileName
+            }
+        ) -join "`n"
+
         $startupScript = @"
 #!/bin/sh
-TOKEN=`$(wget -qO- \
-  --header "X-IDENTITY-HEADER: `$IDENTITY_HEADER" \
-  "`${IDENTITY_ENDPOINT}?resource=https%3A%2F%2Fstorage.azure.com&api-version=2019-08-01" 2>/dev/null \
-  | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+SYNC_INTERVAL_SECONDS=60
 
-if [ -n "`$TOKEN" ]; then
-  wget -qO /data/index.html \
-    --header "Authorization: Bearer `$TOKEN" \
-    --header "x-ms-version: 2020-10-02" \
-    "https://$StorageAccountName.blob.core.windows.net/dashboards/$($Script:DashboardBlobName)" 2>/dev/null
+get_token() {
+    wget -qO- \
+        --header "X-IDENTITY-HEADER: `$IDENTITY_HEADER" \
+        "`${IDENTITY_ENDPOINT}?resource=https%3A%2F%2Fstorage.azure.com&api-version=2019-08-01" 2>/dev/null \
+        | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p'
+}
+
+download_blob() {
+    DEST_PATH="`$1"
+    BLOB_PATH="`$2"
+        TEMP_PATH="`${DEST_PATH}.tmp"
+    mkdir -p "`$(dirname "`$DEST_PATH")"
+        if wget -qO "`$TEMP_PATH" \
+        --header "Authorization: Bearer `$TOKEN" \
+        --header "x-ms-version: 2020-10-02" \
+        "https://$StorageAccountName.blob.core.windows.net/dashboards/`$BLOB_PATH" 2>/dev/null; then
+                mv "`$TEMP_PATH" "`$DEST_PATH"
+        return 0
+    fi
+        rm -f "`$TEMP_PATH"
+    return 1
+}
+
+sync_dashboard() {
+        TOKEN="`$(get_token)"
+        if [ -z "`$TOKEN" ]; then
+                return 1
+        fi
+
+        download_blob /data/index.html "$($Script:DashboardBlobName)" || return 1
+        mkdir -p "/data/$($Script:DashboardAssetsDirectoryName)"
+$assetDownloadLines
+
+        return 0
+}
+
+if ! sync_dashboard; then
+    echo "Initial dashboard sync failed; serving the last available local copy if present." >&2
 fi
+
+(
+    while true; do
+        sleep "`$SYNC_INTERVAL_SECONDS"
+        sync_dashboard || true
+    done
+) &
 
 if [ ! -s /data/index.html ]; then
   cat > /data/index.html << 'PLACEHOLDER'
@@ -1747,13 +1880,43 @@ exec caddy file-server --root /data --listen :80
             @{ id = '14dad69e-099b-42c9-810b-d002981feec1'; type = 'Scope' }  # profile
         )
 
-        # Create the app registration with delegated permissions
-        Write-Host "  Creating app registration 'Defender Reporting Dashboard'..." -ForegroundColor Gray
+        # Reuse an existing app registration when possible so reruns stay idempotent.
+        $appDisplayName = 'Defender Reporting Dashboard'
+        Write-Host "  Resolving app registration '$appDisplayName'..." -ForegroundColor Gray
+        $existingApps = @(
+            (Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/applications?`$filter=displayName eq '$appDisplayName'" -Description 'List matching Entra app registrations').value
+        )
+        $redirectMatchedApps = @(
+            $existingApps | Where-Object { @($_.web.redirectUris) -contains $redirectUri }
+        )
+
+        $appResult = $null
+        if ($redirectMatchedApps.Count -eq 1) {
+            $appResult = $redirectMatchedApps[0]
+            Write-Host "  Reusing existing app registration: $($appResult.appId)" -ForegroundColor Green
+        }
+        elseif ($redirectMatchedApps.Count -gt 1) {
+            $candidateAppIds = ($redirectMatchedApps | ForEach-Object { $_.appId }) -join ', '
+            throw "Multiple Entra app registrations named '$appDisplayName' already include redirect URI '$redirectUri': $candidateAppIds. Clean up duplicates or update the script to disambiguate before rerunning setup."
+        }
+        elseif ($existingApps.Count -eq 1) {
+            $appResult = $existingApps[0]
+            Write-Host "  Reusing existing app registration by display name: $($appResult.appId)" -ForegroundColor Green
+        }
+        elseif ($existingApps.Count -gt 1) {
+            $candidateAppIds = ($existingApps | ForEach-Object { $_.appId }) -join ', '
+            throw "Multiple Entra app registrations named '$appDisplayName' were found: $candidateAppIds. Clean up duplicates or update the script to disambiguate before rerunning setup."
+        }
+
         $appBody = @{
-            displayName    = 'Defender Reporting Dashboard'
+            displayName    = $appDisplayName
             signInAudience = 'AzureADMyOrg'
             web            = @{
-                redirectUris = @($redirectUri)
+                redirectUris = @(
+                    @($appResult.web.redirectUris) + @($redirectUri) |
+                        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                        Select-Object -Unique
+                )
                 implicitGrantSettings = @{
                     enableIdTokenIssuance = $true
                 }
@@ -1765,16 +1928,40 @@ exec caddy file-server --root /data --listen :80
                 }
             )
         }
-        $appResult = Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri '/v1.0/applications' -Body $appBody -Description 'Create Entra app registration'
-        $appClientId = $appResult.appId
-        Write-Host "  App registration created: $appClientId" -ForegroundColor Green
 
-        # Create service principal for the app
-        Write-Host "  Creating service principal..." -ForegroundColor Gray
-        $spBody = @{ appId = $appClientId }
-        $spResult = Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri '/v1.0/servicePrincipals' -Body $spBody -Description 'Create service principal'
+        if ($null -eq $appResult) {
+            $appResult = Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri '/v1.0/applications' -Body $appBody -Description 'Create Entra app registration'
+            Write-Host "  App registration created: $($appResult.appId)" -ForegroundColor Green
+        }
+        else {
+            Invoke-GraphApi -Context $containerGraphContext -Method PATCH -Uri "/v1.0/applications/$($appResult.id)" -Body $appBody -Description 'Update Entra app registration' | Out-Null
+            $appResult = Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/applications/$($appResult.id)" -Description 'Refresh Entra app registration'
+            Write-Host "  App registration updated: $($appResult.appId)" -ForegroundColor Green
+        }
+
+        $appClientId = $appResult.appId
+
+        # Create or reuse the service principal for the app.
+        $existingServicePrincipals = @(
+            (Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/servicePrincipals?`$filter=appId eq '$appClientId'" -Description 'Look up service principal for app registration').value
+        )
+        if ($existingServicePrincipals.Count -gt 1) {
+            $candidateSpIds = ($existingServicePrincipals | ForEach-Object { $_.id }) -join ', '
+            throw "Multiple service principals were found for appId '$appClientId': $candidateSpIds. Resolve the duplicate principals before rerunning setup."
+        }
+
+        if ($existingServicePrincipals.Count -eq 1) {
+            $spResult = $existingServicePrincipals[0]
+            Write-Host "  Reusing existing service principal: $($spResult.id)" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  Creating service principal..." -ForegroundColor Gray
+            $spBody = @{ appId = $appClientId }
+            $spResult = Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri '/v1.0/servicePrincipals' -Body $spBody -Description 'Create service principal'
+            Write-Host "  Service principal created: $($spResult.id)" -ForegroundColor Green
+        }
+
         $spObjectId = $spResult.id
-        Write-Host "  Service principal created: $spObjectId" -ForegroundColor Green
 
         # Grant admin consent for the delegated permissions (prevents user consent prompt)
         Write-Host "  Granting admin consent for openid, email, profile..." -ForegroundColor Gray
@@ -1845,7 +2032,7 @@ exec caddy file-server --root /data --listen :80
             Write-Host "  Security group assigned" -ForegroundColor Green
         }
         catch {
-            if ($_.Exception.Message -match 'Permission being assigned already exists') {
+            if ($_.Exception.Message -match 'Permission being assigned already exists|EntitlementGrant entry already exists|already exists') {
                 Write-Host "  Security group already assigned" -ForegroundColor Green
             }
             else { throw }
@@ -1904,6 +2091,7 @@ exec caddy file-server --root /data --listen :80
     Write-Host "  Resource Group:      $ResourceGroupName" -ForegroundColor Gray
     Write-Host "  Automation Account:  $AutomationAccountName" -ForegroundColor Gray
     Write-Host "  Storage Account:     $StorageAccountName" -ForegroundColor Gray
+    Write-Host "  Dashboard Mode:      $effectiveDashboardDeliveryMode" -ForegroundColor Gray
     Write-Host "  Managed Identity:    $miPrincipalId" -ForegroundColor Gray
     Write-Host "  Blob Containers:     $($Script:BlobContainers -join ', ')" -ForegroundColor Gray
     Write-Host "  Schedule:            Daily" -ForegroundColor Gray

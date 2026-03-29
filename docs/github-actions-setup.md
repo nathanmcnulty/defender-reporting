@@ -8,9 +8,11 @@ The repo includes an automated dashboard update workflow that authenticates to A
 
 - Signs in to Azure using GitHub's OIDC token
 - Exports the latest Defender data into `exports/`
-- Regenerates `VulnerabilityDashboard.html`
+- Regenerates the canonical self-contained `VulnerabilityDashboard.html`
 - Validates the dashboard and uploads the audit as an artifact
 - Commits updated exports and dashboard output unless you run in dry-run mode
+
+Recommended repo convention: commit the self-contained HTML output, and generate a distinct split-assets build such as `VulnerabilityDashboard.Hosted.html` only for hosted deployment or release packaging.
 
 ## Recommended setup
 

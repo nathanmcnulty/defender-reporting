@@ -529,6 +529,56 @@ function Test-DashboardValidationPreservesNoneSeverityData {
     }
 }
 
+function Test-DashboardSplitAssetsGenerationAndValidation {
+    [CmdletBinding()]
+    param()
+
+    $fixturePath = Join-Path $PSScriptRoot 'fixtures\legacy-migration-none-severity'
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-split-assets-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $dashboardScriptPath = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Generate-VulnerabilityDashboard.ps1'
+    $outputPath = Join-Path $tempRoot 'dashboard.html'
+    $auditPath = Join-Path $tempRoot 'audit.json'
+    $validateOnlyAuditPath = Join-Path $tempRoot 'audit-validate-only.json'
+    $assetsPath = Join-Path $tempRoot 'dashboard.assets'
+
+    try {
+        Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
+
+        & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -SplitAssets -Validate -ValidationOutputPath $auditPath | Out-Null
+
+        Assert-True ((Test-Path -LiteralPath $outputPath -PathType Leaf)) 'Expected split-assets generation to write the dashboard HTML.'
+        Assert-True ((Test-Path -LiteralPath $assetsPath -PathType Container)) 'Expected split-assets generation to create the sibling asset directory.'
+
+        foreach ($assetFileName in @('dashboard.css', 'dashboard.js', 'pako.js', 'chart.js', 'pdf-export.bundle.js', 'payload.json.gz')) {
+            Assert-True ((Test-Path -LiteralPath (Join-Path $assetsPath $assetFileName) -PathType Leaf)) ("Expected split-assets generation to write '{0}'." -f $assetFileName)
+        }
+
+        $dashboardHtml = Get-Content -LiteralPath $outputPath -Raw
+        Assert-True ($dashboardHtml.Contains('dashboard.assets/dashboard.css')) 'Expected split-assets dashboard HTML to reference the external stylesheet.'
+        Assert-True ($dashboardHtml.Contains('dashboard.assets/dashboard.js')) 'Expected split-assets dashboard HTML to reference the external dashboard script.'
+        Assert-True ($dashboardHtml.Contains('dashboard.assets/payload.json.gz')) 'Expected split-assets dashboard HTML to reference the external payload.'
+        Assert-True ($dashboardHtml.Contains('external-compressed')) 'Expected split-assets dashboard HTML to advertise the external-compressed payload mode.'
+
+        $audit = Get-Content -LiteralPath $auditPath -Raw | ConvertFrom-Json -Depth 100
+        Assert-True ($audit.RowComparison.Match -eq $true) 'Expected split-assets dashboard validation to match the normalized source rows.'
+        Assert-True ($audit.RowComparison.MissingCount -eq 0) 'Expected no missing rows in split-assets dashboard validation.'
+        Assert-True ($audit.RowComparison.ExtraCount -eq 0) 'Expected no extra rows in split-assets dashboard validation.'
+
+        & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ValidateOnly -ValidationOutputPath $validateOnlyAuditPath | Out-Null
+
+        $validateOnlyAudit = Get-Content -LiteralPath $validateOnlyAuditPath -Raw | ConvertFrom-Json -Depth 100
+        Assert-True ($validateOnlyAudit.RowComparison.Match -eq $true) 'Expected ValidateOnly to read and validate the external split-assets payload.'
+        Assert-True ($validateOnlyAudit.RowComparison.MissingCount -eq 0) 'Expected ValidateOnly split-assets validation to report no missing rows.'
+        Assert-True ($validateOnlyAudit.RowComparison.ExtraCount -eq 0) 'Expected ValidateOnly split-assets validation to report no extra rows.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-VulnContentStoreRoundTrip {
     [CmdletBinding()]
     param()
@@ -671,6 +721,8 @@ Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff
 Write-Output '  Dashboard open-state audit checks passed.'
 Test-DashboardValidationPreservesNoneSeverityData
 Write-Output '  Dashboard none-severity validation checks passed.'
+Test-DashboardSplitAssetsGenerationAndValidation
+Write-Output '  Dashboard split-assets generation and validation checks passed.'
 Test-VulnContentStoreRoundTrip
 Write-Output '  Vulnerability content store round-trip checks passed.'
 Test-VulnObservedWindowCacheRoundTrip
