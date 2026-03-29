@@ -8229,7 +8229,6 @@ function ConvertTo-NormalizedData {
     $jsonWriter = $null
     $columnWriterSet = $null
     $vulnColumnPaths = $null
-    $compactRecordBuffer = $null
     $syntheticManifestPath = Join-Path $DataPath 'synthetic-manifest.json'
     $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-Path -LiteralPath $syntheticManifestPath -PathType Leaf))
     $contentStoreExists = (Test-VulnContentStoreExistence -BasePath $DataPath)
@@ -8263,7 +8262,6 @@ function ConvertTo-NormalizedData {
                 $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($vulnWriter)
                 $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
                 $jsonWriter.WriteStartArray()
-                $compactRecordBuffer = [System.Collections.Generic.List[object]]::new()
             }
 
             foreach ($v in Get-NormalizationSourceRows -DataPath $DataPath -SkipObservedWindowMerge:$effectiveSkipObservedWindowMerge) {
@@ -8501,9 +8499,6 @@ function ConvertTo-NormalizedData {
                 Write-CompactVulnRecordColumnSet -WriterSet $columnWriterSet -Record $compactRecord
             }
             else {
-                if ($compactRecordBuffer) {
-                    [void]$compactRecordBuffer.Add(@($compactRecord))
-                }
                 $jsonWriter.WriteStartArray()
                 foreach ($compactValue in $compactRecord) {
                     if ($null -eq $compactValue) {
@@ -8569,19 +8564,7 @@ function ConvertTo-NormalizedData {
     if ((-not $columnWriterSet) -and -not [string]::IsNullOrWhiteSpace($VulnOutputPath) -and (Test-Path -LiteralPath $VulnOutputPath -PathType Leaf)) {
         $actualVulnRowCount = Get-CompactVulnJsonRowCount -Path $VulnOutputPath
         if ($actualVulnRowCount -ne $processedCount) {
-            Write-Warning ("  Normalized vulnerability payload row count mismatch (expected {0}, found {1}); rewriting via buffered fallback serializer." -f $processedCount, $actualVulnRowCount)
-            if ($compactRecordBuffer) {
-                [System.IO.File]::WriteAllText(
-                    $VulnOutputPath,
-                    ($compactRecordBuffer | ConvertTo-Json -Compress -Depth 6),
-                    [System.Text.UTF8Encoding]::new($false)
-                )
-                $actualVulnRowCount = Get-CompactVulnJsonRowCount -Path $VulnOutputPath
-            }
-
-            if ($actualVulnRowCount -ne $processedCount) {
-                throw ("Normalized vulnerability payload row count mismatch after rewrite fallback. Expected {0}, found {1} in '{2}'." -f $processedCount, $actualVulnRowCount, $VulnOutputPath)
-            }
+            throw ("Normalized vulnerability payload row count mismatch after streaming write. Expected {0}, found {1} in '{2}'." -f $processedCount, $actualVulnRowCount, $VulnOutputPath)
         }
     }
 
@@ -9398,6 +9381,8 @@ try {
     $syntheticManifestPath = Join-Path -Path $tempExports -ChildPath 'synthetic-manifest.json'
     $skipObservedWindowMerge = (Test-Path -LiteralPath $syntheticManifestPath -PathType Leaf)
     $payloadCacheEntry = Get-NormalizedPayloadCacheEntry -BasePath $tempExports -SkipObservedWindowMerge:$skipObservedWindowMerge
+    Invoke-FullGarbageCollection
+    Write-MemoryUsage -Label "Post-PayloadCacheCheck"
     $machines = $null
     $advancedHuntingData = $null
     $normalizedQuality = $null
@@ -9414,6 +9399,7 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         $machines = Read-MachineData -Path $tempExports
         $advancedHuntingData = Read-AdvancedHuntingData -Path $tempExports
+        Write-MemoryUsage -Label "Post-NormalizationInputs"
 
         # Step 2: Normalize data while the working set is still lean
         Write-Output "Normalizing data..."
