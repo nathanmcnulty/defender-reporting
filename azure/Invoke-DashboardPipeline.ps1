@@ -3164,6 +3164,7 @@ function Test-VulnStoreRequiresCanonicalRepair {
         [string]$BasePath,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [object[]]$HistoryDocuments
     )
 
