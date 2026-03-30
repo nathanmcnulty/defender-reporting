@@ -80,6 +80,7 @@ let cascadingFilterState = {};
 
 // Constant for devices without tags
 const NO_TAGS_VALUE = '(No Tags)';
+const NO_TAGS_ARRAY = [NO_TAGS_VALUE];
 
 // Constant for devices without an RBAC group
 const NO_GROUP_VALUE = '(none)';
@@ -93,7 +94,7 @@ const CASCADING_FILTER_CONFIG = {
     },
     filterDeviceTags: {
         allLabel: 'All Tags',
-        getValuesForVuln: v => (v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : [NO_TAGS_VALUE])
+        getValuesForVuln: v => (v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : NO_TAGS_ARRAY)
     },
     filterDeviceName: {
         allLabel: 'All Devices',
@@ -145,6 +146,7 @@ const TABLE_PAGE_SIZE = 100;
 const CARD_PAGE_SIZE = 20;
 const CARD_RENDER_BATCH_SIZE = 10;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
+let sortedByFirstSeen = null;
 const REPORT_IDS = [
     'active-vulnerabilities',
     'remediation-activity',
@@ -163,6 +165,8 @@ let aggregateCacheKey = null;
 let aggregateCache = createEmptyAggregateCache();
 let cascadingFilterCountCacheKey = null;
 let cascadingFilterCountCache = null;
+let chartDataCacheKey = null;
+let chartDataCache = null;
 
 // Remediation table scroll state
 let remediationLoadedCount = 0;
@@ -315,6 +319,8 @@ function invalidateAggregateCache() {
     aggregateCache = createEmptyAggregateCache();
     cascadingFilterCountCacheKey = null;
     cascadingFilterCountCache = null;
+    chartDataCacheKey = null;
+    chartDataCache = null;
 }
 
 function markAllReportsDirty() {
@@ -336,6 +342,24 @@ function buildFilterStateKey(state) {
         state.severities.join('\u001f'),
         state.osPlatforms.join('\u001f')
     ].join('\u001e');
+}
+
+function buildSortedFirstSeenIndex() {
+    if (!vulnerabilityData || vulnerabilityData.length === 0) return;
+    sortedByFirstSeen = vulnerabilityData
+        .map((v, i) => ({ i, fs: v._firstSeenDate || getFirstSeenDate(v) }))
+        .sort((a, b) => (a.fs < b.fs ? -1 : a.fs > b.fs ? 1 : 0));
+}
+
+function binarySearchFirstSeen(targetDate) {
+    if (!sortedByFirstSeen) return 0;
+    let lo = 0, hi = sortedByFirstSeen.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (sortedByFirstSeen[mid].fs < targetDate) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
 }
 
 function syncFilterStateFromDom() {
@@ -477,6 +501,7 @@ function ensureChartJsLoaded() {
             if (typeof Chart === 'undefined') {
                 throw new Error('Chart.js did not initialize correctly.');
             }
+            Chart.defaults.animation = false;
         });
 
     return chartJsLoadPromise;
@@ -585,16 +610,24 @@ async function setCachedData(fingerprint, data) {
 // =============================================================================
 
 /**
- * Build the Web Worker source code as a string.
- * The worker receives lookups + rawVulns and returns the denormalized array.
+ * Build a Worker source that decompresses (if given compressed bytes) and denormalizes.
+ * When compressed bytes are provided via Transferable, pako.inflate runs off-main-thread.
  */
 function buildWorkerSource() {
-    // We stringify the denormalize logic so it runs inside the worker context
     return `
 'use strict';
 self.onmessage = function(e) {
     var lookups = e.data.lookups;
     var rawVulns = e.data.rawVulns;
+
+    // If compressed data was transferred, decompress it first
+    if (e.data.compressedBytes) {
+        var decompressed = pako.inflate(e.data.compressedBytes, { to: 'string' });
+        var data = JSON.parse(decompressed);
+        lookups = data.lookups;
+        rawVulns = data.vulns;
+    }
+
     function isColumnarRawVulnData(value) {
         return !!(value && !Array.isArray(value) && Array.isArray(value.d));
     }
@@ -730,20 +763,39 @@ self.onmessage = function(e) {
             _index: i
         };
     }
-    self.postMessage(result);
+    self.postMessage({ rows: result, lookups: lookups, rawVulns: rawVulns });
 };
 `;
 }
 
 /**
  * Run denormalization in a Web Worker.
+ * When compressedBytes is provided, decompression also runs in the Worker (off main thread).
  * Falls back to main-thread if Worker is unavailable.
- * @returns {Promise<Array>}
+ * @param {Uint8Array} [compressedBytes] - Optional compressed payload bytes
+ * @returns {Promise<{rows: Array, lookups?: Object, rawVulns?: Object}>}
  */
-function denormalizeInWorker() {
+async function denormalizeInWorker(compressedBytes) {
+    // When decompressing in Worker, include pako source in the blob
+    let workerParts = [];
+    if (compressedBytes) {
+        const pakoSource = await getPakoSource();
+        if (pakoSource) {
+            workerParts.push(pakoSource + '\n');
+        } else {
+            // pako source unavailable for Worker — fall back to main-thread decompression
+            const decompressed = pako.inflate(compressedBytes, { to: 'string' });
+            const data = JSON.parse(decompressed);
+            lookups = data.lookups;
+            rawVulns = data.vulns;
+            compressedBytes = null;
+        }
+    }
+    workerParts.push(buildWorkerSource());
+
     return new Promise((resolve, reject) => {
         try {
-            const blob = new Blob([buildWorkerSource()], { type: 'application/javascript' });
+            const blob = new Blob(workerParts, { type: 'application/javascript' });
             const url = URL.createObjectURL(blob);
             const worker = new Worker(url);
 
@@ -758,12 +810,41 @@ function denormalizeInWorker() {
                 reject(err);
             };
 
-            // Transfer data to worker
-            worker.postMessage({ lookups, rawVulns });
+            if (compressedBytes) {
+                worker.postMessage({ compressedBytes });
+            } else {
+                worker.postMessage({ lookups, rawVulns });
+            }
         } catch (err) {
             reject(err);
         }
     });
+}
+
+/**
+ * Get pako library source code for injection into a Worker.
+ * Checks external scripts first (split-assets mode), then inline (embedded mode).
+ * Inline match requires 10KB+ to avoid false positives from small helper scripts.
+ * @returns {Promise<string|null>}
+ */
+async function getPakoSource() {
+    const scripts = document.querySelectorAll('script');
+    // Try fetching external pako script (split-assets / hosted mode)
+    for (const script of scripts) {
+        if (script.src && script.src.indexOf('pako') !== -1) {
+            try {
+                const response = await fetch(script.src);
+                if (response.ok) return await response.text();
+            } catch (e) { /* ignore — will try inline or fall back */ }
+        }
+    }
+    // Try inline script (embedded mode) — require 10KB+ to skip small helper scripts
+    for (const script of scripts) {
+        if (script.textContent && script.textContent.length > 10000 && script.textContent.indexOf('pako') !== -1 && script.textContent.indexOf('inflate') !== -1 && !script.id) {
+            return script.textContent;
+        }
+    }
+    return null;
 }
 
 // =============================================================================
@@ -870,8 +951,11 @@ let activeVirtualTables = [];
 // =============================================================================
 
 /**
- * Load and decompress data from embedded scripts
+ * Load and decompress data from embedded scripts.
+ * For compressed formats, stores raw bytes for Worker-based decompression.
  */
+let pendingCompressedBytes = null;
+
 async function loadData() {
     logDebug('Loading data, format:', dataFormat);
 
@@ -885,19 +969,11 @@ async function loadData() {
             throw new Error(`Failed to load dashboard payload (${response.status} ${response.statusText}).`);
         }
 
-        const compressedBytes = new Uint8Array(await response.arrayBuffer());
-        const decompressed = pako.inflate(compressedBytes, { to: 'string' });
-        const data = JSON.parse(decompressed);
-        lookups = data.lookups;
-        rawVulns = data.vulns;
+        pendingCompressedBytes = new Uint8Array(await response.arrayBuffer());
     } else if (dataFormat === 'compressed') {
-        // Decompress using pako
+        // Base64 decode on main thread (fast), defer inflate to Worker
         const compressedBase64 = document.getElementById('vulnsData').textContent.replace(/\s+/g, '');
-        const compressedBytes = Uint8Array.from(atob(compressedBase64), c => c.charCodeAt(0));
-        const decompressed = pako.inflate(compressedBytes, { to: 'string' });
-        const data = JSON.parse(decompressed);
-        lookups = data.lookups;
-        rawVulns = data.vulns;
+        pendingCompressedBytes = Uint8Array.from(atob(compressedBase64), c => c.charCodeAt(0));
     } else {
         // Normalized but not compressed
         lookups = JSON.parse(document.getElementById('lookupsData').textContent);
@@ -917,9 +993,13 @@ async function loadData() {
     } catch (err) {
         console.warn('Failed to parse data quality metadata:', err);
     }
-    
-    logDebug('Loaded lookups:', Object.keys(lookups));
-    logDebug('Loaded', getRawVulnCount(), 'vulnerability records');
+
+    if (lookups) {
+        logDebug('Loaded lookups:', Object.keys(lookups));
+        logDebug('Loaded', getRawVulnCount(), 'vulnerability records');
+    } else {
+        logDebug('Compressed data loaded, will decompress in Worker');
+    }
 }
 
 function isColumnarRawVulnData(value) {
@@ -1073,34 +1153,58 @@ function denormalizeAllVulns() {
  * @returns {Promise<void>}
  */
 async function denormalizeWithCaching() {
-    const fingerprint = computeDataFingerprint();
-    const rawCount = getRawVulnCount();
-    logDebug('Data fingerprint:', fingerprint);
+    const hasCompressed = !!pendingCompressedBytes;
 
-    // 1. Try IndexedDB cache
-    const cached = await getCachedData(fingerprint);
-    if (cached && cached.length === rawCount) {
-        logDebug('Loaded', cached.length, 'records from IndexedDB cache');
-        vulnerabilityData = cached;
-        applyDerivedVulnerabilityFields(vulnerabilityData);
-        return;
+    // For compressed data, fingerprint and cache checks happen after decompression
+    if (!hasCompressed) {
+        const fingerprint = computeDataFingerprint();
+        const rawCount = getRawVulnCount();
+        logDebug('Data fingerprint:', fingerprint);
+
+        // 1. Try IndexedDB cache
+        const cached = await getCachedData(fingerprint);
+        if (cached && cached.length === rawCount) {
+            logDebug('Loaded', cached.length, 'records from IndexedDB cache');
+            vulnerabilityData = cached;
+            applyDerivedVulnerabilityFields(vulnerabilityData);
+            return;
+        }
     }
 
-    // 2. Try Web Worker
+    // 2. Try Web Worker (with optional decompression)
+    const compBytes = pendingCompressedBytes;
+    pendingCompressedBytes = null;
     try {
-        logDebug('Denormalizing', rawCount, 'records via Web Worker...');
+        const label = compBytes ? 'decompressing + denormalizing' : 'denormalizing';
+        logDebug(label, compBytes ? '(compressed bytes)' : getRawVulnCount(), 'records via Web Worker...');
         const startTime = performance.now();
-        vulnerabilityData = await denormalizeInWorker();
+        const result = await denormalizeInWorker(compBytes);
+        vulnerabilityData = result.rows;
+        if (result.lookups) lookups = result.lookups;
+        if (result.rawVulns) rawVulns = result.rawVulns;
         const elapsed = Math.round(performance.now() - startTime);
-        logDebug('Worker denormalization complete in', elapsed, 'ms');
+        logDebug('Worker complete in', elapsed, 'ms');
     } catch (err) {
         console.warn('Web Worker failed, falling back to main thread:', err);
+        // Decompress on main thread if we have compressed bytes and lookups weren't set
+        if (compBytes && !lookups) {
+            const decompressed = pako.inflate(compBytes, { to: 'string' });
+            const data = JSON.parse(decompressed);
+            lookups = data.lookups;
+            rawVulns = data.vulns;
+        }
         denormalizeAllVulns();
     }
 
     applyDerivedVulnerabilityFields(vulnerabilityData);
 
+    // Log counts after data is available
+    logDebug('Loaded lookups:', lookups ? Object.keys(lookups) : 'none');
+    logDebug('Loaded', getRawVulnCount(), 'vulnerability records');
+
     // 3. Cache the result (fire-and-forget)
+    const fingerprint = computeDataFingerprint();
+    logDebug('Data fingerprint:', fingerprint);
     setCachedData(fingerprint, vulnerabilityData);
 }
 
@@ -1122,6 +1226,7 @@ async function init() {
     
     logDebug('Initializing dashboard with', vulnerabilityData.length, 'vulnerabilities');
     buildDeviceFilterCatalog();
+    buildSortedFirstSeenIndex();
     populateFilters();
     updateDataQualitySummary();
     attachEventListeners();
@@ -1258,7 +1363,7 @@ function buildDeviceFilterCatalog() {
         rbacGroup: getDeviceGroupName(device),
         deviceTags: device.t && device.t.length > 0
             ? device.t.map(tagIndex => lookups.tags[tagIndex])
-            : [NO_TAGS_VALUE]
+            : NO_TAGS_ARRAY
     }));
 }
 
@@ -1757,7 +1862,8 @@ function buildCascadingFilterCountMaps() {
     ]));
 
     const baseRows = vulnerabilityData.filter(v => {
-        if (!matchesFilterStateDate(v, filterState)) return false;
+        if (filterState.startDate && v._effectiveOpenEndDate < filterState.startDate) return false;
+        if (filterState.endDate && v._firstSeenDate > filterState.endDate) return false;
         if (filterState.severitySet.size > 0 && !filterState.severitySet.has(v.VulnerabilitySeverityLevel)) return false;
         if (filterState.osPlatformSet.size > 0 && !filterState.osPlatformSet.has(v.OSPlatform)) return false;
         return true;
@@ -1846,7 +1952,7 @@ function matchesFilterStateNonDate(v, state = filterState) {
     if (state.rbacGroupSet.size > 0 && !state.rbacGroupSet.has(normalizeGroupName(v.RbacGroupName))) return false;
 
     if (state.deviceTagSet.size > 0) {
-        const vulnTags = v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : [NO_TAGS_VALUE];
+        const vulnTags = v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : NO_TAGS_ARRAY;
         if (!vulnTags.some(tag => state.deviceTagSet.has(tag))) return false;
     }
 
@@ -1857,11 +1963,8 @@ function matchesFilterStateNonDate(v, state = filterState) {
 
 function matchesFilterStateDate(v, state = filterState) {
     if (!state.startDate && !state.endDate) return true;
-
-    const firstSeen = getFirstSeenDate(v);
-    const effectiveEnd = getEffectiveOpenEndDate(v);
-    if (state.startDate && effectiveEnd < state.startDate) return false;
-    if (state.endDate && firstSeen > state.endDate) return false;
+    if (state.startDate && v._effectiveOpenEndDate < state.startDate) return false;
+    if (state.endDate && v._firstSeenDate > state.endDate) return false;
     return true;
 }
 
@@ -1870,7 +1973,9 @@ function matchesFilterState(v, state = filterState) {
 }
 
 /**
- * Apply all filters to the vulnerability data
+ * Apply all filters to the vulnerability data.
+ * Keeps cascading counts/options aligned with the current full filter state.
+ * Uses requestAnimationFrame to yield to the browser before rendering.
  */
 function applyFilters() {
     syncFilterStateFromDom();
@@ -1885,12 +1990,46 @@ function applyFilters() {
         return;
     }
 
-    filteredData = vulnerabilityData.filter(v => matchesFilterState(v, filterState));
+    const result = [];
+    const data = vulnerabilityData;
+    const len = data.length;
+    const fs = filterState;
+    const hasDeviceName = fs.deviceNameSet.size > 0;
+    const hasRbacGroup = fs.rbacGroupSet.size > 0;
+    const hasDeviceTag = fs.deviceTagSet.size > 0;
+    const hasSeverity = fs.severitySet.size > 0;
+    const hasOsPlatform = fs.osPlatformSet.size > 0;
+    const startDate = fs.startDate;
+    const endDate = fs.endDate;
+
+    for (let i = 0; i < len; i++) {
+        const v = data[i];
+        if (hasDeviceName && !fs.deviceNameSet.has(v.DeviceId || v.DeviceName)) continue;
+        if (hasRbacGroup && !fs.rbacGroupSet.has(normalizeGroupName(v.RbacGroupName))) continue;
+        if (hasDeviceTag) {
+            const tags = v.MachineTags;
+            if (tags && tags.length > 0) {
+                let tagMatch = false;
+                for (let t = 0; t < tags.length; t++) {
+                    if (fs.deviceTagSet.has(tags[t])) { tagMatch = true; break; }
+                }
+                if (!tagMatch) continue;
+            } else {
+                if (!fs.deviceTagSet.has(NO_TAGS_VALUE)) continue;
+            }
+        }
+        if (hasSeverity && !fs.severitySet.has(v.VulnerabilitySeverityLevel)) continue;
+        if (hasOsPlatform && !fs.osPlatformSet.has(v.OSPlatform)) continue;
+        if (startDate && v._effectiveOpenEndDate < startDate) continue;
+        if (endDate && v._firstSeenDate > endDate) continue;
+        result.push(v);
+    }
+    filteredData = result;
 
     invalidateAggregateCache();
     updateStats();
     markAllReportsDirty();
-    renderActiveReport(true);
+    requestAnimationFrame(() => renderActiveReport(true));
 }
 
 // =============================================================================
@@ -1900,25 +2039,37 @@ function applyFilters() {
 /**
  * Update the statistics summary cards
  */
+let _statElements = null;
+function getStatElements() {
+    if (!_statElements) {
+        _statElements = {
+            critical: document.getElementById('criticalCount'),
+            high: document.getElementById('highCount'),
+            medium: document.getElementById('mediumCount'),
+            low: document.getElementById('lowCount')
+        };
+    }
+    return _statElements;
+}
+
 function updateStats() {
     const statsRows = getActiveRowsForCurrentSelection();
-    const severityCounts = {
-        'Critical': 0,
-        'High': 0,
-        'Medium': 0,
-        'Low': 0
-    };
+    let critical = 0, high = 0, medium = 0, low = 0;
 
-    statsRows.forEach(v => {
-        if (severityCounts.hasOwnProperty(v.VulnerabilitySeverityLevel)) {
-            severityCounts[v.VulnerabilitySeverityLevel]++;
+    for (let i = 0, len = statsRows.length; i < len; i++) {
+        switch (statsRows[i].VulnerabilitySeverityLevel) {
+            case 'Critical': critical++; break;
+            case 'High': high++; break;
+            case 'Medium': medium++; break;
+            case 'Low': low++; break;
         }
-    });
+    }
 
-    document.getElementById('criticalCount').textContent = severityCounts['Critical'];
-    document.getElementById('highCount').textContent = severityCounts['High'];
-    document.getElementById('mediumCount').textContent = severityCounts['Medium'];
-    document.getElementById('lowCount').textContent = severityCounts['Low'];
+    const els = getStatElements();
+    els.critical.textContent = critical;
+    els.high.textContent = high;
+    els.medium.textContent = medium;
+    els.low.textContent = low;
 }
 
 /**
@@ -2081,8 +2232,14 @@ function generateDateRange(startDate, endDate) {
  * @param {string} dateStr - Date in YYYY-MM-DD format
  * @returns {string} Next day in YYYY-MM-DD format
  */
+const _nextDayCache = new Map();
 function nextDay(dateStr) {
-    return formatUtcDateAsYmd(addDaysToUtcDate(parseYmdDateAsUtc(dateStr), 1));
+    let result = _nextDayCache.get(dateStr);
+    if (result === undefined) {
+        result = formatUtcDateAsYmd(addDaysToUtcDate(parseYmdDateAsUtc(dateStr), 1));
+        _nextDayCache.set(dateStr, result);
+    }
+    return result;
 }
 
 function addDaysYmd(dateStr, dayCount) {
@@ -2152,8 +2309,8 @@ function getRemediationDate(v) {
 
 function isVulnerabilityActiveOnDate(v, dateStr) {
     if (!dateStr || dateStr === '-') return false;
-    const firstSeen = getFirstSeenDate(v);
-    const effectiveEnd = getEffectiveOpenEndDate(v);
+    const firstSeen = v._firstSeenDate;
+    const effectiveEnd = v._effectiveOpenEndDate;
     if (!firstSeen || !effectiveEnd) return false;
     return firstSeen <= dateStr && effectiveEnd >= dateStr;
 }
@@ -2178,14 +2335,17 @@ function applyDerivedVulnerabilityFields(rows) {
         const machineLastSeenDate = getMachineLastSeenDate(v);
         const latestActivityDate = getRowLatestActivityDate(v);
         const remediationEvidence = hasKnownPatchEvidence(v);
+        const firstSeenDate = getFirstSeenDate(v);
         const effectiveOpenEndDate = getEffectiveOpenEndDate(v);
-        const environmentFirstSeenDate = earliestEnvironmentFirstSeenByIssue.get(getEnvironmentIssueKey(v)) || getFirstSeenDate(v);
+        const environmentFirstSeenDate = earliestEnvironmentFirstSeenByIssue.get(getEnvironmentIssueKey(v)) || firstSeenDate;
 
+        v._firstSeenDate = firstSeenDate;
         v._machineLastSeenDate = machineLastSeenDate;
         v._latestActivityDate = latestActivityDate;
         v._hasPatchEvidence = remediationEvidence;
         v._effectiveOpenEndDate = effectiveOpenEndDate;
         v._remediationDate = remediationEvidence ? getLastSeenDate(v) : '';
+        v._remediationString = buildRemediationString(v);
         v._environmentFirstSeenDate = environmentFirstSeenDate;
         v.EnvironmentFirstSeenTimestamp = environmentFirstSeenDate;
     });
@@ -2403,93 +2563,94 @@ function renderChart() {
         return;
     }
 
-    const sortedDates = generateDateRange(startDate, endDate);
-    
-    const severityCounts = {
-        Critical: [],
-        High: [],
-        Medium: [],
-        Low: []
-    };
-    const totalCounts = [];
-    const deviceCounts = [];
-    
-    const candidates = filteredData;
-    
-    // Build start/end events for sweep-line algorithm
-    const events = new Map();
-    candidates.forEach(v => {
-        const sd = getFirstSeenDate(v);
-        let ed = nextDay(getEffectiveOpenEndDate(v));
-        
-        // Data validation: ensure end date is after start date
-        if (ed <= sd) {
-            ed = nextDay(sd);
-        }
-        
-        if (!events.has(sd)) events.set(sd, { starts: [], ends: [] });
-        events.get(sd).starts.push(v);
-        if (!events.has(ed)) events.set(ed, { starts: [], ends: [] });
-        events.get(ed).ends.push(v);
-    });
-    
-    // Running sweep state
-    let sweepTotal = 0;
-    const sweepSeverity = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-    const deviceActive = new Map(); // deviceName -> active vuln count
-    
-    const processStart = (v) => {
-        sweepTotal++;
-        const sev = v.VulnerabilitySeverityLevel;
-        if (sweepSeverity[sev] !== undefined) sweepSeverity[sev]++;
-        const deviceKey = getDeviceIdentityKey(v);
-        deviceActive.set(deviceKey, (deviceActive.get(deviceKey) || 0) + 1);
-    };
-    const processEnd = (v) => {
-        if (sweepTotal > 0) sweepTotal--;
-        const sev = v.VulnerabilitySeverityLevel;
-        if (sweepSeverity[sev] !== undefined && sweepSeverity[sev] > 0) sweepSeverity[sev]--;
-        const deviceKey = getDeviceIdentityKey(v);
-        const dc = deviceActive.get(deviceKey);
-        if (dc <= 1) deviceActive.delete(deviceKey);
-        else deviceActive.set(deviceKey, dc - 1);
-    };
-    
-    // Process events before the visible date range to establish initial state
-    const rangeStart = sortedDates[0];
-    const allEventDates = [...events.keys()].sort();
-    for (const eventDate of allEventDates) {
-        if (eventDate >= rangeStart) break;
-        const ev = events.get(eventDate);
-        ev.starts.forEach(processStart);
-        ev.ends.forEach(processEnd);
-    }
-    
-    // Sweep through visible dates
-    sortedDates.forEach(date => {
-        const ev = events.get(date);
-        if (ev) {
+    // Check chart data cache — reuse sweep-line result when filter state is unchanged
+    const cacheKey = filterState.key + '|' + mostRecentLastSeenDate;
+    let sortedDates, severityCounts, totalCounts, deviceCounts;
+
+    if (chartDataCacheKey === cacheKey && chartDataCache) {
+        sortedDates = chartDataCache.sortedDates;
+        severityCounts = chartDataCache.severityCounts;
+        totalCounts = chartDataCache.totalCounts;
+        deviceCounts = chartDataCache.deviceCounts;
+    } else {
+        sortedDates = generateDateRange(startDate, endDate);
+        severityCounts = { Critical: [], High: [], Medium: [], Low: [] };
+        totalCounts = [];
+        deviceCounts = [];
+        const candidates = filteredData;
+
+        const events = new Map();
+        candidates.forEach(v => {
+            const sd = v._firstSeenDate;
+            let ed = nextDay(v._effectiveOpenEndDate);
+            if (ed <= sd) { ed = nextDay(sd); }
+            if (!events.has(sd)) events.set(sd, { starts: [], ends: [] });
+            events.get(sd).starts.push(v);
+            if (!events.has(ed)) events.set(ed, { starts: [], ends: [] });
+            events.get(ed).ends.push(v);
+        });
+
+        let sweepTotal = 0;
+        const sweepSeverity = { Critical: 0, High: 0, Medium: 0, Low: 0 };
+        const deviceActive = new Map();
+        const processStart = (v) => {
+            sweepTotal++;
+            const sev = v.VulnerabilitySeverityLevel;
+            if (sweepSeverity[sev] !== undefined) sweepSeverity[sev]++;
+            const deviceKey = v.DeviceId || v.DeviceName;
+            deviceActive.set(deviceKey, (deviceActive.get(deviceKey) || 0) + 1);
+        };
+        const processEnd = (v) => {
+            if (sweepTotal > 0) sweepTotal--;
+            const sev = v.VulnerabilitySeverityLevel;
+            if (sweepSeverity[sev] !== undefined && sweepSeverity[sev] > 0) sweepSeverity[sev]--;
+            const deviceKey = v.DeviceId || v.DeviceName;
+            const dc = deviceActive.get(deviceKey);
+            if (dc <= 1) deviceActive.delete(deviceKey);
+            else deviceActive.set(deviceKey, dc - 1);
+        };
+
+        const rangeStart = sortedDates[0];
+        const allEventDates = [...events.keys()].sort();
+        for (const eventDate of allEventDates) {
+            if (eventDate >= rangeStart) break;
+            const ev = events.get(eventDate);
             ev.starts.forEach(processStart);
             ev.ends.forEach(processEnd);
         }
-        
-        totalCounts.push(sweepTotal);
-        deviceCounts.push(deviceActive.size);
-        severityCounts.Critical.push(sweepSeverity.Critical);
-        severityCounts.High.push(sweepSeverity.High);
-        severityCounts.Medium.push(sweepSeverity.Medium);
-        severityCounts.Low.push(sweepSeverity.Low);
-    });
-    
-    // Find the index where we transition from actual data to projected (dashed) data
-    const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
 
-    if (chartInstance) {
-        chartInstance.destroy();
+        sortedDates.forEach(date => {
+            const ev = events.get(date);
+            if (ev) {
+                ev.starts.forEach(processStart);
+                ev.ends.forEach(processEnd);
+            }
+            totalCounts.push(sweepTotal);
+            deviceCounts.push(deviceActive.size);
+            severityCounts.Critical.push(sweepSeverity.Critical);
+            severityCounts.High.push(sweepSeverity.High);
+            severityCounts.Medium.push(sweepSeverity.Medium);
+            severityCounts.Low.push(sweepSeverity.Low);
+        });
+
+        chartDataCache = { sortedDates, severityCounts, totalCounts, deviceCounts };
+        chartDataCacheKey = cacheKey;
     }
 
-    try {
-        chartInstance = new Chart(context, {
+    const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
+    const dataArrays = [severityCounts.Critical, severityCounts.High, severityCounts.Medium, severityCounts.Low, totalCounts, deviceCounts];
+
+    if (chartInstance && chartInstance.data.datasets.length === dataArrays.length) {
+        chartInstance.data.labels = sortedDates;
+        dataArrays.forEach((arr, idx) => {
+            chartInstance.data.datasets[idx].data = arr;
+            chartInstance.data.datasets[idx].segment = createSegmentStyle(cutoffIndex);
+        });
+        chartInstance.update('none');
+    } else {
+        if (chartInstance) chartInstance.destroy();
+        try {
+            chartInstance = new Chart(context, {
             type: 'line',
             data: {
                 labels: sortedDates,
@@ -2626,8 +2787,9 @@ function renderChart() {
                 }
             }
         });
-    } catch (error) {
-        console.error('Error creating vulnerability chart:', error);
+        } catch (error) {
+            console.error('Error creating vulnerability chart:', error);
+        }
     }
 }
 
@@ -2642,12 +2804,20 @@ function getRemediationTableData() {
     const remediationMap = {};
     const activeRows = getActiveRowsForCurrentSelection();
 
-    activeRows.forEach(v => {
-        const remediation = buildRemediationString(v);
-        const formatPart = (text) => {
-            if (!text) return 'Unknown';
-            return text.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
-        };
+    const formatCache = new Map();
+    const formatPart = (text) => {
+        if (!text) return 'Unknown';
+        let result = formatCache.get(text);
+        if (result === undefined) {
+            result = text.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()).join(' ');
+            formatCache.set(text, result);
+        }
+        return result;
+    };
+
+    for (let i = 0, len = activeRows.length; i < len; i++) {
+        const v = activeRows[i];
+        const remediation = v._remediationString || buildRemediationString(v);
         const vendor = formatPart(v.SoftwareVendor);
         const software = formatPart(v.SoftwareName);
         const key = `${vendor}|${software}|${remediation}`;
@@ -2667,19 +2837,20 @@ function getRemediationTableData() {
             };
         }
 
-        remediationMap[key].devices.add(getDeviceIdentityKey(v));
-        remediationMap[key].vulnerabilities.add(v.CveId);
+        const entry = remediationMap[key];
+        entry.devices.add(v.DeviceId || v.DeviceName);
+        entry.vulnerabilities.add(v.CveId);
 
         if (v.ExploitabilityLevel === 'ExploitIsVerified' || v.ExploitabilityLevel === 'ExploitIsPublic' || v.ExploitabilityLevel === 'ExploitIsInKit') {
-            remediationMap[key].exploits.add(v.CveId);
+            entry.exploits.add(v.CveId);
         }
 
         if (v.ExploitabilityLevel === 'ExploitIsInKit') {
-            remediationMap[key].kits.add(v.CveId);
+            entry.kits.add(v.CveId);
         }
 
-        remediationMap[key].details.push(v);
-    });
+        entry.details.push(v);
+    }
 
     cache.remediationTableData = Object.values(remediationMap)
         .sort((a, b) => b.vulnerabilities.size - a.vulnerabilities.size);
@@ -2696,7 +2867,7 @@ function getRemediationDetailsData() {
 
     remediationRows.forEach(v => {
         const lastSeenDate = v._remediationDate;
-        const remediation = buildRemediationString(v);
+        const remediation = v._remediationString || buildRemediationString(v);
         const key = `${lastSeenDate}|${remediation}`;
 
         if (!remediationByDate[key]) {
@@ -2729,7 +2900,7 @@ function getImpactAnalysisData() {
     const remediationMap = {};
     const activeRows = getActiveRowsForCurrentSelection();
     activeRows.forEach(v => {
-        const remediation = buildRemediationString(v);
+        const remediation = v._remediationString || buildRemediationString(v);
 
         if (!remediationMap[remediation]) {
             remediationMap[remediation] = {
@@ -2987,13 +3158,19 @@ function renderRemediationChart() {
     
     // Find the index where we transition from actual data to projected (dashed) data
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
-    
-    if (remediationChartInstance) {
-        remediationChartInstance.destroy();
-    }
-    
-    try {
-        remediationChartInstance = new Chart(context, {
+    const remDataArrays = [severityCounts.Critical, severityCounts.High, severityCounts.Medium, severityCounts.Low, totalRemediationCounts, deviceCounts];
+
+    if (remediationChartInstance && remediationChartInstance.data.datasets.length === remDataArrays.length) {
+        remediationChartInstance.data.labels = sortedDates;
+        remDataArrays.forEach((arr, idx) => {
+            remediationChartInstance.data.datasets[idx].data = arr;
+            remediationChartInstance.data.datasets[idx].segment = createSegmentStyle(cutoffIndex);
+        });
+        remediationChartInstance.update('none');
+    } else {
+        if (remediationChartInstance) remediationChartInstance.destroy();
+        try {
+            remediationChartInstance = new Chart(context, {
             type: 'line',
             data: {
                 labels: sortedDates,
@@ -3120,8 +3297,9 @@ function renderRemediationChart() {
                 }
             }
         });
-    } catch (error) {
-        console.error('Error creating remediation chart:', error);
+        } catch (error) {
+            console.error('Error creating remediation chart:', error);
+        }
     }
 }
 
@@ -3298,8 +3476,8 @@ function renderImpactChart() {
     
     filteredData.forEach(v => {
         const isTop25 = top25VulnIds.has(v._index);
-        const sd = getFirstSeenDate(v);
-        let ed = nextDay(getEffectiveOpenEndDate(v));
+        const sd = v._firstSeenDate;
+        let ed = nextDay(v._effectiveOpenEndDate);
         
         // Data validation: ensure end date is after start date
         if (ed <= sd) {
@@ -3370,13 +3548,22 @@ function renderImpactChart() {
     
     // Find the index where we transition from actual data to projected (dashed) data
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
-    
-    if (impactChartInstance) {
-        impactChartInstance.destroy();
-    }
-    
-    try {
-        impactChartInstance = new Chart(context, {
+    const impactDataArrays = [
+        currentSeverityCounts.Critical, currentSeverityCounts.High, currentSeverityCounts.Medium, currentSeverityCounts.Low, currentTotalCounts,
+        projectedSeverityCounts.Critical, projectedSeverityCounts.High, projectedSeverityCounts.Medium, projectedSeverityCounts.Low, projectedTotalCounts
+    ];
+
+    if (impactChartInstance && impactChartInstance.data.datasets.length === impactDataArrays.length) {
+        impactChartInstance.data.labels = sortedDates;
+        impactDataArrays.forEach((arr, idx) => {
+            impactChartInstance.data.datasets[idx].data = arr;
+            impactChartInstance.data.datasets[idx].segment = createSegmentStyle(cutoffIndex);
+        });
+        impactChartInstance.update('none');
+    } else {
+        if (impactChartInstance) impactChartInstance.destroy();
+        try {
+            impactChartInstance = new Chart(context, {
             type: 'line',
             data: {
                 labels: sortedDates,
@@ -3543,8 +3730,9 @@ function renderImpactChart() {
                 }
             }
         });
-    } catch (error) {
-        console.error('Error creating impact chart:', error);
+        } catch (error) {
+            console.error('Error creating impact chart:', error);
+        }
     }
     
 }
@@ -5904,6 +6092,21 @@ async function exportTableBasedReportToPdf(selectedReport, reportName) {
 async function exportToPDF() {
     const button = document.querySelector('.export-pdf-btn');
     button.disabled = true;
+
+    // Create progress bar
+    const progressDiv = document.createElement('div');
+    progressDiv.className = 'pdf-export-progress';
+    progressDiv.innerHTML = '<div class="pdf-progress-container"><div class="pdf-progress-fill" style="width: 0%"></div></div><div class="pdf-progress-text">Loading libraries... 0%</div>';
+    document.body.appendChild(progressDiv);
+
+    const updateProgress = (percent, text) => {
+        const fill = progressDiv.querySelector('.pdf-progress-fill');
+        const label = progressDiv.querySelector('.pdf-progress-text');
+        if (fill) fill.style.width = Math.max(0, Math.min(100, percent)) + '%';
+        if (label) label.textContent = text + ' ' + Math.round(percent) + '%';
+    };
+
+    updateProgress(5, 'Loading libraries...');
     button.textContent = '📄 Loading libraries...';
     setDashboardStatus('Preparing PDF export...');
     
@@ -5914,18 +6117,23 @@ async function exportToPDF() {
         setDashboardStatus('Failed to load PDF export libraries. Please try again from a hosted dashboard or retry the export.', 'error');
         button.disabled = false;
         button.textContent = '📄 Export to PDF';
+        progressDiv.remove();
         return;
     }
     
+    updateProgress(20, 'Libraries loaded.');
+
     const selector = document.getElementById('reportSelector');
     const selectedReport = selector.value;
     const reportName = selector.options[selector.selectedIndex].text;
     
+    updateProgress(25, 'Expanding data...');
     button.textContent = '📄 Expanding data...';
     
     const wasExpanded = expandReportForPdf(selectedReport);
     await new Promise(resolve => setTimeout(resolve, 100));
     
+    updateProgress(30, 'Generating PDF...');
     button.textContent = '📄 Generating PDF...';
     document.body.classList.add('pdf-export-active');
     
@@ -5939,6 +6147,8 @@ async function exportToPDF() {
         } else {
             docDefinition = await exportTableBasedReportToPdf(selectedReport, reportName);
         }
+        
+        updateProgress(70, 'Adding filters...');
         
         // Add filter information  
         const startDate = document.getElementById('filterStartDate').value;
@@ -6039,8 +6249,11 @@ async function exportToPDF() {
         
         docDefinition.content.push(...filterContent);
         
+        updateProgress(90, 'Creating PDF...');
         pdfMake.createPdf(docDefinition).download(fileName);
+        updateProgress(100, 'Complete!');
         clearDashboardStatus();
+        setTimeout(() => { if (progressDiv.parentNode) progressDiv.remove(); }, 1500);
     } catch (err) {
         console.error('PDF generation failed:', err);
         setDashboardStatus('Failed to generate PDF: ' + err.message, 'error');
@@ -6049,6 +6262,7 @@ async function exportToPDF() {
         restoreReportState(selectedReport, wasExpanded);
         button.disabled = false;
         button.textContent = '📄 Export to PDF';
+        setTimeout(() => { if (progressDiv.parentNode) progressDiv.remove(); }, 3000);
     }
 }
 
