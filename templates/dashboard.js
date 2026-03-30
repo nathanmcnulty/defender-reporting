@@ -145,6 +145,8 @@ const TABLE_PAGE_SIZE = 100;
 const CARD_PAGE_SIZE = 20;
 const CARD_RENDER_BATCH_SIZE = 10;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
+let previousNonDateFilterKey = null;
+let sortedByFirstSeen = null;
 const REPORT_IDS = [
     'active-vulnerabilities',
     'remediation-activity',
@@ -340,6 +342,34 @@ function buildFilterStateKey(state) {
         state.severities.join('\u001f'),
         state.osPlatforms.join('\u001f')
     ].join('\u001e');
+}
+
+function buildNonDateFilterKey(state) {
+    return [
+        state.deviceNames.join('\u001f'),
+        state.rbacGroups.join('\u001f'),
+        state.deviceTags.join('\u001f'),
+        state.severities.join('\u001f'),
+        state.osPlatforms.join('\u001f')
+    ].join('\u001e');
+}
+
+function buildSortedFirstSeenIndex() {
+    if (!vulnerabilityData || vulnerabilityData.length === 0) return;
+    sortedByFirstSeen = vulnerabilityData
+        .map((v, i) => ({ i, fs: getFirstSeenDate(v) }))
+        .sort((a, b) => (a.fs < b.fs ? -1 : a.fs > b.fs ? 1 : 0));
+}
+
+function binarySearchFirstSeen(targetDate) {
+    if (!sortedByFirstSeen) return 0;
+    let lo = 0, hi = sortedByFirstSeen.length;
+    while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (sortedByFirstSeen[mid].fs < targetDate) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
 }
 
 function syncFilterStateFromDom() {
@@ -1205,6 +1235,7 @@ async function init() {
     
     logDebug('Initializing dashboard with', vulnerabilityData.length, 'vulnerabilities');
     buildDeviceFilterCatalog();
+    buildSortedFirstSeenIndex();
     populateFilters();
     updateDataQualitySummary();
     attachEventListeners();
@@ -1953,11 +1984,18 @@ function matchesFilterState(v, state = filterState) {
 }
 
 /**
- * Apply all filters to the vulnerability data
+ * Apply all filters to the vulnerability data.
+ * Skips cascading filter rebuild when only dates changed.
+ * Uses requestAnimationFrame to yield to the browser before rendering.
  */
 function applyFilters() {
     syncFilterStateFromDom();
-    refreshCascadingFilters();
+    const currentNonDateKey = buildNonDateFilterKey(filterState);
+    const dateOnlyChange = previousNonDateFilterKey !== null && currentNonDateKey === previousNonDateFilterKey;
+    if (!dateOnlyChange) {
+        refreshCascadingFilters();
+    }
+    previousNonDateFilterKey = currentNonDateKey;
 
     if (!filterState.hasDeviceNames || !filterState.hasRbacGroups || !filterState.hasDeviceTags || !filterState.hasSeverities || !filterState.hasOsPlatforms) {
         filteredData = [];
@@ -1973,7 +2011,7 @@ function applyFilters() {
     invalidateAggregateCache();
     updateStats();
     markAllReportsDirty();
-    renderActiveReport(true);
+    requestAnimationFrame(() => renderActiveReport(true));
 }
 
 // =============================================================================
@@ -2561,13 +2599,19 @@ function renderChart() {
     }
 
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
+    const dataArrays = [severityCounts.Critical, severityCounts.High, severityCounts.Medium, severityCounts.Low, totalCounts, deviceCounts];
 
-    if (chartInstance) {
-        chartInstance.destroy();
-    }
-
-    try {
-        chartInstance = new Chart(context, {
+    if (chartInstance && chartInstance.data.datasets.length === dataArrays.length) {
+        chartInstance.data.labels = sortedDates;
+        dataArrays.forEach((arr, idx) => {
+            chartInstance.data.datasets[idx].data = arr;
+            chartInstance.data.datasets[idx].segment = createSegmentStyle(cutoffIndex);
+        });
+        chartInstance.update('none');
+    } else {
+        if (chartInstance) chartInstance.destroy();
+        try {
+            chartInstance = new Chart(context, {
             type: 'line',
             data: {
                 labels: sortedDates,
@@ -2704,8 +2748,9 @@ function renderChart() {
                 }
             }
         });
-    } catch (error) {
-        console.error('Error creating vulnerability chart:', error);
+        } catch (error) {
+            console.error('Error creating vulnerability chart:', error);
+        }
     }
 }
 
@@ -3065,13 +3110,19 @@ function renderRemediationChart() {
     
     // Find the index where we transition from actual data to projected (dashed) data
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
-    
-    if (remediationChartInstance) {
-        remediationChartInstance.destroy();
-    }
-    
-    try {
-        remediationChartInstance = new Chart(context, {
+    const remDataArrays = [severityCounts.Critical, severityCounts.High, severityCounts.Medium, severityCounts.Low, totalRemediationCounts, deviceCounts];
+
+    if (remediationChartInstance && remediationChartInstance.data.datasets.length === remDataArrays.length) {
+        remediationChartInstance.data.labels = sortedDates;
+        remDataArrays.forEach((arr, idx) => {
+            remediationChartInstance.data.datasets[idx].data = arr;
+            remediationChartInstance.data.datasets[idx].segment = createSegmentStyle(cutoffIndex);
+        });
+        remediationChartInstance.update('none');
+    } else {
+        if (remediationChartInstance) remediationChartInstance.destroy();
+        try {
+            remediationChartInstance = new Chart(context, {
             type: 'line',
             data: {
                 labels: sortedDates,
@@ -3198,8 +3249,9 @@ function renderRemediationChart() {
                 }
             }
         });
-    } catch (error) {
-        console.error('Error creating remediation chart:', error);
+        } catch (error) {
+            console.error('Error creating remediation chart:', error);
+        }
     }
 }
 
@@ -3448,13 +3500,22 @@ function renderImpactChart() {
     
     // Find the index where we transition from actual data to projected (dashed) data
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
-    
-    if (impactChartInstance) {
-        impactChartInstance.destroy();
-    }
-    
-    try {
-        impactChartInstance = new Chart(context, {
+    const impactDataArrays = [
+        currentSeverityCounts.Critical, currentSeverityCounts.High, currentSeverityCounts.Medium, currentSeverityCounts.Low, currentTotalCounts,
+        projectedSeverityCounts.Critical, projectedSeverityCounts.High, projectedSeverityCounts.Medium, projectedSeverityCounts.Low, projectedTotalCounts
+    ];
+
+    if (impactChartInstance && impactChartInstance.data.datasets.length === impactDataArrays.length) {
+        impactChartInstance.data.labels = sortedDates;
+        impactDataArrays.forEach((arr, idx) => {
+            impactChartInstance.data.datasets[idx].data = arr;
+            impactChartInstance.data.datasets[idx].segment = createSegmentStyle(cutoffIndex);
+        });
+        impactChartInstance.update('none');
+    } else {
+        if (impactChartInstance) impactChartInstance.destroy();
+        try {
+            impactChartInstance = new Chart(context, {
             type: 'line',
             data: {
                 labels: sortedDates,
@@ -3621,8 +3682,9 @@ function renderImpactChart() {
                 }
             }
         });
-    } catch (error) {
-        console.error('Error creating impact chart:', error);
+        } catch (error) {
+            console.error('Error creating impact chart:', error);
+        }
     }
     
 }
