@@ -146,7 +146,6 @@ const TABLE_PAGE_SIZE = 100;
 const CARD_PAGE_SIZE = 20;
 const CARD_RENDER_BATCH_SIZE = 10;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
-let previousNonDateFilterKey = null;
 let sortedByFirstSeen = null;
 const REPORT_IDS = [
     'active-vulnerabilities',
@@ -337,16 +336,6 @@ function buildFilterStateKey(state) {
     return [
         state.startDate,
         state.endDate,
-        state.deviceNames.join('\u001f'),
-        state.rbacGroups.join('\u001f'),
-        state.deviceTags.join('\u001f'),
-        state.severities.join('\u001f'),
-        state.osPlatforms.join('\u001f')
-    ].join('\u001e');
-}
-
-function buildNonDateFilterKey(state) {
-    return [
         state.deviceNames.join('\u001f'),
         state.rbacGroups.join('\u001f'),
         state.deviceTags.join('\u001f'),
@@ -822,7 +811,7 @@ async function denormalizeInWorker(compressedBytes) {
             };
 
             if (compressedBytes) {
-                worker.postMessage({ compressedBytes }, [compressedBytes.buffer]);
+                worker.postMessage({ compressedBytes });
             } else {
                 worker.postMessage({ lookups, rawVulns });
             }
@@ -1985,17 +1974,12 @@ function matchesFilterState(v, state = filterState) {
 
 /**
  * Apply all filters to the vulnerability data.
- * Skips cascading filter rebuild when only dates changed.
+ * Keeps cascading counts/options aligned with the current full filter state.
  * Uses requestAnimationFrame to yield to the browser before rendering.
  */
 function applyFilters() {
     syncFilterStateFromDom();
-    const currentNonDateKey = buildNonDateFilterKey(filterState);
-    const dateOnlyChange = previousNonDateFilterKey !== null && currentNonDateKey === previousNonDateFilterKey;
-    if (!dateOnlyChange) {
-        refreshCascadingFilters();
-    }
-    previousNonDateFilterKey = currentNonDateKey;
+    refreshCascadingFilters();
 
     if (!filterState.hasDeviceNames || !filterState.hasRbacGroups || !filterState.hasDeviceTags || !filterState.hasSeverities || !filterState.hasOsPlatforms) {
         filteredData = [];
@@ -2021,7 +2005,7 @@ function applyFilters() {
     for (let i = 0; i < len; i++) {
         const v = data[i];
         if (hasDeviceName && !fs.deviceNameSet.has(v.DeviceId || v.DeviceName)) continue;
-        if (hasRbacGroup && !fs.rbacGroupSet.has(v.RbacGroupName)) continue;
+        if (hasRbacGroup && !fs.rbacGroupSet.has(normalizeGroupName(v.RbacGroupName))) continue;
         if (hasDeviceTag) {
             const tags = v.MachineTags;
             if (tags && tags.length > 0) {

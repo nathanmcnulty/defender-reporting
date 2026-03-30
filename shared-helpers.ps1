@@ -8192,8 +8192,8 @@ function Write-MergedVulnObservedWindowRows {
             $sourceRowCount++
 
             $identityKey = Get-VulnObservedWindowIdentityKey -Row $row
-            $hash = [uint32]([System.Math]::Abs($identityKey.GetHashCode()))
-            $bucket = [int]($hash % $PartitionCount)
+            $hash = [uint32]$identityKey.GetHashCode()
+            $bucket = [int]($hash % [uint32]$PartitionCount)
 
             if ($null -eq $partitionWriters[$bucket]) {
                 $partPath = Join-Path $partitionDir "p$bucket.ndjson"
