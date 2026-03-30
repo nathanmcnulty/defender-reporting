@@ -36,5 +36,5 @@ for ($index = 0; $index -lt $sourceFiles.Count; $index++) {
     }
 }
 
-[System.IO.File]::WriteAllText($outputPath, $combined.ToString(), [System.Text.UTF8Encoding]::new($false))
+[System.IO.File]::WriteAllText($outputPath, $combined.ToString(), [System.Text.UTF8Encoding]::new($true))
 Write-Host "Generated shared helpers: $outputPath" -ForegroundColor Green

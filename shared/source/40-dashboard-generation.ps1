@@ -2885,31 +2885,88 @@ function Write-MergedVulnObservedWindowRows {
         [ref]$InputRowCount = ([ref]0),
 
         [Parameter(Mandatory = $false)]
-        [ref]$OutputRowCount = ([ref]0)
+        [ref]$OutputRowCount = ([ref]0),
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(4, 256)]
+        [int]$PartitionCount = 32
     )
 
-    $rowsByIdentity = @{}
+    # Disk-partitioned merge: scatter rows to temp partition files by identity
+    # key hash, then process each partition independently. Peak memory is
+    # ~(totalRows / PartitionCount) instead of totalRows.
+    $partitionDir = Join-Path ([System.IO.Path]::GetTempPath()) ('owmerge-' + [System.Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $partitionDir -Force)
+
     $sourceRowCount = 0
     $mergedRowCount = 0
+    $partitionWriters = [System.IO.StreamWriter[]]::new($PartitionCount)
 
-    foreach ($row in (& $Source)) {
-        if ($null -eq $row) { continue }
+    try {
+        # Pass 1 — scatter: stream source rows to partition files by identity hash
+        foreach ($row in (& $Source)) {
+            if ($null -eq $row) { continue }
+            $sourceRowCount++
 
-        $sourceRowCount++
-        $identityKey = Get-VulnObservedWindowIdentityKey -Row $row
-        if (-not $rowsByIdentity.ContainsKey($identityKey)) {
-            $rowsByIdentity[$identityKey] = [System.Collections.Generic.List[object]]::new()
+            $identityKey = Get-VulnObservedWindowIdentityKey -Row $row
+            $hash = [uint32]([System.Math]::Abs($identityKey.GetHashCode()))
+            $bucket = [int]($hash % $PartitionCount)
+
+            if ($null -eq $partitionWriters[$bucket]) {
+                $partPath = Join-Path $partitionDir "p$bucket.ndjson"
+                $partitionWriters[$bucket] = [System.IO.StreamWriter]::new(
+                    [System.IO.File]::Create($partPath),
+                    [System.Text.UTF8Encoding]::new($false))
+            }
+            $partitionWriters[$bucket].WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
         }
-        $rowsByIdentity[$identityKey].Add($row)
+
+        # Flush and close all partition writers
+        for ($i = 0; $i -lt $PartitionCount; $i++) {
+            if ($null -ne $partitionWriters[$i]) {
+                $partitionWriters[$i].Dispose()
+                $partitionWriters[$i] = $null
+            }
+        }
+
+        # Pass 2 — gather: process each partition independently
+        for ($bucket = 0; $bucket -lt $PartitionCount; $bucket++) {
+            $partPath = Join-Path $partitionDir "p$bucket.ndjson"
+            if (-not (Test-Path -LiteralPath $partPath -PathType Leaf)) { continue }
+
+            $rowsByIdentity = @{}
+            foreach ($line in [System.IO.File]::ReadLines($partPath, [System.Text.UTF8Encoding]::new($false))) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $row = $line | ConvertFrom-Json
+                $identityKey = Get-VulnObservedWindowIdentityKey -Row $row
+                if (-not $rowsByIdentity.ContainsKey($identityKey)) {
+                    $rowsByIdentity[$identityKey] = [System.Collections.Generic.List[object]]::new()
+                }
+                $rowsByIdentity[$identityKey].Add($row)
+            }
+
+            foreach ($identityKey in @($rowsByIdentity.Keys | Sort-Object)) {
+                foreach ($mergedRow in @(Merge-VulnObservedWindowRows -Rows @($rowsByIdentity[$identityKey]) -AllowedGapDays $AllowedGapDays)) {
+                    $mergedRowCount++
+                    Write-Output $mergedRow
+                }
+            }
+
+            # Free partition memory before moving to next
+            $rowsByIdentity.Clear()
+            $rowsByIdentity = $null
+            Remove-Item -LiteralPath $partPath -Force -ErrorAction SilentlyContinue
+        }
     }
-
-    foreach ($identityKey in @($rowsByIdentity.Keys | Sort-Object)) {
-        foreach ($mergedRow in @(Merge-VulnObservedWindowRows -Rows @($rowsByIdentity[$identityKey]) -AllowedGapDays $AllowedGapDays)) {
-            $mergedRowCount++
-            Write-Output $mergedRow
+    finally {
+        for ($i = 0; $i -lt $PartitionCount; $i++) {
+            if ($null -ne $partitionWriters[$i]) {
+                $partitionWriters[$i].Dispose()
+            }
         }
-
-        [void]$rowsByIdentity.Remove($identityKey)
+        if (Test-Path -LiteralPath $partitionDir) {
+            Remove-Item -Recurse -Force -LiteralPath $partitionDir -ErrorAction SilentlyContinue
+        }
     }
 
     $InputRowCount.Value = $sourceRowCount
