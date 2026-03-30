@@ -754,26 +754,26 @@ self.onmessage = function(e) {
  * @param {Uint8Array} [compressedBytes] - Optional compressed payload bytes
  * @returns {Promise<{rows: Array, lookups?: Object, rawVulns?: Object}>}
  */
-function denormalizeInWorker(compressedBytes) {
+async function denormalizeInWorker(compressedBytes) {
+    // When decompressing in Worker, include pako source in the blob
+    let workerParts = [];
+    if (compressedBytes) {
+        const pakoSource = await getPakoSource();
+        if (pakoSource) {
+            workerParts.push(pakoSource + '\n');
+        } else {
+            // pako source unavailable for Worker — fall back to main-thread decompression
+            const decompressed = pako.inflate(compressedBytes, { to: 'string' });
+            const data = JSON.parse(decompressed);
+            lookups = data.lookups;
+            rawVulns = data.vulns;
+            compressedBytes = null;
+        }
+    }
+    workerParts.push(buildWorkerSource());
+
     return new Promise((resolve, reject) => {
         try {
-            // When decompressing in Worker, include pako source in the blob
-            let workerParts = [];
-            if (compressedBytes) {
-                const pakoSource = getPakoSource();
-                if (pakoSource) {
-                    workerParts.push(pakoSource + '\n');
-                } else {
-                    // pako source unavailable for Worker — fall back to main-thread decompression
-                    const decompressed = pako.inflate(compressedBytes, { to: 'string' });
-                    const data = JSON.parse(decompressed);
-                    lookups = data.lookups;
-                    rawVulns = data.vulns;
-                    compressedBytes = null;
-                }
-            }
-            workerParts.push(buildWorkerSource());
-
             const blob = new Blob(workerParts, { type: 'application/javascript' });
             const url = URL.createObjectURL(blob);
             const worker = new Worker(url);
@@ -802,13 +802,24 @@ function denormalizeInWorker(compressedBytes) {
 
 /**
  * Get pako library source code for injection into a Worker.
- * Returns the source string, or null if unavailable.
+ * Checks external scripts first (split-assets mode), then inline (embedded mode).
+ * Inline match requires 10KB+ to avoid false positives from small helper scripts.
+ * @returns {Promise<string|null>}
  */
-function getPakoSource() {
-    // Try to find pako's script element in the page
+async function getPakoSource() {
     const scripts = document.querySelectorAll('script');
+    // Try fetching external pako script (split-assets / hosted mode)
     for (const script of scripts) {
-        if (script.textContent && script.textContent.indexOf('pako') !== -1 && script.textContent.indexOf('inflate') !== -1 && !script.id) {
+        if (script.src && script.src.indexOf('pako') !== -1) {
+            try {
+                const response = await fetch(script.src);
+                if (response.ok) return await response.text();
+            } catch (e) { /* ignore — will try inline or fall back */ }
+        }
+    }
+    // Try inline script (embedded mode) — require 10KB+ to skip small helper scripts
+    for (const script of scripts) {
+        if (script.textContent && script.textContent.length > 10000 && script.textContent.indexOf('pako') !== -1 && script.textContent.indexOf('inflate') !== -1 && !script.id) {
             return script.textContent;
         }
     }
@@ -1140,9 +1151,9 @@ async function denormalizeWithCaching() {
     }
 
     // 2. Try Web Worker (with optional decompression)
+    const compBytes = pendingCompressedBytes;
+    pendingCompressedBytes = null;
     try {
-        const compBytes = pendingCompressedBytes;
-        pendingCompressedBytes = null;
         const label = compBytes ? 'decompressing + denormalizing' : 'denormalizing';
         logDebug(label, compBytes ? '(compressed bytes)' : getRawVulnCount(), 'records via Web Worker...');
         const startTime = performance.now();
@@ -1154,10 +1165,9 @@ async function denormalizeWithCaching() {
         logDebug('Worker complete in', elapsed, 'ms');
     } catch (err) {
         console.warn('Web Worker failed, falling back to main thread:', err);
-        // If compressed bytes are still pending, decompress on main thread
-        if (pendingCompressedBytes) {
-            const decompressed = pako.inflate(pendingCompressedBytes, { to: 'string' });
-            pendingCompressedBytes = null;
+        // Decompress on main thread if we have compressed bytes and lookups weren't set
+        if (compBytes && !lookups) {
+            const decompressed = pako.inflate(compBytes, { to: 'string' });
             const data = JSON.parse(decompressed);
             lookups = data.lookups;
             rawVulns = data.vulns;
