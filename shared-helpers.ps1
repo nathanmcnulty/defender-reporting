@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 # Canonical shared helper surface for the Defender reporting scripts.
 #
@@ -86,6 +86,154 @@ function Invoke-FullGarbageCollection {
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
     [System.GC]::Collect()
+}
+
+function Invoke-RestMethodWithRetry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Method = 'Get',
+
+        [Parameter(Mandatory = $false)]
+        [hashtable]$Headers,
+
+        [Parameter(Mandatory = $false)]
+        [object]$Body,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ContentType,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = 3,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InitialDelayMs = 1000,
+
+        [Parameter(Mandatory = $false)]
+        [double]$BackoffMultiplier = 2.0
+    )
+
+    $attempt = 0
+    $delay = $InitialDelayMs
+
+    while ($true) {
+        try {
+            $attempt++
+            $restParams = @{ Uri = $Uri; Method = $Method; ErrorAction = 'Stop' }
+            if ($Headers) { $restParams['Headers'] = $Headers }
+            if ($Body) { $restParams['Body'] = $Body }
+            if ($ContentType) { $restParams['ContentType'] = $ContentType }
+
+            return Invoke-RestMethod @restParams
+        }
+        catch {
+            $statusCode = $null
+            if ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+            elseif ($_.Exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+
+            $retryable = $statusCode -in @(429, 500, 502, 503, 504)
+            if (-not $retryable -or $attempt -ge $MaxRetries) {
+                throw
+            }
+
+            # Respect Retry-After header for 429 responses
+            $retryAfter = $null
+            try {
+                if ($_.Exception.Response -and $_.Exception.Response.Headers) {
+                    $retryAfter = $_.Exception.Response.Headers['Retry-After']
+                }
+            }
+            catch {
+                Write-Verbose "Could not read Retry-After header: $_"
+            }
+
+            $waitMs = if ($retryAfter -and [int]::TryParse($retryAfter, [ref]$null)) {
+                [int]$retryAfter * 1000
+            }
+            else {
+                $delay
+            }
+
+            Write-Warning "API call failed (attempt $attempt/$MaxRetries, HTTP $statusCode): $($_.Exception.Message). Retrying in $([math]::Round($waitMs / 1000, 1))s..."
+            Start-Sleep -Milliseconds $waitMs
+            $delay = [int]($delay * $BackoffMultiplier)
+        }
+    }
+}
+
+function Invoke-WebRequestWithRetry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter(Mandatory = $false)]
+        [string]$OutFile,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = 3,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InitialDelayMs = 1000,
+
+        [Parameter(Mandatory = $false)]
+        [double]$BackoffMultiplier = 2.0
+    )
+
+    $attempt = 0
+    $delay = $InitialDelayMs
+
+    while ($true) {
+        try {
+            $attempt++
+            $webParams = @{ Uri = $Uri; ErrorAction = 'Stop' }
+            if ($OutFile) { $webParams['OutFile'] = $OutFile }
+
+            return Invoke-WebRequest @webParams
+        }
+        catch {
+            $statusCode = $null
+            if ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+            elseif ($_.Exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+
+            $retryable = $statusCode -in @(429, 500, 502, 503, 504)
+            if (-not $retryable -or $attempt -ge $MaxRetries) {
+                throw
+            }
+
+            $retryAfter = $null
+            try {
+                if ($_.Exception.Response -and $_.Exception.Response.Headers) {
+                    $retryAfter = $_.Exception.Response.Headers['Retry-After']
+                }
+            }
+            catch {
+                Write-Verbose "Could not read Retry-After header: $_"
+            }
+
+            $waitMs = if ($retryAfter -and [int]::TryParse($retryAfter, [ref]$null)) {
+                [int]$retryAfter * 1000
+            }
+            else {
+                $delay
+            }
+
+            Write-Warning "Download failed (attempt $attempt/$MaxRetries, HTTP $statusCode): $($_.Exception.Message). Retrying in $([math]::Round($waitMs / 1000, 1))s..."
+            Start-Sleep -Milliseconds $waitMs
+            $delay = [int]($delay * $BackoffMultiplier)
+        }
+    }
 }
 
 function Get-StoreTransactionJournalPath {
@@ -2888,6 +3036,7 @@ function Test-VulnStoreRequiresCanonicalRepair {
         [string]$BasePath,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [object[]]$HistoryDocuments
     )
 
@@ -2986,6 +3135,10 @@ function Publish-VulnStoreFromLegacySnapshot {
         [Parameter(Mandatory = $false)]
         [switch]$RemoveLegacyFiles
     )
+
+    if ([datetime]::UtcNow -ge [datetime]$Script:LegacyVulnMigrationRemovalDate) {
+        Write-Warning "Legacy vulnerability migration is past its scheduled removal date ($Script:LegacyVulnMigrationRemovalDate). This code path should be removed."
+    }
 
     $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath -LegacyFilePaths $LegacyFilePaths)
 
@@ -4833,7 +4986,7 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
         [string]$ExportUrl
     )
 
-    $response = Invoke-RestMethod -Uri $ExportUrl -Headers $Headers -Method Get -ErrorAction Stop
+    $response = Invoke-RestMethodWithRetry -Uri $ExportUrl -Headers $Headers -Method Get
     $exportFiles = @($response.exportFiles)
     if ($exportFiles.Count -eq 0) {
         throw 'Bulk vulnerability export returned no files.'
@@ -4854,7 +5007,7 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
         }
 
         $outputFile = Join-Path $OutputPath "VulnExport_${groupId}_${date}.json.gz"
-        Invoke-WebRequest -Uri $fileUrl -OutFile $outputFile
+        Invoke-WebRequestWithRetry -Uri $fileUrl -OutFile $outputFile
         $downloadedFiles.Add($outputFile)
     }
 
@@ -4885,7 +5038,7 @@ DeviceTvmSoftwareVulnerabilities
 "@
 
     $body = @{ Query = $query } | ConvertTo-Json
-    $response = Invoke-RestMethod -Uri $QueryUrl -Headers $Headers -Method Post -Body $body -ErrorAction Stop
+    $response = Invoke-RestMethodWithRetry -Uri $QueryUrl -Headers $Headers -Method Post -Body $body
 
     if (-not $response.Results) {
         return [PSCustomObject]@{
@@ -4955,7 +5108,7 @@ function Get-MdeMachineSnapshotMap {
 
     do {
         $pageCount++
-        $response = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get -ErrorAction Stop
+        $response = Invoke-RestMethodWithRetry -Uri $url -Headers $Headers -Method Get
 
         if ($response.value) {
             foreach ($machine in $response.value) {
@@ -5129,40 +5282,6 @@ function Invoke-MdeMachineStoreRefresh {
 }
 
 # Shared generator/runbook helpers used for dashboard normalization and HTML assembly.
-
-function Get-JSLibrary {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Url,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Name,
-
-        [Parameter(Mandatory = $false)]
-        [bool]$Critical = $false
-    )
-
-    Write-Information "Downloading $Name library..." -InformationAction Continue
-
-    try {
-        $response = Invoke-WebRequest -Uri $Url -TimeoutSec 30
-        Write-Information "  $Name downloaded successfully" -InformationAction Continue
-        return $response.Content
-    }
-    catch {
-        $errorMessage = "Failed to download $Name from $Url`: $_"
-        if ($Critical) {
-            Write-Error $errorMessage
-            throw
-        }
-
-        Write-Warning $errorMessage
-        Write-Warning "Using fallback for $Name (PDF export may not work)"
-        return "// $Name failed to load - functionality may be limited"
-    }
-}
 
 function Save-JSLibraryFile {
     [CmdletBinding()]
@@ -7044,6 +7163,9 @@ function Get-NormalizationContext {
             batchTitles = Get-CaseSensitiveIndexMap
         }
         DateValueCache = @{}
+        Machines = @{}
+        AdvancedHuntingData = @{}
+        HasNoTags = $false
     }
 }
 
@@ -7173,6 +7295,197 @@ function Get-JsonElementPropertyValue {
     return Convert-JsonElementToScalarValue -Element $property
 }
 
+function Add-NormalizedDevice {
+    param(
+        $DeviceId,
+        $DeviceName,
+        $GroupName,
+        $OsPlatform,
+        $OsVersion,
+        $MachineTags,
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Context
+    )
+
+    $lookups = $Context.Lookups
+    $deviceIndex = $Context.Indexes.devices
+    $groupIndex = $Context.Indexes.groups
+    $platformIndex = $Context.Indexes.platforms
+    $tagIndex = $Context.Indexes.tags
+
+    $deviceKey = if (-not [string]::IsNullOrWhiteSpace($DeviceId)) {
+        $DeviceId
+    }
+    else {
+        @(
+            [string]$DeviceName
+            [string]$GroupName
+            [string]$OsPlatform
+            [string]$OsVersion
+        ) -join '|'
+    }
+
+    if (-not $deviceIndex.ContainsKey($deviceKey)) {
+        $machine = if (-not [string]::IsNullOrWhiteSpace($DeviceId)) { $Context.Machines[$DeviceId] } else { $null }
+
+        $resolvedGroupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $GroupName }
+        if ([string]::IsNullOrWhiteSpace([string]$resolvedGroupName)) {
+            $resolvedGroupName = if ([string]::IsNullOrWhiteSpace([string]$GroupName)) { '(none)' } else { $GroupName }
+        }
+        $groupIdx = Get-OrCreateIndex -value $resolvedGroupName -list $lookups.groups -indexMap $groupIndex
+
+        $osPlat = if ($machine) { $machine.PSObject.Properties['osPlatform']?.Value } else { $OsPlatform }
+        $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
+
+        $effectiveTags = if ($machine -and $machine.PSObject.Properties['machineTags']?.Value) { $machine.machineTags }
+                        elseif ($MachineTags) { $MachineTags }
+                        else { @() }
+        $tagIndices = [System.Collections.Generic.List[int]]::new()
+        foreach ($tag in $effectiveTags) {
+            $tagIdx = Get-OrCreateIndex -value $tag -list $lookups.tags -indexMap $tagIndex
+            if ($tagIdx -ge 0) { $tagIndices.Add($tagIdx) }
+        }
+        if ($tagIndices.Count -eq 0) { $Context.HasNoTags = $true }
+
+        $deviceIndex[$deviceKey] = $lookups.devices.Count
+
+        $machineInfo = $null
+        if ($machine) {
+            $machineLastSeen = $machine.PSObject.Properties['lastSeen']?.Value
+            $machineFirstSeen = $machine.PSObject.Properties['firstSeen']?.Value
+            $machineInfo = [PSCustomObject]@{
+                ip = $machine.PSObject.Properties['lastIpAddress']?.Value
+                eip = $machine.PSObject.Properties['lastExternalIpAddress']?.Value
+                hs = $machine.PSObject.Properties['healthStatus']?.Value
+                rs = $machine.PSObject.Properties['riskScore']?.Value
+                el = $machine.PSObject.Properties['exposureLevel']?.Value
+                dv = $machine.PSObject.Properties['deviceValue']?.Value
+                mb = $machine.PSObject.Properties['managedBy']?.Value
+                aad = $machine.PSObject.Properties['isAadJoined']?.Value
+                ls = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineLastSeen
+                fs = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineFirstSeen
+            }
+        }
+
+        $lookups.devices.Add([PSCustomObject]@{
+            id = $DeviceId
+            n = if ($machine) { $machine.PSObject.Properties['computerDnsName']?.Value } elseif ($DeviceName) { $DeviceName } else { '(no machine data)' }
+            g = $groupIdx
+            o = $platIdx
+            ov = if ($machine) { $machine.PSObject.Properties['osVersion']?.Value } else { $OsVersion }
+            t = $tagIndices
+            m = $machineInfo
+        })
+    }
+
+    return [int]$deviceIndex[$deviceKey]
+}
+
+function Add-NormalizedSoftware {
+    param(
+        $SoftwareVendor,
+        $SoftwareName,
+        $RecommendationReference,
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Context
+    )
+
+    $lookups = $Context.Lookups
+    $vendorIndex = $Context.Indexes.vendors
+    $softwareIndex = $Context.Indexes.software
+
+    $vendorIdx = Get-OrCreateIndex -value $SoftwareVendor -list $lookups.vendors -indexMap $vendorIndex
+
+    $softwareKey = "$SoftwareVendor|$SoftwareName|$RecommendationReference"
+    if (-not $softwareIndex.ContainsKey($softwareKey)) {
+        $softwareIndex[$softwareKey] = $lookups.software.Count
+        $lookups.software.Add([PSCustomObject]@{
+            v = $vendorIdx
+            n = $SoftwareName
+            r = $RecommendationReference
+        })
+    }
+
+    return [int]$softwareIndex[$softwareKey]
+}
+
+function Add-NormalizedCve {
+    param(
+        $CveId,
+        $CvssScore,
+        $SeverityLevel,
+        $ExploitabilityLevel,
+        $CveUrl,
+        $CveBatchTitle,
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Context
+    )
+
+    $lookups = $Context.Lookups
+    $exploitIndex = $Context.Indexes.exploitLevels
+    $cveIndex = $Context.Indexes.cves
+    $affSoftwareIndex = $Context.Indexes.affSoftware
+    $batchTitleIndex = $Context.Indexes.batchTitles
+
+    $sevIdx = switch ($SeverityLevel) {
+        'Critical' { 0 }
+        'High' { 1 }
+        'Medium' { 2 }
+        'Low' { 3 }
+        'None' { 4 }
+        default { -1 }
+    }
+
+    $expIdx = Get-OrCreateIndex -value $ExploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
+
+    $cveKey = @(
+        [string]$CveId
+        [string]$CvssScore
+        [string]$SeverityLevel
+        [string]$ExploitabilityLevel
+        [string]$CveUrl
+        [string]$CveBatchTitle
+    ) -join '|'
+
+    if (-not $cveIndex.ContainsKey($cveKey)) {
+        $ahData = $Context.AdvancedHuntingData[[string]$CveId]
+        $publishedDate = $null
+        $vulnDescription = $null
+        $epssScore = $null
+        $affSoftwareIndices = $null
+        if ($ahData) {
+            $publishedDate = $ahData.PublishedDate
+            $vulnDescription = $ahData.VulnerabilityDescription
+            $epssScore = $ahData.EpssScore
+            if ($ahData.AffectedSoftware -and @($ahData.AffectedSoftware).Count -gt 0) {
+                $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
+                foreach ($sw in @($ahData.AffectedSoftware)) {
+                    $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
+                    if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
+                }
+            }
+        }
+
+        $btIdx = Get-OrCreateIndex -value $CveBatchTitle -list $lookups.batchTitles -indexMap $batchTitleIndex
+
+        $cveIndex[$cveKey] = $lookups.cves.Count
+        $lookups.cves.Add([PSCustomObject]@{
+            id = $CveId
+            sc = $CvssScore
+            sv = $sevIdx
+            ex = $expIdx
+            u = $CveUrl
+            bt = $btIdx
+            pd = $publishedDate
+            desc = $vulnDescription
+            ep = $epssScore
+            as = $affSoftwareIndices
+        })
+    }
+
+    return [int]$cveIndex[$cveKey]
+}
+
 function Invoke-ContentStoreNormalization {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -7197,21 +7510,15 @@ function Invoke-ContentStoreNormalization {
     )
 
     $lookups = $Context.Lookups
-    $vendorIndex = $Context.Indexes.vendors
-    $exploitIndex = $Context.Indexes.exploitLevels
-    $groupIndex = $Context.Indexes.groups
-    $platformIndex = $Context.Indexes.platforms
-    $tagIndex = $Context.Indexes.tags
     $updateIndex = $Context.Indexes.updates
-    $deviceIndex = $Context.Indexes.devices
-    $softwareIndex = $Context.Indexes.software
-    $cveIndex = $Context.Indexes.cves
     $versionIndex = $Context.Indexes.versions
     $dateIndex = $Context.Indexes.dates
     $diskPathIndex = $Context.Indexes.diskPaths
     $regPathIndex = $Context.Indexes.regPaths
-    $affSoftwareIndex = $Context.Indexes.affSoftware
-    $batchTitleIndex = $Context.Indexes.batchTitles
+
+    $Context.Machines = $Machines
+    $Context.AdvancedHuntingData = $AdvancedHuntingData
+    $Context.HasNoTags = $false
 
     $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $DataPath
     if (-not (Test-Path -LiteralPath $dictionaryPath -PathType Leaf)) {
@@ -7228,7 +7535,6 @@ function Invoke-ContentStoreNormalization {
     $contentLookupCache = New-Object 'System.Object[]' $contentTemplateCount
     $processedCountRef = [ref]0
     $firstLastSwappedCountRef = [ref]0
-    $hasNoTagsRef = [ref]$false
     $vulnWriter = $null
     $jsonWriter = $null
     $columnWriterSet = $null
@@ -7236,157 +7542,36 @@ function Invoke-ContentStoreNormalization {
 
     for ($deviceProfileIndexValue = 0; $deviceProfileIndexValue -lt $deviceProfileCount; $deviceProfileIndexValue++) {
         $deviceProfile = $deviceProfiles[$deviceProfileIndexValue]
-        $deviceId = [string]$deviceProfile.id
-        $machine = if (-not [string]::IsNullOrWhiteSpace($deviceId)) { $Machines[$deviceId] } else { $null }
-        $fallbackDeviceName = [string]$deviceProfile.n
-        $fallbackGroupName = [string]$deviceProfile.g
-        $fallbackPlatform = [string]$deviceProfile.o
-        $fallbackOsVersion = [string]$deviceProfile.ov
-        $deviceKey = if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
-            $deviceId
-        }
-        else {
-            @(
-                $fallbackDeviceName
-                $fallbackGroupName
-                $fallbackPlatform
-                $fallbackOsVersion
-            ) -join '|'
-        }
-
-        if (-not $deviceIndex.ContainsKey($deviceKey)) {
-            $groupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $fallbackGroupName }
-            if ([string]::IsNullOrWhiteSpace([string]$groupName)) {
-                $groupName = if ([string]::IsNullOrWhiteSpace($fallbackGroupName)) { '(none)' } else { $fallbackGroupName }
-            }
-            $groupIdx = Get-OrCreateIndex -value $groupName -list $lookups.groups -indexMap $groupIndex
-
-            $osPlat = if ($machine) { $machine.PSObject.Properties['osPlatform']?.Value } else { $fallbackPlatform }
-            $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
-
-            $machineTags = if ($machine -and $machine.PSObject.Properties['machineTags']?.Value) { $machine.machineTags }
-                          elseif ($deviceProfile.t) { @($deviceProfile.t) }
-                          else { @() }
-            $tagIndices = [System.Collections.Generic.List[int]]::new()
-            foreach ($tag in $machineTags) {
-                $tagIdx = Get-OrCreateIndex -value $tag -list $lookups.tags -indexMap $tagIndex
-                if ($tagIdx -ge 0) { $tagIndices.Add($tagIdx) }
-            }
-            if ($tagIndices.Count -eq 0) { $hasNoTagsRef.Value = $true }
-
-            $deviceIndex[$deviceKey] = $lookups.devices.Count
-
-            $machineInfo = $null
-            if ($machine) {
-                $machineLastSeen = $machine.PSObject.Properties['lastSeen']?.Value
-                $machineFirstSeen = $machine.PSObject.Properties['firstSeen']?.Value
-                $machineInfo = [PSCustomObject]@{
-                    ip = $machine.PSObject.Properties['lastIpAddress']?.Value
-                    eip = $machine.PSObject.Properties['lastExternalIpAddress']?.Value
-                    hs = $machine.PSObject.Properties['healthStatus']?.Value
-                    rs = $machine.PSObject.Properties['riskScore']?.Value
-                    el = $machine.PSObject.Properties['exposureLevel']?.Value
-                    dv = $machine.PSObject.Properties['deviceValue']?.Value
-                    mb = $machine.PSObject.Properties['managedBy']?.Value
-                    aad = $machine.PSObject.Properties['isAadJoined']?.Value
-                    ls = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineLastSeen
-                    fs = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineFirstSeen
-                }
-            }
-
-            $lookups.devices.Add([PSCustomObject]@{
-                id = $deviceId
-                n = if ($machine) { $machine.PSObject.Properties['computerDnsName']?.Value } elseif ($fallbackDeviceName) { $fallbackDeviceName } else { '(no machine data)' }
-                g = $groupIdx
-                o = $platIdx
-                ov = if ($machine) { $machine.PSObject.Properties['osVersion']?.Value } else { $fallbackOsVersion }
-                t = $tagIndices
-                m = $machineInfo
-            })
-        }
-
-        $deviceLookupIndices[$deviceProfileIndexValue] = [int]$deviceIndex[$deviceKey]
+        $machineTags = if ($deviceProfile.t) { @($deviceProfile.t) } else { @() }
+        $deviceLookupIndices[$deviceProfileIndexValue] = Add-NormalizedDevice `
+            -DeviceId ([string]$deviceProfile.id) `
+            -DeviceName ([string]$deviceProfile.n) `
+            -GroupName ([string]$deviceProfile.g) `
+            -OsPlatform ([string]$deviceProfile.o) `
+            -OsVersion ([string]$deviceProfile.ov) `
+            -MachineTags $machineTags `
+            -Context $Context
         $deviceOnboardedFlags[$deviceProfileIndexValue] = ($deviceProfile.ob -eq $true)
     }
 
     for ($contentTemplateIndexValue = 0; $contentTemplateIndexValue -lt $contentTemplateCount; $contentTemplateIndexValue++) {
         $contentTemplate = $contentTemplates[$contentTemplateIndexValue]
-        $softwareVendor = [string]$contentTemplate.sv
-        $vendorIdx = Get-OrCreateIndex -value $softwareVendor -list $lookups.vendors -indexMap $vendorIndex
 
-        $softwareName = [string]$contentTemplate.sn
-        $recommendationReference = [string]$contentTemplate.rr
-        $softwareKey = "$softwareVendor|$softwareName|$recommendationReference"
-        if (-not $softwareIndex.ContainsKey($softwareKey)) {
-            $softwareIndex[$softwareKey] = $lookups.software.Count
-            $lookups.software.Add([PSCustomObject]@{
-                v = $vendorIdx
-                n = $softwareName
-                r = $recommendationReference
-            })
-        }
-        $swIdx = [int]$softwareIndex[$softwareKey]
+        $swIdx = Add-NormalizedSoftware `
+            -SoftwareVendor ([string]$contentTemplate.sv) `
+            -SoftwareName ([string]$contentTemplate.sn) `
+            -RecommendationReference ([string]$contentTemplate.rr) `
+            -Context $Context
 
-        $cveId = [string]$contentTemplate.c
-        $cvssScore = $contentTemplate.sc
-        $sevLevel = [string]$contentTemplate.sev
-        $sevIdx = switch ($sevLevel) {
-            'Critical' { 0 }
-            'High' { 1 }
-            'Medium' { 2 }
-            'Low' { 3 }
-            default { -1 }
-        }
-
-        $exploitabilityLevel = [string]$contentTemplate.ex
-        $expIdx = Get-OrCreateIndex -value $exploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
         $cveBatchUrl = Convert-CveUrl -Url ([string]$contentTemplate.bu)
-        $btValue = [string]$contentTemplate.bt
-        $cveKey = @(
-            $cveId
-            [string]$cvssScore
-            $sevLevel
-            $exploitabilityLevel
-            [string]$cveBatchUrl
-            $btValue
-        ) -join '|'
-
-        if (-not $cveIndex.ContainsKey($cveKey)) {
-            $ahData = $AdvancedHuntingData[$cveId]
-            $publishedDate = $null
-            $vulnDescription = $null
-            $epssScore = $null
-            $affSoftwareIndices = $null
-            if ($ahData) {
-                $publishedDate = $ahData.PublishedDate
-                $vulnDescription = $ahData.VulnerabilityDescription
-                $epssScore = $ahData.EpssScore
-                if ($ahData.AffectedSoftware -and @($ahData.AffectedSoftware).Count -gt 0) {
-                    $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
-                    foreach ($sw in @($ahData.AffectedSoftware)) {
-                        $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
-                        if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
-                    }
-                }
-            }
-
-            $btIdx = Get-OrCreateIndex -value $btValue -list $lookups.batchTitles -indexMap $batchTitleIndex
-
-            $cveIndex[$cveKey] = $lookups.cves.Count
-            $lookups.cves.Add([PSCustomObject]@{
-                id = $cveId
-                sc = $cvssScore
-                sv = $sevIdx
-                ex = $expIdx
-                u = $cveBatchUrl
-                bt = $btIdx
-                pd = $publishedDate
-                desc = $vulnDescription
-                ep = $epssScore
-                as = $affSoftwareIndices
-            })
-        }
-        $cveIdx = [int]$cveIndex[$cveKey]
+        $cveIdx = Add-NormalizedCve `
+            -CveId ([string]$contentTemplate.c) `
+            -CvssScore $contentTemplate.sc `
+            -SeverityLevel ([string]$contentTemplate.sev) `
+            -ExploitabilityLevel ([string]$contentTemplate.ex) `
+            -CveUrl $cveBatchUrl `
+            -CveBatchTitle ([string]$contentTemplate.bt) `
+            -Context $Context
 
         $recUpdate = [string]$contentTemplate.ru
         $recUpdateId = [string]$contentTemplate.rid
@@ -7594,7 +7779,7 @@ function Invoke-ContentStoreNormalization {
     return [PSCustomObject]@{
         ProcessedCount = $processedCountRef.Value
         FirstLastSwappedCount = $firstLastSwappedCountRef.Value
-        HasNoTags = ($hasNoTagsRef.Value -eq $true)
+        HasNoTags = ($Context.HasNoTags -eq $true)
         VulnsPath = if ($columnWriterSet) { $null } else { $VulnOutputPath }
         VulnColumnPaths = $vulnColumnPaths
     }
@@ -7623,28 +7808,19 @@ function Invoke-RawStoreNormalization {
         [hashtable]$AdvancedHuntingData = @{}
     )
 
-    $normalizationMachines = $Machines
-    $normalizationAdvancedHuntingData = $AdvancedHuntingData
+    $Context.Machines = $Machines
+    $Context.AdvancedHuntingData = $AdvancedHuntingData
+    $Context.HasNoTags = $false
+
     $lookups = $Context.Lookups
-    $vendorIndex = $Context.Indexes.vendors
-    $exploitIndex = $Context.Indexes.exploitLevels
-    $groupIndex = $Context.Indexes.groups
-    $platformIndex = $Context.Indexes.platforms
-    $tagIndex = $Context.Indexes.tags
     $updateIndex = $Context.Indexes.updates
-    $deviceIndex = $Context.Indexes.devices
-    $softwareIndex = $Context.Indexes.software
-    $cveIndex = $Context.Indexes.cves
     $versionIndex = $Context.Indexes.versions
     $dateIndex = $Context.Indexes.dates
     $diskPathIndex = $Context.Indexes.diskPaths
     $regPathIndex = $Context.Indexes.regPaths
-    $affSoftwareIndex = $Context.Indexes.affSoftware
-    $batchTitleIndex = $Context.Indexes.batchTitles
 
     $processedCountRef = [ref]0
     $firstLastSwappedCountRef = [ref]0
-    $hasNoTagsRef = [ref]$false
     $vulnWriter = $null
     $jsonWriter = $null
     $columnWriterSet = $null
@@ -7695,153 +7871,30 @@ function Invoke-RawStoreNormalization {
                         $processedCountRef.Value++
 
                         $deviceId = [string](Get-JsonElementPropertyValue -Element $root -Name 'DeviceId')
-                        $machine = $normalizationMachines[$deviceId]
-                        $fallbackDeviceName = Get-JsonElementPropertyValue -Element $root -Name 'DeviceName'
-                        $fallbackGroupName = Get-JsonElementPropertyValue -Element $root -Name 'RbacGroupName'
-                        $fallbackPlatform = Get-JsonElementPropertyValue -Element $root -Name 'OSPlatform'
-                        $fallbackOsVersion = Get-JsonElementPropertyValue -Element $root -Name 'OSVersion'
-                        $deviceKey = if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
-                            $deviceId
-                        }
-                        else {
-                            @(
-                                [string]$fallbackDeviceName
-                                [string]$fallbackGroupName
-                                [string]$fallbackPlatform
-                                [string]$fallbackOsVersion
-                            ) -join '|'
-                        }
+                        $devIdx = Add-NormalizedDevice `
+                            -DeviceId $deviceId `
+                            -DeviceName (Get-JsonElementPropertyValue -Element $root -Name 'DeviceName') `
+                            -GroupName (Get-JsonElementPropertyValue -Element $root -Name 'RbacGroupName') `
+                            -OsPlatform (Get-JsonElementPropertyValue -Element $root -Name 'OSPlatform') `
+                            -OsVersion (Get-JsonElementPropertyValue -Element $root -Name 'OSVersion') `
+                            -MachineTags (Get-JsonElementPropertyValue -Element $root -Name 'MachineTags' -AsStringArray) `
+                            -Context $Context
 
-                        if (-not $deviceIndex.ContainsKey($deviceKey)) {
-                            $groupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $fallbackGroupName }
-                            if ([string]::IsNullOrWhiteSpace([string]$groupName)) {
-                                $groupName = if ([string]::IsNullOrWhiteSpace([string]$fallbackGroupName)) { '(none)' } else { $fallbackGroupName }
-                            }
-                            $groupIdx = Get-OrCreateIndex -value $groupName -list $lookups.groups -indexMap $groupIndex
-
-                            $osPlat = if ($machine) { $machine.PSObject.Properties['osPlatform']?.Value } else { $fallbackPlatform }
-                            $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
-
-                            $rowMachineTags = Get-JsonElementPropertyValue -Element $root -Name 'MachineTags' -AsStringArray
-                            $machineTags = if ($machine -and $machine.PSObject.Properties['machineTags']?.Value) { $machine.machineTags }
-                                          elseif ($rowMachineTags) { $rowMachineTags }
-                                          else { @() }
-                            $tagIndices = [System.Collections.Generic.List[int]]::new()
-                            foreach ($tag in $machineTags) {
-                                $tagIdx = Get-OrCreateIndex -value $tag -list $lookups.tags -indexMap $tagIndex
-                                if ($tagIdx -ge 0) { $tagIndices.Add($tagIdx) }
-                            }
-                            if ($tagIndices.Count -eq 0) { $hasNoTagsRef.Value = $true }
-
-                            $deviceIndex[$deviceKey] = $lookups.devices.Count
-
-                            $machineInfo = $null
-                            if ($machine) {
-                                $machineLastSeen = $machine.PSObject.Properties['lastSeen']?.Value
-                                $machineFirstSeen = $machine.PSObject.Properties['firstSeen']?.Value
-                                $machineInfo = [PSCustomObject]@{
-                                    ip = $machine.PSObject.Properties['lastIpAddress']?.Value
-                                    eip = $machine.PSObject.Properties['lastExternalIpAddress']?.Value
-                                    hs = $machine.PSObject.Properties['healthStatus']?.Value
-                                    rs = $machine.PSObject.Properties['riskScore']?.Value
-                                    el = $machine.PSObject.Properties['exposureLevel']?.Value
-                                    dv = $machine.PSObject.Properties['deviceValue']?.Value
-                                    mb = $machine.PSObject.Properties['managedBy']?.Value
-                                    aad = $machine.PSObject.Properties['isAadJoined']?.Value
-                                    ls = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineLastSeen
-                                    fs = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineFirstSeen
-                                }
-                            }
-
-                            $lookups.devices.Add([PSCustomObject]@{
-                                id = $deviceId
-                                n = if ($machine) { $machine.PSObject.Properties['computerDnsName']?.Value } elseif ($fallbackDeviceName) { $fallbackDeviceName } else { '(no machine data)' }
-                                g = $groupIdx
-                                o = $platIdx
-                                ov = if ($machine) { $machine.PSObject.Properties['osVersion']?.Value } else { $fallbackOsVersion }
-                                t = $tagIndices
-                                m = $machineInfo
-                            })
-                        }
-                        $devIdx = $deviceIndex[$deviceKey]
-
-                        $softwareVendor = (Get-JsonElementPropertyValue -Element $root -Name 'SoftwareVendor') ?? ''
-                        $vendorIdx = Get-OrCreateIndex -value $softwareVendor -list $lookups.vendors -indexMap $vendorIndex
-
-                        $softwareName = (Get-JsonElementPropertyValue -Element $root -Name 'SoftwareName') ?? ''
-                        $recommendationReference = (Get-JsonElementPropertyValue -Element $root -Name 'RecommendationReference') ?? ''
-                        $softwareKey = "$softwareVendor|$softwareName|$recommendationReference"
-                        if (-not $softwareIndex.ContainsKey($softwareKey)) {
-                            $softwareIndex[$softwareKey] = $lookups.software.Count
-                            $lookups.software.Add([PSCustomObject]@{
-                                v = $vendorIdx
-                                n = $softwareName
-                                r = $recommendationReference
-                            })
-                        }
-                        $swIdx = $softwareIndex[$softwareKey]
+                        $swIdx = Add-NormalizedSoftware `
+                            -SoftwareVendor ((Get-JsonElementPropertyValue -Element $root -Name 'SoftwareVendor') ?? '') `
+                            -SoftwareName ((Get-JsonElementPropertyValue -Element $root -Name 'SoftwareName') ?? '') `
+                            -RecommendationReference ((Get-JsonElementPropertyValue -Element $root -Name 'RecommendationReference') ?? '') `
+                            -Context $Context
 
                         $cveId = Get-JsonElementPropertyValue -Element $root -Name 'CveId'
-                        $cvssScore = Get-JsonElementPropertyValue -Element $root -Name 'CvssScore'
-                        $sevLevel = Get-JsonElementPropertyValue -Element $root -Name 'VulnerabilitySeverityLevel'
-                        $sevIdx = switch ($sevLevel) {
-                            'Critical' { 0 }
-                            'High' { 1 }
-                            'Medium' { 2 }
-                            'Low' { 3 }
-                            default { -1 }
-                        }
-
-                        $exploitabilityLevel = Get-JsonElementPropertyValue -Element $root -Name 'ExploitabilityLevel'
-                        $expIdx = Get-OrCreateIndex -value $exploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
-
-                        $cveBatchUrl = Convert-CveUrl -Url (Get-JsonElementPropertyValue -Element $root -Name 'CveBatchUrl')
-                        $btValue = Get-JsonElementPropertyValue -Element $root -Name 'CveBatchTitle'
-                        $cveKey = @(
-                            [string]$cveId,
-                            [string]$cvssScore,
-                            [string]$sevLevel,
-                            [string]$exploitabilityLevel,
-                            [string]$cveBatchUrl,
-                            [string]$btValue
-                        ) -join '|'
-
-                        if (-not $cveIndex.ContainsKey($cveKey)) {
-                            $ahData = $normalizationAdvancedHuntingData[[string]$cveId]
-                            $publishedDate = $null
-                            $vulnDescription = $null
-                            $epssScore = $null
-                            $affSoftwareIndices = $null
-                            if ($ahData) {
-                                $publishedDate = $ahData.PublishedDate
-                                $vulnDescription = $ahData.VulnerabilityDescription
-                                $epssScore = $ahData.EpssScore
-                                if ($ahData.AffectedSoftware -and @($ahData.AffectedSoftware).Count -gt 0) {
-                                    $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
-                                    foreach ($sw in @($ahData.AffectedSoftware)) {
-                                        $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
-                                        if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
-                                    }
-                                }
-                            }
-
-                            $btIdx = Get-OrCreateIndex -value $btValue -list $lookups.batchTitles -indexMap $batchTitleIndex
-
-                            $cveIndex[$cveKey] = $lookups.cves.Count
-                            $lookups.cves.Add([PSCustomObject]@{
-                                id = $cveId
-                                sc = $cvssScore
-                                sv = $sevIdx
-                                ex = $expIdx
-                                u = $cveBatchUrl
-                                bt = $btIdx
-                                pd = $publishedDate
-                                desc = $vulnDescription
-                                ep = $epssScore
-                                as = $affSoftwareIndices
-                            })
-                        }
-                        $cveIdx = $cveIndex[$cveKey]
+                        $cveIdx = Add-NormalizedCve `
+                            -CveId $cveId `
+                            -CvssScore (Get-JsonElementPropertyValue -Element $root -Name 'CvssScore') `
+                            -SeverityLevel (Get-JsonElementPropertyValue -Element $root -Name 'VulnerabilitySeverityLevel') `
+                            -ExploitabilityLevel (Get-JsonElementPropertyValue -Element $root -Name 'ExploitabilityLevel') `
+                            -CveUrl (Convert-CveUrl -Url (Get-JsonElementPropertyValue -Element $root -Name 'CveBatchUrl')) `
+                            -CveBatchTitle (Get-JsonElementPropertyValue -Element $root -Name 'CveBatchTitle') `
+                            -Context $Context
 
                         $recUpdate = Get-JsonElementPropertyValue -Element $root -Name 'RecommendedSecurityUpdate'
                         $recUpdateId = Get-JsonElementPropertyValue -Element $root -Name 'RecommendedSecurityUpdateId'
@@ -7993,7 +8046,7 @@ function Invoke-RawStoreNormalization {
     return [PSCustomObject]@{
         ProcessedCount = $processedCountRef.Value
         FirstLastSwappedCount = $firstLastSwappedCountRef.Value
-        HasNoTags = ($hasNoTagsRef.Value -eq $true)
+        HasNoTags = ($Context.HasNoTags -eq $true)
         VulnsPath = if ($columnWriterSet) { $null } else { $VulnOutputPath }
         VulnColumnPaths = $vulnColumnPaths
     }
@@ -8115,31 +8168,88 @@ function Write-MergedVulnObservedWindowRows {
         [ref]$InputRowCount = ([ref]0),
 
         [Parameter(Mandatory = $false)]
-        [ref]$OutputRowCount = ([ref]0)
+        [ref]$OutputRowCount = ([ref]0),
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(4, 256)]
+        [int]$PartitionCount = 32
     )
 
-    $rowsByIdentity = @{}
+    # Disk-partitioned merge: scatter rows to temp partition files by identity
+    # key hash, then process each partition independently. Peak memory is
+    # ~(totalRows / PartitionCount) instead of totalRows.
+    $partitionDir = Join-Path ([System.IO.Path]::GetTempPath()) ('owmerge-' + [System.Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $partitionDir -Force)
+
     $sourceRowCount = 0
     $mergedRowCount = 0
+    $partitionWriters = [System.IO.StreamWriter[]]::new($PartitionCount)
 
-    foreach ($row in (& $Source)) {
-        if ($null -eq $row) { continue }
+    try {
+        # Pass 1 — scatter: stream source rows to partition files by identity hash
+        foreach ($row in (& $Source)) {
+            if ($null -eq $row) { continue }
+            $sourceRowCount++
 
-        $sourceRowCount++
-        $identityKey = Get-VulnObservedWindowIdentityKey -Row $row
-        if (-not $rowsByIdentity.ContainsKey($identityKey)) {
-            $rowsByIdentity[$identityKey] = [System.Collections.Generic.List[object]]::new()
+            $identityKey = Get-VulnObservedWindowIdentityKey -Row $row
+            $hash = [uint32]([int64]$identityKey.GetHashCode() -band 0xFFFFFFFFL)
+            $bucket = [int]($hash % [uint32]$PartitionCount)
+
+            if ($null -eq $partitionWriters[$bucket]) {
+                $partPath = Join-Path $partitionDir "p$bucket.ndjson"
+                $partitionWriters[$bucket] = [System.IO.StreamWriter]::new(
+                    [System.IO.File]::Create($partPath),
+                    [System.Text.UTF8Encoding]::new($false))
+            }
+            $partitionWriters[$bucket].WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
         }
-        $rowsByIdentity[$identityKey].Add($row)
+
+        # Flush and close all partition writers
+        for ($i = 0; $i -lt $PartitionCount; $i++) {
+            if ($null -ne $partitionWriters[$i]) {
+                $partitionWriters[$i].Dispose()
+                $partitionWriters[$i] = $null
+            }
+        }
+
+        # Pass 2 — gather: process each partition independently
+        for ($bucket = 0; $bucket -lt $PartitionCount; $bucket++) {
+            $partPath = Join-Path $partitionDir "p$bucket.ndjson"
+            if (-not (Test-Path -LiteralPath $partPath -PathType Leaf)) { continue }
+
+            $rowsByIdentity = @{}
+            foreach ($line in [System.IO.File]::ReadLines($partPath, [System.Text.UTF8Encoding]::new($false))) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $row = $line | ConvertFrom-Json
+                $identityKey = Get-VulnObservedWindowIdentityKey -Row $row
+                if (-not $rowsByIdentity.ContainsKey($identityKey)) {
+                    $rowsByIdentity[$identityKey] = [System.Collections.Generic.List[object]]::new()
+                }
+                $rowsByIdentity[$identityKey].Add($row)
+            }
+
+            foreach ($identityKey in @($rowsByIdentity.Keys | Sort-Object)) {
+                foreach ($mergedRow in @(Merge-VulnObservedWindowRows -Rows @($rowsByIdentity[$identityKey]) -AllowedGapDays $AllowedGapDays)) {
+                    $mergedRowCount++
+                    Write-Output $mergedRow
+                }
+            }
+
+            # Free partition memory before moving to next
+            $rowsByIdentity.Clear()
+            $rowsByIdentity = $null
+            Remove-Item -LiteralPath $partPath -Force -ErrorAction SilentlyContinue
+        }
     }
-
-    foreach ($identityKey in @($rowsByIdentity.Keys | Sort-Object)) {
-        foreach ($mergedRow in @(Merge-VulnObservedWindowRows -Rows @($rowsByIdentity[$identityKey]) -AllowedGapDays $AllowedGapDays)) {
-            $mergedRowCount++
-            Write-Output $mergedRow
+    finally {
+        for ($i = 0; $i -lt $PartitionCount; $i++) {
+            if ($null -ne $partitionWriters[$i]) {
+                $partitionWriters[$i].Dispose()
+            }
         }
-
-        [void]$rowsByIdentity.Remove($identityKey)
+        if (Test-Path -LiteralPath $partitionDir) {
+            Remove-Item -Recurse -Force -LiteralPath $partitionDir -ErrorAction SilentlyContinue
+        }
     }
 
     $InputRowCount.Value = $sourceRowCount
@@ -8294,22 +8404,15 @@ function ConvertTo-NormalizedData {
     Write-Information '  Normalizing data structure...' -InformationAction Continue
     Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s)" -f $Machines.Count, $AdvancedHuntingData.Count) -InformationAction Continue
     $context = Get-NormalizationContext
+    $context.Machines = $Machines
+    $context.AdvancedHuntingData = $AdvancedHuntingData
     $lookups = $context.Lookups
-    $vendorIndex = $context.Indexes.vendors
-    $exploitIndex = $context.Indexes.exploitLevels
-    $groupIndex = $context.Indexes.groups
-    $platformIndex = $context.Indexes.platforms
     $tagIndex = $context.Indexes.tags
     $updateIndex = $context.Indexes.updates
-    $deviceIndex = $context.Indexes.devices
-    $softwareIndex = $context.Indexes.software
-    $cveIndex = $context.Indexes.cves
     $versionIndex = $context.Indexes.versions
     $dateIndex = $context.Indexes.dates
     $diskPathIndex = $context.Indexes.diskPaths
     $regPathIndex = $context.Indexes.regPaths
-    $affSoftwareIndex = $context.Indexes.affSoftware
-    $batchTitleIndex = $context.Indexes.batchTitles
 
     $firstLastSwappedCount = 0
     $processedCount = 0
@@ -8357,156 +8460,31 @@ function ConvertTo-NormalizedData {
                 if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { continue }
                 $processedCount++
 
-                $deviceId = [string]$v.DeviceId
-                $machine = $Machines[$deviceId]
-                $fallbackDeviceName = $v.PSObject.Properties['DeviceName']?.Value
-                $fallbackGroupName = $v.PSObject.Properties['RbacGroupName']?.Value
-                $fallbackPlatform = $v.PSObject.Properties['OSPlatform']?.Value
-                $fallbackOsVersion = $v.PSObject.Properties['OSVersion']?.Value
-                $deviceKey = if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
-                    $deviceId
-                }
-                else {
-                    @(
-                        [string]$fallbackDeviceName
-                        [string]$fallbackGroupName
-                        [string]$fallbackPlatform
-                        [string]$fallbackOsVersion
-                    ) -join '|'
-                }
+            $devIdx = Add-NormalizedDevice `
+                -DeviceId ([string]$v.DeviceId) `
+                -DeviceName $v.PSObject.Properties['DeviceName']?.Value `
+                -GroupName $v.PSObject.Properties['RbacGroupName']?.Value `
+                -OsPlatform $v.PSObject.Properties['OSPlatform']?.Value `
+                -OsVersion $v.PSObject.Properties['OSVersion']?.Value `
+                -MachineTags $v.PSObject.Properties['MachineTags']?.Value `
+                -Context $context
 
-            if (-not $deviceIndex.ContainsKey($deviceKey)) {
-                    # Prefer the stable DeviceId whenever it exists. Only fall back to
-                    # row-level metadata when the export truly lacks a device identifier.
-                    $groupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $fallbackGroupName }
-                    if ([string]::IsNullOrWhiteSpace([string]$groupName)) {
-                        $groupName = if ([string]::IsNullOrWhiteSpace([string]$fallbackGroupName)) { '(none)' } else { $fallbackGroupName }
-                    }
-                    $groupIdx = Get-OrCreateIndex -value $groupName -list $lookups.groups -indexMap $groupIndex
-
-                    $osPlat = if ($machine) { $machine.PSObject.Properties['osPlatform']?.Value } else { $fallbackPlatform }
-                    $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
-
-                    $machineTags = if ($machine -and $machine.PSObject.Properties['machineTags']?.Value) { $machine.machineTags }
-                                  elseif ($v.PSObject.Properties['MachineTags']?.Value) { $v.PSObject.Properties['MachineTags']?.Value }
-                                  else { @() }
-                    $tagIndices = [System.Collections.Generic.List[int]]::new()
-                    foreach ($tag in $machineTags) {
-                        $tagIdx = Get-OrCreateIndex -value $tag -list $lookups.tags -indexMap $tagIndex
-                        if ($tagIdx -ge 0) { $tagIndices.Add($tagIdx) }
-                    }
-                    if ($tagIndices.Count -eq 0) { $hasNoTags = $true }
-
-                    $deviceIndex[$deviceKey] = $lookups.devices.Count
-
-                    $machineInfo = $null
-                    if ($machine) {
-                        $machineLastSeen = $machine.PSObject.Properties['lastSeen']?.Value
-                        $machineFirstSeen = $machine.PSObject.Properties['firstSeen']?.Value
-                        $machineInfo = [PSCustomObject]@{
-                            ip = $machine.PSObject.Properties['lastIpAddress']?.Value
-                            eip = $machine.PSObject.Properties['lastExternalIpAddress']?.Value
-                            hs = $machine.PSObject.Properties['healthStatus']?.Value
-                            rs = $machine.PSObject.Properties['riskScore']?.Value
-                            el = $machine.PSObject.Properties['exposureLevel']?.Value
-                            dv = $machine.PSObject.Properties['deviceValue']?.Value
-                            mb = $machine.PSObject.Properties['managedBy']?.Value
-                            aad = $machine.PSObject.Properties['isAadJoined']?.Value
-                            ls = Get-NormalizationCachedYmdDate -Context $context -DateValue $machineLastSeen
-                            fs = Get-NormalizationCachedYmdDate -Context $context -DateValue $machineFirstSeen
-                        }
-                    }
-
-                    $lookups.devices.Add([PSCustomObject]@{
-                        id = $deviceId
-                        n = if ($machine) { $machine.PSObject.Properties['computerDnsName']?.Value } elseif ($fallbackDeviceName) { $fallbackDeviceName } else { '(no machine data)' }
-                        g = $groupIdx
-                        o = $platIdx
-                        ov = if ($machine) { $machine.PSObject.Properties['osVersion']?.Value } else { $fallbackOsVersion }
-                        t = $tagIndices
-                        m = $machineInfo
-                    })
-            }
-            $devIdx = $deviceIndex[$deviceKey]
-
-            $vendorIdx = Get-OrCreateIndex -value $v.PSObject.Properties['SoftwareVendor']?.Value -list $lookups.vendors -indexMap $vendorIndex
-
-            $softwareVendor = $v.PSObject.Properties['SoftwareVendor']?.Value ?? ''
-            $softwareName = $v.PSObject.Properties['SoftwareName']?.Value ?? ''
-            $recommendationReference = $v.PSObject.Properties['RecommendationReference']?.Value ?? ''
-            $softwareKey = "$softwareVendor|$softwareName|$recommendationReference"
-            if (-not $softwareIndex.ContainsKey($softwareKey)) {
-                $softwareIndex[$softwareKey] = $lookups.software.Count
-                $lookups.software.Add([PSCustomObject]@{
-                    v = $vendorIdx
-                    n = $softwareName
-                    r = $recommendationReference
-                })
-            }
-            $swIdx = $softwareIndex[$softwareKey]
+            $swIdx = Add-NormalizedSoftware `
+                -SoftwareVendor ($v.PSObject.Properties['SoftwareVendor']?.Value ?? '') `
+                -SoftwareName ($v.PSObject.Properties['SoftwareName']?.Value ?? '') `
+                -RecommendationReference ($v.PSObject.Properties['RecommendationReference']?.Value ?? '') `
+                -Context $context
 
             $cveId = $v.CveId
-            $cvssScore = $v.PSObject.Properties['CvssScore']?.Value
-            $sevLevel = $v.PSObject.Properties['VulnerabilitySeverityLevel']?.Value
-            $sevIdx = switch ($sevLevel) {
-                'Critical' { 0 }
-                'High' { 1 }
-                'Medium' { 2 }
-                'Low' { 3 }
-                'None' { 4 }
-                default { -1 }
-            }
 
-            $exploitabilityLevel = $v.PSObject.Properties['ExploitabilityLevel']?.Value
-            $expIdx = Get-OrCreateIndex -value $exploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
-
-            $cveBatchUrl = Convert-CveUrl -Url $v.PSObject.Properties['CveBatchUrl']?.Value
-            $btValue = $v.PSObject.Properties['CveBatchTitle']?.Value
-            $cveKey = @(
-                [string]$cveId,
-                [string]$cvssScore,
-                [string]$sevLevel,
-                [string]$exploitabilityLevel,
-                [string]$cveBatchUrl,
-                [string]$btValue
-            ) -join '|'
-
-            if (-not $cveIndex.ContainsKey($cveKey)) {
-                    $ahData = $AdvancedHuntingData[$cveId]
-                    $publishedDate = $null
-                    $vulnDescription = $null
-                    $epssScore = $null
-                    $affSoftwareIndices = $null
-                    if ($ahData) {
-                        $publishedDate = $ahData.PublishedDate
-                        $vulnDescription = $ahData.VulnerabilityDescription
-                        $epssScore = $ahData.EpssScore
-                        if ($ahData.AffectedSoftware -and @($ahData.AffectedSoftware).Count -gt 0) {
-                            $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
-                            foreach ($sw in @($ahData.AffectedSoftware)) {
-                                $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
-                                if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
-                            }
-                        }
-                    }
-
-                    $btIdx = Get-OrCreateIndex -value $btValue -list $lookups.batchTitles -indexMap $batchTitleIndex
-
-                    $cveIndex[$cveKey] = $lookups.cves.Count
-                    $lookups.cves.Add([PSCustomObject]@{
-                        id = $cveId
-                        sc = $cvssScore
-                        sv = $sevIdx
-                        ex = $expIdx
-                        u = $cveBatchUrl
-                        bt = $btIdx
-                        pd = $publishedDate
-                        desc = $vulnDescription
-                        ep = $epssScore
-                        as = $affSoftwareIndices
-                    })
-            }
-            $cveIdx = $cveIndex[$cveKey]
+            $cveIdx = Add-NormalizedCve `
+                -CveId $cveId `
+                -CvssScore $v.PSObject.Properties['CvssScore']?.Value `
+                -SeverityLevel $v.PSObject.Properties['VulnerabilitySeverityLevel']?.Value `
+                -ExploitabilityLevel $v.PSObject.Properties['ExploitabilityLevel']?.Value `
+                -CveUrl (Convert-CveUrl -Url $v.PSObject.Properties['CveBatchUrl']?.Value) `
+                -CveBatchTitle $v.PSObject.Properties['CveBatchTitle']?.Value `
+                -Context $context
 
             $recUpdate = $v.PSObject.Properties['RecommendedSecurityUpdate']?.Value
             $recUpdateId = $v.PSObject.Properties['RecommendedSecurityUpdateId']?.Value
@@ -8648,6 +8626,7 @@ function ConvertTo-NormalizedData {
                 Close-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
             }
         }
+        $hasNoTags = $context.HasNoTags
     }
 
     if ((-not $columnWriterSet) -and -not [string]::IsNullOrWhiteSpace($VulnOutputPath) -and (Test-Path -LiteralPath $VulnOutputPath -PathType Leaf)) {

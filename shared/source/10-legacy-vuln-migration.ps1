@@ -13,6 +13,7 @@ function Test-VulnStoreRequiresCanonicalRepair {
         [string]$BasePath,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [object[]]$HistoryDocuments
     )
 
@@ -111,6 +112,10 @@ function Publish-VulnStoreFromLegacySnapshot {
         [Parameter(Mandatory = $false)]
         [switch]$RemoveLegacyFiles
     )
+
+    if ([datetime]::UtcNow -ge [datetime]$Script:LegacyVulnMigrationRemovalDate) {
+        Write-Warning "Legacy vulnerability migration is past its scheduled removal date ($Script:LegacyVulnMigrationRemovalDate). This code path should be removed."
+    }
 
     $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath -LegacyFilePaths $LegacyFilePaths)
 
