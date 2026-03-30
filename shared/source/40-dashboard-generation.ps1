@@ -2909,7 +2909,7 @@ function Write-MergedVulnObservedWindowRows {
             $sourceRowCount++
 
             $identityKey = Get-VulnObservedWindowIdentityKey -Row $row
-            $hash = [uint32]$identityKey.GetHashCode()
+            $hash = [uint32]([int64]$identityKey.GetHashCode() -band 0xFFFFFFFFL)
             $bucket = [int]($hash % [uint32]$PartitionCount)
 
             if ($null -eq $partitionWriters[$bucket]) {
