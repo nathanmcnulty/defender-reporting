@@ -29,7 +29,7 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
         [string]$ExportUrl
     )
 
-    $response = Invoke-RestMethod -Uri $ExportUrl -Headers $Headers -Method Get -ErrorAction Stop
+    $response = Invoke-RestMethodWithRetry -Uri $ExportUrl -Headers $Headers -Method Get
     $exportFiles = @($response.exportFiles)
     if ($exportFiles.Count -eq 0) {
         throw 'Bulk vulnerability export returned no files.'
@@ -50,7 +50,7 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
         }
 
         $outputFile = Join-Path $OutputPath "VulnExport_${groupId}_${date}.json.gz"
-        Invoke-WebRequest -Uri $fileUrl -OutFile $outputFile
+        Invoke-WebRequestWithRetry -Uri $fileUrl -OutFile $outputFile
         $downloadedFiles.Add($outputFile)
     }
 
@@ -81,7 +81,7 @@ DeviceTvmSoftwareVulnerabilities
 "@
 
     $body = @{ Query = $query } | ConvertTo-Json
-    $response = Invoke-RestMethod -Uri $QueryUrl -Headers $Headers -Method Post -Body $body -ErrorAction Stop
+    $response = Invoke-RestMethodWithRetry -Uri $QueryUrl -Headers $Headers -Method Post -Body $body
 
     if (-not $response.Results) {
         return [PSCustomObject]@{
@@ -151,7 +151,7 @@ function Get-MdeMachineSnapshotMap {
 
     do {
         $pageCount++
-        $response = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get -ErrorAction Stop
+        $response = Invoke-RestMethodWithRetry -Uri $url -Headers $Headers -Method Get
 
         if ($response.value) {
             foreach ($machine in $response.value) {

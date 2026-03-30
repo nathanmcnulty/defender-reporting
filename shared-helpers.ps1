@@ -88,6 +88,154 @@ function Invoke-FullGarbageCollection {
     [System.GC]::Collect()
 }
 
+function Invoke-RestMethodWithRetry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Method = 'Get',
+
+        [Parameter(Mandatory = $false)]
+        [hashtable]$Headers,
+
+        [Parameter(Mandatory = $false)]
+        [object]$Body,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ContentType,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = 3,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InitialDelayMs = 1000,
+
+        [Parameter(Mandatory = $false)]
+        [double]$BackoffMultiplier = 2.0
+    )
+
+    $attempt = 0
+    $delay = $InitialDelayMs
+
+    while ($true) {
+        try {
+            $attempt++
+            $restParams = @{ Uri = $Uri; Method = $Method; ErrorAction = 'Stop' }
+            if ($Headers) { $restParams['Headers'] = $Headers }
+            if ($Body) { $restParams['Body'] = $Body }
+            if ($ContentType) { $restParams['ContentType'] = $ContentType }
+
+            return Invoke-RestMethod @restParams
+        }
+        catch {
+            $statusCode = $null
+            if ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+            elseif ($_.Exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+
+            $retryable = $statusCode -in @(429, 500, 502, 503, 504)
+            if (-not $retryable -or $attempt -ge $MaxRetries) {
+                throw
+            }
+
+            # Respect Retry-After header for 429 responses
+            $retryAfter = $null
+            try {
+                if ($_.Exception.Response -and $_.Exception.Response.Headers) {
+                    $retryAfter = $_.Exception.Response.Headers['Retry-After']
+                }
+            }
+            catch {
+                Write-Verbose "Could not read Retry-After header: $_"
+            }
+
+            $waitMs = if ($retryAfter -and [int]::TryParse($retryAfter, [ref]$null)) {
+                [int]$retryAfter * 1000
+            }
+            else {
+                $delay
+            }
+
+            Write-Warning "API call failed (attempt $attempt/$MaxRetries, HTTP $statusCode): $($_.Exception.Message). Retrying in $([math]::Round($waitMs / 1000, 1))s..."
+            Start-Sleep -Milliseconds $waitMs
+            $delay = [int]($delay * $BackoffMultiplier)
+        }
+    }
+}
+
+function Invoke-WebRequestWithRetry {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter(Mandatory = $false)]
+        [string]$OutFile,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxRetries = 3,
+
+        [Parameter(Mandatory = $false)]
+        [int]$InitialDelayMs = 1000,
+
+        [Parameter(Mandatory = $false)]
+        [double]$BackoffMultiplier = 2.0
+    )
+
+    $attempt = 0
+    $delay = $InitialDelayMs
+
+    while ($true) {
+        try {
+            $attempt++
+            $webParams = @{ Uri = $Uri; ErrorAction = 'Stop' }
+            if ($OutFile) { $webParams['OutFile'] = $OutFile }
+
+            return Invoke-WebRequest @webParams
+        }
+        catch {
+            $statusCode = $null
+            if ($_.Exception -is [System.Net.WebException] -and $_.Exception.Response) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+            elseif ($_.Exception -is [Microsoft.PowerShell.Commands.HttpResponseException]) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+
+            $retryable = $statusCode -in @(429, 500, 502, 503, 504)
+            if (-not $retryable -or $attempt -ge $MaxRetries) {
+                throw
+            }
+
+            $retryAfter = $null
+            try {
+                if ($_.Exception.Response -and $_.Exception.Response.Headers) {
+                    $retryAfter = $_.Exception.Response.Headers['Retry-After']
+                }
+            }
+            catch {
+                Write-Verbose "Could not read Retry-After header: $_"
+            }
+
+            $waitMs = if ($retryAfter -and [int]::TryParse($retryAfter, [ref]$null)) {
+                [int]$retryAfter * 1000
+            }
+            else {
+                $delay
+            }
+
+            Write-Warning "Download failed (attempt $attempt/$MaxRetries, HTTP $statusCode): $($_.Exception.Message). Retrying in $([math]::Round($waitMs / 1000, 1))s..."
+            Start-Sleep -Milliseconds $waitMs
+            $delay = [int]($delay * $BackoffMultiplier)
+        }
+    }
+}
+
 function Get-StoreTransactionJournalPath {
     [CmdletBinding()]
     [OutputType([string])]
@@ -2987,6 +3135,10 @@ function Publish-VulnStoreFromLegacySnapshot {
         [switch]$RemoveLegacyFiles
     )
 
+    if ([datetime]::UtcNow -ge [datetime]$Script:LegacyVulnMigrationRemovalDate) {
+        Write-Warning "Legacy vulnerability migration is past its scheduled removal date ($Script:LegacyVulnMigrationRemovalDate). This code path should be removed."
+    }
+
     $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath -LegacyFilePaths $LegacyFilePaths)
 
     if ($legacyFiles.Count -eq 0) {
@@ -4833,7 +4985,7 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
         [string]$ExportUrl
     )
 
-    $response = Invoke-RestMethod -Uri $ExportUrl -Headers $Headers -Method Get -ErrorAction Stop
+    $response = Invoke-RestMethodWithRetry -Uri $ExportUrl -Headers $Headers -Method Get
     $exportFiles = @($response.exportFiles)
     if ($exportFiles.Count -eq 0) {
         throw 'Bulk vulnerability export returned no files.'
@@ -4854,7 +5006,7 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
         }
 
         $outputFile = Join-Path $OutputPath "VulnExport_${groupId}_${date}.json.gz"
-        Invoke-WebRequest -Uri $fileUrl -OutFile $outputFile
+        Invoke-WebRequestWithRetry -Uri $fileUrl -OutFile $outputFile
         $downloadedFiles.Add($outputFile)
     }
 
@@ -4885,7 +5037,7 @@ DeviceTvmSoftwareVulnerabilities
 "@
 
     $body = @{ Query = $query } | ConvertTo-Json
-    $response = Invoke-RestMethod -Uri $QueryUrl -Headers $Headers -Method Post -Body $body -ErrorAction Stop
+    $response = Invoke-RestMethodWithRetry -Uri $QueryUrl -Headers $Headers -Method Post -Body $body
 
     if (-not $response.Results) {
         return [PSCustomObject]@{
@@ -4955,7 +5107,7 @@ function Get-MdeMachineSnapshotMap {
 
     do {
         $pageCount++
-        $response = Invoke-RestMethod -Uri $url -Headers $Headers -Method Get -ErrorAction Stop
+        $response = Invoke-RestMethodWithRetry -Uri $url -Headers $Headers -Method Get
 
         if ($response.value) {
             foreach ($machine in $response.value) {
@@ -5129,40 +5281,6 @@ function Invoke-MdeMachineStoreRefresh {
 }
 
 # Shared generator/runbook helpers used for dashboard normalization and HTML assembly.
-
-function Get-JSLibrary {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Url,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Name,
-
-        [Parameter(Mandatory = $false)]
-        [bool]$Critical = $false
-    )
-
-    Write-Information "Downloading $Name library..." -InformationAction Continue
-
-    try {
-        $response = Invoke-WebRequest -Uri $Url -TimeoutSec 30
-        Write-Information "  $Name downloaded successfully" -InformationAction Continue
-        return $response.Content
-    }
-    catch {
-        $errorMessage = "Failed to download $Name from $Url`: $_"
-        if ($Critical) {
-            Write-Error $errorMessage
-            throw
-        }
-
-        Write-Warning $errorMessage
-        Write-Warning "Using fallback for $Name (PDF export may not work)"
-        return "// $Name failed to load - functionality may be limited"
-    }
-}
 
 function Save-JSLibraryFile {
     [CmdletBinding()]

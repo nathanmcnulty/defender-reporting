@@ -112,6 +112,10 @@ function Publish-VulnStoreFromLegacySnapshot {
         [switch]$RemoveLegacyFiles
     )
 
+    if ([datetime]::UtcNow -ge [datetime]$Script:LegacyVulnMigrationRemovalDate) {
+        Write-Warning "Legacy vulnerability migration is past its scheduled removal date ($Script:LegacyVulnMigrationRemovalDate). This code path should be removed."
+    }
+
     $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath -LegacyFilePaths $LegacyFilePaths)
 
     if ($legacyFiles.Count -eq 0) {

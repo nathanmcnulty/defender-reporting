@@ -163,6 +163,8 @@ let aggregateCacheKey = null;
 let aggregateCache = createEmptyAggregateCache();
 let cascadingFilterCountCacheKey = null;
 let cascadingFilterCountCache = null;
+let chartDataCacheKey = null;
+let chartDataCache = null;
 
 // Remediation table scroll state
 let remediationLoadedCount = 0;
@@ -315,6 +317,8 @@ function invalidateAggregateCache() {
     aggregateCache = createEmptyAggregateCache();
     cascadingFilterCountCacheKey = null;
     cascadingFilterCountCache = null;
+    chartDataCacheKey = null;
+    chartDataCache = null;
 }
 
 function markAllReportsDirty() {
@@ -585,16 +589,24 @@ async function setCachedData(fingerprint, data) {
 // =============================================================================
 
 /**
- * Build the Web Worker source code as a string.
- * The worker receives lookups + rawVulns and returns the denormalized array.
+ * Build a Worker source that decompresses (if given compressed bytes) and denormalizes.
+ * When compressed bytes are provided via Transferable, pako.inflate runs off-main-thread.
  */
 function buildWorkerSource() {
-    // We stringify the denormalize logic so it runs inside the worker context
     return `
 'use strict';
 self.onmessage = function(e) {
     var lookups = e.data.lookups;
     var rawVulns = e.data.rawVulns;
+
+    // If compressed data was transferred, decompress it first
+    if (e.data.compressedBytes) {
+        var decompressed = pako.inflate(e.data.compressedBytes, { to: 'string' });
+        var data = JSON.parse(decompressed);
+        lookups = data.lookups;
+        rawVulns = data.vulns;
+    }
+
     function isColumnarRawVulnData(value) {
         return !!(value && !Array.isArray(value) && Array.isArray(value.d));
     }
@@ -730,20 +742,39 @@ self.onmessage = function(e) {
             _index: i
         };
     }
-    self.postMessage(result);
+    self.postMessage({ rows: result, lookups: lookups, rawVulns: rawVulns });
 };
 `;
 }
 
 /**
  * Run denormalization in a Web Worker.
+ * When compressedBytes is provided, decompression also runs in the Worker (off main thread).
  * Falls back to main-thread if Worker is unavailable.
- * @returns {Promise<Array>}
+ * @param {Uint8Array} [compressedBytes] - Optional compressed payload bytes
+ * @returns {Promise<{rows: Array, lookups?: Object, rawVulns?: Object}>}
  */
-function denormalizeInWorker() {
+function denormalizeInWorker(compressedBytes) {
     return new Promise((resolve, reject) => {
         try {
-            const blob = new Blob([buildWorkerSource()], { type: 'application/javascript' });
+            // When decompressing in Worker, include pako source in the blob
+            let workerParts = [];
+            if (compressedBytes) {
+                const pakoSource = getPakoSource();
+                if (pakoSource) {
+                    workerParts.push(pakoSource + '\n');
+                } else {
+                    // pako source unavailable for Worker — fall back to main-thread decompression
+                    const decompressed = pako.inflate(compressedBytes, { to: 'string' });
+                    const data = JSON.parse(decompressed);
+                    lookups = data.lookups;
+                    rawVulns = data.vulns;
+                    compressedBytes = null;
+                }
+            }
+            workerParts.push(buildWorkerSource());
+
+            const blob = new Blob(workerParts, { type: 'application/javascript' });
             const url = URL.createObjectURL(blob);
             const worker = new Worker(url);
 
@@ -758,12 +789,30 @@ function denormalizeInWorker() {
                 reject(err);
             };
 
-            // Transfer data to worker
-            worker.postMessage({ lookups, rawVulns });
+            if (compressedBytes) {
+                worker.postMessage({ compressedBytes }, [compressedBytes.buffer]);
+            } else {
+                worker.postMessage({ lookups, rawVulns });
+            }
         } catch (err) {
             reject(err);
         }
     });
+}
+
+/**
+ * Get pako library source code for injection into a Worker.
+ * Returns the source string, or null if unavailable.
+ */
+function getPakoSource() {
+    // Try to find pako's script element in the page
+    const scripts = document.querySelectorAll('script');
+    for (const script of scripts) {
+        if (script.textContent && script.textContent.indexOf('pako') !== -1 && script.textContent.indexOf('inflate') !== -1 && !script.id) {
+            return script.textContent;
+        }
+    }
+    return null;
 }
 
 // =============================================================================
@@ -870,8 +919,11 @@ let activeVirtualTables = [];
 // =============================================================================
 
 /**
- * Load and decompress data from embedded scripts
+ * Load and decompress data from embedded scripts.
+ * For compressed formats, stores raw bytes for Worker-based decompression.
  */
+let pendingCompressedBytes = null;
+
 async function loadData() {
     logDebug('Loading data, format:', dataFormat);
 
@@ -885,19 +937,11 @@ async function loadData() {
             throw new Error(`Failed to load dashboard payload (${response.status} ${response.statusText}).`);
         }
 
-        const compressedBytes = new Uint8Array(await response.arrayBuffer());
-        const decompressed = pako.inflate(compressedBytes, { to: 'string' });
-        const data = JSON.parse(decompressed);
-        lookups = data.lookups;
-        rawVulns = data.vulns;
+        pendingCompressedBytes = new Uint8Array(await response.arrayBuffer());
     } else if (dataFormat === 'compressed') {
-        // Decompress using pako
+        // Base64 decode on main thread (fast), defer inflate to Worker
         const compressedBase64 = document.getElementById('vulnsData').textContent.replace(/\s+/g, '');
-        const compressedBytes = Uint8Array.from(atob(compressedBase64), c => c.charCodeAt(0));
-        const decompressed = pako.inflate(compressedBytes, { to: 'string' });
-        const data = JSON.parse(decompressed);
-        lookups = data.lookups;
-        rawVulns = data.vulns;
+        pendingCompressedBytes = Uint8Array.from(atob(compressedBase64), c => c.charCodeAt(0));
     } else {
         // Normalized but not compressed
         lookups = JSON.parse(document.getElementById('lookupsData').textContent);
@@ -917,9 +961,13 @@ async function loadData() {
     } catch (err) {
         console.warn('Failed to parse data quality metadata:', err);
     }
-    
-    logDebug('Loaded lookups:', Object.keys(lookups));
-    logDebug('Loaded', getRawVulnCount(), 'vulnerability records');
+
+    if (lookups) {
+        logDebug('Loaded lookups:', Object.keys(lookups));
+        logDebug('Loaded', getRawVulnCount(), 'vulnerability records');
+    } else {
+        logDebug('Compressed data loaded, will decompress in Worker');
+    }
 }
 
 function isColumnarRawVulnData(value) {
@@ -1073,34 +1121,59 @@ function denormalizeAllVulns() {
  * @returns {Promise<void>}
  */
 async function denormalizeWithCaching() {
-    const fingerprint = computeDataFingerprint();
-    const rawCount = getRawVulnCount();
-    logDebug('Data fingerprint:', fingerprint);
+    const hasCompressed = !!pendingCompressedBytes;
 
-    // 1. Try IndexedDB cache
-    const cached = await getCachedData(fingerprint);
-    if (cached && cached.length === rawCount) {
-        logDebug('Loaded', cached.length, 'records from IndexedDB cache');
-        vulnerabilityData = cached;
-        applyDerivedVulnerabilityFields(vulnerabilityData);
-        return;
+    // For compressed data, fingerprint and cache checks happen after decompression
+    if (!hasCompressed) {
+        const fingerprint = computeDataFingerprint();
+        const rawCount = getRawVulnCount();
+        logDebug('Data fingerprint:', fingerprint);
+
+        // 1. Try IndexedDB cache
+        const cached = await getCachedData(fingerprint);
+        if (cached && cached.length === rawCount) {
+            logDebug('Loaded', cached.length, 'records from IndexedDB cache');
+            vulnerabilityData = cached;
+            applyDerivedVulnerabilityFields(vulnerabilityData);
+            return;
+        }
     }
 
-    // 2. Try Web Worker
+    // 2. Try Web Worker (with optional decompression)
     try {
-        logDebug('Denormalizing', rawCount, 'records via Web Worker...');
+        const compBytes = pendingCompressedBytes;
+        pendingCompressedBytes = null;
+        const label = compBytes ? 'decompressing + denormalizing' : 'denormalizing';
+        logDebug(label, compBytes ? '(compressed bytes)' : getRawVulnCount(), 'records via Web Worker...');
         const startTime = performance.now();
-        vulnerabilityData = await denormalizeInWorker();
+        const result = await denormalizeInWorker(compBytes);
+        vulnerabilityData = result.rows;
+        if (result.lookups) lookups = result.lookups;
+        if (result.rawVulns) rawVulns = result.rawVulns;
         const elapsed = Math.round(performance.now() - startTime);
-        logDebug('Worker denormalization complete in', elapsed, 'ms');
+        logDebug('Worker complete in', elapsed, 'ms');
     } catch (err) {
         console.warn('Web Worker failed, falling back to main thread:', err);
+        // If compressed bytes are still pending, decompress on main thread
+        if (pendingCompressedBytes) {
+            const decompressed = pako.inflate(pendingCompressedBytes, { to: 'string' });
+            pendingCompressedBytes = null;
+            const data = JSON.parse(decompressed);
+            lookups = data.lookups;
+            rawVulns = data.vulns;
+        }
         denormalizeAllVulns();
     }
 
     applyDerivedVulnerabilityFields(vulnerabilityData);
 
+    // Log counts after data is available
+    logDebug('Loaded lookups:', lookups ? Object.keys(lookups) : 'none');
+    logDebug('Loaded', getRawVulnCount(), 'vulnerability records');
+
     // 3. Cache the result (fire-and-forget)
+    const fingerprint = computeDataFingerprint();
+    logDebug('Data fingerprint:', fingerprint);
     setCachedData(fingerprint, vulnerabilityData);
 }
 
@@ -2403,85 +2476,80 @@ function renderChart() {
         return;
     }
 
-    const sortedDates = generateDateRange(startDate, endDate);
-    
-    const severityCounts = {
-        Critical: [],
-        High: [],
-        Medium: [],
-        Low: []
-    };
-    const totalCounts = [];
-    const deviceCounts = [];
-    
-    const candidates = filteredData;
-    
-    // Build start/end events for sweep-line algorithm
-    const events = new Map();
-    candidates.forEach(v => {
-        const sd = getFirstSeenDate(v);
-        let ed = nextDay(getEffectiveOpenEndDate(v));
-        
-        // Data validation: ensure end date is after start date
-        if (ed <= sd) {
-            ed = nextDay(sd);
-        }
-        
-        if (!events.has(sd)) events.set(sd, { starts: [], ends: [] });
-        events.get(sd).starts.push(v);
-        if (!events.has(ed)) events.set(ed, { starts: [], ends: [] });
-        events.get(ed).ends.push(v);
-    });
-    
-    // Running sweep state
-    let sweepTotal = 0;
-    const sweepSeverity = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-    const deviceActive = new Map(); // deviceName -> active vuln count
-    
-    const processStart = (v) => {
-        sweepTotal++;
-        const sev = v.VulnerabilitySeverityLevel;
-        if (sweepSeverity[sev] !== undefined) sweepSeverity[sev]++;
-        const deviceKey = getDeviceIdentityKey(v);
-        deviceActive.set(deviceKey, (deviceActive.get(deviceKey) || 0) + 1);
-    };
-    const processEnd = (v) => {
-        if (sweepTotal > 0) sweepTotal--;
-        const sev = v.VulnerabilitySeverityLevel;
-        if (sweepSeverity[sev] !== undefined && sweepSeverity[sev] > 0) sweepSeverity[sev]--;
-        const deviceKey = getDeviceIdentityKey(v);
-        const dc = deviceActive.get(deviceKey);
-        if (dc <= 1) deviceActive.delete(deviceKey);
-        else deviceActive.set(deviceKey, dc - 1);
-    };
-    
-    // Process events before the visible date range to establish initial state
-    const rangeStart = sortedDates[0];
-    const allEventDates = [...events.keys()].sort();
-    for (const eventDate of allEventDates) {
-        if (eventDate >= rangeStart) break;
-        const ev = events.get(eventDate);
-        ev.starts.forEach(processStart);
-        ev.ends.forEach(processEnd);
-    }
-    
-    // Sweep through visible dates
-    sortedDates.forEach(date => {
-        const ev = events.get(date);
-        if (ev) {
+    // Check chart data cache — reuse sweep-line result when filter state is unchanged
+    const cacheKey = filterState.key + '|' + mostRecentLastSeenDate;
+    let sortedDates, severityCounts, totalCounts, deviceCounts;
+
+    if (chartDataCacheKey === cacheKey && chartDataCache) {
+        sortedDates = chartDataCache.sortedDates;
+        severityCounts = chartDataCache.severityCounts;
+        totalCounts = chartDataCache.totalCounts;
+        deviceCounts = chartDataCache.deviceCounts;
+    } else {
+        sortedDates = generateDateRange(startDate, endDate);
+        severityCounts = { Critical: [], High: [], Medium: [], Low: [] };
+        totalCounts = [];
+        deviceCounts = [];
+        const candidates = filteredData;
+
+        const events = new Map();
+        candidates.forEach(v => {
+            const sd = getFirstSeenDate(v);
+            let ed = nextDay(getEffectiveOpenEndDate(v));
+            if (ed <= sd) { ed = nextDay(sd); }
+            if (!events.has(sd)) events.set(sd, { starts: [], ends: [] });
+            events.get(sd).starts.push(v);
+            if (!events.has(ed)) events.set(ed, { starts: [], ends: [] });
+            events.get(ed).ends.push(v);
+        });
+
+        let sweepTotal = 0;
+        const sweepSeverity = { Critical: 0, High: 0, Medium: 0, Low: 0 };
+        const deviceActive = new Map();
+        const processStart = (v) => {
+            sweepTotal++;
+            const sev = v.VulnerabilitySeverityLevel;
+            if (sweepSeverity[sev] !== undefined) sweepSeverity[sev]++;
+            const deviceKey = getDeviceIdentityKey(v);
+            deviceActive.set(deviceKey, (deviceActive.get(deviceKey) || 0) + 1);
+        };
+        const processEnd = (v) => {
+            if (sweepTotal > 0) sweepTotal--;
+            const sev = v.VulnerabilitySeverityLevel;
+            if (sweepSeverity[sev] !== undefined && sweepSeverity[sev] > 0) sweepSeverity[sev]--;
+            const deviceKey = getDeviceIdentityKey(v);
+            const dc = deviceActive.get(deviceKey);
+            if (dc <= 1) deviceActive.delete(deviceKey);
+            else deviceActive.set(deviceKey, dc - 1);
+        };
+
+        const rangeStart = sortedDates[0];
+        const allEventDates = [...events.keys()].sort();
+        for (const eventDate of allEventDates) {
+            if (eventDate >= rangeStart) break;
+            const ev = events.get(eventDate);
             ev.starts.forEach(processStart);
             ev.ends.forEach(processEnd);
         }
-        
-        totalCounts.push(sweepTotal);
-        deviceCounts.push(deviceActive.size);
-        severityCounts.Critical.push(sweepSeverity.Critical);
-        severityCounts.High.push(sweepSeverity.High);
-        severityCounts.Medium.push(sweepSeverity.Medium);
-        severityCounts.Low.push(sweepSeverity.Low);
-    });
-    
-    // Find the index where we transition from actual data to projected (dashed) data
+
+        sortedDates.forEach(date => {
+            const ev = events.get(date);
+            if (ev) {
+                ev.starts.forEach(processStart);
+                ev.ends.forEach(processEnd);
+            }
+            totalCounts.push(sweepTotal);
+            deviceCounts.push(deviceActive.size);
+            severityCounts.Critical.push(sweepSeverity.Critical);
+            severityCounts.High.push(sweepSeverity.High);
+            severityCounts.Medium.push(sweepSeverity.Medium);
+            severityCounts.Low.push(sweepSeverity.Low);
+        });
+
+        chartDataCache = { sortedDates, severityCounts, totalCounts, deviceCounts };
+        chartDataCacheKey = cacheKey;
+    }
+
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
 
     if (chartInstance) {
@@ -5904,6 +5972,21 @@ async function exportTableBasedReportToPdf(selectedReport, reportName) {
 async function exportToPDF() {
     const button = document.querySelector('.export-pdf-btn');
     button.disabled = true;
+
+    // Create progress bar
+    const progressDiv = document.createElement('div');
+    progressDiv.className = 'pdf-export-progress';
+    progressDiv.innerHTML = '<div class="pdf-progress-container"><div class="pdf-progress-fill" style="width: 0%"></div></div><div class="pdf-progress-text">Loading libraries... 0%</div>';
+    document.body.appendChild(progressDiv);
+
+    const updateProgress = (percent, text) => {
+        const fill = progressDiv.querySelector('.pdf-progress-fill');
+        const label = progressDiv.querySelector('.pdf-progress-text');
+        if (fill) fill.style.width = Math.max(0, Math.min(100, percent)) + '%';
+        if (label) label.textContent = text + ' ' + Math.round(percent) + '%';
+    };
+
+    updateProgress(5, 'Loading libraries...');
     button.textContent = '📄 Loading libraries...';
     setDashboardStatus('Preparing PDF export...');
     
@@ -5914,18 +5997,23 @@ async function exportToPDF() {
         setDashboardStatus('Failed to load PDF export libraries. Please try again from a hosted dashboard or retry the export.', 'error');
         button.disabled = false;
         button.textContent = '📄 Export to PDF';
+        progressDiv.remove();
         return;
     }
     
+    updateProgress(20, 'Libraries loaded.');
+
     const selector = document.getElementById('reportSelector');
     const selectedReport = selector.value;
     const reportName = selector.options[selector.selectedIndex].text;
     
+    updateProgress(25, 'Expanding data...');
     button.textContent = '📄 Expanding data...';
     
     const wasExpanded = expandReportForPdf(selectedReport);
     await new Promise(resolve => setTimeout(resolve, 100));
     
+    updateProgress(30, 'Generating PDF...');
     button.textContent = '📄 Generating PDF...';
     document.body.classList.add('pdf-export-active');
     
@@ -5939,6 +6027,8 @@ async function exportToPDF() {
         } else {
             docDefinition = await exportTableBasedReportToPdf(selectedReport, reportName);
         }
+        
+        updateProgress(70, 'Adding filters...');
         
         // Add filter information  
         const startDate = document.getElementById('filterStartDate').value;
@@ -6039,8 +6129,11 @@ async function exportToPDF() {
         
         docDefinition.content.push(...filterContent);
         
+        updateProgress(90, 'Creating PDF...');
         pdfMake.createPdf(docDefinition).download(fileName);
+        updateProgress(100, 'Complete!');
         clearDashboardStatus();
+        setTimeout(() => { if (progressDiv.parentNode) progressDiv.remove(); }, 1500);
     } catch (err) {
         console.error('PDF generation failed:', err);
         setDashboardStatus('Failed to generate PDF: ' + err.message, 'error');
@@ -6049,6 +6142,7 @@ async function exportToPDF() {
         restoreReportState(selectedReport, wasExpanded);
         button.disabled = false;
         button.textContent = '📄 Export to PDF';
+        setTimeout(() => { if (progressDiv.parentNode) progressDiv.remove(); }, 3000);
     }
 }
 
