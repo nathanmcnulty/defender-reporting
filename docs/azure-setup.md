@@ -4,8 +4,9 @@ This page covers the Azure-specific parts of the project: permissions, authentic
 
 ## What the Azure provisioning script creates
 
-`Setup-AzureResources.ps1` provisions:
+`Setup-AzureResources.ps1` provisions infrastructure using one of two mutually exclusive compute types:
 
+**Automation Account (default)**:
 - A resource group
 - An Azure Automation account with system-assigned managed identity
 - A storage account with `exports`, `templates`, and `dashboards` containers
@@ -13,6 +14,24 @@ This page covers the Azure-specific parts of the project: permissions, authentic
 - A PowerShell 7.4 runtime environment
 - The dashboard runbook and daily schedule
 - An optional Azure Container App protected by Entra ID Easy Auth
+
+**Function App (Flex Consumption)**:
+- A resource group
+- An Azure Function App on a Flex Consumption plan (Linux, PowerShell 7.4)
+- A storage account with `exports`, `templates`, `dashboards`, and `app-package` containers
+- RBAC for the Function App managed identity (Blob Data Owner, Queue/Table Data Contributor)
+- Timer-triggered function running daily at 2:00 AM UTC
+- An optional Azure Container App protected by Entra ID Easy Auth
+
+## When to choose each compute type
+
+| Factor | Automation Account | Function App (Flex Consumption) |
+|--------|-------------------|-------------------------------|
+| **Best for** | Simple deployments, < 20K devices | Large environments, 20K–50K+ devices |
+| **Scaling** | ~200 concurrent jobs | Up to 1000 instances, per-function scaling |
+| **Cost (daily ~25 min run)** | ~$25–35/mo | ~$15–20/mo |
+| **Monitoring** | Automation job logs | Application Insights (richer) |
+| **Module management** | Managed runtime environment | Bundled in deployment zip |
 
 ## Prerequisites
 
@@ -22,7 +41,7 @@ This page covers the Azure-specific parts of the project: permissions, authentic
 
 `Setup-AzureResources.ps1` uses `Get-AzAccessToken` plus native Microsoft Graph REST calls first. If the Az-issued Graph token does not contain the required delegated scopes, the script falls back to `Microsoft.Graph.Authentication` when that module is installed. If neither path is available, the script fails fast with guidance.
 
-## Basic provisioning
+## Basic provisioning (Automation Account)
 
 ```powershell
 .\Setup-AzureResources.ps1 `
@@ -31,12 +50,34 @@ This page covers the Azure-specific parts of the project: permissions, authentic
     -StorageAccountName "stdefenderreporting"
 ```
 
-## Provisioning with a protected Container App
+## Basic provisioning (Function App)
 
 ```powershell
 .\Setup-AzureResources.ps1 `
+    -ComputeType FunctionApp `
+    -ResourceGroupName "rg-defender-reporting" `
+    -FunctionAppName "func-defender-reporting" `
+    -StorageAccountName "stdefenderreporting"
+```
+
+## Provisioning with a protected Container App
+
+Either compute type works with the Container App:
+
+```powershell
+# With Automation Account (default)
+.\Setup-AzureResources.ps1 `
     -ResourceGroupName "rg-defender-reporting" `
     -AutomationAccountName "aa-defender-reporting" `
+    -StorageAccountName "stdefenderreporting" `
+    -IncludeContainerApp `
+    -SecurityGroup "Dashboard Viewers"
+
+# With Function App
+.\Setup-AzureResources.ps1 `
+    -ComputeType FunctionApp `
+    -ResourceGroupName "rg-defender-reporting" `
+    -FunctionAppName "func-defender-reporting" `
     -StorageAccountName "stdefenderreporting" `
     -IncludeContainerApp `
     -SecurityGroup "Dashboard Viewers"
@@ -66,8 +107,10 @@ For local validation of the hosted split-assets build, use a local HTTP server i
 
 | Parameter | Required | Purpose |
 |---|---|---|
+| `-ComputeType` | No | `AutomationAccount` (default) or `FunctionApp` |
 | `-ResourceGroupName` | Yes | Resource group name |
-| `-AutomationAccountName` | Yes | Automation account name |
+| `-AutomationAccountName` | When `AutomationAccount` | Automation account name |
+| `-FunctionAppName` | When `FunctionApp` | Function App name |
 | `-StorageAccountName` | Yes | Storage account name |
 | `-Location` | No | Azure region, default `westus2` |
 | `-SkipMdePermissions` | No | Skip automatic MDE app role assignment |
@@ -165,17 +208,25 @@ finally {
     -IncludeAdvancedHunting
 ```
 
-## Runbook source of truth
+## Pipeline source of truth
 
-`azure/Invoke-DashboardPipeline.ps1` is generated. To change the Azure Automation runbook:
+Both the Automation runbook and Function App derive from the same source file. `azure/Invoke-DashboardPipeline.ps1` and `azure/function-app/ExportAndGenerate/run.ps1` are generated artifacts.
+
+To change the pipeline logic:
 
 1. Edit `shared-helpers.ps1`
 2. Edit `azure/runbook-source.ps1`
 3. Rebuild with:
 
 ```powershell
+# Rebuild the Automation runbook
 .\azure\Build-Runbook.ps1
+
+# Rebuild the Function App entry point
+.\azure\Build-FunctionApp.ps1
 ```
+
+The Function App build transforms `runbook-source.ps1` into a timer-triggered function, replacing Automation Account variables with environment variable lookups and inlining shared helpers.
 
 ## Related docs
 

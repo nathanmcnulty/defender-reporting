@@ -5,12 +5,19 @@
 .DESCRIPTION
     Creates and configures the following Azure resources:
     - Resource Group (if not exists)
-    - Azure Automation Account with System-Assigned Managed Identity
+    - Azure Automation Account with System-Assigned Managed Identity (default),
+      OR Azure Function App on Flex Consumption plan (with -ComputeType FunctionApp)
     - Azure Storage Account configured per Microsoft Security Benchmark
     - Blob containers (exports, templates, dashboards)
-    - RBAC: Storage Blob Data Contributor for the Automation Managed Identity
+    - RBAC: Storage Blob Data Contributor (or Owner for Function App) for the
+      compute Managed Identity
     - Custom PowerShell 7.4 runtime environment with latest Az.Accounts
-    - Runbook and daily recurring schedule
+      (Automation) or bundled modules (Function App)
+    - Runbook and daily recurring schedule (Automation) or timer-triggered
+      function (Function App)
+    
+    Automation Account and Function App are mutually exclusive compute options.
+    Both can optionally include the Container App for web delivery.
     
     After provisioning, uploads dashboard templates and runs the pipeline
     end-to-end to validate the setup. Use -SkipValidation to skip this step.
@@ -23,13 +30,25 @@
 .PARAMETER SubscriptionId
     Azure subscription ID. Defaults to the current Az context subscription.
 
+.PARAMETER ComputeType
+    Compute backend for the pipeline. AutomationAccount (default) creates an
+    Azure Automation runbook with a daily schedule.  FunctionApp creates an
+    Azure Function App on the Flex Consumption plan with a timer trigger.
+    The two are mutually exclusive — only one compute resource is provisioned.
+
 .PARAMETER ResourceGroupName
     Name of the resource group. Created if it does not exist.
     Must be 1-90 characters: alphanumeric, hyphens, underscores, periods, parentheses.
 
 .PARAMETER AutomationAccountName
     Name of the Azure Automation account. Created if it does not exist.
+    Required when ComputeType is AutomationAccount.
     Must be 6-50 characters: alphanumeric and hyphens, starting with a letter.
+
+.PARAMETER FunctionAppName
+    Name of the Azure Function App. Created if it does not exist.
+    Required when ComputeType is FunctionApp.
+    Must be 2-60 characters: alphanumeric and hyphens.
 
 .PARAMETER StorageAccountName
     Name of the Azure Storage account. Created if it does not exist.
@@ -54,7 +73,7 @@
     the dashboard from blob storage on each cold start (scale-to-zero).
 
 .PARAMETER DashboardDeliveryMode
-    Controls which dashboard packaging mode Azure Automation publishes.
+    Controls which dashboard packaging mode the compute pipeline publishes.
     Auto uses Hosted when -IncludeContainerApp is set, otherwise SelfContained.
     Hosted publishes the HTML plus a sibling asset directory for same-origin
     delivery through the Container App or another HTTP host.
@@ -73,6 +92,11 @@
     .\Setup-AzureResources.ps1 -ResourceGroupName "rg-defender-reporting" `
         -AutomationAccountName "aa-defender-reporting" `
         -StorageAccountName "stdefenderreporting"
+
+.EXAMPLE
+    .\Setup-AzureResources.ps1 -ResourceGroupName "rg-defender-reporting" `
+        -StorageAccountName "stdefenderreporting" `
+        -ComputeType FunctionApp -FunctionAppName "func-defender-reporting"
 
 .EXAMPLE
     .\Setup-AzureResources.ps1 -ResourceGroupName "rg-defender-reporting" `
@@ -113,11 +137,18 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Azure subscription ID (defaults to current context)")]
     [string]$SubscriptionId,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Compute backend: AutomationAccount (default) or FunctionApp")]
+    [ValidateSet('AutomationAccount', 'FunctionApp')]
+    [string]$ComputeType = 'AutomationAccount',
+
     [Parameter(Mandatory = $true, HelpMessage = "Resource group name")]
     [string]$ResourceGroupName,
 
-    [Parameter(Mandatory = $true, HelpMessage = "Automation account name")]
+    [Parameter(Mandatory = $false, HelpMessage = "Automation account name (required for AutomationAccount compute type)")]
     [string]$AutomationAccountName,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Function App name (required for FunctionApp compute type)")]
+    [string]$FunctionAppName,
 
     [Parameter(Mandatory = $true, HelpMessage = "Storage account name")]
     [string]$StorageAccountName,
@@ -131,7 +162,7 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Skip end-to-end validation (template upload, pipeline run, result check)")]
     [switch]$SkipValidation,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Timeout in seconds for the validation Automation job polling loop")]
+    [Parameter(Mandatory = $false, HelpMessage = "Timeout in seconds for the validation polling loop")]
     [ValidateRange(60, 7200)]
     [int]$ValidationTimeoutSeconds = 1800,
 
@@ -153,6 +184,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # =============================================================================
+# COMPUTE TYPE VALIDATION
+# =============================================================================
+
+if ($ComputeType -eq 'AutomationAccount' -and -not $AutomationAccountName) {
+    throw "-AutomationAccountName is required when -ComputeType is AutomationAccount."
+}
+if ($ComputeType -eq 'FunctionApp' -and -not $FunctionAppName) {
+    throw "-FunctionAppName is required when -ComputeType is FunctionApp."
+}
+
+# =============================================================================
 # NAME VALIDATION & SANITIZATION
 # =============================================================================
 
@@ -169,16 +211,33 @@ if ($ResourceGroupName -ne $originalRG) {
 }
 
 # Automation Account: 6-50 chars, alphanumeric and hyphens, must start with a letter
-$originalAA = $AutomationAccountName
-$AutomationAccountName = $AutomationAccountName -replace '[^a-zA-Z0-9\-]', ''
-$AutomationAccountName = $AutomationAccountName.TrimStart('0123456789-'.ToCharArray())
-if ($AutomationAccountName.Length -gt 50) { $AutomationAccountName = $AutomationAccountName.Substring(0, 50) }
-if ($AutomationAccountName.Length -lt 6) {
-    throw "Automation account name '$originalAA' is too short after sanitization ('$AutomationAccountName'). Must be 6-50 chars: alphanumeric and hyphens, starting with a letter."
+if ($ComputeType -eq 'AutomationAccount') {
+    $originalAA = $AutomationAccountName
+    $AutomationAccountName = $AutomationAccountName -replace '[^a-zA-Z0-9\-]', ''
+    $AutomationAccountName = $AutomationAccountName.TrimStart('0123456789-'.ToCharArray())
+    if ($AutomationAccountName.Length -gt 50) { $AutomationAccountName = $AutomationAccountName.Substring(0, 50) }
+    if ($AutomationAccountName.Length -lt 6) {
+        throw "Automation account name '$originalAA' is too short after sanitization ('$AutomationAccountName'). Must be 6-50 chars: alphanumeric and hyphens, starting with a letter."
+    }
+    if ($AutomationAccountName -ne $originalAA) {
+        Write-Host "Automation account name sanitized: '$originalAA' -> '$AutomationAccountName'" -ForegroundColor Yellow
+        Write-Host "  Allowed: alphanumeric and hyphens, must start with a letter (6-50 chars)" -ForegroundColor Gray
+    }
 }
-if ($AutomationAccountName -ne $originalAA) {
-    Write-Host "Automation account name sanitized: '$originalAA' -> '$AutomationAccountName'" -ForegroundColor Yellow
-    Write-Host "  Allowed: alphanumeric and hyphens, must start with a letter (6-50 chars)" -ForegroundColor Gray
+
+# Function App: 2-60 chars, alphanumeric and hyphens
+if ($ComputeType -eq 'FunctionApp') {
+    $originalFA = $FunctionAppName
+    $FunctionAppName = $FunctionAppName.ToLower() -replace '[^a-z0-9\-]', ''
+    $FunctionAppName = $FunctionAppName.Trim('-')
+    if ($FunctionAppName.Length -gt 60) { $FunctionAppName = $FunctionAppName.Substring(0, 60).TrimEnd('-') }
+    if ($FunctionAppName.Length -lt 2) {
+        throw "Function App name '$originalFA' is too short after sanitization ('$FunctionAppName'). Must be 2-60 chars: lowercase alphanumeric and hyphens."
+    }
+    if ($FunctionAppName -ne $originalFA) {
+        Write-Host "Function App name sanitized: '$originalFA' -> '$FunctionAppName'" -ForegroundColor Yellow
+        Write-Host "  Allowed: lowercase alphanumeric and hyphens (2-60 chars)" -ForegroundColor Gray
+    }
 }
 
 # Storage Account: 3-24 chars, lowercase alphanumeric only (most restrictive)
@@ -231,6 +290,7 @@ $effectiveDashboardDeliveryMode = switch ($DashboardDeliveryMode) {
 }
 
 Write-Host "Dashboard delivery mode resolved to '$effectiveDashboardDeliveryMode'" -ForegroundColor Cyan
+Write-Host "Compute type: $ComputeType" -ForegroundColor Cyan
 
 # =============================================================================
 # CONSTANTS
@@ -242,11 +302,15 @@ $Script:ArmApiVersions = @{
     RuntimeEnvironment = '2024-10-23'
     StorageAccount     = '2023-05-01'
     RoleAssignment     = '2022-04-01'
+    WebApp             = '2024-04-01'
 }
 
 $Script:RuntimeEnvName = 'PowerShell-74-AzAccounts'
 
 $Script:StorageBlobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+$Script:StorageBlobDataOwnerRoleId = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
+$Script:StorageQueueDataContributorRoleId = '974c5e8b-45b9-4653-ba55-5f855dd0fb88'
+$Script:StorageTableDataContributorRoleId = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
 $Script:MdeAppId = 'fc780465-2017-40d4-a0c5-307022471b92'
 $Script:GraphApiBaseUrl = 'https://graph.microsoft.com'
 $Script:AzPowerShellGraphAppName = 'Microsoft Azure PowerShell'
@@ -258,6 +322,7 @@ $Script:MdeAppRoles = @(
 )
 
 $Script:BlobContainers = @('exports', 'templates', 'dashboards')
+$Script:FunctionAppDeploymentContainer = 'app-package'
 $Script:AutomationDailyScheduleName = 'DashboardPipeline-Daily'
 $Script:AutomationLegacyWeeklyScheduleName = 'DashboardPipeline-Every7Days'
 
@@ -800,48 +865,139 @@ try {
     }
 
     # -------------------------------------------------------------------------
-    # Step 3: Create/verify Automation Account with Managed Identity
+    # Step 3: Create/verify Compute Resource (Automation Account or Function App)
     # -------------------------------------------------------------------------
-    Write-Host "`nStep 3: Automation Account '$AutomationAccountName'..." -ForegroundColor Cyan
+    if ($ComputeType -eq 'AutomationAccount') {
+        Write-Host "`nStep 3: Automation Account '$AutomationAccountName'..." -ForegroundColor Cyan
 
-    $aaPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/${AutomationAccountName}?api-version=$($Script:ArmApiVersions.AutomationAccount)"
+        $aaPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/${AutomationAccountName}?api-version=$($Script:ArmApiVersions.AutomationAccount)"
 
-    $aaPayload = @{
-        location   = $Location
-        tags       = $Script:ProvisioningTags
-        identity   = @{
-            type = "SystemAssigned"
+        $aaPayload = @{
+            location   = $Location
+            tags       = $Script:ProvisioningTags
+            identity   = @{
+                type = "SystemAssigned"
+            }
+            properties = @{
+                sku              = @{ name = "Basic" }
+                disableLocalAuth = $true
+            }
+        } | ConvertTo-Json -Depth 5
+
+        if ($PSCmdlet.ShouldProcess($AutomationAccountName, "Create/update automation account")) {
+            $null = Invoke-ArmApi -Path $aaPath -Method PUT -Payload $aaPayload -Description "Create/update automation account"
+            Write-Host "  Automation account ready with Managed Identity enabled" -ForegroundColor Green
         }
-        properties = @{
-            sku              = @{ name = "Basic" }
-            disableLocalAuth = $true
+
+        # Step 4: Poll for Managed Identity principal ID (Automation Account)
+        Write-Host "`nStep 4: Waiting for Managed Identity..." -ForegroundColor Cyan
+
+        $miPrincipalId = $null
+        $miReady = Wait-WithPolling -Description "Managed Identity principal ID" -IntervalSeconds 5 -TimeoutSeconds 60 -Condition {
+            $aa = Invoke-ArmApi -Path $aaPath -Method GET -Description "Check MI"
+            if ($aa.identity -and $aa.identity.principalId) {
+                $script:miPrincipalId = $aa.identity.principalId
+                return $true
+            }
+            return $false
         }
-    } | ConvertTo-Json -Depth 5
 
-    if ($PSCmdlet.ShouldProcess($AutomationAccountName, "Create/update automation account")) {
-        $null = Invoke-ArmApi -Path $aaPath -Method PUT -Payload $aaPayload -Description "Create/update automation account"
-        Write-Host "  Automation account ready with Managed Identity enabled" -ForegroundColor Green
-    }
-
-    # -------------------------------------------------------------------------
-    # Step 4: Poll for Managed Identity principal ID
-    # -------------------------------------------------------------------------
-    Write-Host "`nStep 4: Waiting for Managed Identity..." -ForegroundColor Cyan
-
-    $miPrincipalId = $null
-    $miReady = Wait-WithPolling -Description "Managed Identity principal ID" -IntervalSeconds 5 -TimeoutSeconds 60 -Condition {
-        $aa = Invoke-ArmApi -Path $aaPath -Method GET -Description "Check MI"
-        if ($aa.identity -and $aa.identity.principalId) {
-            $script:miPrincipalId = $aa.identity.principalId
-            return $true
+        if (-not $miReady -or -not $miPrincipalId) {
+            throw "Managed Identity principal ID was not available after polling. Check the Automation Account in the portal."
         }
-        return $false
-    }
+        Write-Host "  Managed Identity principal ID: $miPrincipalId" -ForegroundColor Green
 
-    if (-not $miReady -or -not $miPrincipalId) {
-        throw "Managed Identity principal ID was not available after polling. Check the Automation Account in the portal."
+    } elseif ($ComputeType -eq 'FunctionApp') {
+        Write-Host "`nStep 3: Function App '$FunctionAppName' (Flex Consumption)..." -ForegroundColor Cyan
+
+        # 3a: Create Flex Consumption App Service Plan
+        $planName = "$FunctionAppName-plan"
+        $planPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/serverfarms/${planName}?api-version=$($Script:ArmApiVersions.WebApp)"
+
+        $planPayload = @{
+            location   = $Location
+            tags       = $Script:ProvisioningTags
+            kind       = "functionapp"
+            sku        = @{
+                name = "FC1"
+                tier = "FlexConsumption"
+            }
+            properties = @{
+                reserved = $true
+            }
+        } | ConvertTo-Json -Depth 5
+
+        if ($PSCmdlet.ShouldProcess($planName, "Create/update Flex Consumption plan")) {
+            $null = Invoke-ArmApi -Path $planPath -Method PUT -Payload $planPayload -Description "Create/update Flex Consumption plan"
+            Write-Host "  Flex Consumption plan '$planName' ready" -ForegroundColor Green
+        }
+
+        # 3b: Create Function App with system-assigned Managed Identity
+        $functionAppPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/${FunctionAppName}?api-version=$($Script:ArmApiVersions.WebApp)"
+
+        $functionAppPayload = @{
+            location   = $Location
+            tags       = $Script:ProvisioningTags
+            kind       = "functionapp,linux"
+            identity   = @{
+                type = "SystemAssigned"
+            }
+            properties = @{
+                serverFarmId    = "/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/serverfarms/$planName"
+                siteConfig      = @{
+                    appSettings = @(
+                        @{ name = "AzureWebJobsStorage__accountName"; value = $StorageAccountName }
+                        @{ name = "FUNCTIONS_EXTENSION_VERSION"; value = "~4" }
+                        @{ name = "STORAGE_ACCOUNT_NAME"; value = $StorageAccountName }
+                        @{ name = "DASHBOARD_DELIVERY_MODE"; value = $effectiveDashboardDeliveryMode }
+                        @{ name = "INCLUDE_ADVANCED_HUNTING"; value = "$IncludeAdvancedHunting" }
+                    )
+                }
+                functionAppConfig = @{
+                    deployment     = @{
+                        storage = @{
+                            type  = "blobContainer"
+                            value = "https://${StorageAccountName}.blob.core.windows.net/$($Script:FunctionAppDeploymentContainer)"
+                            authentication = @{
+                                type = "SystemAssignedIdentity"
+                            }
+                        }
+                    }
+                    scaleAndConcurrency = @{
+                        instanceMemoryMB     = 2048
+                        maximumInstanceCount = 100
+                    }
+                    runtime = @{
+                        name    = "powershell"
+                        version = "7.4"
+                    }
+                }
+            }
+        } | ConvertTo-Json -Depth 10
+
+        if ($PSCmdlet.ShouldProcess($FunctionAppName, "Create/update Function App")) {
+            $null = Invoke-ArmApi -Path $functionAppPath -Method PUT -Payload $functionAppPayload -Description "Create/update Function App"
+            Write-Host "  Function App '$FunctionAppName' created with Managed Identity" -ForegroundColor Green
+        }
+
+        # Step 4: Poll for Managed Identity principal ID (Function App)
+        Write-Host "`nStep 4: Waiting for Managed Identity..." -ForegroundColor Cyan
+
+        $miPrincipalId = $null
+        $miReady = Wait-WithPolling -Description "Managed Identity principal ID" -IntervalSeconds 5 -TimeoutSeconds 60 -Condition {
+            $fa = Invoke-ArmApi -Path $functionAppPath -Method GET -Description "Check MI"
+            if ($fa.identity -and $fa.identity.principalId) {
+                $script:miPrincipalId = $fa.identity.principalId
+                return $true
+            }
+            return $false
+        }
+
+        if (-not $miReady -or -not $miPrincipalId) {
+            throw "Managed Identity principal ID was not available after polling. Check the Function App in the portal."
+        }
+        Write-Host "  Managed Identity principal ID: $miPrincipalId" -ForegroundColor Green
     }
-    Write-Host "  Managed Identity principal ID: $miPrincipalId" -ForegroundColor Green
 
     # -------------------------------------------------------------------------
     # Step 5: Create/verify Storage Account (Microsoft Security Benchmark)
@@ -1042,40 +1198,103 @@ try {
         }
     }
 
-    # -------------------------------------------------------------------------
-    # Step 8: Assign Storage Blob Data Contributor to Managed Identity
-    # -------------------------------------------------------------------------
-    Write-Host "`nStep 8: Assigning Storage Blob Data Contributor role..." -ForegroundColor Cyan
-
-    $roleAssignmentId = [guid]::NewGuid().ToString()
-    $roleDefId = "$subPath/providers/Microsoft.Authorization/roleDefinitions/$($Script:StorageBlobDataContributorRoleId)"
-    $roleAssignmentPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName/providers/Microsoft.Authorization/roleAssignments/${roleAssignmentId}?api-version=$($Script:ArmApiVersions.RoleAssignment)"
-
-    $rolePayload = @{
-        properties = @{
-            principalId      = $miPrincipalId
-            roleDefinitionId = $roleDefId
-            principalType    = "ServicePrincipal"
-        }
-    } | ConvertTo-Json -Depth 5
-
-    if ($PSCmdlet.ShouldProcess("Storage Blob Data Contributor", "Assign to Managed Identity")) {
-        try {
-            Invoke-ArmApi -Path $roleAssignmentPath -Method PUT -Payload $rolePayload -Description "Assign RBAC role" | Out-Null
-            Write-Host "  Role assigned successfully" -ForegroundColor Green
-        }
-        catch {
-            if ($_.Exception.Message -match '409|already exists|RoleAssignmentExists') {
-                Write-Host "  Role assignment already exists" -ForegroundColor Green
+    # Function App: also create deployment container for zip package
+    if ($ComputeType -eq 'FunctionApp') {
+        $deployContainerPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName/blobServices/default/containers/$($Script:FunctionAppDeploymentContainer)?api-version=$($Script:ArmApiVersions.StorageAccount)"
+        if ($PSCmdlet.ShouldProcess($Script:FunctionAppDeploymentContainer, "Create deployment container")) {
+            try {
+                Invoke-ArmApi -Path $deployContainerPath -Method PUT -Payload '{}' -Description "Create deployment container" | Out-Null
+                Write-Host "  Container '$($Script:FunctionAppDeploymentContainer)' created (deployment)" -ForegroundColor Green
             }
-            else { throw }
+            catch {
+                if ($_.Exception.Message -match '409|Conflict|already exists') {
+                    Write-Host "  Container '$($Script:FunctionAppDeploymentContainer)' already exists" -ForegroundColor Green
+                }
+                else { throw }
+            }
+        }
+    }
+
+    # -------------------------------------------------------------------------
+    # Step 8: Assign Storage RBAC roles to Managed Identity
+    # -------------------------------------------------------------------------
+    if ($ComputeType -eq 'FunctionApp') {
+        # Function App needs elevated roles: Blob Data Owner (runtime manages containers),
+        # Queue Data Contributor (timer triggers), Table Data Contributor (host state)
+        Write-Host "`nStep 8: Assigning Storage RBAC roles to Function App MI..." -ForegroundColor Cyan
+
+        $storageRoles = @(
+            @{ Name = 'Storage Blob Data Owner';          RoleId = $Script:StorageBlobDataOwnerRoleId }
+            @{ Name = 'Storage Queue Data Contributor';   RoleId = $Script:StorageQueueDataContributorRoleId }
+            @{ Name = 'Storage Table Data Contributor';   RoleId = $Script:StorageTableDataContributorRoleId }
+        )
+
+        foreach ($role in $storageRoles) {
+            $roleAssignmentId = [guid]::NewGuid().ToString()
+            $roleDefId = "$subPath/providers/Microsoft.Authorization/roleDefinitions/$($role.RoleId)"
+            $roleAssignmentPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName/providers/Microsoft.Authorization/roleAssignments/${roleAssignmentId}?api-version=$($Script:ArmApiVersions.RoleAssignment)"
+
+            $rolePayload = @{
+                properties = @{
+                    principalId      = $miPrincipalId
+                    roleDefinitionId = $roleDefId
+                    principalType    = "ServicePrincipal"
+                }
+            } | ConvertTo-Json -Depth 5
+
+            if ($PSCmdlet.ShouldProcess($role.Name, "Assign to Function App MI")) {
+                try {
+                    Invoke-ArmApi -Path $roleAssignmentPath -Method PUT -Payload $rolePayload -Description "Assign $($role.Name) role" | Out-Null
+                    Write-Host "  $($role.Name) assigned" -ForegroundColor Green
+                }
+                catch {
+                    if ($_.Exception.Message -match '409|already exists|RoleAssignmentExists') {
+                        Write-Host "  $($role.Name) already assigned" -ForegroundColor Green
+                    }
+                    else { throw }
+                }
+            }
         }
 
-        # Poll to verify the role assignment is effective
+        # Poll to verify role assignments are effective
         Wait-WithPolling -Description "RBAC propagation" -IntervalSeconds 5 -TimeoutSeconds 30 -Condition {
             $saResource = Invoke-ArmApi -Path "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName/providers/Microsoft.Authorization/roleAssignments?api-version=$($Script:ArmApiVersions.RoleAssignment)&`$filter=principalId eq '$miPrincipalId'" -Method GET -Description "Check RBAC"
-            return ($saResource.value.Count -gt 0)
+            return ($saResource.value.Count -ge 3)
         } | Out-Null
+
+    } else {
+        Write-Host "`nStep 8: Assigning Storage Blob Data Contributor role..." -ForegroundColor Cyan
+
+        $roleAssignmentId = [guid]::NewGuid().ToString()
+        $roleDefId = "$subPath/providers/Microsoft.Authorization/roleDefinitions/$($Script:StorageBlobDataContributorRoleId)"
+        $roleAssignmentPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName/providers/Microsoft.Authorization/roleAssignments/${roleAssignmentId}?api-version=$($Script:ArmApiVersions.RoleAssignment)"
+
+        $rolePayload = @{
+            properties = @{
+                principalId      = $miPrincipalId
+                roleDefinitionId = $roleDefId
+                principalType    = "ServicePrincipal"
+            }
+        } | ConvertTo-Json -Depth 5
+
+        if ($PSCmdlet.ShouldProcess("Storage Blob Data Contributor", "Assign to Managed Identity")) {
+            try {
+                Invoke-ArmApi -Path $roleAssignmentPath -Method PUT -Payload $rolePayload -Description "Assign RBAC role" | Out-Null
+                Write-Host "  Role assigned successfully" -ForegroundColor Green
+            }
+            catch {
+                if ($_.Exception.Message -match '409|already exists|RoleAssignmentExists') {
+                    Write-Host "  Role assignment already exists" -ForegroundColor Green
+                }
+                else { throw }
+            }
+
+            # Poll to verify the role assignment is effective
+            Wait-WithPolling -Description "RBAC propagation" -IntervalSeconds 5 -TimeoutSeconds 30 -Condition {
+                $saResource = Invoke-ArmApi -Path "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName/providers/Microsoft.Authorization/roleAssignments?api-version=$($Script:ArmApiVersions.RoleAssignment)&`$filter=principalId eq '$miPrincipalId'" -Method GET -Description "Check RBAC"
+                return ($saResource.value.Count -gt 0)
+            } | Out-Null
+        }
     }
 
     # Also assign Storage Blob Data Contributor to the caller (needed for template uploads, downloads)
@@ -1124,6 +1343,11 @@ try {
             return ($callerRoles.value.Count -gt 0)
         } | Out-Null
     }
+
+    # -------------------------------------------------------------------------
+    # Steps 9-12: Compute-specific configuration
+    # -------------------------------------------------------------------------
+    if ($ComputeType -eq 'AutomationAccount') {
 
     # -------------------------------------------------------------------------
     # Step 9: Create custom runtime environment (PowerShell 7.4 + Az.Accounts)
@@ -1326,6 +1550,50 @@ try {
         Write-Host "  Schedule linked to runbook '$runbookName'" -ForegroundColor Green
     }
 
+    } elseif ($ComputeType -eq 'FunctionApp') {
+        # Steps 9-12 (FunctionApp): Build deployment zip and deploy
+        Write-Host "`nSteps 9-12: Building and deploying Function App..." -ForegroundColor Cyan
+
+        # Build the Function App from runbook-source.ps1
+        Write-Host "  Building Function App from runbook-source.ps1..." -ForegroundColor Gray
+        $buildScript = Join-Path $PSScriptRoot 'azure' 'Build-FunctionApp.ps1'
+        if (-not (Test-Path $buildScript)) {
+            throw "Build script not found: $buildScript. Run from the repository root."
+        }
+        & $buildScript
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+            throw "Build-FunctionApp.ps1 failed with exit code $LASTEXITCODE"
+        }
+        Write-Host "  Function App built successfully" -ForegroundColor Green
+
+        # Create deployment zip
+        Write-Host "  Creating deployment zip..." -ForegroundColor Gray
+        $functionAppDir = Join-Path $PSScriptRoot 'azure' 'function-app'
+        $zipPath = Join-Path $PSScriptRoot 'azure' 'function-app-deploy.zip'
+        if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+        Compress-Archive -Path "$functionAppDir\*" -DestinationPath $zipPath -Force
+        Write-Host "  Deployment zip created: $zipPath" -ForegroundColor Green
+
+        # Upload zip to deployment container
+        Write-Host "  Uploading deployment zip to storage..." -ForegroundColor Gray
+        $storageToken = Get-ArmToken -ResourceUrl 'https://storage.azure.com/'
+        $blobUrl = "https://${StorageAccountName}.blob.core.windows.net/$($Script:FunctionAppDeploymentContainer)/function-app.zip"
+        $uploadHeaders = @{
+            'Authorization'  = "Bearer $storageToken"
+            'x-ms-blob-type' = 'BlockBlob'
+            'x-ms-version'   = '2023-11-03'
+            'Content-Type'   = 'application/zip'
+        }
+        $zipBytes = [System.IO.File]::ReadAllBytes($zipPath)
+        Invoke-RestMethod -Uri $blobUrl -Method Put -Headers $uploadHeaders -Body $zipBytes | Out-Null
+        Write-Host "  Deployment zip uploaded to $blobUrl" -ForegroundColor Green
+
+        # Clean up local zip
+        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+
+        Write-Host "  Function App deployment complete" -ForegroundColor Green
+    }
+
     # -------------------------------------------------------------------------
     # Step 13: Assign MDE API app roles via Microsoft Graph (optional)
     # -------------------------------------------------------------------------
@@ -1421,99 +1689,134 @@ try {
         $uploadScript = Join-Path -Path $PSScriptRoot -ChildPath 'azure' | Join-Path -ChildPath 'Upload-Templates.ps1'
         if (-not (Test-Path -Path $uploadScript)) {
             Write-Warning "Upload-Templates.ps1 not found at: $uploadScript"
-            Write-Host "  Run azure/Upload-Templates.ps1 manually before the runbook." -ForegroundColor Yellow
+            Write-Host "  Run azure/Upload-Templates.ps1 manually before the pipeline." -ForegroundColor Yellow
         }
         else {
             & $uploadScript -StorageAccountName $StorageAccountName
         }
 
-        # 14b: Start a runbook job
-        Write-Host "  Starting validation job..." -ForegroundColor Gray
-        $runbookName = 'Invoke-DashboardPipeline'
-        $jobId = [guid]::NewGuid().ToString()
-        $jobPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/${jobId}?api-version=$($Script:ArmApiVersions.AutomationAccount)"
-        $jobPayload = @{
-            properties = @{
-                runbook    = @{ name = $runbookName }
-                parameters = @{
-                    StorageAccountName = $StorageAccountName
-                    DashboardDeliveryMode = $effectiveDashboardDeliveryMode
-                }
-            }
-        } | ConvertTo-Json -Depth 5
-
-        Invoke-ArmApi -Path $jobPath -Method PUT -Payload $jobPayload -Description "Start validation job" | Out-Null
-        Write-Host "  Job $jobId started" -ForegroundColor Gray
-
-        # 14c: Poll for completion
-        $activeStates = @('New', 'Activating', 'Running', 'Queued')
-        Wait-WithPolling -Description "validation job completion" -IntervalSeconds 15 -TimeoutSeconds $ValidationTimeoutSeconds -Condition {
-            $jobRes = Invoke-ArmApi -Path "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/${jobId}?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Poll job"
-            $status = $jobRes.properties.status
-            Write-Host "    Job status: $status" -ForegroundColor Gray
-            return ($status -notin $activeStates)
-        } | Out-Null
-
-        # 14d: Get final status and report results
-        $finalJob = Invoke-ArmApi -Path "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/${jobId}?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Get final job status"
-        $finalStatus = $finalJob.properties.status
-
-        if ($finalStatus -eq 'Completed') {
-            Write-Host "  Validation PASSED - runbook completed successfully" -ForegroundColor Green
-
-            # Get summary from last few output streams
-            $streamsPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/$jobId/streams?`$filter=properties/streamType eq 'Output'&api-version=$($Script:ArmApiVersions.AutomationAccount)"
-            $streamsRes = Invoke-ArmApi -Path $streamsPath -Method GET -Description "Get job output"
-            if ($streamsRes.value) {
-                $lastStreams = $streamsRes.value | Select-Object -Last 8
-                Write-Host "  --- Pipeline Summary ---" -ForegroundColor Cyan
-                foreach ($s in $lastStreams) {
-                    try {
-                        $streamDetail = Invoke-ArmApi -Path "$($s.id)?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Read stream"
-                        $raw = $streamDetail.properties.value
-                        $val = if ($raw -is [string]) { $raw } elseif ($raw.value) { $raw.value } else { "$raw" }
-                        if ($val) { Write-Host "  $val" -ForegroundColor Gray }
+        if ($ComputeType -eq 'AutomationAccount') {
+            # 14b: Start a runbook job
+            Write-Host "  Starting validation job..." -ForegroundColor Gray
+            $runbookName = 'Invoke-DashboardPipeline'
+            $jobId = [guid]::NewGuid().ToString()
+            $jobPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/${jobId}?api-version=$($Script:ArmApiVersions.AutomationAccount)"
+            $jobPayload = @{
+                properties = @{
+                    runbook    = @{ name = $runbookName }
+                    parameters = @{
+                        StorageAccountName = $StorageAccountName
+                        DashboardDeliveryMode = $effectiveDashboardDeliveryMode
                     }
-                    catch { $null = $_ <# Stream detail unavailable #> }
                 }
-            }
-        }
-        else {
-            Write-Warning "Validation FAILED - job status: $finalStatus"
+            } | ConvertTo-Json -Depth 5
 
-            # Show error streams
-            $errorStreamsPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/$jobId/streams?`$filter=properties/streamType eq 'Error'&api-version=$($Script:ArmApiVersions.AutomationAccount)"
-            $errorRes = Invoke-ArmApi -Path $errorStreamsPath -Method GET -Description "Get error streams"
-            if ($errorRes.value) {
-                foreach ($es in $errorRes.value) {
-                    try {
-                        $errDetail = Invoke-ArmApi -Path "$($es.id)?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Read error"
-                        $raw = $errDetail.properties.value
-                        $msg = if ($raw -is [string]) { $raw } elseif ($raw.message) { $raw.message } elseif ($raw.value) { $raw.value } else { "$raw" }
-                        Write-Host "  Error: $msg" -ForegroundColor Red
+            Invoke-ArmApi -Path $jobPath -Method PUT -Payload $jobPayload -Description "Start validation job" | Out-Null
+            Write-Host "  Job $jobId started" -ForegroundColor Gray
+
+            # 14c: Poll for completion
+            $activeStates = @('New', 'Activating', 'Running', 'Queued')
+            Wait-WithPolling -Description "validation job completion" -IntervalSeconds 15 -TimeoutSeconds $ValidationTimeoutSeconds -Condition {
+                $jobRes = Invoke-ArmApi -Path "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/${jobId}?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Poll job"
+                $status = $jobRes.properties.status
+                Write-Host "    Job status: $status" -ForegroundColor Gray
+                return ($status -notin $activeStates)
+            } | Out-Null
+
+            # 14d: Get final status and report results
+            $finalJob = Invoke-ArmApi -Path "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/${jobId}?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Get final job status"
+            $finalStatus = $finalJob.properties.status
+
+            if ($finalStatus -eq 'Completed') {
+                Write-Host "  Validation PASSED - runbook completed successfully" -ForegroundColor Green
+
+                # Get summary from last few output streams
+                $streamsPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/$jobId/streams?`$filter=properties/streamType eq 'Output'&api-version=$($Script:ArmApiVersions.AutomationAccount)"
+                $streamsRes = Invoke-ArmApi -Path $streamsPath -Method GET -Description "Get job output"
+                if ($streamsRes.value) {
+                    $lastStreams = $streamsRes.value | Select-Object -Last 8
+                    Write-Host "  --- Pipeline Summary ---" -ForegroundColor Cyan
+                    foreach ($s in $lastStreams) {
+                        try {
+                            $streamDetail = Invoke-ArmApi -Path "$($s.id)?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Read stream"
+                            $raw = $streamDetail.properties.value
+                            $val = if ($raw -is [string]) { $raw } elseif ($raw.value) { $raw.value } else { "$raw" }
+                            if ($val) { Write-Host "  $val" -ForegroundColor Gray }
+                        }
+                        catch { $null = $_ <# Stream detail unavailable #> }
                     }
-                    catch { $null = $_ <# Error detail unavailable #> }
                 }
             }
+            else {
+                Write-Warning "Validation FAILED - job status: $finalStatus"
 
-            # Also check last output streams for error context
-            $outPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/$jobId/streams?`$filter=properties/streamType eq 'Output'&api-version=$($Script:ArmApiVersions.AutomationAccount)"
-            $outRes = Invoke-ArmApi -Path $outPath -Method GET -Description "Get output streams"
-            if ($outRes.value) {
-                $lastOut = $outRes.value | Select-Object -Last 5
-                Write-Host "  --- Last Output ---" -ForegroundColor Yellow
-                foreach ($o in $lastOut) {
-                    try {
-                        $oDetail = Invoke-ArmApi -Path "$($o.id)?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Read output"
-                        $raw = $oDetail.properties.value
-                        $val = if ($raw -is [string]) { $raw } elseif ($raw.value) { $raw.value } else { "$raw" }
-                        if ($val) { Write-Host "  $val" -ForegroundColor Gray }
+                # Show error streams
+                $errorStreamsPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/$jobId/streams?`$filter=properties/streamType eq 'Error'&api-version=$($Script:ArmApiVersions.AutomationAccount)"
+                $errorRes = Invoke-ArmApi -Path $errorStreamsPath -Method GET -Description "Get error streams"
+                if ($errorRes.value) {
+                    foreach ($es in $errorRes.value) {
+                        try {
+                            $errDetail = Invoke-ArmApi -Path "$($es.id)?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Read error"
+                            $raw = $errDetail.properties.value
+                            $msg = if ($raw -is [string]) { $raw } elseif ($raw.message) { $raw.message } elseif ($raw.value) { $raw.value } else { "$raw" }
+                            Write-Host "  Error: $msg" -ForegroundColor Red
+                        }
+                        catch { $null = $_ <# Error detail unavailable #> }
                     }
-                    catch { $null = $_ <# Stream detail unavailable #> }
                 }
+
+                # Also check last output streams for error context
+                $outPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/$jobId/streams?`$filter=properties/streamType eq 'Output'&api-version=$($Script:ArmApiVersions.AutomationAccount)"
+                $outRes = Invoke-ArmApi -Path $outPath -Method GET -Description "Get output streams"
+                if ($outRes.value) {
+                    $lastOut = $outRes.value | Select-Object -Last 5
+                    Write-Host "  --- Last Output ---" -ForegroundColor Yellow
+                    foreach ($o in $lastOut) {
+                        try {
+                            $oDetail = Invoke-ArmApi -Path "$($o.id)?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Read output"
+                            $raw = $oDetail.properties.value
+                            $val = if ($raw -is [string]) { $raw } elseif ($raw.value) { $raw.value } else { "$raw" }
+                            if ($val) { Write-Host "  $val" -ForegroundColor Gray }
+                        }
+                        catch { $null = $_ <# Stream detail unavailable #> }
+                    }
+                }
+
+                throw "Validation job '$jobId' failed with status '$finalStatus'. Review the Automation job output above or re-run with -SkipValidation if you intentionally want to continue without a verified pipeline."
             }
 
-            throw "Validation job '$jobId' failed with status '$finalStatus'. Review the Automation job output above or re-run with -SkipValidation if you intentionally want to continue without a verified pipeline."
+        } elseif ($ComputeType -eq 'FunctionApp') {
+            # 14b: Verify Function App is deployed and reachable
+            Write-Host "  Verifying Function App deployment..." -ForegroundColor Gray
+
+            $faCheckPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/${FunctionAppName}?api-version=$($Script:ArmApiVersions.WebApp)"
+            $faCheck = Invoke-ArmApi -Path $faCheckPath -Method GET -Description "Verify Function App"
+
+            if ($faCheck.properties.state -eq 'Running') {
+                Write-Host "  Function App is running" -ForegroundColor Green
+            } else {
+                Write-Warning "Function App state: $($faCheck.properties.state)"
+            }
+
+            # Verify the timer function is registered
+            $functionsPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/${FunctionAppName}/functions?api-version=$($Script:ArmApiVersions.WebApp)"
+            try {
+                $functionsRes = Invoke-ArmApi -Path $functionsPath -Method GET -Description "List functions"
+                $functionCount = if ($functionsRes.value) { $functionsRes.value.Count } else { 0 }
+                if ($functionCount -gt 0) {
+                    Write-Host "  Function App has $functionCount function(s) deployed" -ForegroundColor Green
+                    foreach ($fn in $functionsRes.value) {
+                        Write-Host "    - $($fn.name)" -ForegroundColor Gray
+                    }
+                } else {
+                    Write-Host "  No functions detected yet (may still be initializing)" -ForegroundColor Yellow
+                }
+            }
+            catch {
+                Write-Host "  Could not list functions (app may still be initializing)" -ForegroundColor Yellow
+            }
+
+            Write-Host "  Validation complete - Function App deployed successfully" -ForegroundColor Green
         }
     }
     else {
@@ -2089,12 +2392,21 @@ exec caddy file-server --root /data --listen :80
     Write-Host "========================================" -ForegroundColor Green
     Write-Host "`nResources:" -ForegroundColor White
     Write-Host "  Resource Group:      $ResourceGroupName" -ForegroundColor Gray
-    Write-Host "  Automation Account:  $AutomationAccountName" -ForegroundColor Gray
+    Write-Host "  Compute Type:        $ComputeType" -ForegroundColor Gray
+    if ($ComputeType -eq 'AutomationAccount') {
+        Write-Host "  Automation Account:  $AutomationAccountName" -ForegroundColor Gray
+    } else {
+        Write-Host "  Function App:        $FunctionAppName" -ForegroundColor Gray
+    }
     Write-Host "  Storage Account:     $StorageAccountName" -ForegroundColor Gray
     Write-Host "  Dashboard Mode:      $effectiveDashboardDeliveryMode" -ForegroundColor Gray
     Write-Host "  Managed Identity:    $miPrincipalId" -ForegroundColor Gray
     Write-Host "  Blob Containers:     $($Script:BlobContainers -join ', ')" -ForegroundColor Gray
-    Write-Host "  Schedule:            Daily" -ForegroundColor Gray
+    if ($ComputeType -eq 'AutomationAccount') {
+        Write-Host "  Schedule:            Daily" -ForegroundColor Gray
+    } else {
+        Write-Host "  Timer Trigger:       Daily at 2:00 AM UTC" -ForegroundColor Gray
+    }
     if ($IncludeContainerApp) {
         Write-Host "  Container App Env:   $ContainerAppEnvName" -ForegroundColor Gray
         Write-Host "  Container App:       $ContainerAppName" -ForegroundColor Gray
@@ -2107,16 +2419,28 @@ exec caddy file-server --root /data --listen :80
     if ($IncludeContainerApp) {
         Write-Host "  1. Open https://$caFqdn in a browser to access the dashboard" -ForegroundColor Gray
         Write-Host "  2. Sign in with a user in the '$securityGroupName' security group" -ForegroundColor Gray
-        Write-Host "  3. The runbook will update the dashboard daily" -ForegroundColor Gray
+        if ($ComputeType -eq 'AutomationAccount') {
+            Write-Host "  3. The runbook will update the dashboard daily" -ForegroundColor Gray
+        } else {
+            Write-Host "  3. The function app will update the dashboard daily at 2:00 AM UTC" -ForegroundColor Gray
+        }
         Write-Host "  4. Container App scales to zero when idle; cold starts fetch the latest blob`n" -ForegroundColor Gray
     }
     elseif (-not $SkipValidation) {
         Write-Host "  1. Download VulnerabilityDashboard.html from the 'dashboards' container" -ForegroundColor Gray
-        Write-Host "  2. The runbook will run automatically every day`n" -ForegroundColor Gray
+        if ($ComputeType -eq 'AutomationAccount') {
+            Write-Host "  2. The runbook will run automatically every day`n" -ForegroundColor Gray
+        } else {
+            Write-Host "  2. The function app will run automatically every day at 2:00 AM UTC`n" -ForegroundColor Gray
+        }
     }
     else {
         Write-Host "  1. Upload templates: .\azure\Upload-Templates.ps1 -StorageAccountName $StorageAccountName" -ForegroundColor Gray
-        Write-Host "  2. Run the pipeline: start the runbook manually from the Azure portal" -ForegroundColor Gray
+        if ($ComputeType -eq 'AutomationAccount') {
+            Write-Host "  2. Run the pipeline: start the runbook manually from the Azure portal" -ForegroundColor Gray
+        } else {
+            Write-Host "  2. Run the pipeline: trigger the function app manually from the Azure portal" -ForegroundColor Gray
+        }
         Write-Host "  3. Download VulnerabilityDashboard.html from the 'dashboards' container`n" -ForegroundColor Gray
     }
 
