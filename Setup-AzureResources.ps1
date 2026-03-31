@@ -837,10 +837,8 @@ try {
         Write-Host "`nLooking up existing $ComputeType '$computeName'..." -ForegroundColor Gray
 
         $found = $null
-        try {
-            $resources = Invoke-ArmApi -Path "$subPath/resources?`$filter=name eq '$computeName' and resourceType eq '$providerType'&api-version=2021-04-01" -Method GET -Description "Find existing $ComputeType"
-            $found = $resources.value | Select-Object -First 1
-        } catch { <# not found, handled below #> }
+        $resources = Invoke-ArmApi -Path "$subPath/resources?`$filter=name eq '$computeName' and resourceType eq '$providerType'&api-version=2021-04-01" -Method GET -Description "Find existing $ComputeType"
+        $found = $resources.value | Select-Object -First 1
 
         if ($found) {
             # Extract resource group from the resource ID: /subscriptions/.../resourceGroups/<RG>/providers/...
@@ -872,7 +870,9 @@ try {
                         $saVar = Invoke-ArmApi -Path $varPath -Method GET -Description 'Read StorageAccountName variable'
                         # Variable values are JSON-encoded strings (e.g. '"stname"')
                         $StorageAccountName = ($saVar.properties.value | ConvertFrom-Json)
-                    } catch { <# variable may not exist yet #> }
+                    } catch {
+                        Write-Verbose "StorageAccountName variable not found on Automation Account: $_"
+                    }
                 }
 
                 if ($StorageAccountName) {
@@ -1630,44 +1630,46 @@ try {
     }
 
     } elseif ($ComputeType -eq 'FunctionApp') {
-        # Steps 9-12 (FunctionApp): Build deployment zip and deploy
-        Write-Host "`nSteps 9-12: Building and deploying Function App..." -ForegroundColor Cyan
+        if ($PSCmdlet.ShouldProcess($FunctionAppName, 'Build and deploy Function App code')) {
+            # Steps 9-12 (FunctionApp): Build deployment zip and deploy
+            Write-Host "`nSteps 9-12: Building and deploying Function App..." -ForegroundColor Cyan
 
-        # Build the Function App from runbook-source.ps1
-        Write-Host "  Building Function App from runbook-source.ps1..." -ForegroundColor Gray
-        $buildScript = Join-Path $PSScriptRoot 'azure' 'Build-FunctionApp.ps1'
-        if (-not (Test-Path $buildScript)) {
-            throw "Build script not found: $buildScript. Run from the repository root."
+            # Build the Function App from runbook-source.ps1
+            Write-Host "  Building Function App from runbook-source.ps1..." -ForegroundColor Gray
+            $buildScript = Join-Path $PSScriptRoot 'azure' 'Build-FunctionApp.ps1'
+            if (-not (Test-Path $buildScript)) {
+                throw "Build script not found: $buildScript. Run from the repository root."
+            }
+            & $buildScript
+            # Build-FunctionApp.ps1 uses $ErrorActionPreference = 'Stop' and throws
+            # on failure, so an explicit exit-code check is unnecessary.
+            Write-Host "  Function App built successfully" -ForegroundColor Green
+
+            # Deploy function app code via az CLI zip deployment (Flex Consumption
+            # uses a Kudu-lite pipeline that packages and uploads to blob storage)
+            Write-Host "  Deploying function app code via zip deployment..." -ForegroundColor Gray
+            $functionAppDir = Join-Path $PSScriptRoot 'azure' 'function-app'
+            $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) 'funcapp-deploy.zip'
+            if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+
+            Push-Location $functionAppDir
+            try {
+                Compress-Archive -Path '.\*' -DestinationPath $zipPath -Force
+            } finally {
+                Pop-Location
+            }
+
+            az functionapp deployment source config-zip `
+                --src $zipPath `
+                --name $FunctionAppName `
+                --resource-group $ResourceGroupName `
+                --output none
+            if ($LASTEXITCODE -ne 0) {
+                throw "Function App zip deployment failed (exit code $LASTEXITCODE)."
+            }
+            Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+            Write-Host "  Function App deployed successfully" -ForegroundColor Green
         }
-        & $buildScript
-        # Build-FunctionApp.ps1 uses $ErrorActionPreference = 'Stop' and throws
-        # on failure, so an explicit exit-code check is unnecessary.
-        Write-Host "  Function App built successfully" -ForegroundColor Green
-
-        # Deploy function app code via az CLI zip deployment (Flex Consumption
-        # uses a Kudu-lite pipeline that packages and uploads to blob storage)
-        Write-Host "  Deploying function app code via zip deployment..." -ForegroundColor Gray
-        $functionAppDir = Join-Path $PSScriptRoot 'azure' 'function-app'
-        $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) 'funcapp-deploy.zip'
-        if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-
-        Push-Location $functionAppDir
-        try {
-            Compress-Archive -Path '.\*' -DestinationPath $zipPath -Force
-        } finally {
-            Pop-Location
-        }
-
-        az functionapp deployment source config-zip `
-            --src $zipPath `
-            --name $FunctionAppName `
-            --resource-group $ResourceGroupName `
-            --output none
-        if ($LASTEXITCODE -ne 0) {
-            throw "Function App zip deployment failed (exit code $LASTEXITCODE)."
-        }
-        Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-        Write-Host "  Function App deployed successfully" -ForegroundColor Green
     }
 
     # -------------------------------------------------------------------------

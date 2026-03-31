@@ -108,10 +108,10 @@ For local validation of the hosted split-assets build, use a local HTTP server i
 | Parameter | Required | Purpose |
 |---|---|---|
 | `-ComputeType` | No | `AutomationAccount` (default) or `FunctionApp` |
-| `-ResourceGroupName` | Yes | Resource group name |
+| `-ResourceGroupName` | First run only | Resource group name (auto-detected on re-runs) |
 | `-AutomationAccountName` | When `AutomationAccount` | Automation account name |
 | `-FunctionAppName` | When `FunctionApp` | Function App name |
-| `-StorageAccountName` | Yes | Storage account name |
+| `-StorageAccountName` | First run only | Storage account name (auto-detected on re-runs) |
 | `-Location` | No | Azure region, default `westus2` |
 | `-SkipMdePermissions` | No | Skip automatic MDE app role assignment |
 | `-SkipValidation` | No | Skip the post-provisioning validation run |
