@@ -131,8 +131,8 @@ flowchart TD
     A --> D["Run in GitHub Actions"]
     A --> H["Run in Azure Function App"]
     B --> E["Open HTML directly"]
-    C --> F["Publish to blob storage or Container App"]
-    D --> G["Commit updated exports and dashboard"]
+    C --> F["Publish to blob storage\nand optional Container App"]
+    D --> G["Commit updated exports\nand dashboard"]
     H --> F
 ```
 
