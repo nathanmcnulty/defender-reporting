@@ -1760,8 +1760,10 @@ function Read-VulnNdjsonRecordsFromPath {
         [string]$Path
     )
 
-    foreach ($line in Read-VulnNdjsonLinesFromPath -Path $Path) {
-        $record = $line | ConvertFrom-Json -Depth 20
+    # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
+    # collecting all NDJSON lines into memory before JSON-parsing begins.
+    Read-VulnNdjsonLinesFromPath -Path $Path | ForEach-Object {
+        $record = $_ | ConvertFrom-Json -Depth 20
         if ($null -ne $record) {
             Write-Output $record
         }
@@ -2840,11 +2842,13 @@ function Read-VulnContentStoreRow {
         $refPaths.Add($historyRefsFile.FullName)
     }
 
+    # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
+    # collecting all ref lines into memory at once.
     foreach ($refPath in $refPaths) {
-        foreach ($line in Read-VulnNdjsonLinesFromPath -Path $refPath) {
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        Read-VulnNdjsonLinesFromPath -Path $refPath | ForEach-Object {
+            if ([string]::IsNullOrWhiteSpace($_)) { return }
 
-            $ref = $line | ConvertFrom-Json -Depth 10
+            $ref = $_ | ConvertFrom-Json -Depth 10
             $device = $dictionary.deviceProfiles[[int]$ref[1]]
             $content = $dictionary.contentTemplates[[int]$ref[2]]
 
@@ -2915,8 +2919,9 @@ function Publish-VulnContentStoreUnlocked {
                 $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
                 $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
 
-                foreach ($row in Read-VulnNdjsonRecordsFromPath -Path $InputPath) {
-                    if ($null -eq $row) { continue }
+                Read-VulnNdjsonRecordsFromPath -Path $InputPath | ForEach-Object {
+                    $row = $_
+                    if ($null -eq $row) { return }
 
                     $deviceSignature = Get-VulnDeviceProfileSignature -Row $row
                     if (-not $deviceProfileIndex.ContainsKey($deviceSignature)) {
