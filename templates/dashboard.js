@@ -90,15 +90,15 @@ const CASCADING_FILTER_IDS = ['filterRbacGroup', 'filterDeviceTags', 'filterDevi
 const CASCADING_FILTER_CONFIG = {
     filterRbacGroup: {
         allLabel: 'All Groups',
-        getValuesForVuln: v => [normalizeGroupName(v.RbacGroupName)]
+        getValuesForVuln: v => [v._normalizedGroup]
     },
     filterDeviceTags: {
         allLabel: 'All Tags',
-        getValuesForVuln: v => (v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : NO_TAGS_ARRAY)
+        getValuesForVuln: v => v._tagValues
     },
     filterDeviceName: {
         allLabel: 'All Devices',
-        getValuesForVuln: v => [getDeviceNameFilterValue(v)]
+        getValuesForVuln: v => [v._deviceFilterKey]
     }
 };
 
@@ -144,7 +144,7 @@ let sortImpactAnalysisDirection = {};
 // Render and filter state
 const TABLE_PAGE_SIZE = 100;
 const CARD_PAGE_SIZE = 20;
-const CARD_RENDER_BATCH_SIZE = 10;
+const CARD_RENDER_BATCH_SIZE = 50;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
 let sortedByFirstSeen = null;
 const REPORT_IDS = [
@@ -550,6 +550,24 @@ function computeDataFingerprint() {
 }
 
 /**
+ * Compute a fingerprint from raw compressed bytes so we can check the
+ * IndexedDB cache *before* decompressing / denormalizing.
+ * Samples a few byte ranges and includes byte length.
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
+function computeCompressedFingerprint(bytes) {
+    const len = bytes.length;
+    let hash = 5381 ^ len;
+    // Sample ~200 bytes spread across the payload
+    const step = Math.max(1, Math.floor(len / 200));
+    for (let i = 0; i < len; i += step) {
+        hash = ((hash << 5) + hash + bytes[i]) | 0;
+    }
+    return 'cfp_' + len + '_' + (hash >>> 0).toString(36);
+}
+
+/**
  * Open (or create) the IndexedDB cache database.
  * @returns {Promise<IDBDatabase>}
  */
@@ -579,7 +597,11 @@ async function getCachedData(fingerprint) {
             const tx = db.transaction(VULNDB_STORE, 'readonly');
             const store = tx.objectStore(VULNDB_STORE);
             const req = store.get(fingerprint);
-            req.onsuccess = () => resolve(req.result ? req.result.data : null);
+            req.onsuccess = () => {
+                if (!req.result) return resolve(null);
+                // Return both data and cached lookups (if available)
+                return resolve({ data: req.result.data, lookups: req.result.lookups || null });
+            };
             req.onerror = () => resolve(null);
         });
     } catch {
@@ -599,7 +621,7 @@ async function setCachedData(fingerprint, data) {
         const tx = db.transaction(VULNDB_STORE, 'readwrite');
         const store = tx.objectStore(VULNDB_STORE);
         store.clear(); // Keep only the latest dataset
-        store.put({ fingerprint, data, ts: Date.now() });
+        store.put({ fingerprint, data, lookups: lookups || null, ts: Date.now() });
     } catch {
         // Cache failure is non-fatal
     }
@@ -619,6 +641,7 @@ function buildWorkerSource() {
 self.onmessage = function(e) {
     var lookups = e.data.lookups;
     var rawVulns = e.data.rawVulns;
+    var decompressOnly = !!e.data.decompressOnly;
 
     // If compressed data was transferred, decompress it first
     if (e.data.compressedBytes) {
@@ -626,6 +649,13 @@ self.onmessage = function(e) {
         var data = JSON.parse(decompressed);
         lookups = data.lookups;
         rawVulns = data.vulns;
+    }
+
+    // For large compressed datasets, return raw data without denormalizing
+    // to avoid structured-clone memory limits on postMessage
+    if (decompressOnly) {
+        self.postMessage({ rows: null, lookups: lookups, rawVulns: rawVulns });
+        return;
     }
 
     function isColumnarRawVulnData(value) {
@@ -811,7 +841,10 @@ async function denormalizeInWorker(compressedBytes) {
             };
 
             if (compressedBytes) {
-                worker.postMessage({ compressedBytes });
+                // For compressed data, use decompress-only mode to avoid
+                // structured-clone memory limits on postMessage with 1M+ records.
+                // Main thread will denormalize after receiving lookups + rawVulns.
+                worker.postMessage({ compressedBytes, decompressOnly: true });
             } else {
                 worker.postMessage({ lookups, rawVulns });
             }
@@ -1139,10 +1172,239 @@ function denormalizeAllVulns() {
     const startTime = performance.now();
 
     vulnerabilityData = new Array(rawCount);
-    for (let i = 0; i < rawCount; i++) {
-        vulnerabilityData[i] = denormalizeVuln(getRawVulnRecord(i), i);
+
+    // Direct column references for hot loop — avoids getRawVulnRecord overhead
+    const isColumnar = isColumnarRawVulnData(rawVulns);
+    const dCol = isColumnar ? rawVulns.d : null;
+    const cCol = isColumnar ? rawVulns.c : null;
+    const sCol = isColumnar ? rawVulns.s : null;
+    const vCol = isColumnar ? rawVulns.v : null;
+    const fCol = isColumnar ? rawVulns.f : null;
+    const lCol = isColumnar ? rawVulns.l : null;
+    const uaCol = isColumnar ? rawVulns.ua : null;
+    const uCol = isColumnar ? rawVulns.u : null;
+    const dpCol = isColumnar ? rawVulns.dp : null;
+    const rpCol = isColumnar ? rawVulns.rp : null;
+
+    // Cache lookup arrays locally
+    const lkDevices = lookups.devices;
+    const lkCves = lookups.cves;
+    const lkSoftware = lookups.software;
+    const lkGroups = lookups.groups;
+    const lkPlatforms = lookups.platforms;
+    const lkTags = lookups.tags;
+    const lkVersions = lookups.versions;
+    const lkDates = lookups.dates;
+    const lkUpdates = lookups.updates;
+    const lkVendors = lookups.vendors;
+    const lkSeverities = lookups.severities;
+    const lkExploitLevels = lookups.exploitLevels;
+    const lkDiskPaths = lookups.diskPaths;
+    const lkRegPaths = lookups.regPaths;
+    const lkBatchTitles = lookups.batchTitles;
+    const lkAffSoftware = lookups.affSoftware;
+
+    // Pre-format all date strings once (lkDates typically has ~365 entries)
+    const preFormattedDates = new Array(lkDates ? lkDates.length : 0);
+    for (let di = 0; di < preFormattedDates.length; di++) {
+        const d = formatDateYMD(lkDates[di]);
+        preFormattedDates[di] = d === '-' ? '' : d;
     }
-    
+
+    // Pre-compute addDaysYmd results for the inactivity window (memoized by date string)
+    const addDaysCache = new Map();
+    function addDaysCached(dateStr) {
+        let result = addDaysCache.get(dateStr);
+        if (result === undefined) {
+            result = addDaysYmd(dateStr, DEVICE_INACTIVITY_WINDOW_DAYS);
+            addDaysCache.set(dateStr, result);
+        }
+        return result;
+    }
+
+    // Pre-format machine last-seen dates (one per unique device, ~20K)
+    for (let di = 0; di < lkDevices.length; di++) {
+        const dev = lkDevices[di];
+        if (dev) {
+            const mi = dev.m;
+            const ls = mi ? (mi.ls || mi.lastSeen || '') : '';
+            const fmt = formatDateYMD(ls);
+            dev._mlsFmt = fmt === '-' ? '' : fmt;
+        }
+    }
+
+    const noTagsArr = NO_TAGS_ARRAY;
+    const earliestFirstSeenByIssue = new Map();
+
+    for (let i = 0; i < rawCount; i++) {
+        let devIdx, cveIdx, swIdx, verIdx, fsIdx, lsIdx, uaFlag, updIdx, dpArr, rpArr;
+        if (isColumnar) {
+            devIdx = dCol[i]; cveIdx = cCol[i]; swIdx = sCol[i]; verIdx = vCol[i];
+            fsIdx = fCol[i]; lsIdx = lCol[i]; uaFlag = uaCol[i]; updIdx = uCol[i];
+            dpArr = dpCol[i]; rpArr = rpCol[i];
+        } else {
+            const row = rawVulns[i];
+            devIdx = row[0]; cveIdx = row[1]; swIdx = row[2]; verIdx = row[3];
+            fsIdx = row[4]; lsIdx = row[5]; uaFlag = row[6]; updIdx = row[7];
+            dpArr = row[8]; rpArr = row[9];
+        }
+
+        const device = lkDevices[devIdx];
+        const cve = lkCves[cveIdx];
+        const software = lkSoftware[swIdx];
+
+        // Tags — avoid .map() overhead
+        let tagNames;
+        const deviceTags = device.t;
+        if (deviceTags && deviceTags.length > 0) {
+            tagNames = new Array(deviceTags.length);
+            for (let ti = 0; ti < deviceTags.length; ti++) {
+                tagNames[ti] = lkTags[deviceTags[ti]];
+            }
+        } else {
+            tagNames = [];
+        }
+
+        const vendorName = software.v >= 0 && software.v < lkVendors.length ? lkVendors[software.v] : null;
+        const updateObj = updIdx >= 0 ? lkUpdates[updIdx] : null;
+        const updateName = updateObj ? (updateObj.n || updateObj) : null;
+
+        const firstSeen = fsIdx >= 0 ? preFormattedDates[fsIdx] : '';
+        const lastSeen = lsIdx >= 0 ? preFormattedDates[lsIdx] : '';
+
+        // Disk paths
+        let diskPaths;
+        if (dpArr && dpArr.length > 0) {
+            diskPaths = new Array(dpArr.length);
+            for (let di = 0; di < dpArr.length; di++) diskPaths[di] = lkDiskPaths[dpArr[di]];
+        } else {
+            diskPaths = [];
+        }
+
+        // Registry paths
+        let regPaths;
+        if (rpArr && rpArr.length > 0) {
+            regPaths = new Array(rpArr.length);
+            for (let ri = 0; ri < rpArr.length; ri++) regPaths[ri] = lkRegPaths[rpArr[ri]];
+        } else {
+            regPaths = [];
+        }
+
+        const groupVal = device.g >= 0 && device.g < lkGroups.length ? lkGroups[device.g] : null;
+        const rbacGroupName = (groupVal && String(groupVal).trim() !== '') ? groupVal : '(none)';
+
+        // Affected software
+        let affSoftware = null;
+        const cveAs = cve.as;
+        if (cveAs && cveAs.length > 0) {
+            affSoftware = new Array(cveAs.length);
+            for (let ai = 0; ai < cveAs.length; ai++) affSoftware[ai] = lkAffSoftware[cveAs[ai]];
+        }
+
+        // --- Inline derived fields (avoids a separate 1.5M-record pass) ---
+        const machineLastSeen = device._mlsFmt;
+        const latestActivity = (!machineLastSeen) ? lastSeen
+            : (!lastSeen) ? machineLastSeen
+            : (machineLastSeen > lastSeen ? machineLastSeen : lastSeen);
+        const hasPatchEvidence = !!(lastSeen && latestActivity && latestActivity > lastSeen);
+        let effectiveOpenEndDate = '';
+        if (lastSeen) {
+            if (latestActivity > lastSeen) {
+                effectiveOpenEndDate = lastSeen;
+            } else {
+                effectiveOpenEndDate = addDaysCached(latestActivity || lastSeen);
+            }
+        }
+        const deviceFilterKey = device.id || device.n || '';
+        const normalizedGroup = normalizeGroupName(rbacGroupName);
+        const tagValues = tagNames.length > 0 ? tagNames : noTagsArr;
+
+        // Inline buildRemediationString
+        const updateId = updateObj ? (updateObj.id || null) : null;
+        const batchTitle = cve.bt >= 0 ? lkBatchTitles[cve.bt] : null;
+        const kbId = updateId
+            ? (String(updateId).startsWith('KB') ? updateId : 'KB' + updateId)
+            : null;
+        let remediationString;
+        if (batchTitle) {
+            remediationString = kbId ? batchTitle + ' (' + kbId + ')' : batchTitle;
+        } else if (updateName && kbId) {
+            remediationString = updateName + ' (' + kbId + ')';
+        } else if (updateName) {
+            remediationString = updateName;
+        } else if (kbId) {
+            remediationString = kbId;
+        } else {
+            remediationString = 'Not Specified';
+        }
+
+        // Track earliest first-seen per environment issue key
+        if (firstSeen) {
+            const issueKey = (cve.id || '') + '|' + (vendorName || '') + '|' + (software.n || '') + '|' + (verIdx >= 0 ? lkVersions[verIdx] : '');
+            const existing = earliestFirstSeenByIssue.get(issueKey);
+            if (!existing || firstSeen < existing) {
+                earliestFirstSeenByIssue.set(issueKey, firstSeen);
+            }
+        }
+
+        vulnerabilityData[i] = {
+            DeviceId: device.id,
+            DeviceName: device.n,
+            RbacGroupName: rbacGroupName,
+            OSPlatform: device.o >= 0 && device.o < lkPlatforms.length ? lkPlatforms[device.o] : null,
+            OSVersion: device.ov,
+            MachineTags: tagNames,
+            MachineInfo: device.m || null,
+            CveId: cve.id,
+            CvssScore: cve.sc,
+            VulnerabilitySeverityLevel: cve.sv >= 0 && cve.sv < lkSeverities.length ? lkSeverities[cve.sv] : null,
+            ExploitabilityLevel: cve.ex >= 0 ? lkExploitLevels[cve.ex] : null,
+            CveBatchUrl: cve.u,
+            CveBatchTitle: batchTitle,
+            PublishedDate: cve.pd ? (formatDateYMD(cve.pd) || null) : null,
+            VulnerabilityDescription: cve.desc || null,
+            EpssScore: cve.ep != null ? cve.ep : null,
+            AffectedSoftware: affSoftware,
+            SoftwareVendor: vendorName,
+            SoftwareName: software.n,
+            SoftwareVersion: verIdx >= 0 ? lkVersions[verIdx] : null,
+            RecommendationReference: software.r,
+            _firstSeenDate: firstSeen,
+            _lastSeenDate: lastSeen,
+            FirstSeenTimestamp: firstSeen,
+            LastSeenTimestamp: lastSeen,
+            SecurityUpdateAvailable: uaFlag === 1,
+            RecommendedSecurityUpdate: updateName,
+            RecommendedSecurityUpdateId: updateId,
+            RecommendedSecurityUpdateUrl: updateObj ? (updateObj.url || null) : null,
+            DiskPaths: diskPaths,
+            RegistryPaths: regPaths,
+            _remediationKey: updateName
+                ? vendorName + ' ' + software.n + ' - ' + updateName
+                : vendorName + ' ' + software.n,
+            _index: i,
+            // Derived fields (inlined)
+            _machineLastSeenDate: machineLastSeen,
+            _latestActivityDate: latestActivity,
+            _hasPatchEvidence: hasPatchEvidence,
+            _effectiveOpenEndDate: effectiveOpenEndDate,
+            _remediationDate: hasPatchEvidence ? lastSeen : '',
+            _remediationString: remediationString,
+            _deviceFilterKey: deviceFilterKey,
+            _normalizedGroup: normalizedGroup,
+            _tagValues: tagValues
+        };
+    }
+
+    // Second pass: assign _environmentFirstSeenDate (requires global map)
+    for (let i = 0; i < rawCount; i++) {
+        const v = vulnerabilityData[i];
+        const issueKey = (v.CveId || '') + '|' + (v.SoftwareVendor || '') + '|' + (v.SoftwareName || '') + '|' + (v.SoftwareVersion || '');
+        const envFirstSeen = earliestFirstSeenByIssue.get(issueKey) || v._firstSeenDate;
+        v._environmentFirstSeenDate = envFirstSeen;
+        v.EnvironmentFirstSeenTimestamp = envFirstSeen;
+    }
+
     const elapsed = Math.round(performance.now() - startTime);
     logDebug('Denormalization complete in', elapsed, 'ms');
 }
@@ -1154,8 +1416,32 @@ function denormalizeAllVulns() {
  */
 async function denormalizeWithCaching() {
     const hasCompressed = !!pendingCompressedBytes;
+    let compressedFp = null;
 
-    // For compressed data, fingerprint and cache checks happen after decompression
+    // For compressed data, try cache using a fingerprint of the raw compressed bytes
+    if (hasCompressed) {
+        compressedFp = computeCompressedFingerprint(pendingCompressedBytes);
+        logDebug('Compressed fingerprint:', compressedFp);
+        const cached = await getCachedData(compressedFp);
+        if (cached && cached.data && cached.data.length > 0) {
+            logDebug('Loaded', cached.data.length, 'records from IndexedDB cache (compressed fingerprint)');
+            vulnerabilityData = cached.data;
+            if (cached.lookups) {
+                lookups = cached.lookups;
+                logDebug('Restored lookups from IndexedDB cache');
+            } else {
+                // Fallback: decompress to get lookups
+                const decompressed = pako.inflate(pendingCompressedBytes, { to: 'string' });
+                const payload = JSON.parse(decompressed);
+                lookups = payload.lookups;
+                rawVulns = payload.vulns;
+            }
+            pendingCompressedBytes = null;
+            applyDerivedVulnerabilityFields(vulnerabilityData);
+            return;
+        }
+    }
+
     if (!hasCompressed) {
         const fingerprint = computeDataFingerprint();
         const rawCount = getRawVulnCount();
@@ -1163,9 +1449,10 @@ async function denormalizeWithCaching() {
 
         // 1. Try IndexedDB cache
         const cached = await getCachedData(fingerprint);
-        if (cached && cached.length === rawCount) {
-            logDebug('Loaded', cached.length, 'records from IndexedDB cache');
-            vulnerabilityData = cached;
+        if (cached && cached.data && cached.data.length === rawCount) {
+            logDebug('Loaded', cached.data.length, 'records from IndexedDB cache');
+            if (cached.lookups) lookups = cached.lookups;
+            vulnerabilityData = cached.data;
             applyDerivedVulnerabilityFields(vulnerabilityData);
             return;
         }
@@ -1175,15 +1462,23 @@ async function denormalizeWithCaching() {
     const compBytes = pendingCompressedBytes;
     pendingCompressedBytes = null;
     try {
-        const label = compBytes ? 'decompressing + denormalizing' : 'denormalizing';
-        logDebug(label, compBytes ? '(compressed bytes)' : getRawVulnCount(), 'records via Web Worker...');
+        const label = compBytes ? 'decompressing' : 'denormalizing';
+        logDebug(label, compBytes ? '(compressed bytes via Worker)' : getRawVulnCount(), 'records via Web Worker...');
         const startTime = performance.now();
         const result = await denormalizeInWorker(compBytes);
-        vulnerabilityData = result.rows;
         if (result.lookups) lookups = result.lookups;
         if (result.rawVulns) rawVulns = result.rawVulns;
+        if (result.rows) {
+            // Worker returned fully denormalized rows (non-compressed path)
+            vulnerabilityData = result.rows;
+        } else {
+            // Decompress-only path: Worker returned lookups + rawVulns, denormalize here
+            const decompElapsed = Math.round(performance.now() - startTime);
+            console.log('[perf] Worker decompress: ' + decompElapsed + 'ms');
+            denormalizeAllVulns();
+        }
         const elapsed = Math.round(performance.now() - startTime);
-        logDebug('Worker complete in', elapsed, 'ms');
+        logDebug('Worker + denormalize complete in', elapsed, 'ms');
     } catch (err) {
         console.warn('Web Worker failed, falling back to main thread:', err);
         // Decompress on main thread if we have compressed bytes and lookups weren't set
@@ -1196,16 +1491,25 @@ async function denormalizeWithCaching() {
         denormalizeAllVulns();
     }
 
-    applyDerivedVulnerabilityFields(vulnerabilityData);
+    // Derived fields are now computed inline in denormalizeAllVulns();
+    // only call applyDerivedVulnerabilityFields for IndexedDB-cached data (above)
 
     // Log counts after data is available
     logDebug('Loaded lookups:', lookups ? Object.keys(lookups) : 'none');
     logDebug('Loaded', getRawVulnCount(), 'vulnerability records');
 
-    // 3. Cache the result (fire-and-forget)
-    const fingerprint = computeDataFingerprint();
-    logDebug('Data fingerprint:', fingerprint);
-    setCachedData(fingerprint, vulnerabilityData);
+    // 3. Cache the result (fire-and-forget) — skip for very large datasets
+    // IndexedDB structured clone fails with out-of-memory for 500K+ records
+    if (vulnerabilityData.length < 500000) {
+        const fingerprint = computeDataFingerprint();
+        logDebug('Data fingerprint:', fingerprint);
+        setCachedData(fingerprint, vulnerabilityData);
+        if (compressedFp) {
+            setCachedData(compressedFp, vulnerabilityData);
+        }
+    } else {
+        console.log('[perf] Skipping IndexedDB cache for', vulnerabilityData.length, 'records (too large for structured clone)');
+    }
 }
 
 // =============================================================================
@@ -1216,11 +1520,16 @@ async function denormalizeWithCaching() {
  * Initialize the dashboard on page load
  */
 async function init() {
+    console.time('[perf] init total');
     setDashboardStatus('Loading dashboard data...');
 
     // Load and process data
+    console.time('[perf] loadData');
     await loadData();
+    console.timeEnd('[perf] loadData');
+    console.time('[perf] denormalize');
     await denormalizeWithCaching();
+    console.timeEnd('[perf] denormalize');
     await ensureChartJsLoaded();
     mostRecentLastSeenDate = getMostRecentLastSeen();
     
@@ -1234,6 +1543,8 @@ async function init() {
     activeReportId = getCurrentReportId();
     setDateRange('1m');
     clearDashboardStatus();
+    console.timeEnd('[perf] init total');
+    window._dashboardReady = true;
 }
 
 function renderActiveVulnerabilitiesReport() {
@@ -1709,6 +2020,54 @@ function populateCheckboxes(containerId, values, allLabel, onChange) {
 }
 
 /**
+ * Fast in-place count update for a cascading filter.
+ * Walks the existing DOM items, updating count labels and zero-class styling
+ * without tearing down and rebuilding the entire DOM.
+ * For filterDeviceName, if the visible set changed (items with count becoming 0
+ * or gaining count), falls back to full render by returning false.
+ * @param {string} containerId - The filter container ID
+ * @param {Map<string, number>} countMap - New device counts
+ * @returns {boolean} true if fast update succeeded, false if full render needed
+ */
+function updateCascadingFilterCounts(containerId, countMap) {
+    const container = document.getElementById(containerId);
+    const filterEntry = cascadingFilterState[containerId];
+    const isSubset = filterEntry.mode === 'subset';
+    const isDeviceName = containerId === 'filterDeviceName';
+    const items = container.querySelectorAll('.checkbox-item:not(.checkbox-item-all)');
+
+    if (isDeviceName) {
+        // For device name, visible set may change when counts flip 0↔non-zero.
+        // Count how many options would be visible with new counts.
+        const options = cascadingFilterOptions[containerId] || [];
+        let newVisible = 0;
+        for (let i = 0; i < options.length; i++) {
+            const count = countMap.get(options[i].value) || 0;
+            const isExplicitlySelected = isSubset && filterEntry.selectedValues.has(options[i].value);
+            if (count > 0 || isExplicitlySelected) newVisible++;
+        }
+        if (newVisible !== items.length) return false; // visible set changed, need full rebuild
+    }
+
+    // Walk DOM items and update counts + zero-class in-place
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const cb = item.querySelector('input[type="checkbox"]');
+        if (!cb || !cb.value) continue;
+        const count = countMap.get(cb.value) || 0;
+        const countSpan = item.querySelector('.checkbox-count');
+        if (countSpan) countSpan.textContent = count;
+        if (count === 0) {
+            item.classList.add('checkbox-item-zero');
+        } else {
+            item.classList.remove('checkbox-item-zero');
+        }
+    }
+
+    return true;
+}
+
+/**
  * Render a cascading device filter from explicit UI state and computed counts.
  * @param {string} containerId - The filter container ID
  * @param {Map<string, number>} countMap - Device counts for each option
@@ -1718,7 +2077,14 @@ function renderCascadingFilter(containerId, countMap = new Map()) {
     const filterGroup = container.parentElement;
     const filterEntry = cascadingFilterState[containerId];
     const options = cascadingFilterOptions[containerId] || [];
-    container.innerHTML = '';
+
+    // ── Fast-update path ──
+    // If the container already has rendered options, try to update counts in-place
+    // instead of tearing down and rebuilding the entire DOM tree.
+    if (container._renderedOptions && countMap.size > 0) {
+        const fastOk = updateCascadingFilterCounts(containerId, countMap);
+        if (fastOk) return;
+    }
 
     const existingSearch = filterGroup.querySelector('.filter-search');
     if (existingSearch) existingSearch.remove();
@@ -1743,64 +2109,65 @@ function renderCascadingFilter(containerId, countMap = new Map()) {
         filterGroup.insertBefore(searchInput, container);
     }
 
-    const allDiv = document.createElement('div');
-    allDiv.className = 'checkbox-item checkbox-item-all';
-    const allCheckbox = document.createElement('input');
-    allCheckbox.type = 'checkbox';
-    allCheckbox.id = `${containerId}_all`;
-    allCheckbox.checked = filterEntry.mode === 'all';
-    allCheckbox.indeterminate = filterEntry.mode === 'subset' && filterEntry.selectedValues.size > 0;
-    allCheckbox.addEventListener('change', function() {
-        setCascadingFilterAllMode(containerId, this.checked);
-        scheduleApplyFilters(true);
-    });
+    // Build checkbox HTML via string concatenation — much faster than individual
+    // createElement/appendChild calls when the option list is large (e.g. 20K devices).
+    const h = [];
+    const allChecked = filterEntry.mode === 'all';
+    const isSubset = filterEntry.mode === 'subset';
+    const allIndeterminate = isSubset && filterEntry.selectedValues.size > 0;
+    h.push('<div class="checkbox-item checkbox-item-all"><input type="checkbox" id="',
+        containerId, '_all"', allChecked ? ' checked' : '',
+        '><label for="', containerId, '_all">',
+        escapeHtml(CASCADING_FILTER_CONFIG[containerId].allLabel),
+        '</label></div>');
 
-    const allLabel = document.createElement('label');
-    allLabel.setAttribute('for', allCheckbox.id);
-    allLabel.textContent = CASCADING_FILTER_CONFIG[containerId].allLabel;
-    allDiv.appendChild(allCheckbox);
-    allDiv.appendChild(allLabel);
-    container.appendChild(allDiv);
-
-    options.forEach((option, idx) => {
-        const { value, label: optionLabel, searchText, showCount } = option;
-        const div = document.createElement('div');
+    for (let i = 0; i < options.length; i++) {
+        const { value, label: optionLabel, searchText, showCount } = options[i];
         const count = countMap.get(value) || 0;
-        const isExplicitlySelected = filterEntry.mode === 'subset' && filterEntry.selectedValues.has(value);
-        if (containerId === 'filterDeviceName' && count === 0 && !isExplicitlySelected) {
-            return;
-        }
-        div.className = count === 0 ? 'checkbox-item checkbox-item-zero' : 'checkbox-item';
-        div.dataset.filterLabel = (searchText || optionLabel).toLowerCase();
+        const isExplicitlySelected = isSubset && filterEntry.selectedValues.has(value);
+        if (containerId === 'filterDeviceName' && count === 0 && !isExplicitlySelected) continue;
 
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.value = value;
-        checkbox.id = `${containerId}_${idx}`;
-        checkbox.checked = filterEntry.mode === 'all' || filterEntry.selectedValues.has(value);
-        checkbox.addEventListener('change', function() {
-            toggleCascadingFilterValue(containerId, value, this.checked);
+        const zeroClass = count === 0 ? ' checkbox-item-zero' : '';
+        const filterLabel = (searchText || optionLabel).toLowerCase();
+        const checked = allChecked || filterEntry.selectedValues.has(value);
+        h.push('<div class="checkbox-item', zeroClass, '" data-filter-label="',
+            escapeHtml(filterLabel), '"><input type="checkbox" value="',
+            escapeHtml(value), '" id="', containerId, '_', i, '"',
+            checked ? ' checked' : '',
+            '><label for="', containerId, '_', i,
+            '"><span class="checkbox-label-text">', escapeHtml(optionLabel), '</span>');
+        if (showCount) {
+            h.push('<span class="checkbox-count">', count, '</span>');
+        }
+        h.push('</label></div>');
+    }
+
+    container.innerHTML = h.join('');
+
+    // Remember what we rendered so the fast-update path can compare
+    container._renderedOptions = true;
+
+    // Set indeterminate state (cannot be expressed as an HTML attribute)
+    if (allIndeterminate) {
+        const allCb = container.querySelector(`#${containerId}_all`);
+        if (allCb) allCb.indeterminate = true;
+    }
+
+    // Attach a single delegated change listener once per container.
+    // It survives innerHTML replacements because it is on the container itself.
+    if (!container._cascadeDelegation) {
+        container._cascadeDelegation = true;
+        container.addEventListener('change', function(e) {
+            const cb = e.target;
+            if (cb.type !== 'checkbox') return;
+            if (cb.id === containerId + '_all') {
+                setCascadingFilterAllMode(containerId, cb.checked);
+            } else {
+                toggleCascadingFilterValue(containerId, cb.value, cb.checked);
+            }
             scheduleApplyFilters(true);
         });
-
-        const label = document.createElement('label');
-        label.setAttribute('for', checkbox.id);
-
-        const labelText = document.createElement('span');
-        labelText.className = 'checkbox-label-text';
-        labelText.textContent = optionLabel;
-
-        label.appendChild(labelText);
-        if (showCount) {
-            const labelCount = document.createElement('span');
-            labelCount.className = 'checkbox-count';
-            labelCount.textContent = String(count);
-            label.appendChild(labelCount);
-        }
-        div.appendChild(checkbox);
-        div.appendChild(label);
-        container.appendChild(div);
-    });
+    }
 
     applyCascadingFilterSearch(containerId);
 }
@@ -1873,7 +2240,7 @@ function buildCascadingFilterCountMaps() {
         CASCADING_FILTER_IDS.forEach(targetFilterId => {
             if (!matchesFiltersForFacetCount(v, targetFilterId)) return;
 
-            const deviceKey = getDeviceIdentityKey(v);
+            const deviceKey = v._deviceFilterKey;
             CASCADING_FILTER_CONFIG[targetFilterId].getValuesForVuln(v).forEach(value => {
                 if (!deviceSetsByFilter[targetFilterId].has(value)) {
                     deviceSetsByFilter[targetFilterId].set(value, new Set());
@@ -1890,16 +2257,16 @@ function buildCascadingFilterCountMaps() {
 }
 
 function matchesFiltersForFacetCount(v, targetFilterId) {
-    if (targetFilterId !== 'filterDeviceName' && filterState.deviceNameSet.size > 0 && !filterState.deviceNameSet.has(getDeviceNameFilterValue(v))) {
+    if (targetFilterId !== 'filterDeviceName' && filterState.deviceNameSet.size > 0 && !filterState.deviceNameSet.has(v._deviceFilterKey)) {
         return false;
     }
 
-    if (targetFilterId !== 'filterRbacGroup' && filterState.rbacGroupSet.size > 0 && !filterState.rbacGroupSet.has(normalizeGroupName(v.RbacGroupName))) {
+    if (targetFilterId !== 'filterRbacGroup' && filterState.rbacGroupSet.size > 0 && !filterState.rbacGroupSet.has(v._normalizedGroup)) {
         return false;
     }
 
     if (targetFilterId !== 'filterDeviceTags' && filterState.deviceTagSet.size > 0) {
-        const vulnTags = CASCADING_FILTER_CONFIG.filterDeviceTags.getValuesForVuln(v);
+        const vulnTags = v._tagValues;
         if (!vulnTags.some(tag => filterState.deviceTagSet.has(tag))) return false;
     }
 
@@ -1948,11 +2315,11 @@ function hasAnyChecked(containerId) {
 }
 
 function matchesFilterStateNonDate(v, state = filterState) {
-    if (state.deviceNameSet.size > 0 && !state.deviceNameSet.has(getDeviceNameFilterValue(v))) return false;
-    if (state.rbacGroupSet.size > 0 && !state.rbacGroupSet.has(normalizeGroupName(v.RbacGroupName))) return false;
+    if (state.deviceNameSet.size > 0 && !state.deviceNameSet.has(v._deviceFilterKey)) return false;
+    if (state.rbacGroupSet.size > 0 && !state.rbacGroupSet.has(v._normalizedGroup)) return false;
 
     if (state.deviceTagSet.size > 0) {
-        const vulnTags = v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : NO_TAGS_ARRAY;
+        const vulnTags = v._tagValues;
         if (!vulnTags.some(tag => state.deviceTagSet.has(tag))) return false;
     }
 
@@ -1978,11 +2345,13 @@ function matchesFilterState(v, state = filterState) {
  * Uses requestAnimationFrame to yield to the browser before rendering.
  */
 function applyFilters() {
+    const _t0 = performance.now();
     syncFilterStateFromDom();
-    refreshCascadingFilters();
 
     if (!filterState.hasDeviceNames || !filterState.hasRbacGroups || !filterState.hasDeviceTags || !filterState.hasSeverities || !filterState.hasOsPlatforms) {
         filteredData = [];
+        // Still render cascading filters so the UI stays consistent
+        refreshCascadingFilters();
         invalidateAggregateCache();
         updateStats();
         markAllReportsDirty();
@@ -1990,6 +2359,7 @@ function applyFilters() {
         return;
     }
 
+    // ---- Single-pass: compute main filter result AND cascading device counts ----
     const result = [];
     const data = vulnerabilityData;
     const len = data.length;
@@ -2002,34 +2372,82 @@ function applyFilters() {
     const startDate = fs.startDate;
     const endDate = fs.endDate;
 
+    // Cascading count accumulators (device-Set per option per filter dimension)
+    const deviceSetsByFilter = Object.fromEntries(CASCADING_FILTER_IDS.map(filterId => [
+        filterId,
+        new Map((cascadingFilterOptions[filterId] || []).map(option => [option.value, new Set()]))
+    ]));
+
     for (let i = 0; i < len; i++) {
         const v = data[i];
-        if (hasDeviceName && !fs.deviceNameSet.has(v.DeviceId || v.DeviceName)) continue;
-        if (hasRbacGroup && !fs.rbacGroupSet.has(normalizeGroupName(v.RbacGroupName))) continue;
-        if (hasDeviceTag) {
-            const tags = v.MachineTags;
-            if (tags && tags.length > 0) {
-                let tagMatch = false;
-                for (let t = 0; t < tags.length; t++) {
-                    if (fs.deviceTagSet.has(tags[t])) { tagMatch = true; break; }
-                }
-                if (!tagMatch) continue;
-            } else {
-                if (!fs.deviceTagSet.has(NO_TAGS_VALUE)) continue;
-            }
-        }
-        if (hasSeverity && !fs.severitySet.has(v.VulnerabilitySeverityLevel)) continue;
-        if (hasOsPlatform && !fs.osPlatformSet.has(v.OSPlatform)) continue;
+
+        // Base checks shared by both cascading counts and main filter
         if (startDate && v._effectiveOpenEndDate < startDate) continue;
         if (endDate && v._firstSeenDate > endDate) continue;
-        result.push(v);
+        if (hasSeverity && !fs.severitySet.has(v.VulnerabilitySeverityLevel)) continue;
+        if (hasOsPlatform && !fs.osPlatformSet.has(v.OSPlatform)) continue;
+
+        // Evaluate device-level dimension matches (needed for cross-filter counts)
+        const matchesDevName = !hasDeviceName || fs.deviceNameSet.has(v._deviceFilterKey);
+        const matchesGroup = !hasRbacGroup || fs.rbacGroupSet.has(v._normalizedGroup);
+        let matchesTags = true;
+        if (hasDeviceTag) {
+            const tags = v._tagValues;
+            matchesTags = false;
+            for (let t = 0; t < tags.length; t++) {
+                if (fs.deviceTagSet.has(tags[t])) { matchesTags = true; break; }
+            }
+        }
+
+        // Cascading counts: each dimension excludes itself so the user sees
+        // how many devices would match if they toggled that particular option.
+        const deviceKey = v._deviceFilterKey;
+        if (matchesGroup && matchesTags) {
+            const m = deviceSetsByFilter.filterDeviceName;
+            const vals = v._deviceFilterKey;
+            const s = m.get(vals);
+            if (s) s.add(deviceKey); else m.set(vals, new Set([deviceKey]));
+        }
+        if (matchesDevName && matchesTags) {
+            const m = deviceSetsByFilter.filterRbacGroup;
+            const val = v._normalizedGroup;
+            const s = m.get(val);
+            if (s) s.add(deviceKey); else m.set(val, new Set([deviceKey]));
+        }
+        if (matchesDevName && matchesGroup) {
+            const m = deviceSetsByFilter.filterDeviceTags;
+            const tagVals = v._tagValues;
+            for (let t = 0; t < tagVals.length; t++) {
+                const s = m.get(tagVals[t]);
+                if (s) s.add(deviceKey); else m.set(tagVals[t], new Set([deviceKey]));
+            }
+        }
+
+        // Main filtered result: all dimensions must match
+        if (matchesDevName && matchesGroup && matchesTags) {
+            result.push(v);
+        }
     }
     filteredData = result;
+    const _tCascade = performance.now();
+
+    // Convert device Sets to counts and render cascading filters
+    const countMaps = Object.fromEntries(CASCADING_FILTER_IDS.map(filterId => [
+        filterId,
+        new Map(Array.from(deviceSetsByFilter[filterId].entries()).map(([value, deviceSet]) => [value, deviceSet.size]))
+    ]));
+    cascadingFilterCountCacheKey = fs.key;
+    cascadingFilterCountCache = countMaps;
+    CASCADING_FILTER_IDS.forEach(filterId => {
+        renderCascadingFilter(filterId, countMaps[filterId]);
+    });
+    console.log(`[perf] cascading filter render: ${(performance.now() - _tCascade).toFixed(1)}ms`);
 
     invalidateAggregateCache();
     updateStats();
     markAllReportsDirty();
     requestAnimationFrame(() => renderActiveReport(true));
+    console.log(`[perf] applyFilters: ${(performance.now() - _t0).toFixed(1)}ms  (${result.length}/${len} rows passed)`);
 }
 
 // =============================================================================
@@ -2348,6 +2766,9 @@ function applyDerivedVulnerabilityFields(rows) {
         v._remediationString = buildRemediationString(v);
         v._environmentFirstSeenDate = environmentFirstSeenDate;
         v.EnvironmentFirstSeenTimestamp = environmentFirstSeenDate;
+        v._deviceFilterKey = v.DeviceId || v.DeviceName || '';
+        v._normalizedGroup = normalizeGroupName(v.RbacGroupName);
+        v._tagValues = v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : NO_TAGS_ARRAY;
     });
 }
 
