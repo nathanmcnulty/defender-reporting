@@ -105,7 +105,7 @@ For local testing of the split-assets build, use a local HTTP server instead of 
 | `Invoke-VulnerabilityExport.ps1` | Downloads Defender exports and writes the canonical gzip data store |
 | `Generate-VulnerabilityDashboard.ps1` | Builds the dashboard in self-contained or split-assets form and can validate the result |
 | `Validate-DashboardReports.ps1` | Validates an existing dashboard HTML against committed exports |
-| `Setup-AzureResources.ps1` | Provisions Azure Automation, storage, scheduling, and optional Container App hosting |
+| `Setup-AzureResources.ps1` | Provisions Azure compute (Automation Account or Function App), storage, scheduling, and optional Container App hosting |
 | `Setup-GitHubActionServicePrincipal.ps1` | Creates the Entra app and federated credential for GitHub Actions OIDC |
 
 ## Canonical data files
@@ -129,14 +129,16 @@ flowchart TD
     A["Same export and generation scripts"] --> B["Run locally"]
     A --> C["Run in Azure Automation"]
     A --> D["Run in GitHub Actions"]
+    A --> H["Run in Azure Function App"]
     B --> E["Open HTML directly"]
-    C --> F["Publish to blob storage or Container App"]
-    D --> G["Commit updated exports and dashboard"]
+    C --> F["Publish to blob storage\nand optional Container App"]
+    D --> G["Commit updated exports\nand dashboard"]
+    H --> F
 ```
 
 ## Notes
 
-- `azure/Invoke-DashboardPipeline.ps1` is a generated runbook artifact. Edit `shared-helpers.ps1` and `azure/runbook-source.ps1`, then rebuild with `.\azure\Build-Runbook.ps1`.
+- `azure/Invoke-DashboardPipeline.ps1` and `azure/function-app/ExportAndGenerate/run.ps1` are generated artifacts. Edit `shared-helpers.ps1` and `azure/runbook-source.ps1`, then rebuild with `.\azure\Build-Runbook.ps1` and `.\azure\Build-FunctionApp.ps1`.
 - Legacy `VulnExport_<group>_<date>.json(.gz)` compatibility remains temporary through `2026-07-01`.
 - Sample PDF outputs are committed under `reports/`.
 - `exports/.dashboard-cache` is a derived local build cache and is intentionally ignored by git.
