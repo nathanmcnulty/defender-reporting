@@ -658,6 +658,7 @@ elseif ($CleanOutput) {
     }
 
     foreach ($path in @($pathsToRemove | Sort-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
         $removed = $false
         for ($attempt = 1; $attempt -le 5 -and -not $removed; $attempt++) {
             try {

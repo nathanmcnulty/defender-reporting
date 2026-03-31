@@ -146,7 +146,6 @@ const TABLE_PAGE_SIZE = 100;
 const CARD_PAGE_SIZE = 20;
 const CARD_RENDER_BATCH_SIZE = 50;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
-let sortedByFirstSeen = null;
 const REPORT_IDS = [
     'active-vulnerabilities',
     'remediation-activity',
@@ -342,24 +341,6 @@ function buildFilterStateKey(state) {
         state.severities.join('\u001f'),
         state.osPlatforms.join('\u001f')
     ].join('\u001e');
-}
-
-function buildSortedFirstSeenIndex() {
-    if (!vulnerabilityData || vulnerabilityData.length === 0) return;
-    sortedByFirstSeen = vulnerabilityData
-        .map((v, i) => ({ i, fs: v._firstSeenDate || getFirstSeenDate(v) }))
-        .sort((a, b) => (a.fs < b.fs ? -1 : a.fs > b.fs ? 1 : 0));
-}
-
-function binarySearchFirstSeen(targetDate) {
-    if (!sortedByFirstSeen) return 0;
-    let lo = 0, hi = sortedByFirstSeen.length;
-    while (lo < hi) {
-        const mid = (lo + hi) >>> 1;
-        if (sortedByFirstSeen[mid].fs < targetDate) lo = mid + 1;
-        else hi = mid;
-    }
-    return lo;
 }
 
 function syncFilterStateFromDom() {
@@ -638,15 +619,25 @@ async function setCachedData(fingerprint, data) {
 function buildWorkerSource() {
     return `
 'use strict';
-self.onmessage = function(e) {
+self.onmessage = async function(e) {
     var lookups = e.data.lookups;
     var rawVulns = e.data.rawVulns;
     var decompressOnly = !!e.data.decompressOnly;
 
     // If compressed data was transferred, decompress it first
     if (e.data.compressedBytes) {
-        var decompressed = pako.inflate(e.data.compressedBytes, { to: 'string' });
-        var data = JSON.parse(decompressed);
+        var data;
+        if (typeof DecompressionStream !== 'undefined') {
+            // Native gzip decompression — significantly faster than pako
+            var ds = new DecompressionStream('gzip');
+            var blob = new Blob([e.data.compressedBytes]);
+            var decompressedStream = blob.stream().pipeThrough(ds);
+            var text = await new Response(decompressedStream).text();
+            data = JSON.parse(text);
+        } else {
+            var decompressed = pako.inflate(e.data.compressedBytes, { to: 'string' });
+            data = JSON.parse(decompressed);
+        }
         lookups = data.lookups;
         rawVulns = data.vulns;
     }
@@ -1006,7 +997,11 @@ async function loadData() {
     } else if (dataFormat === 'compressed') {
         // Base64 decode on main thread (fast), defer inflate to Worker
         const compressedBase64 = document.getElementById('vulnsData').textContent.replace(/\s+/g, '');
-        pendingCompressedBytes = Uint8Array.from(atob(compressedBase64), c => c.charCodeAt(0));
+        const binaryString = atob(compressedBase64);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
+        pendingCompressedBytes = bytes;
     } else {
         // Normalized but not compressed
         lookups = JSON.parse(document.getElementById('lookupsData').textContent);
@@ -1084,85 +1079,6 @@ function getRawVulnRecord(index) {
  * @param {number} index - Index in the array
  * @returns {Object} Expanded vulnerability object
  */
-function denormalizeVuln(v, index) {
-    const device = lookups.devices[v[0]];
-    const cve = lookups.cves[v[1]];
-    const software = lookups.software[v[2]];
-    
-    // Get tag names from indices
-    const tagNames = device.t.length > 0 
-        ? device.t.map(idx => lookups.tags[idx])
-        : [];
-    
-    // Resolve version from lookup
-    const version = v[3] >= 0 ? lookups.versions[v[3]] : null;
-    // Resolve dates from lookup
-    const firstSeen = v[4] >= 0 ? (formatDateYMD(lookups.dates[v[4]]) || '') : '';
-    const lastSeen = v[5] >= 0 ? (formatDateYMD(lookups.dates[v[5]]) || '') : '';
-    // Resolve evidence paths from lookup indices
-    const diskPaths = v[8] && v[8].length > 0 ? v[8].map(idx => lookups.diskPaths[idx]) : [];
-    const regPaths = v[9] && v[9].length > 0 ? v[9].map(idx => lookups.regPaths[idx]) : [];
-    // Resolve batch title from lookup
-    const batchTitle = cve.bt >= 0 ? lookups.batchTitles[cve.bt] : null;
-    // Resolve affected software from lookup indices
-    const affSoftware = cve.as && cve.as.length > 0 ? cve.as.map(idx => lookups.affSoftware[idx]) : null;
-    
-    return {
-        // Device info
-        DeviceId: device.id,
-        DeviceName: device.n,
-        RbacGroupName: (getLookupValue(lookups.groups, device.g) && String(getLookupValue(lookups.groups, device.g)).trim() !== '') ? getLookupValue(lookups.groups, device.g) : '(none)',
-        OSPlatform: getLookupValue(lookups.platforms, device.o),
-        OSVersion: device.ov,
-        MachineTags: tagNames,
-        MachineInfo: device.m || null,
-        
-        // CVE info
-        CveId: cve.id,
-        CvssScore: cve.sc,
-        VulnerabilitySeverityLevel: getLookupValue(lookups.severities, cve.sv),
-        ExploitabilityLevel: cve.ex >= 0 ? lookups.exploitLevels[cve.ex] : null,
-        CveBatchUrl: cve.u,
-        CveBatchTitle: batchTitle,
-        PublishedDate: formatDateYMD(cve.pd) || null,
-        VulnerabilityDescription: cve.desc || null,
-        EpssScore: cve.ep ?? null,
-        AffectedSoftware: affSoftware,
-        
-        // Software info
-        SoftwareVendor: getLookupValue(lookups.vendors, software.v),
-        SoftwareName: software.n,
-        SoftwareVersion: version,
-        RecommendationReference: software.r,
-        
-        // Timestamps (resolved from lookup)
-        _firstSeenDate: firstSeen,
-        _lastSeenDate: lastSeen,
-        FirstSeenTimestamp: firstSeen,
-        LastSeenTimestamp: lastSeen,
-        
-        // Update info
-        SecurityUpdateAvailable: v[6] === 1,
-        RecommendedSecurityUpdate: v[7] >= 0 ? (lookups.updates[v[7]].n || lookups.updates[v[7]]) : null,
-        RecommendedSecurityUpdateId: v[7] >= 0 && lookups.updates[v[7]].id ? lookups.updates[v[7]].id : null,
-        RecommendedSecurityUpdateUrl: v[7] >= 0 && lookups.updates[v[7]].url ? lookups.updates[v[7]].url : null,
-        
-        // Evidence (resolved from lookup)
-        DiskPaths: diskPaths,
-        RegistryPaths: regPaths,
-        
-        // Pre-computed fields
-        _remediationKey: (() => {
-            const uObj = v[7] >= 0 ? lookups.updates[v[7]] : null;
-            const uName = uObj ? (uObj.n || uObj) : null;
-            return uName
-                ? `${lookups.vendors[software.v]} ${software.n} - ${uName}`
-                : `${lookups.vendors[software.v]} ${software.n}`;
-        })(),
-        _index: index
-    };
-}
-
 /**
  * Denormalize all vulnerability records (main-thread fallback)
  */
@@ -1181,10 +1097,7 @@ function denormalizeAllVulns() {
     const vCol = isColumnar ? rawVulns.v : null;
     const fCol = isColumnar ? rawVulns.f : null;
     const lCol = isColumnar ? rawVulns.l : null;
-    const uaCol = isColumnar ? rawVulns.ua : null;
     const uCol = isColumnar ? rawVulns.u : null;
-    const dpCol = isColumnar ? rawVulns.dp : null;
-    const rpCol = isColumnar ? rawVulns.rp : null;
 
     // Cache lookup arrays locally
     const lkDevices = lookups.devices;
@@ -1199,8 +1112,6 @@ function denormalizeAllVulns() {
     const lkVendors = lookups.vendors;
     const lkSeverities = lookups.severities;
     const lkExploitLevels = lookups.exploitLevels;
-    const lkDiskPaths = lookups.diskPaths;
-    const lkRegPaths = lookups.regPaths;
     const lkBatchTitles = lookups.batchTitles;
     const lkAffSoftware = lookups.affSoftware;
 
@@ -1211,59 +1122,96 @@ function denormalizeAllVulns() {
         preFormattedDates[di] = d === '-' ? '' : d;
     }
 
-    // Pre-compute addDaysYmd results for the inactivity window (memoized by date string)
-    const addDaysCache = new Map();
-    function addDaysCached(dateStr) {
-        let result = addDaysCache.get(dateStr);
-        if (result === undefined) {
-            result = addDaysYmd(dateStr, DEVICE_INACTIVITY_WINDOW_DAYS);
-            addDaysCache.set(dateStr, result);
-        }
-        return result;
+    // Pre-compute addDays(date, DEVICE_INACTIVITY_WINDOW_DAYS) for every date index
+    const addDaysByDateIdx = new Array(preFormattedDates.length);
+    for (let di = 0; di < preFormattedDates.length; di++) {
+        addDaysByDateIdx[di] = preFormattedDates[di]
+            ? addDaysYmd(preFormattedDates[di], DEVICE_INACTIVITY_WINDOW_DAYS)
+            : '';
     }
 
-    // Pre-format machine last-seen dates (one per unique device, ~20K)
+    // Pre-compute per-device values (one per unique device, ~20K)
+    const noTagsArr = NO_TAGS_ARRAY;
+    const EMPTY_PATHS = [];
     for (let di = 0; di < lkDevices.length; di++) {
         const dev = lkDevices[di];
-        if (dev) {
-            const mi = dev.m;
-            const ls = mi ? (mi.ls || mi.lastSeen || '') : '';
-            const fmt = formatDateYMD(ls);
-            dev._mlsFmt = fmt === '-' ? '' : fmt;
+        if (!dev) continue;
+        const mi = dev.m;
+        const ls = mi ? (mi.ls || mi.lastSeen || '') : '';
+        const fmt = formatDateYMD(ls);
+        dev._mlsFmt = fmt === '-' ? '' : fmt;
+        dev._mlsInactivity = dev._mlsFmt
+            ? addDaysYmd(dev._mlsFmt, DEVICE_INACTIVITY_WINDOW_DAYS)
+            : '';
+        // Tag names
+        const deviceTags = dev.t;
+        if (deviceTags && deviceTags.length > 0) {
+            dev._tagNames = new Array(deviceTags.length);
+            for (let ti = 0; ti < deviceTags.length; ti++) dev._tagNames[ti] = lkTags[deviceTags[ti]];
+        } else {
+            dev._tagNames = [];
+        }
+        dev._tagValues = dev._tagNames.length > 0 ? dev._tagNames : noTagsArr;
+        dev._deviceFilterKey = dev.id || dev.n || '';
+        // RBAC group
+        const gVal = (dev.g >= 0 && dev.g < lkGroups.length) ? lkGroups[dev.g] : null;
+        dev._rbacGroupName = (gVal && String(gVal).trim() !== '') ? gVal : '(none)';
+        dev._normalizedGroup = normalizeGroupName(dev._rbacGroupName);
+    }
+
+    // Pre-compute per-CVE values (~30K items)
+    for (let ci = 0; ci < lkCves.length; ci++) {
+        const cve = lkCves[ci];
+        cve._pdFmt = cve.pd ? (formatDateYMD(cve.pd) || null) : null;
+        const cveAs = cve.as;
+        if (cveAs && cveAs.length > 0) {
+            cve._affSw = new Array(cveAs.length);
+            for (let ai = 0; ai < cveAs.length; ai++) cve._affSw[ai] = lkAffSoftware[cveAs[ai]];
+        } else {
+            cve._affSw = null;
         }
     }
 
-    const noTagsArr = NO_TAGS_ARRAY;
+    // Pre-compute per-(software, update) remediation key is no longer needed
+    // (_remediationKey was set but never read)
+
+    // Pre-compute per-(update, batchTitle) remediation string
+    const remStrCache = new Map();
+    function getRemediationStrCached(updIdx, btIdx) {
+        const ck = (updIdx + 1) * 100000 + (btIdx + 1);
+        let cached = remStrCache.get(ck);
+        if (cached !== undefined) return cached;
+        const uo = updIdx >= 0 ? lkUpdates[updIdx] : null;
+        const un = uo ? (uo.n || uo) : null;
+        const uid = uo ? (uo.id || null) : null;
+        const bt = btIdx >= 0 ? lkBatchTitles[btIdx] : null;
+        const kb = uid ? (String(uid).startsWith('KB') ? uid : 'KB' + uid) : null;
+        if (bt) { cached = kb ? bt + ' (' + kb + ')' : bt; }
+        else if (un && kb) { cached = un + ' (' + kb + ')'; }
+        else if (un) { cached = un; }
+        else if (kb) { cached = kb; }
+        else { cached = 'Not Specified'; }
+        remStrCache.set(ck, cached);
+        return cached;
+    }
+
     const earliestFirstSeenByIssue = new Map();
+    let _maxLatestActivity = '';
 
     for (let i = 0; i < rawCount; i++) {
-        let devIdx, cveIdx, swIdx, verIdx, fsIdx, lsIdx, uaFlag, updIdx, dpArr, rpArr;
+        let devIdx, cveIdx, swIdx, verIdx, fsIdx, lsIdx, updIdx;
         if (isColumnar) {
             devIdx = dCol[i]; cveIdx = cCol[i]; swIdx = sCol[i]; verIdx = vCol[i];
-            fsIdx = fCol[i]; lsIdx = lCol[i]; uaFlag = uaCol[i]; updIdx = uCol[i];
-            dpArr = dpCol[i]; rpArr = rpCol[i];
+            fsIdx = fCol[i]; lsIdx = lCol[i]; updIdx = uCol[i];
         } else {
             const row = rawVulns[i];
             devIdx = row[0]; cveIdx = row[1]; swIdx = row[2]; verIdx = row[3];
-            fsIdx = row[4]; lsIdx = row[5]; uaFlag = row[6]; updIdx = row[7];
-            dpArr = row[8]; rpArr = row[9];
+            fsIdx = row[4]; lsIdx = row[5]; updIdx = row[7];
         }
 
         const device = lkDevices[devIdx];
         const cve = lkCves[cveIdx];
         const software = lkSoftware[swIdx];
-
-        // Tags — avoid .map() overhead
-        let tagNames;
-        const deviceTags = device.t;
-        if (deviceTags && deviceTags.length > 0) {
-            tagNames = new Array(deviceTags.length);
-            for (let ti = 0; ti < deviceTags.length; ti++) {
-                tagNames[ti] = lkTags[deviceTags[ti]];
-            }
-        } else {
-            tagNames = [];
-        }
 
         const vendorName = software.v >= 0 && software.v < lkVendors.length ? lkVendors[software.v] : null;
         const updateObj = updIdx >= 0 ? lkUpdates[updIdx] : null;
@@ -1272,75 +1220,27 @@ function denormalizeAllVulns() {
         const firstSeen = fsIdx >= 0 ? preFormattedDates[fsIdx] : '';
         const lastSeen = lsIdx >= 0 ? preFormattedDates[lsIdx] : '';
 
-        // Disk paths
-        let diskPaths;
-        if (dpArr && dpArr.length > 0) {
-            diskPaths = new Array(dpArr.length);
-            for (let di = 0; di < dpArr.length; di++) diskPaths[di] = lkDiskPaths[dpArr[di]];
-        } else {
-            diskPaths = [];
-        }
-
-        // Registry paths
-        let regPaths;
-        if (rpArr && rpArr.length > 0) {
-            regPaths = new Array(rpArr.length);
-            for (let ri = 0; ri < rpArr.length; ri++) regPaths[ri] = lkRegPaths[rpArr[ri]];
-        } else {
-            regPaths = [];
-        }
-
-        const groupVal = device.g >= 0 && device.g < lkGroups.length ? lkGroups[device.g] : null;
-        const rbacGroupName = (groupVal && String(groupVal).trim() !== '') ? groupVal : '(none)';
-
-        // Affected software
-        let affSoftware = null;
-        const cveAs = cve.as;
-        if (cveAs && cveAs.length > 0) {
-            affSoftware = new Array(cveAs.length);
-            for (let ai = 0; ai < cveAs.length; ai++) affSoftware[ai] = lkAffSoftware[cveAs[ai]];
-        }
-
-        // --- Inline derived fields (avoids a separate 1.5M-record pass) ---
+        // --- Inline derived fields using pre-computed device/cve values ---
         const machineLastSeen = device._mlsFmt;
         const latestActivity = (!machineLastSeen) ? lastSeen
             : (!lastSeen) ? machineLastSeen
             : (machineLastSeen > lastSeen ? machineLastSeen : lastSeen);
         const hasPatchEvidence = !!(lastSeen && latestActivity && latestActivity > lastSeen);
+        if (latestActivity > _maxLatestActivity) _maxLatestActivity = latestActivity;
         let effectiveOpenEndDate = '';
         if (lastSeen) {
             if (latestActivity > lastSeen) {
                 effectiveOpenEndDate = lastSeen;
+            } else if (latestActivity === machineLastSeen && machineLastSeen) {
+                effectiveOpenEndDate = device._mlsInactivity;
             } else {
-                effectiveOpenEndDate = addDaysCached(latestActivity || lastSeen);
+                effectiveOpenEndDate = lsIdx >= 0 ? addDaysByDateIdx[lsIdx] : '';
             }
         }
-        const deviceFilterKey = device.id || device.n || '';
-        const normalizedGroup = normalizeGroupName(rbacGroupName);
-        const tagValues = tagNames.length > 0 ? tagNames : noTagsArr;
 
-        // Inline buildRemediationString
-        const updateId = updateObj ? (updateObj.id || null) : null;
-        const batchTitle = cve.bt >= 0 ? lkBatchTitles[cve.bt] : null;
-        const kbId = updateId
-            ? (String(updateId).startsWith('KB') ? updateId : 'KB' + updateId)
-            : null;
-        let remediationString;
-        if (batchTitle) {
-            remediationString = kbId ? batchTitle + ' (' + kbId + ')' : batchTitle;
-        } else if (updateName && kbId) {
-            remediationString = updateName + ' (' + kbId + ')';
-        } else if (updateName) {
-            remediationString = updateName;
-        } else if (kbId) {
-            remediationString = kbId;
-        } else {
-            remediationString = 'Not Specified';
-        }
-
-        // Track earliest first-seen per environment issue key
+        // Track earliest first-seen per environment issue key (numeric key avoids string concat)
+        const issueKey = cveIdx * 1000000 + swIdx * 10000 + (verIdx + 1);
         if (firstSeen) {
-            const issueKey = (cve.id || '') + '|' + (vendorName || '') + '|' + (software.n || '') + '|' + (verIdx >= 0 ? lkVersions[verIdx] : '');
             const existing = earliestFirstSeenByIssue.get(issueKey);
             if (!existing || firstSeen < existing) {
                 earliestFirstSeenByIssue.set(issueKey, firstSeen);
@@ -1350,63 +1250,105 @@ function denormalizeAllVulns() {
         vulnerabilityData[i] = {
             DeviceId: device.id,
             DeviceName: device.n,
-            RbacGroupName: rbacGroupName,
+            RbacGroupName: device._rbacGroupName,
             OSPlatform: device.o >= 0 && device.o < lkPlatforms.length ? lkPlatforms[device.o] : null,
-            OSVersion: device.ov,
-            MachineTags: tagNames,
+            MachineTags: device._tagNames,
             MachineInfo: device.m || null,
             CveId: cve.id,
             CvssScore: cve.sc,
             VulnerabilitySeverityLevel: cve.sv >= 0 && cve.sv < lkSeverities.length ? lkSeverities[cve.sv] : null,
             ExploitabilityLevel: cve.ex >= 0 ? lkExploitLevels[cve.ex] : null,
-            CveBatchUrl: cve.u,
-            CveBatchTitle: batchTitle,
-            PublishedDate: cve.pd ? (formatDateYMD(cve.pd) || null) : null,
-            VulnerabilityDescription: cve.desc || null,
+            PublishedDate: cve._pdFmt,
             EpssScore: cve.ep != null ? cve.ep : null,
-            AffectedSoftware: affSoftware,
             SoftwareVendor: vendorName,
             SoftwareName: software.n,
             SoftwareVersion: verIdx >= 0 ? lkVersions[verIdx] : null,
-            RecommendationReference: software.r,
             _firstSeenDate: firstSeen,
             _lastSeenDate: lastSeen,
-            FirstSeenTimestamp: firstSeen,
-            LastSeenTimestamp: lastSeen,
-            SecurityUpdateAvailable: uaFlag === 1,
             RecommendedSecurityUpdate: updateName,
-            RecommendedSecurityUpdateId: updateId,
-            RecommendedSecurityUpdateUrl: updateObj ? (updateObj.url || null) : null,
-            DiskPaths: diskPaths,
-            RegistryPaths: regPaths,
-            _remediationKey: updateName
-                ? vendorName + ' ' + software.n + ' - ' + updateName
-                : vendorName + ' ' + software.n,
             _index: i,
-            // Derived fields (inlined)
+            _issueKey: issueKey,
+            // Derived fields (inlined, using pre-computed device values)
             _machineLastSeenDate: machineLastSeen,
             _latestActivityDate: latestActivity,
             _hasPatchEvidence: hasPatchEvidence,
             _effectiveOpenEndDate: effectiveOpenEndDate,
             _remediationDate: hasPatchEvidence ? lastSeen : '',
-            _remediationString: remediationString,
-            _deviceFilterKey: deviceFilterKey,
-            _normalizedGroup: normalizedGroup,
-            _tagValues: tagValues
+            _remediationString: getRemediationStrCached(updIdx, cve.bt),
+            _deviceFilterKey: device._deviceFilterKey,
+            _normalizedGroup: device._normalizedGroup,
+            _tagValues: device._tagValues
         };
     }
 
-    // Second pass: assign _environmentFirstSeenDate (requires global map)
+    // Second pass: assign _environmentFirstSeenDate (uses stored _issueKey)
     for (let i = 0; i < rawCount; i++) {
         const v = vulnerabilityData[i];
-        const issueKey = (v.CveId || '') + '|' + (v.SoftwareVendor || '') + '|' + (v.SoftwareName || '') + '|' + (v.SoftwareVersion || '');
-        const envFirstSeen = earliestFirstSeenByIssue.get(issueKey) || v._firstSeenDate;
-        v._environmentFirstSeenDate = envFirstSeen;
-        v.EnvironmentFirstSeenTimestamp = envFirstSeen;
+        v._environmentFirstSeenDate = earliestFirstSeenByIssue.get(v._issueKey) || v._firstSeenDate;
     }
 
+    mostRecentLastSeenDate = _maxLatestActivity;
     const elapsed = Math.round(performance.now() - startTime);
     logDebug('Denormalization complete in', elapsed, 'ms');
+}
+
+/**
+ * Lazily resolve deferred detail properties on a vulnerability row.
+ * Properties like DiskPaths, RegistryPaths, CveBatchUrl, etc. are only
+ * needed for table/card/modal detail views (not for filtering or charts).
+ * This avoids 1.5M array allocations during denormalization.
+ * @param {Object} v - Vulnerability row object
+ * @returns {Object} The same object, enriched with deferred properties
+ */
+function materializeRow(v) {
+    if (v._mat) return v;
+    // For rows loaded from IndexedDB cache, properties are already set;
+    // rawVulns may not be available in that case
+    if (!rawVulns || v._index == null || getRawVulnCount() === 0) {
+        v._mat = true;
+        return v;
+    }
+    const idx = v._index;
+    if (idx < 0 || idx >= getRawVulnCount()) {
+        v._mat = true;
+        return v;
+    }
+    const rec = getRawVulnRecord(idx);
+    const device = lookups.devices[rec[0]];
+    const cve = lookups.cves[rec[1]];
+    const software = lookups.software[rec[2]];
+    const updIdx = rec[7];
+    const updateObj = updIdx >= 0 ? lookups.updates[updIdx] : null;
+
+    // Evidence paths (resolved from lookup indices)
+    const dpArr = rec[8];
+    const rpArr = rec[9];
+    if (dpArr && dpArr.length > 0) {
+        v.DiskPaths = new Array(dpArr.length);
+        for (let i = 0; i < dpArr.length; i++) v.DiskPaths[i] = lookups.diskPaths[dpArr[i]];
+    } else {
+        v.DiskPaths = [];
+    }
+    if (rpArr && rpArr.length > 0) {
+        v.RegistryPaths = new Array(rpArr.length);
+        for (let i = 0; i < rpArr.length; i++) v.RegistryPaths[i] = lookups.regPaths[rpArr[i]];
+    } else {
+        v.RegistryPaths = [];
+    }
+
+    // Detail-only properties
+    v.CveBatchUrl = cve.u;
+    v.CveBatchTitle = cve.bt >= 0 ? lookups.batchTitles[cve.bt] : null;
+    v.VulnerabilityDescription = cve.desc || null;
+    v.AffectedSoftware = cve._affSw;
+    v.RecommendedSecurityUpdateId = updateObj ? (updateObj.id || null) : null;
+    v.RecommendedSecurityUpdateUrl = updateObj ? (updateObj.url || null) : null;
+    v.OSVersion = device.ov;
+    v.SecurityUpdateAvailable = rec[6] === 1;
+    v.RecommendationReference = software.r;
+
+    v._mat = true;
+    return v;
 }
 
 /**
@@ -1531,11 +1473,9 @@ async function init() {
     await denormalizeWithCaching();
     console.timeEnd('[perf] denormalize');
     await ensureChartJsLoaded();
-    mostRecentLastSeenDate = getMostRecentLastSeen();
     
     logDebug('Initializing dashboard with', vulnerabilityData.length, 'vulnerabilities');
     buildDeviceFilterCatalog();
-    buildSortedFirstSeenIndex();
     populateFilters();
     updateDataQualitySummary();
     attachEventListeners();
@@ -2564,21 +2504,6 @@ function formatSoftwareName(vendor, product) {
     return `${formatPart(vendor)} - ${formatPart(product)}`;
 }
 
-/**
- * Find the most recent LastSeenTimestamp across all data
- * @returns {string} The most recent date in YYYY-MM-DD format
- */
-function getMostRecentLastSeen() {
-    let mostRecentLastSeen = '';
-    vulnerabilityData.forEach(v => {
-        const lastSeenDate = getRowLatestActivityDate(v);
-        if (lastSeenDate > mostRecentLastSeen) {
-            mostRecentLastSeen = lastSeenDate;
-        }
-    });
-    return mostRecentLastSeen;
-}
-
 function getPointInTimeReferenceDate() {
     return filterState.endDate || mostRecentLastSeenDate;
 }
@@ -2749,9 +2674,11 @@ function applyDerivedVulnerabilityFields(rows) {
         }
     });
 
+    let _maxLatest = '';
     rows.forEach(v => {
         const machineLastSeenDate = getMachineLastSeenDate(v);
         const latestActivityDate = getRowLatestActivityDate(v);
+        if (latestActivityDate > _maxLatest) _maxLatest = latestActivityDate;
         const remediationEvidence = hasKnownPatchEvidence(v);
         const firstSeenDate = getFirstSeenDate(v);
         const effectiveOpenEndDate = getEffectiveOpenEndDate(v);
@@ -2765,11 +2692,11 @@ function applyDerivedVulnerabilityFields(rows) {
         v._remediationDate = remediationEvidence ? getLastSeenDate(v) : '';
         v._remediationString = buildRemediationString(v);
         v._environmentFirstSeenDate = environmentFirstSeenDate;
-        v.EnvironmentFirstSeenTimestamp = environmentFirstSeenDate;
         v._deviceFilterKey = v.DeviceId || v.DeviceName || '';
         v._normalizedGroup = normalizeGroupName(v.RbacGroupName);
         v._tagValues = v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : NO_TAGS_ARRAY;
     });
+    mostRecentLastSeenDate = _maxLatest;
 }
 
 /**
@@ -2931,6 +2858,7 @@ function formatAffectedSoftware(softwareStr) {
  * @returns {string} Formatted remediation string
  */
 function buildRemediationString(v) {
+    materializeRow(v);
     const kbId = v.RecommendedSecurityUpdateId
         ? (v.RecommendedSecurityUpdateId.toString().startsWith('KB') ? v.RecommendedSecurityUpdateId : 'KB' + v.RecommendedSecurityUpdateId)
         : null;
@@ -4409,6 +4337,7 @@ function renderDevicesByRemediationTable() {
         const activeRows = getActiveRowsForCurrentSelection();
 
         activeRows.forEach(v => {
+            materializeRow(v);
             const updateName = v.RecommendedSecurityUpdate || 'Unknown';
             const updateId = v.RecommendedSecurityUpdateId || '';
             const osPlatform = v.OSPlatform || 'Unknown';
@@ -4453,7 +4382,7 @@ function renderDevicesByRemediationTable() {
                     cvssScore: v.CvssScore,
                     epssScore: v.EpssScore,
                     firstSeenTimestamp: getEnvironmentFirstSeenDate(v),
-                    lastSeenTimestamp: v.LastSeenTimestamp,
+                    lastSeenTimestamp: v._lastSeenDate,
                     exploitabilityLevel: v.ExploitabilityLevel,
                     softwareVendor: v.SoftwareVendor,
                     softwareName: v.SoftwareName,
@@ -4921,6 +4850,7 @@ function renderRemediationsByDeviceTable() {
         const activeRows = getActiveRowsForCurrentSelection();
 
         activeRows.forEach(v => {
+            materializeRow(v);
             const deviceId = getDeviceIdentityKey(v);
 
             if (!deviceByKey[deviceId]) {
@@ -5313,6 +5243,7 @@ function initEvidenceTooltips() {
  * @returns {string} HTML for evidence cell
  */
 function buildEvidenceHtml(v) {
+    materializeRow(v);
     const diskPaths = v.DiskPaths || [];
     const regPaths = v.RegistryPaths || [];
     const totalEvidence = diskPaths.length + regPaths.length;
@@ -5389,6 +5320,7 @@ function buildDeviceBubbleHtml(v) {
  * @returns {string} HTML for a CVE link cell with optional description tooltip
  */
 function buildCveLinkHtml(v) {
+    materializeRow(v);
     const cveUrl = v.CveBatchUrl || `https://msrc.microsoft.com/update-guide/vulnerability/${v.CveId}`;
     const displayId = formatCveDisplayId(v.CveId);
     const severityClass = (v.VulnerabilitySeverityLevel || 'unknown').toLowerCase();
@@ -5409,7 +5341,7 @@ function buildCveLinkHtml(v) {
         severity: v.VulnerabilitySeverityLevel || 'Unknown',
         publishedDate: v.PublishedDate,
         firstSeen: getEnvironmentFirstSeenDate(v),
-        lastSeen: v._lastSeenDate || v.LastSeenTimestamp
+        lastSeen: v._lastSeenDate
     });
 
     if (cveUrl) {
@@ -5426,6 +5358,8 @@ function buildCveLinkHtml(v) {
  */
 function groupDevicesByCveSignature(details) {
     const mergeModalObservationRow = (existing, candidate) => {
+        materializeRow(existing);
+        materializeRow(candidate);
         const existingFirstSeen = getFirstSeenDate(existing);
         const candidateFirstSeen = getFirstSeenDate(candidate);
         const existingLastSeen = getLastSeenDate(existing);
@@ -5441,12 +5375,10 @@ function groupDevicesByCveSignature(details) {
         const latestLastSeen = getMostRecentYmdDate([existingLastSeen, candidateLastSeen]);
 
         if (earliestFirstSeen) {
-            merged.FirstSeenTimestamp = earliestFirstSeen;
             merged._firstSeenDate = earliestFirstSeen;
         }
 
         if (latestLastSeen) {
-            merged.LastSeenTimestamp = latestLastSeen;
             merged._lastSeenDate = latestLastSeen;
         }
 

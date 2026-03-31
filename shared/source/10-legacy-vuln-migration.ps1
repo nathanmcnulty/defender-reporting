@@ -404,17 +404,13 @@ function Read-VulnStoreRow {
         }
 
         if (Test-VulnContentStoreExistence -BasePath $BasePath) {
-            foreach ($record in Read-VulnContentStoreRow -BasePath $BasePath) {
-                Write-Output $record
-            }
+            Read-VulnContentStoreRow -BasePath $BasePath
             return
         }
 
         $currentPath = Get-VulnCurrentPath -BasePath $BasePath
         if (Test-Path -Path $currentPath) {
-            foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $currentPath) {
-                Write-Output $record
-            }
+            Read-VulnNdjsonRecordsFromPath -Path $currentPath
         }
 
         $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File | Sort-Object Name)
@@ -438,15 +434,11 @@ function Read-VulnStoreRow {
             }
 
             if (-not [string]::IsNullOrWhiteSpace($rowsReadPath)) {
-                foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $rowsReadPath) {
-                    Write-Output $record
-                }
+                Read-VulnNdjsonRecordsFromPath -Path $rowsReadPath
                 continue
             }
 
-            foreach ($record in Read-VulnHistoryRowsFromPath -Path $file.FullName) {
-                Write-Output $record
-            }
+            Read-VulnHistoryRowsFromPath -Path $file.FullName
         }
     } | Write-Output
 }

@@ -1760,8 +1760,10 @@ function Read-VulnNdjsonRecordsFromPath {
         [string]$Path
     )
 
-    foreach ($line in Read-VulnNdjsonLinesFromPath -Path $Path) {
-        $record = $line | ConvertFrom-Json -Depth 20
+    # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
+    # collecting all NDJSON lines into memory before JSON-parsing begins.
+    Read-VulnNdjsonLinesFromPath -Path $Path | ForEach-Object {
+        $record = $_ | ConvertFrom-Json -Depth 20
         if ($null -ne $record) {
             Write-Output $record
         }
@@ -2840,11 +2842,13 @@ function Read-VulnContentStoreRow {
         $refPaths.Add($historyRefsFile.FullName)
     }
 
+    # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
+    # collecting all ref lines into memory at once.
     foreach ($refPath in $refPaths) {
-        foreach ($line in Read-VulnNdjsonLinesFromPath -Path $refPath) {
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        Read-VulnNdjsonLinesFromPath -Path $refPath | ForEach-Object {
+            if ([string]::IsNullOrWhiteSpace($_)) { return }
 
-            $ref = $line | ConvertFrom-Json -Depth 10
+            $ref = $_ | ConvertFrom-Json -Depth 10
             $device = $dictionary.deviceProfiles[[int]$ref[1]]
             $content = $dictionary.contentTemplates[[int]$ref[2]]
 
@@ -2915,8 +2919,9 @@ function Publish-VulnContentStoreUnlocked {
                 $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
                 $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
 
-                foreach ($row in Read-VulnNdjsonRecordsFromPath -Path $InputPath) {
-                    if ($null -eq $row) { continue }
+                Read-VulnNdjsonRecordsFromPath -Path $InputPath | ForEach-Object {
+                    $row = $_
+                    if ($null -eq $row) { return }
 
                     $deviceSignature = Get-VulnDeviceProfileSignature -Row $row
                     if (-not $deviceProfileIndex.ContainsKey($deviceSignature)) {
@@ -3427,17 +3432,13 @@ function Read-VulnStoreRow {
         }
 
         if (Test-VulnContentStoreExistence -BasePath $BasePath) {
-            foreach ($record in Read-VulnContentStoreRow -BasePath $BasePath) {
-                Write-Output $record
-            }
+            Read-VulnContentStoreRow -BasePath $BasePath
             return
         }
 
         $currentPath = Get-VulnCurrentPath -BasePath $BasePath
         if (Test-Path -Path $currentPath) {
-            foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $currentPath) {
-                Write-Output $record
-            }
+            Read-VulnNdjsonRecordsFromPath -Path $currentPath
         }
 
         $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File | Sort-Object Name)
@@ -3461,15 +3462,11 @@ function Read-VulnStoreRow {
             }
 
             if (-not [string]::IsNullOrWhiteSpace($rowsReadPath)) {
-                foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $rowsReadPath) {
-                    Write-Output $record
-                }
+                Read-VulnNdjsonRecordsFromPath -Path $rowsReadPath
                 continue
             }
 
-            foreach ($record in Read-VulnHistoryRowsFromPath -Path $file.FullName) {
-                Write-Output $record
-            }
+            Read-VulnHistoryRowsFromPath -Path $file.FullName
         }
     } | Write-Output
 }
@@ -6683,6 +6680,182 @@ function Clear-StaleVulnObservedWindowCache {
     }
 }
 
+function Write-MergedVulnContentStoreRefs {
+    <#
+    .SYNOPSIS
+    Memory-efficient observed-window merge that operates on compact content-store
+    ref arrays instead of fully-expanded PSCustomObjects. Each ref is a 5-element
+    array [Id, DeviceProfileIdx, ContentTemplateIdx, FST, LST] — roughly 30x
+    smaller per row than expanded objects.
+    #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, 30)]
+        [int]$AllowedGapDays = 1,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(4, 256)]
+        [int]$PartitionCount = 32
+    )
+
+    # Collect ref file paths
+    $refPaths = [System.Collections.Generic.List[string]]::new()
+    $currentRefsPath = Get-VulnCurrentRefsPath -BasePath $BasePath
+    if (Test-Path -LiteralPath $currentRefsPath -PathType Leaf) {
+        $refPaths.Add($currentRefsPath)
+    }
+    foreach ($historyRefsFile in @(Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRefs_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        $refPaths.Add($historyRefsFile.FullName)
+    }
+
+    if ($refPaths.Count -eq 0) { return }
+
+    $partitionDir = Join-Path ([System.IO.Path]::GetTempPath()) ('owref-' + [System.Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $partitionDir -Force)
+
+    $partitionWriters = [System.IO.StreamWriter[]]::new($PartitionCount)
+
+    try {
+        # Pass 1 — scatter raw ref lines to partition files by identity hash.
+        # Use .NET StreamReader directly to avoid PowerShell pipeline buffering
+        # that would materialize all 1.5M+ lines in memory at once.
+        foreach ($refPath in $refPaths) {
+            $refFileStream = [System.IO.File]::OpenRead($refPath)
+            $refGzipStream = if ($refPath.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+                [System.IO.Compression.GZipStream]::new($refFileStream, [System.IO.Compression.CompressionMode]::Decompress)
+            } else { $refFileStream }
+            $refReader = [System.IO.StreamReader]::new($refGzipStream, [System.Text.UTF8Encoding]::new($false))
+            try {
+                while ($null -ne ($line = $refReader.ReadLine())) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+                # Fast Id extraction: ref lines are JSON arrays ["id",...
+                $firstQuote = $line.IndexOf('"')
+                if ($firstQuote -lt 0) { continue }
+                $secondQuote = $line.IndexOf('"', $firstQuote + 1)
+                if ($secondQuote -lt 0) { continue }
+                $identityKey = $line.Substring($firstQuote + 1, $secondQuote - $firstQuote - 1)
+
+                $hash = [uint32]([int64]$identityKey.GetHashCode() -band 0xFFFFFFFFL)
+                $bucket = [int]($hash % [uint32]$PartitionCount)
+
+                if ($null -eq $partitionWriters[$bucket]) {
+                    $partPath = Join-Path $partitionDir "p$bucket.ndjson"
+                    $partitionWriters[$bucket] = [System.IO.StreamWriter]::new(
+                        [System.IO.File]::Create($partPath),
+                        [System.Text.UTF8Encoding]::new($false))
+                }
+                $partitionWriters[$bucket].WriteLine($line)
+                }
+            }
+            finally {
+                $refReader.Dispose()
+                if ($refGzipStream -ne $refFileStream) { $refGzipStream.Dispose() }
+                $refFileStream.Dispose()
+            }
+        }
+
+        for ($i = 0; $i -lt $PartitionCount; $i++) {
+            if ($null -ne $partitionWriters[$i]) {
+                $partitionWriters[$i].Dispose()
+                $partitionWriters[$i] = $null
+            }
+        }
+
+        # Pass 2 — gather: process each partition, merge refs by Id
+        for ($bucket = 0; $bucket -lt $PartitionCount; $bucket++) {
+            $partPath = Join-Path $partitionDir "p$bucket.ndjson"
+            if (-not (Test-Path -LiteralPath $partPath -PathType Leaf)) { continue }
+
+            $refsByIdentity = @{}
+            foreach ($line in [System.IO.File]::ReadLines($partPath, [System.Text.UTF8Encoding]::new($false))) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                $ref = $line | ConvertFrom-Json -Depth 10
+                $identityKey = [string]$ref[0]
+                if (-not $refsByIdentity.ContainsKey($identityKey)) {
+                    $refsByIdentity[$identityKey] = [System.Collections.Generic.List[object]]::new()
+                }
+                $refsByIdentity[$identityKey].Add($ref)
+            }
+
+            foreach ($identityKey in @($refsByIdentity.Keys | Sort-Object)) {
+                $items = @($refsByIdentity[$identityKey])
+                if ($items.Count -le 1) {
+                    foreach ($item in $items) { Write-Output (,$item) }
+                    continue
+                }
+
+                # Sort by FST, LST and merge overlapping windows
+                $sorted = @($items | Sort-Object { [string]$_[3] }, { [string]$_[4] })
+                $current = $sorted[0]
+                $currentFST = Convert-VulnToYmdDate -DateValue ([string]$current[3])
+                $currentLST = Convert-VulnToYmdDate -DateValue ([string]$current[4])
+                if ($currentFST -and $currentLST -and [datetime]$currentFST -gt [datetime]$currentLST) {
+                    $temp = $currentFST; $currentFST = $currentLST; $currentLST = $temp
+                }
+
+                for ($idx = 1; $idx -lt $sorted.Count; $idx++) {
+                    $candidate = $sorted[$idx]
+                    $candFST = Convert-VulnToYmdDate -DateValue ([string]$candidate[3])
+                    $candLST = Convert-VulnToYmdDate -DateValue ([string]$candidate[4])
+                    if ($candFST -and $candLST -and [datetime]$candFST -gt [datetime]$candLST) {
+                        $temp = $candFST; $candFST = $candLST; $candLST = $temp
+                    }
+
+                    $shouldMerge = $false
+                    if ($currentFST -and $currentLST -and $candFST -and $candLST) {
+                        $mergeThreshold = ([datetime]$currentLST).AddDays($AllowedGapDays + 1).ToString('yyyy-MM-dd')
+                        if ([datetime]$candFST -le [datetime]$mergeThreshold) {
+                            $shouldMerge = $true
+                        }
+                    }
+
+                    if ($shouldMerge) {
+                        $mergedFST = Get-MinVulnDate -Primary $currentFST -Secondary $candFST
+                        $mergedLST = Get-MaxVulnDate -Primary $currentLST -Secondary $candLST
+                        # Take candidate as base (latest data), update timestamps
+                        $current = $candidate
+                        $currentFST = $mergedFST
+                        $currentLST = $mergedLST
+                    }
+                    else {
+                        # Emit current with merged timestamps
+                        $current[3] = $currentFST
+                        $current[4] = $currentLST
+                        Write-Output (,$current)
+                        $current = $candidate
+                        $currentFST = $candFST
+                        $currentLST = $candLST
+                    }
+                }
+
+                $current[3] = $currentFST
+                $current[4] = $currentLST
+                Write-Output (,$current)
+            }
+
+            $refsByIdentity.Clear()
+            $refsByIdentity = $null
+            Remove-Item -LiteralPath $partPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+    finally {
+        for ($i = 0; $i -lt $PartitionCount; $i++) {
+            if ($null -ne $partitionWriters[$i]) {
+                $partitionWriters[$i].Dispose()
+            }
+        }
+        if (Test-Path -LiteralPath $partitionDir) {
+            Remove-Item -Recurse -Force -LiteralPath $partitionDir -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Publish-VulnObservedWindowCache {
     [CmdletBinding()]
     [OutputType([string])]
@@ -6716,9 +6889,56 @@ function Publish-VulnObservedWindowCache {
         $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
         $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
 
-        foreach ($row in Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $BasePath } -AllowedGapDays $AllowedGapDays) {
-            if ($null -eq $row) { continue }
-            $writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
+        if (Test-VulnContentStoreExistence -BasePath $BasePath) {
+            # Memory-efficient path: merge at the compact ref level, then
+            # stream-expand to full rows one at a time for the cache file.
+            # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
+            # collecting all 1.5M+ merged refs into memory at once.
+            $dictionary = Read-VulnContentDictionary -Path (Get-VulnContentDictionaryPath -BasePath $BasePath)
+            Write-MergedVulnContentStoreRefs -BasePath $BasePath -AllowedGapDays $AllowedGapDays | ForEach-Object {
+                $ref = $_
+                if ($null -eq $ref) { return }
+                $device = $dictionary.deviceProfiles[[int]$ref[1]]
+                $content = $dictionary.contentTemplates[[int]$ref[2]]
+                $row = [PSCustomObject]@{
+                    Id                         = [string]$ref[0]
+                    DeviceId                   = [string]$device.id
+                    DeviceName                 = [string]$device.n
+                    RbacGroupName              = [string]$device.g
+                    OSPlatform                 = [string]$device.o
+                    OSVersion                  = [string]$device.ov
+                    MachineTags                = @($device.t)
+                    CveId                      = [string]$content.c
+                    SoftwareVendor             = [string]$content.sv
+                    SoftwareName               = [string]$content.sn
+                    SoftwareVersion            = [string]$content.ver
+                    VulnerabilitySeverityLevel = [string]$content.sev
+                    CvssScore                  = $content.sc
+                    ExploitabilityLevel        = [string]$content.ex
+                    RecommendationReference    = [string]$content.rr
+                    RecommendedSecurityUpdate  = [string]$content.ru
+                    RecommendedSecurityUpdateId  = [string]$content.rid
+                    RecommendedSecurityUpdateUrl = [string]$content.url
+                    SecurityUpdateAvailable    = ($content.ua -eq $true)
+                    FirstSeenTimestamp         = [string]$ref[3]
+                    LastSeenTimestamp           = [string]$ref[4]
+                    DiskPaths                  = @($content.dp)
+                    RegistryPaths              = @($content.rp)
+                    CveBatchTitle              = [string]$content.bt
+                    CveBatchUrl                = [string]$content.bu
+                    IsOnboarded                = ($device.ob -eq $true)
+                }
+                $writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
+            }
+            $dictionary = $null
+        }
+        else {
+            # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
+            # collecting all merged rows into memory at once.
+            Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $BasePath } -AllowedGapDays $AllowedGapDays | ForEach-Object {
+                if ($null -eq $_) { return }
+                $writer.WriteLine(($_ | ConvertTo-Json -Compress -Depth 20))
+            }
         }
     }
     finally {
@@ -8187,8 +8407,11 @@ function Write-MergedVulnObservedWindowRows {
 
     try {
         # Pass 1 — scatter: stream source rows to partition files by identity hash
-        foreach ($row in (& $Source)) {
-            if ($null -eq $row) { continue }
+        # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
+        # collecting all source rows into memory at once.
+        & $Source | ForEach-Object {
+            $row = $_
+            if ($null -eq $row) { return }
             $sourceRowCount++
 
             $identityKey = Get-VulnObservedWindowIdentityKey -Row $row
@@ -8268,9 +8491,7 @@ function Read-NormalizedVulnStoreRow {
     )
 
     $normalizedStoreBasePath = $BasePath
-    foreach ($row in Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $normalizedStoreBasePath } -AllowedGapDays $AllowedGapDays) {
-        Write-Output $row
-    }
+    Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $normalizedStoreBasePath } -AllowedGapDays $AllowedGapDays
 }
 
 function Get-NormalizationSourceRows {
@@ -8288,11 +8509,7 @@ function Get-NormalizationSourceRows {
         Write-Information '  Found vulnerability current/history store to normalize...' -InformationAction Continue
         if ($SkipObservedWindowMerge) {
             Write-Information '  Synthetic stress dataset detected; skipping observed-window merge.' -InformationAction Continue
-            foreach ($row in Read-VulnStoreRow -BasePath $DataPath) {
-                if ($null -ne $row) {
-                    Write-Output $row
-                }
-            }
+            Read-VulnStoreRow -BasePath $DataPath
             return
         }
 
@@ -8300,11 +8517,7 @@ function Get-NormalizationSourceRows {
             $observedWindowCachePath = Publish-VulnObservedWindowCache -BasePath $DataPath
             if (-not [string]::IsNullOrWhiteSpace($observedWindowCachePath) -and (Test-Path -LiteralPath $observedWindowCachePath -PathType Leaf)) {
                 Write-Information ("  Using observed-window cache {0}" -f (Split-Path -Leaf $observedWindowCachePath)) -InformationAction Continue
-                foreach ($row in Read-VulnNdjsonRecordsFromPath -Path $observedWindowCachePath) {
-                    if ($null -ne $row) {
-                        Write-Output $row
-                    }
-                }
+                Read-VulnNdjsonRecordsFromPath -Path $observedWindowCachePath
                 return
             }
         }
@@ -8314,9 +8527,7 @@ function Get-NormalizationSourceRows {
 
         $inputRowCount = 0
         $normalizedRowCount = 0
-        foreach ($row in Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $DataPath } -InputRowCount ([ref]$inputRowCount) -OutputRowCount ([ref]$normalizedRowCount)) {
-            Write-Output $row
-        }
+        Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $DataPath } -InputRowCount ([ref]$inputRowCount) -OutputRowCount ([ref]$normalizedRowCount)
 
         if ($normalizedRowCount -ne $inputRowCount) {
             Write-Information ("  Collapsed {0} vulnerability observation row(s) into {1} normalized window(s)" -f $inputRowCount, $normalizedRowCount) -InformationAction Continue
@@ -8352,7 +8563,7 @@ function Get-NormalizationSourceRows {
 
     $legacyInputRowCount = 0
     $legacyNormalizedRowCount = 0
-    foreach ($row in Write-MergedVulnObservedWindowRows -Source {
+    Write-MergedVulnObservedWindowRows -Source {
         foreach ($record in @($legacyStore.CurrentRecords)) {
             if ($null -ne $record) {
                 Write-Output $record
@@ -8369,9 +8580,7 @@ function Get-NormalizationSourceRows {
                 }
             }
         }
-    } -InputRowCount ([ref]$legacyInputRowCount) -OutputRowCount ([ref]$legacyNormalizedRowCount)) {
-        Write-Output $row
-    }
+    } -InputRowCount ([ref]$legacyInputRowCount) -OutputRowCount ([ref]$legacyNormalizedRowCount)
 
     if ($legacyNormalizedRowCount -ne $legacyInputRowCount) {
         Write-Information ("  Collapsed {0} vulnerability observation row(s) into {1} normalized window(s)" -f $legacyInputRowCount, $legacyNormalizedRowCount) -InformationAction Continue
@@ -8456,8 +8665,11 @@ function ConvertTo-NormalizedData {
                 $jsonWriter.WriteStartArray()
             }
 
-            foreach ($v in Get-NormalizationSourceRows -DataPath $DataPath -SkipObservedWindowMerge:$effectiveSkipObservedWindowMerge) {
-                if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { continue }
+            # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
+            # collecting all source rows into memory at once.
+            Get-NormalizationSourceRows -DataPath $DataPath -SkipObservedWindowMerge:$effectiveSkipObservedWindowMerge | ForEach-Object {
+                $v = $_
+                if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { return }
                 $processedCount++
 
             $devIdx = Add-NormalizedDevice `
