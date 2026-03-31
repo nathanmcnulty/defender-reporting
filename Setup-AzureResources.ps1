@@ -99,6 +99,12 @@
         -ComputeType FunctionApp -FunctionAppName "func-defender-reporting"
 
 .EXAMPLE
+    # Re-run against an existing Function App (resource group and storage
+    # account are auto-detected from the deployed resource):
+    .\Setup-AzureResources.ps1 -ComputeType FunctionApp `
+        -FunctionAppName "func-defender-reporting"
+
+.EXAMPLE
     .\Setup-AzureResources.ps1 -ResourceGroupName "rg-defender-reporting" `
         -AutomationAccountName "aa-defender-reporting" `
         -StorageAccountName "stdefenderreporting" `
@@ -141,7 +147,7 @@ param(
     [ValidateSet('AutomationAccount', 'FunctionApp')]
     [string]$ComputeType = 'AutomationAccount',
 
-    [Parameter(Mandatory = $true, HelpMessage = "Resource group name")]
+    [Parameter(Mandatory = $false, HelpMessage = "Resource group name (auto-detected from existing compute resource if omitted)")]
     [string]$ResourceGroupName,
 
     [Parameter(Mandatory = $false, HelpMessage = "Automation account name (required for AutomationAccount compute type)")]
@@ -150,7 +156,7 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Function App name (required for FunctionApp compute type)")]
     [string]$FunctionAppName,
 
-    [Parameter(Mandatory = $true, HelpMessage = "Storage account name")]
+    [Parameter(Mandatory = $false, HelpMessage = "Storage account name (auto-detected from existing compute resource if omitted)")]
     [string]$StorageAccountName,
 
     [Parameter(Mandatory = $false, HelpMessage = "Azure region for all resources")]
@@ -199,15 +205,17 @@ if ($ComputeType -eq 'FunctionApp' -and -not $FunctionAppName) {
 # =============================================================================
 
 # Resource Group: 1-90 chars, alphanumeric, hyphens, underscores, periods, parentheses
-$originalRG = $ResourceGroupName
-$ResourceGroupName = $ResourceGroupName -replace '[^a-zA-Z0-9._\-()]', ''
-if ($ResourceGroupName.Length -gt 90) { $ResourceGroupName = $ResourceGroupName.Substring(0, 90) }
-if ($ResourceGroupName.Length -eq 0) {
-    throw "Resource group name '$originalRG' contains no valid characters. Use alphanumeric, hyphens, underscores, periods, or parentheses (1-90 chars)."
-}
-if ($ResourceGroupName -ne $originalRG) {
-    Write-Host "Resource group name sanitized: '$originalRG' -> '$ResourceGroupName'" -ForegroundColor Yellow
-    Write-Host "  Allowed: alphanumeric, hyphens, underscores, periods, parentheses (1-90 chars)" -ForegroundColor Gray
+if ($ResourceGroupName) {
+    $originalRG = $ResourceGroupName
+    $ResourceGroupName = $ResourceGroupName -replace '[^a-zA-Z0-9._\-()]', ''
+    if ($ResourceGroupName.Length -gt 90) { $ResourceGroupName = $ResourceGroupName.Substring(0, 90) }
+    if ($ResourceGroupName.Length -eq 0) {
+        throw "Resource group name '$originalRG' contains no valid characters. Use alphanumeric, hyphens, underscores, periods, or parentheses (1-90 chars)."
+    }
+    if ($ResourceGroupName -ne $originalRG) {
+        Write-Host "Resource group name sanitized: '$originalRG' -> '$ResourceGroupName'" -ForegroundColor Yellow
+        Write-Host "  Allowed: alphanumeric, hyphens, underscores, periods, parentheses (1-90 chars)" -ForegroundColor Gray
+    }
 }
 
 # Automation Account: 6-50 chars, alphanumeric and hyphens, must start with a letter
@@ -241,15 +249,17 @@ if ($ComputeType -eq 'FunctionApp') {
 }
 
 # Storage Account: 3-24 chars, lowercase alphanumeric only (most restrictive)
-$originalSA = $StorageAccountName
-$StorageAccountName = $StorageAccountName.ToLower() -replace '[^a-z0-9]', ''
-if ($StorageAccountName.Length -gt 24) { $StorageAccountName = $StorageAccountName.Substring(0, 24) }
-if ($StorageAccountName.Length -lt 3) {
-    throw "Storage account name '$originalSA' is too short after sanitization ('$StorageAccountName'). Must be 3-24 chars: lowercase letters and numbers only. No hyphens, underscores, or special characters."
-}
-if ($StorageAccountName -ne $originalSA) {
-    Write-Host "Storage account name sanitized: '$originalSA' -> '$StorageAccountName'" -ForegroundColor Yellow
-    Write-Host "  Allowed: lowercase letters and numbers only (3-24 chars). No hyphens or special characters." -ForegroundColor Gray
+if ($StorageAccountName) {
+    $originalSA = $StorageAccountName
+    $StorageAccountName = $StorageAccountName.ToLower() -replace '[^a-z0-9]', ''
+    if ($StorageAccountName.Length -gt 24) { $StorageAccountName = $StorageAccountName.Substring(0, 24) }
+    if ($StorageAccountName.Length -lt 3) {
+        throw "Storage account name '$originalSA' is too short after sanitization ('$StorageAccountName'). Must be 3-24 chars: lowercase letters and numbers only. No hyphens, underscores, or special characters."
+    }
+    if ($StorageAccountName -ne $originalSA) {
+        Write-Host "Storage account name sanitized: '$originalSA' -> '$StorageAccountName'" -ForegroundColor Yellow
+        Write-Host "  Allowed: lowercase letters and numbers only (3-24 chars). No hyphens or special characters." -ForegroundColor Gray
+    }
 }
 
 # Container App validation
@@ -815,6 +825,75 @@ try {
     $subPath = "/subscriptions/$SubscriptionId"
 
     # -------------------------------------------------------------------------
+    # Auto-discover ResourceGroupName and StorageAccountName from existing resource
+    # (Read-only lookups — suppress WhatIf so Invoke-AzRestMethod executes)
+    # -------------------------------------------------------------------------
+    if (-not $ResourceGroupName -or -not $StorageAccountName) {
+        $savedWhatIf = $WhatIfPreference
+        $WhatIfPreference = $false
+        try {
+        $computeName = if ($ComputeType -eq 'FunctionApp') { $FunctionAppName } else { $AutomationAccountName }
+        $providerType = if ($ComputeType -eq 'FunctionApp') { 'Microsoft.Web/sites' } else { 'Microsoft.Automation/automationAccounts' }
+        Write-Host "`nLooking up existing $ComputeType '$computeName'..." -ForegroundColor Gray
+
+        $found = $null
+        try {
+            $resources = Invoke-ArmApi -Path "$subPath/resources?`$filter=name eq '$computeName' and resourceType eq '$providerType'&api-version=2021-04-01" -Method GET -Description "Find existing $ComputeType"
+            $found = $resources.value | Select-Object -First 1
+        } catch { <# not found, handled below #> }
+
+        if ($found) {
+            # Extract resource group from the resource ID: /subscriptions/.../resourceGroups/<RG>/providers/...
+            $discoveredRG = ($found.id -split '/resourceGroups/|/providers/')[1]
+            if (-not $ResourceGroupName) {
+                $ResourceGroupName = $discoveredRG
+                Write-Host "  Auto-detected resource group: $ResourceGroupName" -ForegroundColor Green
+            }
+
+            # Auto-detect location from existing resource if not explicitly provided
+            if (-not $PSBoundParameters.ContainsKey('Location') -and $found.location) {
+                $Location = $found.location
+                Write-Host "  Auto-detected location: $Location" -ForegroundColor Green
+            }
+
+            if (-not $StorageAccountName) {
+                if ($ComputeType -eq 'FunctionApp') {
+                    $apiVer = $Script:ArmApiVersions.WebApp
+                    $appSettings = Invoke-ArmApi -Path "$subPath/resourceGroups/$discoveredRG/providers/Microsoft.Web/sites/$FunctionAppName/config/appsettings/list?api-version=$apiVer" -Method POST -Description 'Read app settings'
+                    $StorageAccountName = $appSettings.properties.STORAGE_ACCOUNT_NAME
+                    if (-not $StorageAccountName) {
+                        $StorageAccountName = $appSettings.properties.'AzureWebJobsStorage__accountName'
+                    }
+                } else {
+                    # Automation Account: look up the StorageAccountName variable
+                    try {
+                        $apiVer = $Script:ArmApiVersions.AutomationAccount
+                        $varPath = "$subPath/resourceGroups/$discoveredRG/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/variables/StorageAccountName?api-version=$apiVer"
+                        $saVar = Invoke-ArmApi -Path $varPath -Method GET -Description 'Read StorageAccountName variable'
+                        # Variable values are JSON-encoded strings (e.g. '"stname"')
+                        $StorageAccountName = ($saVar.properties.value | ConvertFrom-Json)
+                    } catch { <# variable may not exist yet #> }
+                }
+
+                if ($StorageAccountName) {
+                    Write-Host "  Auto-detected storage account: $StorageAccountName" -ForegroundColor Green
+                } else {
+                    throw "Could not auto-detect -StorageAccountName from existing $ComputeType '$computeName'. Please provide it explicitly."
+                }
+            }
+        } else {
+            # Resource doesn't exist yet — both params are required for first-time setup
+            $missing = @()
+            if (-not $ResourceGroupName) { $missing += '-ResourceGroupName' }
+            if (-not $StorageAccountName) { $missing += '-StorageAccountName' }
+            if ($missing) {
+                throw "No existing $ComputeType '$computeName' found. For first-time setup, provide: $($missing -join ', ')"
+            }
+        }
+        } finally { $WhatIfPreference = $savedWhatIf }
+    }
+
+    # -------------------------------------------------------------------------
     # Step 2: Create/verify Resource Group
     # -------------------------------------------------------------------------
     Write-Host "`nStep 2: Resource Group '$ResourceGroupName'..." -ForegroundColor Cyan
@@ -950,7 +1029,7 @@ try {
                         @{ name = "FUNCTIONS_EXTENSION_VERSION"; value = "~4" }
                         @{ name = "STORAGE_ACCOUNT_NAME"; value = $StorageAccountName }
                         @{ name = "DASHBOARD_DELIVERY_MODE"; value = $effectiveDashboardDeliveryMode }
-                        @{ name = "INCLUDE_ADVANCED_HUNTING"; value = "$IncludeAdvancedHunting" }
+                        @{ name = "INCLUDE_ADVANCED_HUNTING"; value = "true" }
                     )
                 }
                 functionAppConfig = @{
@@ -1561,37 +1640,34 @@ try {
             throw "Build script not found: $buildScript. Run from the repository root."
         }
         & $buildScript
-        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-            throw "Build-FunctionApp.ps1 failed with exit code $LASTEXITCODE"
-        }
+        # Build-FunctionApp.ps1 uses $ErrorActionPreference = 'Stop' and throws
+        # on failure, so an explicit exit-code check is unnecessary.
         Write-Host "  Function App built successfully" -ForegroundColor Green
 
-        # Create deployment zip
-        Write-Host "  Creating deployment zip..." -ForegroundColor Gray
+        # Deploy function app code via az CLI zip deployment (Flex Consumption
+        # uses a Kudu-lite pipeline that packages and uploads to blob storage)
+        Write-Host "  Deploying function app code via zip deployment..." -ForegroundColor Gray
         $functionAppDir = Join-Path $PSScriptRoot 'azure' 'function-app'
-        $zipPath = Join-Path $PSScriptRoot 'azure' 'function-app-deploy.zip'
+        $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) 'funcapp-deploy.zip'
         if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-        Compress-Archive -Path "$functionAppDir\*" -DestinationPath $zipPath -Force
-        Write-Host "  Deployment zip created: $zipPath" -ForegroundColor Green
 
-        # Upload zip to deployment container
-        Write-Host "  Uploading deployment zip to storage..." -ForegroundColor Gray
-        $storageToken = Get-ArmToken -ResourceUrl 'https://storage.azure.com/'
-        $blobUrl = "https://${StorageAccountName}.blob.core.windows.net/$($Script:FunctionAppDeploymentContainer)/function-app.zip"
-        $uploadHeaders = @{
-            'Authorization'  = "Bearer $storageToken"
-            'x-ms-blob-type' = 'BlockBlob'
-            'x-ms-version'   = '2023-11-03'
-            'Content-Type'   = 'application/zip'
+        Push-Location $functionAppDir
+        try {
+            Compress-Archive -Path '.\*' -DestinationPath $zipPath -Force
+        } finally {
+            Pop-Location
         }
-        $zipBytes = [System.IO.File]::ReadAllBytes($zipPath)
-        Invoke-RestMethod -Uri $blobUrl -Method Put -Headers $uploadHeaders -Body $zipBytes | Out-Null
-        Write-Host "  Deployment zip uploaded to $blobUrl" -ForegroundColor Green
 
-        # Clean up local zip
+        az functionapp deployment source config-zip `
+            --src $zipPath `
+            --name $FunctionAppName `
+            --resource-group $ResourceGroupName `
+            --output none
+        if ($LASTEXITCODE -ne 0) {
+            throw "Function App zip deployment failed (exit code $LASTEXITCODE)."
+        }
         Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-
-        Write-Host "  Function App deployment complete" -ForegroundColor Green
+        Write-Host "  Function App deployed successfully" -ForegroundColor Green
     }
 
     # -------------------------------------------------------------------------
