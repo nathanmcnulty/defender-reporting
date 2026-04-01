@@ -563,6 +563,17 @@ function Test-VulnContentStoreExistence {
     return $true
 }
 
+function Test-IsSyntheticDataset {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    return (Test-Path -LiteralPath (Join-Path $BasePath 'synthetic-manifest.json') -PathType Leaf)
+}
+
 function New-QuarterPeriodKey {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
@@ -1585,7 +1596,7 @@ function Read-VulnNdjsonLinesFromPath {
                             if ($carryStream.Length -gt 0) {
                                 $line = [System.Text.Encoding]::UTF8.GetString($carryStream.ToArray())
                                 if (-not [string]::IsNullOrWhiteSpace($line)) {
-                                    Write-Output $line
+                                    $line
                                 }
                             }
 
@@ -1594,7 +1605,7 @@ function Read-VulnNdjsonLinesFromPath {
                         elseif ($segmentLength -gt 0) {
                             $line = [System.Text.Encoding]::UTF8.GetString($buffer, $segmentStart, $segmentLength)
                             if (-not [string]::IsNullOrWhiteSpace($line)) {
-                                Write-Output $line
+                                $line
                             }
                         }
 
@@ -1617,7 +1628,7 @@ function Read-VulnNdjsonLinesFromPath {
                     if ($lineLength -gt 0) {
                         $line = [System.Text.Encoding]::UTF8.GetString($lineBytes, 0, $lineLength)
                         if (-not [string]::IsNullOrWhiteSpace($line)) {
-                            Write-Output $line
+                            $line
                         }
                     }
                 }
@@ -1765,7 +1776,7 @@ function Read-VulnNdjsonRecordsFromPath {
     Read-VulnNdjsonLinesFromPath -Path $Path | ForEach-Object {
         $record = $_ | ConvertFrom-Json -Depth 20
         if ($null -ne $record) {
-            Write-Output $record
+            $record
         }
     }
 }
@@ -1890,7 +1901,7 @@ function Read-VulnHistoryRowsFromPath {
 
                         $row = $rowToken.ToString([Newtonsoft.Json.Formatting]::None) | ConvertFrom-Json -Depth 20
                         if ($null -ne $row) {
-                            Write-Output $row
+                            $row
                         }
                     }
                 }
@@ -2852,7 +2863,7 @@ function Read-VulnContentStoreRow {
             $device = $dictionary.deviceProfiles[[int]$ref[1]]
             $content = $dictionary.contentTemplates[[int]$ref[2]]
 
-            Write-Output ([PSCustomObject]@{
+            ([PSCustomObject]@{
                 Id = [string]$ref[0]
                 DeviceId = [string]$device.id
                 DeviceName = [string]$device.n
