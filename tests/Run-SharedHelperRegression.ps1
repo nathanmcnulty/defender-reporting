@@ -697,9 +697,12 @@ function Test-VulnObservedWindowCacheRoundTrip {
         Publish-VulnContentStoreUnlocked -BasePath $tempRoot
         $expectedRows = @(Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $tempRoot } | Sort-Object Id, FirstSeenTimestamp, LastSeenTimestamp)
         $cachePath = Publish-VulnObservedWindowCache -BasePath $tempRoot
-        $cachedRows = @(Read-VulnNdjsonRecordsFromPath -Path $cachePath | Sort-Object Id, FirstSeenTimestamp, LastSeenTimestamp)
 
         Assert-True ((Test-Path -LiteralPath $cachePath -PathType Leaf)) 'Expected observed-window cache to be created.'
+
+        # Read the cache through Get-NormalizationSourceRows which auto-detects
+        # the compact ref format (T5) or legacy full-record format.
+        $cachedRows = @(Get-NormalizationSourceRows -DataPath $tempRoot | Sort-Object Id, FirstSeenTimestamp, LastSeenTimestamp)
         Assert-True ($expectedRows.Count -eq $cachedRows.Count) 'Expected observed-window cache to preserve merged row count.'
 
         for ($i = 0; $i -lt $expectedRows.Count; $i++) {

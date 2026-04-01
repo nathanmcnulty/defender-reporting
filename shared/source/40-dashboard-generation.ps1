@@ -1503,10 +1503,10 @@ function Write-MergedVulnContentStoreRefs {
                 $refsByIdentity[$identityKey].Add($ref)
             }
 
-            foreach ($identityKey in @($refsByIdentity.Keys | Sort-Object)) {
+            foreach ($identityKey in @($refsByIdentity.Keys)) {
                 $items = @($refsByIdentity[$identityKey])
                 if ($items.Count -le 1) {
-                    foreach ($item in $items) { Write-Output (,$item) }
+                    foreach ($item in $items) { ,$item }
                     continue
                 }
 
@@ -1547,7 +1547,7 @@ function Write-MergedVulnContentStoreRefs {
                         # Emit current with merged timestamps
                         $current[3] = $currentFST
                         $current[4] = $currentLST
-                        Write-Output (,$current)
+                        ,$current
                         $current = $candidate
                         $currentFST = $candFST
                         $currentLST = $candLST
@@ -1556,7 +1556,7 @@ function Write-MergedVulnContentStoreRefs {
 
                 $current[3] = $currentFST
                 $current[4] = $currentLST
-                Write-Output (,$current)
+                ,$current
             }
 
             $refsByIdentity.Clear()
@@ -1610,47 +1610,16 @@ function Publish-VulnObservedWindowCache {
         $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
 
         if (Test-VulnContentStoreExistence -BasePath $BasePath) {
-            # Memory-efficient path: merge at the compact ref level, then
-            # stream-expand to full rows one at a time for the cache file.
+            # Memory-efficient path: write compact refs directly instead of
+            # expanding to full PSCustomObjects. Refs are 5-element arrays
+            # [id, deviceProfileIdx, contentTemplateIdx, firstSeen, lastSeen].
             # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
             # collecting all 1.5M+ merged refs into memory at once.
-            $dictionary = Read-VulnContentDictionary -Path (Get-VulnContentDictionaryPath -BasePath $BasePath)
             Write-MergedVulnContentStoreRefs -BasePath $BasePath -AllowedGapDays $AllowedGapDays | ForEach-Object {
                 $ref = $_
                 if ($null -eq $ref) { return }
-                $device = $dictionary.deviceProfiles[[int]$ref[1]]
-                $content = $dictionary.contentTemplates[[int]$ref[2]]
-                $row = [PSCustomObject]@{
-                    Id                         = [string]$ref[0]
-                    DeviceId                   = [string]$device.id
-                    DeviceName                 = [string]$device.n
-                    RbacGroupName              = [string]$device.g
-                    OSPlatform                 = [string]$device.o
-                    OSVersion                  = [string]$device.ov
-                    MachineTags                = @($device.t)
-                    CveId                      = [string]$content.c
-                    SoftwareVendor             = [string]$content.sv
-                    SoftwareName               = [string]$content.sn
-                    SoftwareVersion            = [string]$content.ver
-                    VulnerabilitySeverityLevel = [string]$content.sev
-                    CvssScore                  = $content.sc
-                    ExploitabilityLevel        = [string]$content.ex
-                    RecommendationReference    = [string]$content.rr
-                    RecommendedSecurityUpdate  = [string]$content.ru
-                    RecommendedSecurityUpdateId  = [string]$content.rid
-                    RecommendedSecurityUpdateUrl = [string]$content.url
-                    SecurityUpdateAvailable    = ($content.ua -eq $true)
-                    FirstSeenTimestamp         = [string]$ref[3]
-                    LastSeenTimestamp           = [string]$ref[4]
-                    DiskPaths                  = @($content.dp)
-                    RegistryPaths              = @($content.rp)
-                    CveBatchTitle              = [string]$content.bt
-                    CveBatchUrl                = [string]$content.bu
-                    IsOnboarded                = ($device.ob -eq $true)
-                }
-                $writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
+                $writer.WriteLine(($ref | ConvertTo-Json -Compress))
             }
-            $dictionary = $null
         }
         else {
             # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
@@ -1754,8 +1723,7 @@ function Get-VulnerabilityPayloadFingerprintSourceFileSet {
         [switch]$SkipObservedWindowMerge
     )
 
-    $syntheticManifestPath = Join-Path $BasePath 'synthetic-manifest.json'
-    $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-Path -LiteralPath $syntheticManifestPath -PathType Leaf))
+    $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-IsSyntheticDataset -BasePath $BasePath))
     $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
 
     $contentStoreExists = (Test-VulnContentStoreExistence -BasePath $BasePath)
@@ -2107,6 +2075,61 @@ function Get-NormalizationContext {
         AdvancedHuntingData = @{}
         HasNoTags = $false
     }
+}
+
+function Write-CompactVulnRecordJson {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextWriter]$Writer,
+
+        [Parameter(Mandatory = $true)]
+        $Record
+    )
+
+    if ($null -eq $Record) { return }
+    $Writer.WriteStartArray()
+    foreach ($compactValue in $Record) {
+        if ($null -eq $compactValue) {
+            $Writer.WriteNull()
+            continue
+        }
+
+        if ($compactValue -is [System.Collections.IEnumerable] -and $compactValue -isnot [string]) {
+            $Writer.WriteStartArray()
+            foreach ($nestedValue in $compactValue) {
+                if ($null -eq $nestedValue) {
+                    $Writer.WriteNull()
+                }
+                else {
+                    $Writer.WriteValue($nestedValue)
+                }
+            }
+            $Writer.WriteEndArray()
+            continue
+        }
+
+        $Writer.WriteValue($compactValue)
+    }
+    $Writer.WriteEndArray()
+}
+
+function Resolve-UpdateLookupIndex {
+    param(
+        [AllowNull()][AllowEmptyString()][string]$UpdateName,
+        [AllowNull()][AllowEmptyString()][string]$UpdateId,
+        [AllowNull()][AllowEmptyString()][string]$UpdateUrl,
+        [System.Collections.Generic.List[PSObject]]$UpdateList,
+        [hashtable]$UpdateIndex
+    )
+
+    $name = if ($UpdateName -and $UpdateName -ne '--') { $UpdateName } else { $null }
+    if ($null -eq $name -or $name -eq '') { return -1 }
+    $key = @([string]$name, [string]$UpdateId, [string]$UpdateUrl) -join '|'
+    if ($UpdateIndex.ContainsKey($key)) { return [int]$UpdateIndex[$key] }
+    $idx = $UpdateList.Count
+    $UpdateIndex[$key] = $idx
+    $UpdateList.Add([PSCustomObject]@{ n = $name; id = $UpdateId; url = $UpdateUrl })
+    return $idx
 }
 
 function Get-NormalizationCachedYmdDate {
@@ -2516,29 +2539,7 @@ function Invoke-ContentStoreNormalization {
         $recUpdate = [string]$contentTemplate.ru
         $recUpdateId = [string]$contentTemplate.rid
         $recUpdateUrl = [string]$contentTemplate.url
-        $updateName = if ($recUpdate -and $recUpdate -ne '--') { $recUpdate } else { $null }
-        if ($null -eq $updateName -or $updateName -eq '') {
-            $updIdx = -1
-        }
-        else {
-            $updateKey = @(
-                $updateName
-                $recUpdateId
-                $recUpdateUrl
-            ) -join '|'
-            if ($updateIndex.ContainsKey($updateKey)) {
-                $updIdx = [int]$updateIndex[$updateKey]
-            }
-            else {
-                $updIdx = $lookups.updates.Count
-                $updateIndex[$updateKey] = $updIdx
-                $lookups.updates.Add([PSCustomObject]@{
-                    n = $updateName
-                    id = $recUpdateId
-                    url = $recUpdateUrl
-                })
-            }
-        }
+        $updIdx = Resolve-UpdateLookupIndex -UpdateName $recUpdate -UpdateId $recUpdateId -UpdateUrl $recUpdateUrl -UpdateList $lookups.updates -UpdateIndex $updateIndex
 
         $versionIdx = Get-OrCreateIndex -value ([string]$contentTemplate.ver) -list $lookups.versions -indexMap $versionIndex
         $diskPathIndices = $null
@@ -2650,30 +2651,7 @@ function Invoke-ContentStoreNormalization {
                         Write-CompactVulnRecordColumnSet -WriterSet $columnWriterSet -Record $compactRecord
                     }
                     else {
-                        $jsonWriter.WriteStartArray()
-                        foreach ($compactValue in $compactRecord) {
-                            if ($null -eq $compactValue) {
-                                $jsonWriter.WriteNull()
-                                continue
-                            }
-
-                            if ($compactValue -is [System.Collections.IEnumerable] -and $compactValue -isnot [string]) {
-                                $jsonWriter.WriteStartArray()
-                                foreach ($nestedValue in $compactValue) {
-                                    if ($null -eq $nestedValue) {
-                                        $jsonWriter.WriteNull()
-                                    }
-                                    else {
-                                        $jsonWriter.WriteValue($nestedValue)
-                                    }
-                                }
-                                $jsonWriter.WriteEndArray()
-                                continue
-                            }
-
-                            $jsonWriter.WriteValue($compactValue)
-                        }
-                        $jsonWriter.WriteEndArray()
+                        Write-CompactVulnRecordJson -Writer $jsonWriter -Record $compactRecord
                     }
 
                     if (($processedCountRef.Value % 50000) -eq 0) {
@@ -2839,29 +2817,7 @@ function Invoke-RawStoreNormalization {
                         $recUpdate = Get-JsonElementPropertyValue -Element $root -Name 'RecommendedSecurityUpdate'
                         $recUpdateId = Get-JsonElementPropertyValue -Element $root -Name 'RecommendedSecurityUpdateId'
                         $recUpdateUrl = Get-JsonElementPropertyValue -Element $root -Name 'RecommendedSecurityUpdateUrl'
-                        $updateName = if ($recUpdate -and $recUpdate -ne '--') { $recUpdate } else { $null }
-                        if ($null -eq $updateName -or $updateName -eq '') {
-                            $updIdx = -1
-                        }
-                        else {
-                            $updateKey = @(
-                                [string]$updateName,
-                                [string]$recUpdateId,
-                                [string]$recUpdateUrl
-                            ) -join '|'
-                            if ($updateIndex.ContainsKey($updateKey)) {
-                                $updIdx = $updateIndex[$updateKey]
-                            }
-                            else {
-                                $updIdx = $lookups.updates.Count
-                                $updateIndex[$updateKey] = $updIdx
-                                $lookups.updates.Add([PSCustomObject]@{
-                                    n = $updateName
-                                    id = $recUpdateId
-                                    url = $recUpdateUrl
-                                })
-                            }
-                        }
+                        $updIdx = Resolve-UpdateLookupIndex -UpdateName $recUpdate -UpdateId $recUpdateId -UpdateUrl $recUpdateUrl -UpdateList $lookups.updates -UpdateIndex $updateIndex
 
                         $seenWindow = Get-NormalizedVulnSeenWindow `
                             -FirstSeenValue (Get-JsonElementPropertyValue -Element $root -Name 'FirstSeenTimestamp') `
@@ -2916,30 +2872,7 @@ function Invoke-RawStoreNormalization {
                             Write-CompactVulnRecordColumnSet -WriterSet $columnWriterSet -Record $compactRecord
                         }
                         else {
-                            $jsonWriter.WriteStartArray()
-                            foreach ($compactValue in $compactRecord) {
-                                if ($null -eq $compactValue) {
-                                    $jsonWriter.WriteNull()
-                                    continue
-                                }
-
-                                if ($compactValue -is [System.Collections.IEnumerable] -and $compactValue -isnot [string]) {
-                                    $jsonWriter.WriteStartArray()
-                                    foreach ($nestedValue in $compactValue) {
-                                        if ($null -eq $nestedValue) {
-                                            $jsonWriter.WriteNull()
-                                        }
-                                        else {
-                                            $jsonWriter.WriteValue($nestedValue)
-                                        }
-                                    }
-                                    $jsonWriter.WriteEndArray()
-                                    continue
-                                }
-
-                                $jsonWriter.WriteValue($compactValue)
-                            }
-                            $jsonWriter.WriteEndArray()
+                            Write-CompactVulnRecordJson -Writer $jsonWriter -Record $compactRecord
                         }
 
                         if (($processedCountRef.Value % 50000) -eq 0) {
@@ -3171,10 +3104,10 @@ function Write-MergedVulnObservedWindowRows {
                 $rowsByIdentity[$identityKey].Add($row)
             }
 
-            foreach ($identityKey in @($rowsByIdentity.Keys | Sort-Object)) {
+            foreach ($identityKey in @($rowsByIdentity.Keys)) {
                 foreach ($mergedRow in @(Merge-VulnObservedWindowRows -Rows @($rowsByIdentity[$identityKey]) -AllowedGapDays $AllowedGapDays)) {
                     $mergedRowCount++
-                    Write-Output $mergedRow
+                    $mergedRow
                 }
             }
 
@@ -3237,7 +3170,52 @@ function Get-NormalizationSourceRows {
             $observedWindowCachePath = Publish-VulnObservedWindowCache -BasePath $DataPath
             if (-not [string]::IsNullOrWhiteSpace($observedWindowCachePath) -and (Test-Path -LiteralPath $observedWindowCachePath -PathType Leaf)) {
                 Write-Information ("  Using observed-window cache {0}" -f (Split-Path -Leaf $observedWindowCachePath)) -InformationAction Continue
-                Read-VulnNdjsonRecordsFromPath -Path $observedWindowCachePath
+
+                # Detect whether cache is in compact ref format (arrays starting with [)
+                # or legacy full-record format (objects starting with {)
+                $firstCacheLine = Get-GzipLine -Path $observedWindowCachePath | Select-Object -First 1
+                if ($firstCacheLine -and $firstCacheLine.TrimStart().StartsWith('[')) {
+                    # Content-store ref format — load dictionary and expand to full PSCustomObjects
+                    $dictionary = Read-VulnContentDictionary -Path (Get-VulnContentDictionaryPath -BasePath $DataPath)
+                    Read-VulnNdjsonLinesFromPath -Path $observedWindowCachePath | ForEach-Object {
+                        $ref = $_ | ConvertFrom-Json
+                        if ($null -eq $ref -or @($ref).Count -lt 5) { return }
+                        $device = $dictionary.deviceProfiles[[int]$ref[1]]
+                        $content = $dictionary.contentTemplates[[int]$ref[2]]
+                        ([PSCustomObject]@{
+                            Id                         = [string]$ref[0]
+                            DeviceId                   = [string]$device.id
+                            DeviceName                 = [string]$device.n
+                            RbacGroupName              = [string]$device.g
+                            OSPlatform                 = [string]$device.o
+                            OSVersion                  = [string]$device.ov
+                            MachineTags                = @($device.t)
+                            CveId                      = [string]$content.c
+                            SoftwareVendor             = [string]$content.sv
+                            SoftwareName               = [string]$content.sn
+                            SoftwareVersion            = [string]$content.ver
+                            VulnerabilitySeverityLevel = [string]$content.sev
+                            CvssScore                  = $content.sc
+                            ExploitabilityLevel        = [string]$content.ex
+                            RecommendationReference    = [string]$content.rr
+                            RecommendedSecurityUpdate  = [string]$content.ru
+                            RecommendedSecurityUpdateId  = [string]$content.rid
+                            RecommendedSecurityUpdateUrl = [string]$content.url
+                            SecurityUpdateAvailable    = ($content.ua -eq $true)
+                            FirstSeenTimestamp         = [string]$ref[3]
+                            LastSeenTimestamp           = [string]$ref[4]
+                            DiskPaths                  = @($content.dp)
+                            RegistryPaths              = @($content.rp)
+                            CveBatchTitle              = [string]$content.bt
+                            CveBatchUrl                = [string]$content.bu
+                            IsOnboarded                = ($device.ob -eq $true)
+                        })
+                    }
+                    $dictionary = $null
+                }
+                else {
+                    Read-VulnNdjsonRecordsFromPath -Path $observedWindowCachePath
+                }
                 return
             }
         }
@@ -3265,7 +3243,7 @@ function Get-NormalizationSourceRows {
         Write-Information '  Synthetic stress dataset detected; skipping observed-window merge.' -InformationAction Continue
         foreach ($record in @($legacyStore.CurrentRecords)) {
             if ($null -ne $record) {
-                Write-Output $record
+                $record
             }
         }
         foreach ($historyDocument in @($legacyStore.HistoryDocuments)) {
@@ -3273,7 +3251,7 @@ function Get-NormalizationSourceRows {
                 foreach ($entry in @($snapshot.closed)) {
                     $historyRow = Get-VulnPropertyValue -InputObject $entry -Name 'row'
                     if ($null -ne $historyRow) {
-                        Write-Output $historyRow
+                        $historyRow
                     }
                 }
             }
@@ -3286,7 +3264,7 @@ function Get-NormalizationSourceRows {
     Write-MergedVulnObservedWindowRows -Source {
         foreach ($record in @($legacyStore.CurrentRecords)) {
             if ($null -ne $record) {
-                Write-Output $record
+                $record
             }
         }
 
@@ -3295,7 +3273,7 @@ function Get-NormalizationSourceRows {
                 foreach ($entry in @($snapshot.closed)) {
                     $historyRow = Get-VulnPropertyValue -InputObject $entry -Name 'row'
                     if ($null -ne $historyRow) {
-                        Write-Output $historyRow
+                        $historyRow
                     }
                 }
             }
@@ -3350,8 +3328,7 @@ function ConvertTo-NormalizedData {
     $jsonWriter = $null
     $columnWriterSet = $null
     $vulnColumnPaths = $null
-    $syntheticManifestPath = Join-Path $DataPath 'synthetic-manifest.json'
-    $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-Path -LiteralPath $syntheticManifestPath -PathType Leaf))
+    $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-IsSyntheticDataset -BasePath $DataPath))
     $contentStoreExists = (Test-VulnContentStoreExistence -BasePath $DataPath)
     $storeExists = ((Test-VulnStoreExistence -BasePath $DataPath) -or $contentStoreExists)
     $useRawStoreFastPath = ($effectiveSkipObservedWindowMerge -and $storeExists)
@@ -3421,29 +3398,7 @@ function ConvertTo-NormalizedData {
             $recUpdate = $v.PSObject.Properties['RecommendedSecurityUpdate']?.Value
             $recUpdateId = $v.PSObject.Properties['RecommendedSecurityUpdateId']?.Value
             $recUpdateUrl = $v.PSObject.Properties['RecommendedSecurityUpdateUrl']?.Value
-            $updateName = if ($recUpdate -and $recUpdate -ne '--') { $recUpdate } else { $null }
-            if ($null -eq $updateName -or $updateName -eq '') {
-                $updIdx = -1
-            }
-            else {
-                $updateKey = @(
-                    [string]$updateName,
-                    [string]$recUpdateId,
-                    [string]$recUpdateUrl
-                ) -join '|'
-                if ($updateIndex.ContainsKey($updateKey)) {
-                    $updIdx = $updateIndex[$updateKey]
-                }
-                else {
-                    $updIdx = $lookups.updates.Count
-                    $updateIndex[$updateKey] = $updIdx
-                    $lookups.updates.Add([PSCustomObject]@{
-                        n = $updateName
-                        id = $recUpdateId
-                        url = $recUpdateUrl
-                    })
-                }
-            }
+            $updIdx = Resolve-UpdateLookupIndex -UpdateName $recUpdate -UpdateId $recUpdateId -UpdateUrl $recUpdateUrl -UpdateList $lookups.updates -UpdateIndex $updateIndex
 
             $seenWindow = Get-NormalizedVulnSeenWindow `
                 -FirstSeenValue $v.PSObject.Properties['FirstSeenTimestamp']?.Value `
@@ -3498,30 +3453,7 @@ function ConvertTo-NormalizedData {
                 Write-CompactVulnRecordColumnSet -WriterSet $columnWriterSet -Record $compactRecord
             }
             else {
-                $jsonWriter.WriteStartArray()
-                foreach ($compactValue in $compactRecord) {
-                    if ($null -eq $compactValue) {
-                        $jsonWriter.WriteNull()
-                        continue
-                    }
-
-                    if ($compactValue -is [System.Collections.IEnumerable] -and $compactValue -isnot [string]) {
-                        $jsonWriter.WriteStartArray()
-                        foreach ($nestedValue in $compactValue) {
-                            if ($null -eq $nestedValue) {
-                                $jsonWriter.WriteNull()
-                            }
-                            else {
-                                $jsonWriter.WriteValue($nestedValue)
-                            }
-                        }
-                        $jsonWriter.WriteEndArray()
-                        continue
-                    }
-
-                    $jsonWriter.WriteValue($compactValue)
-                }
-                $jsonWriter.WriteEndArray()
+                Write-CompactVulnRecordJson -Writer $jsonWriter -Record $compactRecord
             }
 
             if (($processedCount % 50000) -eq 0) {

@@ -331,7 +331,7 @@ function Read-MachineRecordsFromFile {
         foreach ($machine in $machineList) {
             if ($null -eq $machine) { continue }
             if ($machine.PSObject.Properties['removed']?.Value -eq $true) {
-                Write-Output ([PSCustomObject]@{
+                ([PSCustomObject]@{
                     id = $machine.PSObject.Properties['id']?.Value
                     observedOn = $machine.PSObject.Properties['observedOn']?.Value
                     removed = $true
@@ -344,7 +344,7 @@ function Read-MachineRecordsFromFile {
             $observedOn = $machine.PSObject.Properties['observedOn']?.Value
             if ($stateHash) { Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash }
             if ($observedOn) { Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn }
-            Write-Output $record
+            $record
         }
 
         return
@@ -371,7 +371,7 @@ function Read-MachineRecordsFromFile {
 
                     if ($null -eq $machine) { continue }
                     if ($machine.PSObject.Properties['removed']?.Value -eq $true) {
-                        Write-Output ([PSCustomObject]@{
+                        ([PSCustomObject]@{
                             id = $machine.PSObject.Properties['id']?.Value
                             observedOn = $machine.PSObject.Properties['observedOn']?.Value
                             removed = $true
@@ -384,7 +384,7 @@ function Read-MachineRecordsFromFile {
                     $observedOn = $machine.PSObject.Properties['observedOn']?.Value
                     if ($stateHash) { Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash }
                     if ($observedOn) { Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn }
-                    Write-Output $record
+                    $record
                 }
             }
             finally { $reader.Dispose() }
@@ -492,7 +492,11 @@ function Write-NdjsonRecordsFile {
 
         foreach ($record in $Records) {
             if ($null -eq $record) { continue }
-            $writer.WriteLine(($record | ConvertTo-Json -Compress -Depth 6))
+            $dict = [System.Collections.Generic.Dictionary[string,object]]::new()
+            foreach ($prop in $record.PSObject.Properties) {
+                $dict[$prop.Name] = $prop.Value
+            }
+            $writer.WriteLine([System.Text.Json.JsonSerializer]::Serialize[System.Collections.Generic.Dictionary[string,object]]($dict))
         }
     }
     finally {
@@ -810,7 +814,7 @@ function Read-AdvancedHuntingRecordsFromFile {
 
         foreach ($record in $records) {
             if ($null -ne $record) {
-                Write-Output $record
+                $record
             }
         }
 
@@ -830,7 +834,7 @@ function Read-AdvancedHuntingRecordsFromFile {
                     if ([string]::IsNullOrWhiteSpace($line)) { continue }
                     try {
                         $record = $line | ConvertFrom-Json
-                        if ($null -ne $record) { Write-Output $record }
+                        if ($null -ne $record) { $record }
                     }
                     catch {
                         Write-Warning "Failed to parse Advanced Hunting line in $(Split-Path -Leaf $Path): $_"
