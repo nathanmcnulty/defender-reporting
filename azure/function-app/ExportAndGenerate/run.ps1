@@ -9423,6 +9423,9 @@ function Write-MergedVulnObservedWindowRows {
     $sourceRowCount = 0
     $mergedRowCount = 0
     $partitionWriters = [System.IO.StreamWriter[]]::new($PartitionCount)
+    $scatterJsonOptions = [System.Text.Json.JsonSerializerOptions]::new()
+    $scatterJsonOptions.WriteIndented = $false
+    $scatterJsonOptions.MaxDepth = 20
 
     try {
         # Pass 1 — scatter: stream source rows to partition files by identity hash
@@ -9443,7 +9446,9 @@ function Write-MergedVulnObservedWindowRows {
                     [System.IO.File]::Create($partPath),
                     [System.Text.UTF8Encoding]::new($false))
             }
-            $partitionWriters[$bucket].WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
+            $dict = [System.Collections.Generic.Dictionary[string,object]]::new()
+            foreach ($prop in $row.PSObject.Properties) { $dict[$prop.Name] = $prop.Value }
+            $partitionWriters[$bucket].WriteLine([System.Text.Json.JsonSerializer]::Serialize($dict, $scatterJsonOptions))
         }
 
         # Flush and close all partition writers
@@ -20419,6 +20424,9 @@ function Write-MergedVulnObservedWindowRows {
     $sourceRowCount = 0
     $mergedRowCount = 0
     $partitionWriters = [System.IO.StreamWriter[]]::new($PartitionCount)
+    $scatterJsonOptions = [System.Text.Json.JsonSerializerOptions]::new()
+    $scatterJsonOptions.WriteIndented = $false
+    $scatterJsonOptions.MaxDepth = 20
 
     try {
         # Pass 1 — scatter: stream source rows to partition files by identity hash
@@ -20439,7 +20447,9 @@ function Write-MergedVulnObservedWindowRows {
                     [System.IO.File]::Create($partPath),
                     [System.Text.UTF8Encoding]::new($false))
             }
-            $partitionWriters[$bucket].WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
+            $dict = [System.Collections.Generic.Dictionary[string,object]]::new()
+            foreach ($prop in $row.PSObject.Properties) { $dict[$prop.Name] = $prop.Value }
+            $partitionWriters[$bucket].WriteLine([System.Text.Json.JsonSerializer]::Serialize($dict, $scatterJsonOptions))
         }
 
         # Flush and close all partition writers
