@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2026-04-05
+
+### Benchmark and validation merge prep
+
+#### Added
+- Synthetic live-export generation for shifting a synthetic dataset forward to a target latest date.
+- Current-only benchmark capture for the local runbook and Function App validation path.
+- Streaming large-dataset dashboard audit helpers sourced from `validation/source/` and emitted into `validation-helpers.ps1`.
+- Documented performance baselines for the recorded `20K` replay and shifted live synthetic datasets.
+
+#### Changed
+- Manual path-coverage harnesses were moved under `tests/manual/` and now default their outputs to ignored `.local` paths.
+- Test documentation now distinguishes committed fixtures from manual harnesses and local-only benchmark output.
+
+#### Fixed
+- Current-only local benchmark runs now stage a private dataset copy so validation cannot mutate the source dataset in place.
+- Regression fixture smoke runs now execute against temp copies so they do not recreate committed `.dashboard-cache` artifacts.
+- Derived `.dashboard-cache` directories are now ignored consistently across the repository.
+
 ## 2026-03-26
 
 ### Stress-scale dashboard generation and pipeline hardening

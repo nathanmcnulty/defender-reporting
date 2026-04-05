@@ -81,10 +81,19 @@ if (-not $SkipDashboardFixtureValidation) {
     [void](New-Item -Path $tempRoot -ItemType Directory -Force)
 
     try {
+        $fixtureDataPath = Join-Path $tempRoot 'fixture-data'
+        [void](New-Item -Path $fixtureDataPath -ItemType Directory -Force)
+        Copy-Item -Path (Join-Path $fixturePath '*') -Destination $fixtureDataPath -Recurse -Force
+
+        $fixtureCachePath = Join-Path $fixtureDataPath '.dashboard-cache'
+        if (Test-Path -LiteralPath $fixtureCachePath) {
+            Remove-Item -LiteralPath $fixtureCachePath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
         $fixtureHtmlPath = Join-Path $tempRoot 'fixture-dashboard.html'
         Write-Output 'Running dashboard fixture smoke generation...'
         & (Join-Path $repoRoot 'Generate-VulnerabilityDashboard.ps1') `
-            -DirectoryPath $fixturePath `
+            -DirectoryPath $fixtureDataPath `
             -OutputPath $fixtureHtmlPath `
             -ExportMachineData:$false
         if (Test-LastExitCodeFailed) {
