@@ -1,7 +1,6 @@
 .github/copilot-instructions.md
-/node_modules
+.local/
 /dashboard-app
-# Derived dashboard caches are rebuilt from exports on demand and should not be committed.
-/exports/.dashboard-cache/
-/exports-synthetic*
-/stress-output
+# Derived dashboard caches are rebuilt on demand and should not be committed.
+.dashboard-cache/
+/azure/function-app/Modules/

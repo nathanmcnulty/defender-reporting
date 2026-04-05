@@ -374,7 +374,18 @@ function Test-ConvertToNormalizedDataWritesExpectedRowCount {
         Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
 
         $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -Machines @{} -AdvancedHuntingData @{}
-        $writtenRowCount = Get-CompactVulnJsonRowCount -Path $result.VulnsPath
+
+        if ($result.VulnsPath) {
+            $writtenRowCount = Get-CompactVulnJsonRowCount -Path $result.VulnsPath
+        }
+        elseif ($result.VulnColumnPaths) {
+            # Column-store format: count entries in the device-index column
+            $colJson = Get-Content -Path $result.VulnColumnPaths['d'] -Raw
+            $writtenRowCount = ([Newtonsoft.Json.Linq.JArray]::Parse($colJson)).Count
+        }
+        else {
+            throw 'ConvertTo-NormalizedData returned neither VulnsPath nor VulnColumnPaths.'
+        }
 
         Assert-True ($result.VulnCount -eq 2) 'Expected normalized data to include both current and history vulnerability rows.'
         Assert-True ($writtenRowCount -eq $result.VulnCount) 'Expected normalized vuln file row count to match the processed vulnerability count.'
@@ -544,6 +555,11 @@ function Test-DashboardValidationPreservesNoneSeverityData {
     try {
         Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
 
+        $cachePath = Join-Path $tempRoot '.dashboard-cache'
+        if (Test-Path -LiteralPath $cachePath) {
+            Remove-Item -LiteralPath $cachePath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
         & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
 
         $audit = Get-Content -Path $auditPath -Raw | ConvertFrom-Json -Depth 100
@@ -573,6 +589,11 @@ function Test-DashboardSplitAssetsGenerationAndValidation {
 
     try {
         Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
+
+        $cachePath = Join-Path $tempRoot '.dashboard-cache'
+        if (Test-Path -LiteralPath $cachePath) {
+            Remove-Item -LiteralPath $cachePath -Recurse -Force -ErrorAction SilentlyContinue
+        }
 
         & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -SplitAssets -Validate -ValidationOutputPath $auditPath | Out-Null
 

@@ -714,6 +714,8 @@ function Export-ToStaticWebApp {
 # MAIN PIPELINE
 # =============================================================================
 
+$tempRoot = $null
+
 try {
     Write-Output "========================================"
     Write-Output "  Vulnerability Dashboard Pipeline"
@@ -788,11 +790,65 @@ try {
     # -----------------------------------------------------------------
     Write-Output "`n--- Stage B: Download historical data ---"
 
-    $tempRoot = Join-Path -Path $env:TEMP -ChildPath "dashboard-pipeline-$(Get-Date -Format 'yyyyMMddHHmmss')"
+    $tempBasePath = $null
+    $tempBaseCandidates = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($candidate in @($env:TEMP, $env:TMP, $env:TMPDIR)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            [void]$tempBaseCandidates.Add([string]$candidate)
+        }
+    }
+
+    try {
+        $systemTempPath = [System.IO.Path]::GetTempPath()
+        if (-not [string]::IsNullOrWhiteSpace($systemTempPath)) {
+            [void]$tempBaseCandidates.Add($systemTempPath)
+        }
+    }
+    catch {
+        Write-Verbose ("Unable to read the system temp path: {0}" -f $_.Exception.Message)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:HOME)) {
+        [void]$tempBaseCandidates.Add([System.IO.Path]::Combine([string]$env:HOME, 'site', 'tmp'))
+    }
+
+    foreach ($candidate in @('/tmp', 'C:\Windows\Temp')) {
+        [void]$tempBaseCandidates.Add($candidate)
+    }
+
+    foreach ($candidate in $tempBaseCandidates) {
+        $resolvedCandidate = ([string]$candidate).Trim()
+        if ([string]::IsNullOrWhiteSpace($resolvedCandidate)) {
+            continue
+        }
+
+        try {
+            if (-not (Test-Path -LiteralPath $resolvedCandidate -PathType Container)) {
+                New-Item -Path $resolvedCandidate -ItemType Directory -Force | Out-Null
+            }
+
+            if (Test-Path -LiteralPath $resolvedCandidate -PathType Container) {
+                $tempBasePath = $resolvedCandidate
+                break
+            }
+        }
+        catch {
+            Write-Verbose ("Skipping temp path candidate '{0}': {1}" -f $resolvedCandidate, $_.Exception.Message)
+        }
+    }
+
+    if (-not $tempBasePath) {
+        throw 'Unable to resolve a temporary directory for the dashboard pipeline.'
+    }
+
+    $tempRoot = Join-Path -Path $tempBasePath -ChildPath "dashboard-pipeline-$(Get-Date -Format 'yyyyMMddHHmmss')"
     $tempExports = Join-Path -Path $tempRoot -ChildPath "exports"
     $tempTemplates = Join-Path -Path $tempRoot -ChildPath "templates"
     $tempDashboards = Join-Path -Path $tempRoot -ChildPath "dashboards"
     $tempLibraries = Join-Path -Path $tempRoot -ChildPath "libraries"
+
+    Write-Output "  Temporary workspace: $tempRoot"
 
     New-Item -Path $tempExports -ItemType Directory -Force | Out-Null
     New-Item -Path $tempTemplates -ItemType Directory -Force | Out-Null
@@ -993,12 +1049,23 @@ try {
         $vulnCount = $normalizedResult.VulnCount
         $deviceCount = $normalizedResult.Lookups.devices.Count
         $cveCount = $normalizedResult.Lookups.cves.Count
-        $vulnsFileSize = [math]::Round((Get-Item $normalizedResult.VulnsPath).Length / 1KB, 1)
-        Write-Output "  Vulns JSON file: ${vulnsFileSize}KB"
+        if (-not [string]::IsNullOrWhiteSpace($normalizedResult.VulnsPath) -and (Test-Path -LiteralPath $normalizedResult.VulnsPath -PathType Leaf)) {
+            $vulnsFileSize = [math]::Round((Get-Item $normalizedResult.VulnsPath).Length / 1KB, 1)
+            Write-Output "  Vulns JSON file: ${vulnsFileSize}KB"
+        }
+        elseif ($normalizedResult.VulnColumnPaths) {
+            $vulnColumnSizeBytes = 0L
+            foreach ($columnPath in $normalizedResult.VulnColumnPaths.Values) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$columnPath) -and (Test-Path -LiteralPath ([string]$columnPath) -PathType Leaf)) {
+                    $vulnColumnSizeBytes += (Get-Item -LiteralPath ([string]$columnPath)).Length
+                }
+            }
+            Write-Output ("  Compact vuln columns: {0}KB" -f [math]::Round($vulnColumnSizeBytes / 1KB, 1))
+        }
 
         Write-Output "  Compressing embedded data..."
         $normalizedQuality = $normalizedResult['Quality']
-        Write-CombinedPayloadGzip -Lookups $normalizedResult.Lookups -VulnsPath $normalizedResult.VulnsPath -OutputPath $tempPayloadPath
+        Write-CombinedPayloadGzip -Lookups $normalizedResult.Lookups -VulnsPath $normalizedResult.VulnsPath -VulnColumnPaths $normalizedResult.VulnColumnPaths -OutputPath $tempPayloadPath
         $normalizedResult = $null
         if (Test-Path -LiteralPath $tempVulnsPath -PathType Leaf) {
             Remove-Item -LiteralPath $tempVulnsPath -Force -ErrorAction SilentlyContinue
