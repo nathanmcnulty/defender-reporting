@@ -967,6 +967,7 @@ function Close-CombinedPayloadWriter {
     )
 
     try {
+        Update-NormalizedAffectedSoftwareLookup -Lookups $Lookups
         Write-CombinedPayloadLookups -Writer $WriterState.JsonWriter -Lookups $Lookups
         $WriterState.JsonWriter.WriteEndObject()
         $WriterState.JsonWriter.Flush()
@@ -976,6 +977,80 @@ function Close-CombinedPayloadWriter {
         elseif ($WriterState.StreamWriter) { $WriterState.StreamWriter.Dispose() }
         elseif ($WriterState.GzipStream) { $WriterState.GzipStream.Dispose() }
         elseif ($WriterState.FileStream) { $WriterState.FileStream.Dispose() }
+    }
+}
+
+function Update-NormalizedAffectedSoftwareLookup {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only mutates in-memory lookup data before serialization.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Lookups
+    )
+
+    if ($null -eq $Lookups) {
+        return
+    }
+
+    $vendors = $null
+    $cves = $null
+    $affSoftware = $null
+    if ($Lookups -is [System.Collections.IDictionary]) {
+        $vendors = $Lookups['vendors']
+        $cves = $Lookups['cves']
+        $affSoftware = $Lookups['affSoftware']
+    }
+    else {
+        $vendors = $Lookups.PSObject.Properties['vendors']?.Value
+        $cves = $Lookups.PSObject.Properties['cves']?.Value
+        $affSoftware = $Lookups.PSObject.Properties['affSoftware']?.Value
+    }
+
+    if ($null -eq $vendors -or $null -eq $cves -or $null -eq $affSoftware) {
+        return
+    }
+
+    $datasetVendors = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($vendor in @($vendors)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$vendor)) {
+            [void]$datasetVendors.Add((Get-VendorMatchKey -Vendor $vendor))
+        }
+    }
+
+    $affectedSoftwareLookupCount = @($affSoftware).Count
+    foreach ($cve in @($cves)) {
+        if ($null -eq $cve -or $null -eq $cve.as -or @($cve.as).Count -eq 0) {
+            continue
+        }
+
+        $filteredIndices = [System.Collections.Generic.List[int]]::new()
+        foreach ($asIdx in @($cve.as)) {
+            $resolvedIndex = -1
+            try {
+                $resolvedIndex = [int]$asIdx
+            }
+            catch {
+                continue
+            }
+
+            if ($resolvedIndex -lt 0 -or $resolvedIndex -ge $affectedSoftwareLookupCount) {
+                continue
+            }
+
+            $swStr = [string]$affSoftware[$resolvedIndex]
+            if ([string]::IsNullOrWhiteSpace($swStr)) {
+                continue
+            }
+
+            $separatorIndex = $swStr.IndexOf(':')
+            $swVendor = if ($separatorIndex -ge 0) { $swStr.Substring(0, $separatorIndex) } else { $swStr }
+            if ($datasetVendors.Contains((Get-VendorMatchKey -Vendor $swVendor))) {
+                $filteredIndices.Add($resolvedIndex)
+            }
+        }
+
+        $cve.as = if ($filteredIndices.Count -gt 0) { $filteredIndices } else { $null }
     }
 }
 
@@ -2221,7 +2296,7 @@ function Get-DashboardPayloadCacheFingerprint {
     }
 
     $builder = [System.Text.StringBuilder]::new()
-    [void]$builder.AppendLine('dashboard-payload-cache-v2')
+    [void]$builder.AppendLine('dashboard-payload-cache-v4')
     [void]$builder.AppendLine(('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true)))
     foreach ($file in @($files | Sort-Object FullName -Unique)) {
         $hash = Get-FileSha256Hex -Path $file.FullName
@@ -2377,7 +2452,7 @@ function Publish-NormalizedPayloadCache {
 
     Copy-Item -LiteralPath $PayloadPath -Destination $tempPayloadPath -Force
     $manifest = [ordered]@{
-        Version = 'dashboard-payload-cache-v2'
+        Version = 'dashboard-payload-cache-v4'
         Fingerprint = $fingerprint
         GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
         VulnCount = $VulnCount
@@ -4360,25 +4435,7 @@ function ConvertTo-NormalizedData {
         Write-Warning "  Corrected $firstLastSwappedCount record(s) with FirstSeenTimestamp > LastSeenTimestamp"
     }
 
-    $datasetVendors = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($vendor in $lookups.vendors) {
-        [void]$datasetVendors.Add((Get-VendorMatchKey -Vendor $vendor))
-    }
-
-    foreach ($cve in $lookups.cves) {
-        if ($null -ne $cve.as -and $cve.as.Count -gt 0) {
-            $filteredIndices = [System.Collections.Generic.List[int]]::new()
-            foreach ($asIdx in $cve.as) {
-                $swStr = $lookups.affSoftware[$asIdx]
-                $separatorIndex = $swStr.IndexOf(':')
-                $swVendor = if ($separatorIndex -ge 0) { $swStr.Substring(0, $separatorIndex) } else { $swStr }
-                if ($datasetVendors.Contains((Get-VendorMatchKey -Vendor $swVendor))) {
-                    $filteredIndices.Add($asIdx)
-                }
-            }
-            $cve.as = if ($filteredIndices.Count -gt 0) { $filteredIndices } else { $null }
-        }
-    }
+    Update-NormalizedAffectedSoftwareLookup -Lookups $lookups
 
     return @{
         Lookups = [PSCustomObject]@{
