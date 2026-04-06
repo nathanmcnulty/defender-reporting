@@ -46,6 +46,21 @@ param(
     [int]$PollIntervalSeconds = 15,
 
     [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 256)]
+    [int]$MinimumAvailableMemoryGB = 8,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 2048)]
+    [int]$MinimumFreeDiskGB = 10,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 50000000)]
+    [int]$MaximumDatasetRows = 2500000,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AllowLargeDataset,
+
+    [Parameter(Mandatory = $false)]
     [switch]$CurrentOnly,
 
     [Parameter(Mandatory = $false)]
@@ -160,6 +175,127 @@ function Get-DatasetFiles {
             } |
             Sort-Object -Property Name
     )
+}
+
+function Get-FreeDiskSpaceBytes {
+    [CmdletBinding()]
+    [OutputType([int64])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetPathRoot($resolvedPath)
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        throw "Unable to determine drive root for '$resolvedPath'."
+    }
+
+    return [int64]([System.IO.DriveInfo]::new($root).AvailableFreeSpace)
+}
+
+function Assert-BenchmarkDatasetReady {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DatasetPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaximumDatasetRows,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$AllowLargeDataset,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MinimumAvailableMemoryGB,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MinimumFreeDiskGB
+    )
+
+    $manifestPath = Join-Path -Path $DatasetPath -ChildPath 'synthetic-manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Synthetic benchmark dataset is incomplete. Missing manifest: $manifestPath"
+    }
+
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 20
+    $progressPath = Join-Path -Path $DatasetPath -ChildPath '.synthetic-progress.json'
+    $progress = if (Test-Path -LiteralPath $progressPath -PathType Leaf) {
+        Get-Content -LiteralPath $progressPath -Raw | ConvertFrom-Json -Depth 20
+    }
+    else {
+        $null
+    }
+
+    if ($null -ne $progress -and [string]$progress.stage -ne 'completed') {
+        throw ("Synthetic benchmark dataset is incomplete. Progress file reports stage '{0}'." -f [string]$progress.stage)
+    }
+
+    $missingFiles = [System.Collections.Generic.List[string]]::new()
+    foreach ($requiredName in @('Machines_Current.json.gz', 'VulnContentDictionary.json.gz', 'VulnCurrentRefs.json.gz')) {
+        if (-not (Test-Path -LiteralPath (Join-Path -Path $DatasetPath -ChildPath $requiredName) -PathType Leaf)) {
+            $missingFiles.Add($requiredName)
+        }
+    }
+
+    if (@(Get-ChildItem -LiteralPath $DatasetPath -Filter 'VulnHistoryRefs_*.json.gz' -File -ErrorAction SilentlyContinue).Count -eq 0) {
+        $missingFiles.Add('VulnHistoryRefs_*.json.gz')
+    }
+
+    if ($missingFiles.Count -gt 0) {
+        throw ("Synthetic benchmark dataset is incomplete. Missing required file(s): {0}" -f ($missingFiles -join ', '))
+    }
+
+    if (-not ($manifest.PSObject.Properties['actualCurrentRows'] -and $manifest.PSObject.Properties['actualHistoryRows'])) {
+        throw 'Synthetic benchmark dataset manifest is missing actual row counts.'
+    }
+
+    $totalRows = [int]$manifest.actualCurrentRows + [int]$manifest.actualHistoryRows
+    if ($totalRows -le 0) {
+        throw 'Synthetic benchmark dataset manifest reports zero rows.'
+    }
+
+    if ($manifest.PSObject.Properties['targetTotalVulnRows']) {
+        $targetTotalRows = [int]$manifest.targetTotalVulnRows
+        if ($targetTotalRows -gt 0 -and $targetTotalRows -ne $totalRows) {
+            throw ("Synthetic benchmark dataset manifest does not match its requested size. actual rows={0}; target rows={1}." -f $totalRows, $targetTotalRows)
+        }
+    }
+
+    if ($totalRows -gt $MaximumDatasetRows -and -not $AllowLargeDataset) {
+        throw ("Synthetic benchmark dataset has {0} rows, which exceeds the unattended benchmark limit of {1}. Re-run with -AllowLargeDataset only after reviewing memory headroom." -f $totalRows, $MaximumDatasetRows)
+    }
+
+    $datasetFiles = @(Get-DatasetFiles -Path $DatasetPath)
+    $datasetBytes = [int64](($datasetFiles | Measure-Object -Property Length -Sum).Sum)
+    $availableMemoryGB = Get-AvailableMemoryGB
+    if ($availableMemoryGB -lt $MinimumAvailableMemoryGB) {
+        throw ("Available system memory is {0} GB, below the benchmark preflight floor of {1} GB." -f $availableMemoryGB, $MinimumAvailableMemoryGB)
+    }
+
+    $freeDiskBytes = Get-FreeDiskSpaceBytes -Path $OutputDirectory
+    $requiredFreeDiskBytes = [Math]::Max(([int64]$MinimumFreeDiskGB * 1GB), (($datasetBytes * 2) + 2GB))
+    if ($freeDiskBytes -lt $requiredFreeDiskBytes) {
+        throw ("Available disk space on the benchmark output drive is {0:N2} GB, but at least {1:N2} GB is required for the dataset copy and outputs." -f ($freeDiskBytes / 1GB), ($requiredFreeDiskBytes / 1GB))
+    }
+
+    if ($totalRows -gt $MaximumDatasetRows) {
+        Write-Warning ("Large benchmark dataset override enabled for {0} rows." -f $totalRows)
+    }
+
+    return [PSCustomObject]@{
+        manifest = $manifest
+        progress = $progress
+        totalRows = $totalRows
+        datasetBytes = $datasetBytes
+        availableMemoryGB = $availableMemoryGB
+        freeDiskGB = [math]::Round(($freeDiskBytes / 1GB), 2)
+        requiredFreeDiskGB = [math]::Round(($requiredFreeDiskBytes / 1GB), 2)
+    }
 }
 
 function Clear-BlobContainer {
@@ -306,13 +442,32 @@ function Build-AndDeploy-FunctionApp {
     }
 
     try {
-        Invoke-AzCli -Arguments @(
-            'functionapp', 'deployment', 'source', 'config-zip',
-            '--src', $zipPath,
-            '--name', $FunctionAppName,
-            '--resource-group', $FunctionAppResourceGroup,
-            '--output', 'none'
-        ) | Out-Null
+        $maxAttempts = 3
+        for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            try {
+                Invoke-AzCli -Arguments @(
+                    'functionapp', 'deployment', 'source', 'config-zip',
+                    '--src', $zipPath,
+                    '--name', $FunctionAppName,
+                    '--resource-group', $FunctionAppResourceGroup,
+                    '--output', 'none'
+                ) | Out-Null
+                break
+            }
+            catch {
+                if ($_.Exception.Message -match 'Deployment was partially successful') {
+                    Write-Warning 'Function App zip deployment reported partial success without retained logs. Continuing and relying on host readiness validation.'
+                    break
+                }
+
+                if ($attempt -ge $maxAttempts -or $_.Exception.Message -notmatch 'BadGatewayConnection|Bad Gateway') {
+                    throw
+                }
+
+                Write-Warning ("Function App zip deployment hit a transient gateway error (attempt {0}/{1}). Retrying..." -f $attempt, $maxAttempts)
+                Start-Sleep -Seconds (5 * $attempt)
+            }
+        }
     }
     finally {
         Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
@@ -629,7 +784,9 @@ function Remove-FunctionTraceFiles {
 
     $paths = @(
         'admin/vfs/tmp/FunctionsData/ExportAndGenerate.trace.log',
-        'admin/vfs/tmp/FunctionsData/FunctionProfile.trace.log'
+        'admin/vfs/tmp/FunctionsData/FunctionProfile.trace.log',
+        'admin/vfs/home/site/diagnostics/ExportAndGenerate.trace.log',
+        'admin/vfs/home/site/diagnostics/FunctionProfile.trace.log'
     )
 
     foreach ($path in $paths) {
@@ -640,6 +797,47 @@ function Remove-FunctionTraceFiles {
             Write-Verbose ("Ignoring trace cleanup failure for {0}: {1}" -f $path, $_.Exception.Message)
         }
     }
+}
+
+function Get-FunctionTraceFileContent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HostName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$MasterKey,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$CandidatePaths
+    )
+
+    foreach ($path in @($CandidatePaths)) {
+        try {
+            $response = Invoke-FunctionAdminRequest -Method Get -HostName $HostName -MasterKey $MasterKey -Path $path
+        }
+        catch {
+            $response = $_.Exception.Response
+            if ($null -ne $response -and [int]$response.StatusCode -in @(403, 404)) {
+                continue
+            }
+
+            throw
+        }
+
+        if ($null -eq $response) {
+            continue
+        }
+
+        $content = [string]$response.Content
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            continue
+        }
+
+        return $content
+    }
+
+    return $null
 }
 
 function Get-TraceEventsFromContent {
@@ -692,12 +890,35 @@ function Get-FunctionTraceEvents {
         [datetime]$NotBeforeUtc
     )
 
-    $response = Invoke-FunctionAdminRequest -Method Get -HostName $HostName -MasterKey $MasterKey -Path 'admin/vfs/tmp/FunctionsData/ExportAndGenerate.trace.log'
-    if ($null -eq $response) {
+    $content = Get-FunctionTraceFileContent -HostName $HostName -MasterKey $MasterKey -CandidatePaths @(
+        'admin/vfs/tmp/FunctionsData/ExportAndGenerate.trace.log',
+        'admin/vfs/home/site/diagnostics/ExportAndGenerate.trace.log'
+    )
+    if ([string]::IsNullOrWhiteSpace($content)) {
         return @()
     }
 
-    return @(Get-TraceEventsFromContent -Content $response.Content -NotBeforeUtc $NotBeforeUtc)
+    return @(Get-TraceEventsFromContent -Content $content -NotBeforeUtc $NotBeforeUtc)
+}
+
+function Get-FunctionTraceTerminalStatus {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Events
+    )
+
+    if (@($Events | Where-Object { [string]$_.message -match 'Pipeline Failed!|^Error:' }).Count -gt 0) {
+        return 'Failed'
+    }
+
+    if (@($Events | Where-Object { [string]$_.message -match 'Pipeline Complete!' }).Count -gt 0) {
+        return 'Completed'
+    }
+
+    return $null
 }
 
 function Start-RunbookBenchmark {
@@ -1178,6 +1399,7 @@ function Invoke-BaselineBenchmark {
     $effectiveFunctionMasterKey = Get-FunctionMasterKey
     Write-Host 'Waiting for Function App host readiness...'
     Wait-FunctionHostReady -HostName $FunctionHostName -MasterKey $effectiveFunctionMasterKey
+    Remove-FunctionTraceFiles -HostName $FunctionHostName -MasterKey $effectiveFunctionMasterKey
 
     $baselineOutputDirectory = Join-Path -Path $OutputRoot -ChildPath $BaselineName
     if (-not (Test-Path -LiteralPath $baselineOutputDirectory)) {
@@ -1196,9 +1418,13 @@ function Invoke-BaselineBenchmark {
     $functionCompleted = $false
     $functionCompletedUtc = $null
     $functionStatus = 'Running'
-    $functionDeadlineUtc = $functionInvokeStartedUtc.AddHours(2)
+    $functionTimeoutMinutes = [math]::Max(15, ([math]::Ceiling(([double]$TotalRows / 500000.0)) * 10))
+    $functionDeadlineUtc = $functionInvokeStartedUtc.AddMinutes($functionTimeoutMinutes)
     $functionExecutionActivity = $null
     $functionLastMetricPollUtc = [datetime]::MinValue
+    $functionEvents = @()
+    $functionLastTracePollUtc = [datetime]::MinValue
+    $functionTraceCompletedUtc = $null
 
     while (-not ($localState.completed -and $runbookCompleted -and $functionCompleted)) {
         Update-LocalBenchmark -State $localState
@@ -1212,6 +1438,7 @@ function Invoke-BaselineBenchmark {
         }
 
         if (-not $functionCompleted) {
+            $nowUtc = [datetime]::UtcNow
             $functionDashboardBlob = Get-BlobDetail -AccountName $FunctionStorageAccountName -ContainerName 'dashboards' -BlobName 'VulnerabilityDashboard.html'
             if ($null -ne $functionDashboardBlob) {
                 $lastModifiedUtc = ([datetimeoffset]$functionDashboardBlob.properties.lastModified).UtcDateTime
@@ -1222,15 +1449,33 @@ function Invoke-BaselineBenchmark {
                 }
             }
 
-            $nowUtc = [datetime]::UtcNow
+            if ((-not $functionCompleted) -and $nowUtc -ge $functionLastTracePollUtc.AddSeconds([math]::Max($PollIntervalSeconds, 15))) {
+                $functionEvents = @(Get-FunctionTraceEvents -HostName $FunctionHostName -MasterKey $effectiveFunctionMasterKey -NotBeforeUtc $functionInvokeStartedUtc)
+                $functionLastTracePollUtc = $nowUtc
+
+                $functionTraceTerminalStatus = Get-FunctionTraceTerminalStatus -Events $functionEvents
+                if ($functionTraceTerminalStatus -eq 'Failed') {
+                    $functionCompletedUtc = @($functionEvents | Where-Object { [string]$_.message -match 'Pipeline Failed!|^Error:' } | Sort-Object timestamp_utc | Select-Object -Last 1 | ForEach-Object { $_.timestamp_utc }) | Select-Object -First 1
+                    if ($null -eq $functionCompletedUtc) {
+                        $functionCompletedUtc = $nowUtc
+                    }
+                    $functionCompleted = $true
+                    $functionStatus = 'Failed'
+                }
+                elseif ($functionTraceTerminalStatus -eq 'Completed') {
+                    $functionTraceCompletedUtc = @($functionEvents | Where-Object { [string]$_.message -match 'Pipeline Complete!' } | Sort-Object timestamp_utc | Select-Object -Last 1 | ForEach-Object { $_.timestamp_utc }) | Select-Object -First 1
+                }
+            }
+
             if ((-not $functionCompleted) -and $nowUtc -ge $functionLastMetricPollUtc.AddSeconds([math]::Max($PollIntervalSeconds, 30))) {
                 $functionExecutionActivity = Get-FunctionExecutionActivity -ResourceId $FunctionResourceId -StartTimeUtc $functionInvokeStartedUtc.AddMinutes(-1) -EndTimeUtc $nowUtc
                 $functionLastMetricPollUtc = $nowUtc
-                if ($functionExecutionActivity.total_count -ge 1) {
-                    $functionCompletedUtc = if ($null -ne $functionExecutionActivity.latest_timestamp_utc) { $functionExecutionActivity.latest_timestamp_utc } else { $nowUtc }
-                    $functionCompleted = $true
-                    $functionStatus = 'FailedNoDashboard'
-                }
+            }
+
+            if ((-not $functionCompleted) -and $null -ne $functionTraceCompletedUtc -and $nowUtc -ge $functionTraceCompletedUtc.AddMinutes(2)) {
+                $functionCompletedUtc = $functionTraceCompletedUtc
+                $functionCompleted = $true
+                $functionStatus = 'FailedNoDashboard'
             }
 
             if ((-not $functionCompleted) -and [datetime]::UtcNow -ge $functionDeadlineUtc) {
@@ -1270,6 +1515,7 @@ function Invoke-BaselineBenchmark {
     else {
         [datetime]::UtcNow
     }
+    $functionEvents = @(Get-FunctionTraceEvents -HostName $FunctionHostName -MasterKey $effectiveFunctionMasterKey -NotBeforeUtc $functionInvokeStartedUtc)
     $functionMetricSummary = Get-FunctionMetricSummary -ResourceId $FunctionResourceId -StartTimeUtc $functionInvokeStartedUtc.AddMinutes(-1) -EndTimeUtc $functionMetricEndUtc
 
     $localResult = Get-LocalBenchmarkResult -State $localState -TotalRows $TotalRows
@@ -1298,7 +1544,7 @@ function Invoke-BaselineBenchmark {
         runbook_job_name = $runbookState.name
         function_invoked_at_utc = $functionInvokeStartedUtc
         runbook_events = $runbookEvents
-        function_events = @()
+        function_events = $functionEvents
     }
 }
 
@@ -1406,19 +1652,18 @@ if (-not (Test-Path -LiteralPath $outputDirectory)) {
     $null = New-Item -Path $outputDirectory -ItemType Directory -Force
 }
 
-$datasetManifestPath = Join-Path -Path $resolvedDatasetPath -ChildPath 'synthetic-manifest.json'
-$datasetManifest = if (Test-Path -LiteralPath $datasetManifestPath -PathType Leaf) {
-    Get-Content -LiteralPath $datasetManifestPath -Raw | ConvertFrom-Json -Depth 20
-}
-else {
-    $null
-}
-$totalRows = if ($null -ne $datasetManifest -and $datasetManifest.PSObject.Properties['actualCurrentRows'] -and $datasetManifest.PSObject.Properties['actualHistoryRows']) {
-    [int]$datasetManifest.actualCurrentRows + [int]$datasetManifest.actualHistoryRows
-}
-else {
-    0
-}
+$datasetPreflight = Assert-BenchmarkDatasetReady `
+    -DatasetPath $resolvedDatasetPath `
+    -OutputDirectory $outputDirectory `
+    -MaximumDatasetRows $MaximumDatasetRows `
+    -AllowLargeDataset ($AllowLargeDataset -eq $true) `
+    -MinimumAvailableMemoryGB $MinimumAvailableMemoryGB `
+    -MinimumFreeDiskGB $MinimumFreeDiskGB
+
+$datasetManifest = $datasetPreflight.manifest
+$totalRows = [int]$datasetPreflight.totalRows
+
+Write-Host ("Dataset preflight passed: {0} rows, {1:N2} GB on disk, {2} GB free memory, {3} GB free disk." -f $totalRows, ($datasetPreflight.datasetBytes / 1GB), $datasetPreflight.availableMemoryGB, $datasetPreflight.freeDiskGB)
 
 $subscription = Invoke-AzCli -Arguments @('account', 'show', '-o', 'json') -ExpectJson
 $functionHostName = Get-FunctionHostName
@@ -1467,6 +1712,13 @@ $result = [PSCustomObject]@{
         files = @(Get-DatasetFiles -Path $resolvedDatasetPath | ForEach-Object { $_.Name })
         manifest = $datasetManifest
         total_rows = $totalRows
+        dataset_bytes = [int64]$datasetPreflight.datasetBytes
+        progress_stage = if ($null -ne $datasetPreflight.progress) { [string]$datasetPreflight.progress.stage } else { $null }
+        preflight = [PSCustomObject]@{
+            available_memory_gb = $datasetPreflight.availableMemoryGB
+            free_disk_gb = $datasetPreflight.freeDiskGB
+            required_free_disk_gb = $datasetPreflight.requiredFreeDiskGB
+        }
     }
     current = $currentResult
     main = $mainResult
