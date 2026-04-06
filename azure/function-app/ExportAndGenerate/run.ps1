@@ -8800,6 +8800,182 @@ function Write-NormalizedCompactRecordFromLookup {
     Write-NormalizedCompactRecord -WriterState $WriterState -Record $Record
 }
 
+function Write-NormalizedSourceRow {
+    [CmdletBinding(DefaultParameterSetName = 'lookup')]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$WriterState,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$Record,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Context,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$ProcessedCount,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$FirstSeenValue,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$LastSeenValue,
+
+        [Parameter(Mandatory = $false)]
+        [ref]$FirstLastSwappedCount = ([ref]0),
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'lookup')]
+        [int]$DeviceIndex,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'lookup')]
+        [pscustomobject]$ContentLookup,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$DeviceId,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$DeviceName,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$GroupName,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$OsPlatform,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$OsVersion,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object[]]$MachineTags,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$SoftwareVendor,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$SoftwareName,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$RecommendationReference,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$CveId,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$CvssScore,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$SeverityLevel,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$ExploitabilityLevel,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$CveUrl,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$CveBatchTitle,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$RecommendedSecurityUpdate,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$RecommendedSecurityUpdateId,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$RecommendedSecurityUpdateUrl,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$SoftwareVersion,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object[]]$DiskPaths,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object[]]$RegistryPaths,
+
+        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [AllowNull()]
+        [object]$SecurityUpdateAvailable
+    )
+
+    $effectiveDeviceIndex = $DeviceIndex
+    $effectiveContentLookup = $ContentLookup
+
+    if ($PSCmdlet.ParameterSetName -eq 'source') {
+        $recordLookup = Get-NormalizedRecordLookup `
+            -DeviceId ([string]$DeviceId) `
+            -DeviceName $DeviceName `
+            -GroupName $GroupName `
+            -OsPlatform $OsPlatform `
+            -OsVersion $OsVersion `
+            -MachineTags $MachineTags `
+            -SoftwareVendor $SoftwareVendor `
+            -SoftwareName $SoftwareName `
+            -RecommendationReference $RecommendationReference `
+            -CveId $CveId `
+            -CvssScore $CvssScore `
+            -SeverityLevel $SeverityLevel `
+            -ExploitabilityLevel $ExploitabilityLevel `
+            -CveUrl $CveUrl `
+            -CveBatchTitle $CveBatchTitle `
+            -RecommendedSecurityUpdate $RecommendedSecurityUpdate `
+            -RecommendedSecurityUpdateId $RecommendedSecurityUpdateId `
+            -RecommendedSecurityUpdateUrl $RecommendedSecurityUpdateUrl `
+            -SoftwareVersion $SoftwareVersion `
+            -DiskPaths @($DiskPaths) `
+            -RegistryPaths @($RegistryPaths) `
+            -SecurityUpdateAvailable $SecurityUpdateAvailable `
+            -Context $Context
+
+        $effectiveDeviceIndex = $recordLookup.DeviceIndex
+        $effectiveContentLookup = $recordLookup.ContentLookup
+    }
+
+    $ProcessedCount.Value++
+
+    Write-NormalizedCompactRecordFromLookup `
+        -WriterState $WriterState `
+        -Record $Record `
+        -DeviceIndex $effectiveDeviceIndex `
+        -ContentLookup $effectiveContentLookup `
+        -Context $Context `
+        -FirstSeenValue $FirstSeenValue `
+        -LastSeenValue $LastSeenValue `
+        -FirstLastSwappedCount $FirstLastSwappedCount
+
+    if (($ProcessedCount.Value % 50000) -eq 0) {
+        Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $ProcessedCount.Value) -InformationAction Continue
+    }
+
+    if (($ProcessedCount.Value % 100000) -eq 0) {
+        Sync-NormalizedVulnWriter -WriterState $WriterState
+        Invoke-FullGarbageCollection
+    }
+}
+
 function Set-NormalizedCompactRecordValues {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
@@ -9033,26 +9209,16 @@ function Invoke-ContentStoreNormalization {
                             if (($contentTemplateIndexValue -lt 0) -or ($contentTemplateIndexValue -ge $contentTemplateCount)) { continue }
                             if (-not $deviceOnboardedFlags[$deviceProfileIndexValue]) { continue }
 
-                            $processedCountRef.Value++
-
-                            Write-NormalizedCompactRecordFromLookup `
+                            Write-NormalizedSourceRow `
                                 -WriterState $writerState `
                                 -Record ([object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) `
+                                -ProcessedCount $processedCountRef `
                                 -DeviceIndex $deviceLookupIndices[$deviceProfileIndexValue] `
                                 -ContentLookup $contentLookupCache[$contentTemplateIndexValue] `
                                 -Context $Context `
                                 -FirstSeenValue $firstSeenValue `
                                 -LastSeenValue $lastSeenValue `
                                 -FirstLastSwappedCount $firstLastSwappedCountRef
-
-                            if (($processedCountRef.Value % 50000) -eq 0) {
-                                Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCountRef.Value) -InformationAction Continue
-                            }
-
-                            if (($processedCountRef.Value % 100000) -eq 0) {
-                                Sync-NormalizedVulnWriter -WriterState $writerState
-                                Invoke-FullGarbageCollection
-                            }
                         }
                         finally {
                             $document.Dispose()
@@ -9085,10 +9251,10 @@ function Invoke-ContentStoreNormalization {
                                     $fv = if ($elements.Current.ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $elements.Current.GetString() }
                                     [void]$elements.MoveNext()
                                     $lv = if ($elements.Current.ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $elements.Current.GetString() }
-                                    $processedCountRef.Value++
-                                    Write-NormalizedCompactRecordFromLookup `
+                                    Write-NormalizedSourceRow `
                                         -WriterState $writerState `
                                         -Record ([object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) `
+                                        -ProcessedCount $processedCountRef `
                                         -DeviceIndex $deviceLookupIndices[$dpv] `
                                         -ContentLookup $contentLookupCache[$ctv] `
                                         -Context $Context `
@@ -9477,9 +9643,10 @@ function Invoke-RawStoreNormalization {
 
                         if ($isOnboarded -ne $true) { return }
 
-                        $processedCountRef.Value++
-
-                        $recordLookup = Get-NormalizedRecordLookup `
+                        Write-NormalizedSourceRow `
+                            -WriterState $writerState `
+                            -Record $compactRecord `
+                            -ProcessedCount $processedCountRef `
                             -DeviceId $deviceId `
                             -DeviceName $deviceName `
                             -GroupName $groupName `
@@ -9502,26 +9669,10 @@ function Invoke-RawStoreNormalization {
                             -DiskPaths @($rawDiskPaths) `
                             -RegistryPaths @($rawRegPaths) `
                             -SecurityUpdateAvailable $secUpdateAvail `
-                            -Context $Context
-
-                        Write-NormalizedCompactRecordFromLookup `
-                            -WriterState $writerState `
-                            -Record $compactRecord `
-                            -DeviceIndex $recordLookup.DeviceIndex `
-                            -ContentLookup $recordLookup.ContentLookup `
                             -Context $Context `
                             -FirstSeenValue $seenFirstValue `
                             -LastSeenValue $seenLastValue `
                             -FirstLastSwappedCount $firstLastSwappedCountRef
-
-                        if (($processedCountRef.Value % 50000) -eq 0) {
-                            Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCountRef.Value) -InformationAction Continue
-                        }
-
-                        if (($processedCountRef.Value % 100000) -eq 0) {
-                            Sync-NormalizedVulnWriter -WriterState $writerState
-                            Invoke-FullGarbageCollection
-                        }
                 }
 
                 if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
@@ -10050,9 +10201,10 @@ function ConvertTo-NormalizedData {
             Get-NormalizationSourceRows -DataPath $DataPath -SkipObservedWindowMerge:$effectiveSkipObservedWindowMerge | ForEach-Object {
                 $v = $_
                 if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { return }
-                $processedCount++
-
-                $recordLookup = Get-NormalizedRecordLookup `
+                Write-NormalizedSourceRow `
+                    -WriterState $writerState `
+                    -Record $compactRecord `
+                    -ProcessedCount ([ref]$processedCount) `
                     -DeviceId ([string]$v.DeviceId) `
                     -DeviceName $v.PSObject.Properties['DeviceName']?.Value `
                     -GroupName $v.PSObject.Properties['RbacGroupName']?.Value `
@@ -10075,26 +10227,10 @@ function ConvertTo-NormalizedData {
                     -DiskPaths @($v.PSObject.Properties['DiskPaths']?.Value) `
                     -RegistryPaths @($v.PSObject.Properties['RegistryPaths']?.Value) `
                     -SecurityUpdateAvailable $v.PSObject.Properties['SecurityUpdateAvailable']?.Value `
-                    -Context $context
-
-                Write-NormalizedCompactRecordFromLookup `
-                    -WriterState $writerState `
-                    -Record $compactRecord `
-                    -DeviceIndex $recordLookup.DeviceIndex `
-                    -ContentLookup $recordLookup.ContentLookup `
                     -Context $context `
                     -FirstSeenValue $v.PSObject.Properties['FirstSeenTimestamp']?.Value `
                     -LastSeenValue $v.PSObject.Properties['LastSeenTimestamp']?.Value `
                     -FirstLastSwappedCount ([ref]$firstLastSwappedCount)
-
-                if (($processedCount % 50000) -eq 0) {
-                    Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCount) -InformationAction Continue
-                }
-
-                if (($processedCount % 100000) -eq 0) {
-                    Sync-NormalizedVulnWriter -WriterState $writerState
-                    Invoke-FullGarbageCollection
-                }
             }
 
             Sync-NormalizedVulnWriter -WriterState $writerState
