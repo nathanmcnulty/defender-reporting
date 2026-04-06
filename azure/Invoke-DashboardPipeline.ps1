@@ -2784,11 +2784,16 @@ function Get-VulnDeviceProfileSignature {
         $Row
     )
 
+    $deviceId = [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceId')
+    if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
+        return $deviceId
+    }
+
     $machineTags = @((Get-VulnPropertyValue -InputObject $Row -Name 'MachineTags'))
     $valueDelimiter = [string][char]0x001f
     $listDelimiter = [string][char]0x001e
     return @(
-        [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceId')
+        $deviceId
         [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceName')
         [string](Get-VulnPropertyValue -InputObject $Row -Name 'RbacGroupName')
         [string](Get-VulnPropertyValue -InputObject $Row -Name 'OSPlatform')
@@ -3053,36 +3058,382 @@ function Publish-VulnContentStoreUnlocked {
             $fileStream = $null
             $gzipStream = $null
             $writer = $null
+            $valueDelimiter = [string][char]0x001f
+            $listDelimiter = [string][char]0x001e
             try {
                 $fileStream = [System.IO.File]::Create($OutputPath)
                 $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
                 $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
 
-                Read-VulnNdjsonRecordsFromPath -Path $InputPath | ForEach-Object {
-                    $row = $_
-                    if ($null -eq $row) { return }
+                Invoke-VulnNdjsonJsonRootAction -Path $InputPath -Action {
+                    param([System.Text.Json.JsonElement]$root)
 
-                    $deviceSignature = Get-VulnDeviceProfileSignature -Row $row
+                    $deviceId = ''
+                    $deviceName = ''
+                    $groupName = ''
+                    $osPlatform = ''
+                    $osVersion = ''
+                    $machineTags = @()
+                    $isOnboarded = $false
+                    $cveId = ''
+                    $softwareVendor = ''
+                    $softwareName = ''
+                    $softwareVersion = ''
+                    $severityLevel = ''
+                    $cvssScore = $null
+                    $exploitabilityLevel = ''
+                    $recommendationReference = ''
+                    $recommendedSecurityUpdate = ''
+                    $recommendedSecurityUpdateId = ''
+                    $recommendedSecurityUpdateUrl = ''
+                    $securityUpdateAvailable = $false
+                    $diskPaths = @()
+                    $registryPaths = @()
+                    $cveBatchTitle = ''
+                    $cveBatchUrl = ''
+                    $id = ''
+                    $firstSeenTimestamp = ''
+                    $lastSeenTimestamp = ''
+
+                    foreach ($jsonProperty in $root.EnumerateObject()) {
+                        $propertyValue = $jsonProperty.Value
+                        switch ($jsonProperty.Name) {
+                            'DeviceId' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $deviceId = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $deviceId = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'DeviceName' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $deviceName = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $deviceName = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'RbacGroupName' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $groupName = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $groupName = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'OSPlatform' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $osPlatform = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $osPlatform = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'OSVersion' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $osVersion = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $osVersion = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'MachineTags' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+                                    $tagValues = [System.Collections.Generic.List[string]]::new()
+                                    foreach ($tagValueElement in $propertyValue.EnumerateArray()) {
+                                        $tagValue = if ($tagValueElement.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                            $tagValueElement.GetString()
+                                        }
+                                        else {
+                                            Convert-JsonElementToScalarValue -Element $tagValueElement
+                                        }
+                                        if ($null -ne $tagValue -and -not [string]::IsNullOrWhiteSpace([string]$tagValue)) {
+                                            [void]$tagValues.Add([string]$tagValue)
+                                        }
+                                    }
+                                    $machineTags = [string[]]$tagValues.ToArray()
+                                }
+                            }
+                            'IsOnboarded' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::True) {
+                                    $isOnboarded = $true
+                                }
+                                elseif ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::False) {
+                                    $isOnboarded = $false
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $isOnboarded = ((Convert-JsonElementToScalarValue -Element $propertyValue) -eq $true)
+                                }
+                            }
+                            'CveId' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $cveId = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $cveId = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'SoftwareVendor' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $softwareVendor = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $softwareVendor = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'SoftwareName' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $softwareName = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $softwareName = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'SoftwareVersion' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $softwareVersion = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $softwareVersion = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'VulnerabilitySeverityLevel' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $severityLevel = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $severityLevel = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'CvssScore' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $cvssScore = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Number) {
+                                    $cvssInt64 = 0L
+                                    if ($propertyValue.TryGetInt64([ref]$cvssInt64)) {
+                                        $cvssScore = $cvssInt64
+                                    }
+                                    else {
+                                        $cvssDouble = 0.0
+                                        if ($propertyValue.TryGetDouble([ref]$cvssDouble)) {
+                                            $cvssScore = $cvssDouble
+                                        }
+                                        else {
+                                            $cvssScore = $propertyValue.GetRawText()
+                                        }
+                                    }
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $cvssScore = Convert-JsonElementToScalarValue -Element $propertyValue
+                                }
+                            }
+                            'ExploitabilityLevel' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $exploitabilityLevel = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $exploitabilityLevel = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'RecommendationReference' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $recommendationReference = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $recommendationReference = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'RecommendedSecurityUpdate' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $recommendedSecurityUpdate = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $recommendedSecurityUpdate = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'RecommendedSecurityUpdateId' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $recommendedSecurityUpdateId = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $recommendedSecurityUpdateId = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'RecommendedSecurityUpdateUrl' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $recommendedSecurityUpdateUrl = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $recommendedSecurityUpdateUrl = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'SecurityUpdateAvailable' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::True) {
+                                    $securityUpdateAvailable = $true
+                                }
+                                elseif ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::False) {
+                                    $securityUpdateAvailable = $false
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $securityUpdateAvailable = ((Convert-JsonElementToScalarValue -Element $propertyValue) -eq $true)
+                                }
+                            }
+                            'DiskPaths' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+                                    $diskPathValues = [System.Collections.Generic.List[string]]::new()
+                                    foreach ($diskPathElement in $propertyValue.EnumerateArray()) {
+                                        $diskPathValue = if ($diskPathElement.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                            $diskPathElement.GetString()
+                                        }
+                                        else {
+                                            Convert-JsonElementToScalarValue -Element $diskPathElement
+                                        }
+                                        if ($null -ne $diskPathValue -and -not [string]::IsNullOrWhiteSpace([string]$diskPathValue)) {
+                                            [void]$diskPathValues.Add([string]$diskPathValue)
+                                        }
+                                    }
+                                    $diskPaths = [string[]]$diskPathValues.ToArray()
+                                }
+                            }
+                            'RegistryPaths' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+                                    $registryPathValues = [System.Collections.Generic.List[string]]::new()
+                                    foreach ($registryPathElement in $propertyValue.EnumerateArray()) {
+                                        $registryPathValue = if ($registryPathElement.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                            $registryPathElement.GetString()
+                                        }
+                                        else {
+                                            Convert-JsonElementToScalarValue -Element $registryPathElement
+                                        }
+                                        if ($null -ne $registryPathValue -and -not [string]::IsNullOrWhiteSpace([string]$registryPathValue)) {
+                                            [void]$registryPathValues.Add([string]$registryPathValue)
+                                        }
+                                    }
+                                    $registryPaths = [string[]]$registryPathValues.ToArray()
+                                }
+                            }
+                            'CveBatchTitle' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $cveBatchTitle = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $cveBatchTitle = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'CveBatchUrl' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $cveBatchUrl = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $cveBatchUrl = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'Id' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $id = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $id = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'FirstSeenTimestamp' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $firstSeenTimestamp = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $firstSeenTimestamp = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'LastSeenTimestamp' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $lastSeenTimestamp = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $lastSeenTimestamp = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                        }
+                    }
+
+                    if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
+                        $deviceSignature = $deviceId
+                    }
+                    else {
+                        $deviceSignature = @(
+                            $deviceId
+                            $deviceName
+                            $groupName
+                            $osPlatform
+                            $osVersion
+                            ($machineTags -join $listDelimiter)
+                            [string]$isOnboarded
+                        ) -join $valueDelimiter
+                    }
                     if (-not $deviceProfileIndex.ContainsKey($deviceSignature)) {
                         $deviceProfileIndex[$deviceSignature] = $deviceProfiles.Count
-                        [void]$deviceProfiles.Add((ConvertTo-VulnDeviceProfileTemplate -Row $row))
+                        [void]$deviceProfiles.Add([PSCustomObject]@{
+                            id = $deviceId
+                            n = $deviceName
+                            g = $groupName
+                            o = $osPlatform
+                            ov = $osVersion
+                            t = $machineTags
+                            ob = $isOnboarded
+                        })
                     }
                     $deviceIndexValue = [int]$deviceProfileIndex[$deviceSignature]
 
-                    $contentSignature = Get-VulnContentTemplateSignature -Row $row
+                    $contentSignature = @(
+                        $cveId
+                        $softwareVendor
+                        $softwareName
+                        $softwareVersion
+                        $severityLevel
+                        [string]$cvssScore
+                        $exploitabilityLevel
+                        $recommendationReference
+                        $recommendedSecurityUpdate
+                        $recommendedSecurityUpdateId
+                        $recommendedSecurityUpdateUrl
+                        [string]$securityUpdateAvailable
+                        ($diskPaths -join $listDelimiter)
+                        ($registryPaths -join $listDelimiter)
+                        $cveBatchTitle
+                        $cveBatchUrl
+                    ) -join $valueDelimiter
                     if (-not $contentTemplateIndex.ContainsKey($contentSignature)) {
                         $contentTemplateIndex[$contentSignature] = $contentTemplates.Count
-                        [void]$contentTemplates.Add((ConvertTo-VulnContentTemplate -Row $row))
+                        [void]$contentTemplates.Add([PSCustomObject]@{
+                            c = $cveId
+                            sv = $softwareVendor
+                            sn = $softwareName
+                            ver = $softwareVersion
+                            sev = $severityLevel
+                            sc = $cvssScore
+                            ex = $exploitabilityLevel
+                            rr = $recommendationReference
+                            ru = $recommendedSecurityUpdate
+                            rid = $recommendedSecurityUpdateId
+                            url = $recommendedSecurityUpdateUrl
+                            ua = $securityUpdateAvailable
+                            dp = $diskPaths
+                            rp = $registryPaths
+                            bt = $cveBatchTitle
+                            bu = $cveBatchUrl
+                        })
                     }
                     $contentIndexValue = [int]$contentTemplateIndex[$contentSignature]
-
-                    Write-VulnObservationRefLine `
-                        -Writer $writer `
-                        -Id ([string](Get-VulnPropertyValue -InputObject $row -Name 'Id')) `
-                        -DeviceProfileIndex $deviceIndexValue `
-                        -ContentTemplateIndex $contentIndexValue `
-                        -FirstSeenTimestamp ([string](Get-VulnPropertyValue -InputObject $row -Name 'FirstSeenTimestamp')) `
-                        -LastSeenTimestamp ([string](Get-VulnPropertyValue -InputObject $row -Name 'LastSeenTimestamp'))
+                    $writer.WriteLine((
+                        '[' +
+                        (Convert-ToJsonStringLiteral -Value $id) + ',' +
+                        $deviceIndexValue + ',' +
+                        $contentIndexValue + ',' +
+                        (Convert-ToJsonStringLiteral -Value $firstSeenTimestamp) + ',' +
+                        (Convert-ToJsonStringLiteral -Value $lastSeenTimestamp) +
+                        ']'
+                    ))
                 }
             }
             finally {
@@ -3166,390 +3517,8 @@ function Publish-VulnContentStoreUnlocked {
 }
 
 
-# =============================================================================
-# TEMPORARY LEGACY VULNERABILITY MIGRATION HELPERS
-# Remove after $Script:LegacyVulnMigrationRemovalDate once legacy VulnExport_* snapshots
-# are no longer supported.
-# =============================================================================
-
-function Test-VulnStoreRequiresCanonicalRepair {
-    [CmdletBinding()]
-    [OutputType([bool])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$BasePath,
-
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyCollection()]
-        [object[]]$HistoryDocuments
-    )
-
-    $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue)
-    if (@($historyFiles | Where-Object { $_.BaseName -match '^VulnHistory_\d{4}$' }).Count -gt 0) {
-        return $true
-    }
-
-    foreach ($historyDocument in @($HistoryDocuments)) {
-        $periodKey = Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument
-        $rowsPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
-        if (-not (Test-Path -LiteralPath $rowsPath -PathType Leaf)) {
-            return $true
-        }
-    }
-
-    return $false
-}
-
-function Publish-VulnStoreExistingCanonicalState {
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$BasePath,
-
-        [Parameter(Mandatory = $false)]
-        [AllowNull()]
-        [string]$LatestSnapshotDate
-    )
-
-    $currentPath = Get-VulnCurrentPath -BasePath $BasePath
-    $historyDocuments = @(Get-VulnHistoryDocumentList -BasePath $BasePath)
-    $requiresCanonicalRepair = Test-VulnStoreRequiresCanonicalRepair -BasePath $BasePath -HistoryDocuments $historyDocuments
-    if ($requiresCanonicalRepair) {
-        $currentRecords = if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
-            @(Read-VulnNdjsonRecordsFromPath -Path $currentPath)
-        }
-        else {
-            @()
-        }
-
-        [void](Publish-VulnStoreUnlocked -BasePath $BasePath -Store ([PSCustomObject]@{
-            CurrentRecords = $currentRecords
-            HistoryDocuments = $historyDocuments
-            LatestSnapshotDate = $LatestSnapshotDate
-        }))
-    }
-
-    $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
-    $currentRows = if (Test-Path -LiteralPath $currentPath -PathType Leaf) { Test-VulnCurrentFile -Path $currentPath } else { 0 }
-    Publish-VulnContentStoreUnlocked -BasePath $BasePath
-
-    return [PSCustomObject]@{
-        CurrentRows = $currentRows
-        HistoryYears = if ($historyPeriodCount -gt 0) { $historyPeriodCount } else { $historyDocuments.Count }
-        LatestSnapshotDate = $LatestSnapshotDate
-        MigratedLegacy = $requiresCanonicalRepair
-    }
-}
-
-function Get-VulnLegacyFilesBySnapshotDate {
-    [CmdletBinding()]
-    [OutputType([hashtable])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [System.IO.FileInfo[]]$LegacyFiles,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$SnapshotDates
-    )
-
-    $filesByDate = @{}
-    foreach ($file in @($LegacyFiles)) {
-        $date = Get-VulnSnapshotDateFromName -Name $file.Name
-        if ($date -notin $SnapshotDates) { continue }
-        if (-not $filesByDate.ContainsKey($date)) {
-            $filesByDate[$date] = [System.Collections.Generic.List[object]]::new()
-        }
-        $filesByDate[$date].Add($file)
-    }
-
-    return $filesByDate
-}
-
-function Publish-VulnStoreFromLegacySnapshot {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '')]
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$BasePath,
-
-        [Parameter(Mandatory = $false)]
-        [string[]]$LegacyFilePaths,
-
-        [Parameter(Mandatory = $false)]
-        [switch]$RemoveLegacyFiles
-    )
-
-    if ([datetime]::UtcNow -ge [datetime]$Script:LegacyVulnMigrationRemovalDate) {
-        Write-Warning "Legacy vulnerability migration is past its scheduled removal date ($Script:LegacyVulnMigrationRemovalDate). This code path should be removed."
-    }
-
-    $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath -LegacyFilePaths $LegacyFilePaths)
-
-    if ($legacyFiles.Count -eq 0) {
-        throw "No legacy VulnExport snapshot files found in '$BasePath'."
-    }
-
-    $publishOutput = @(Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
-        Restore-StoreTransaction -BasePath $BasePath -StoreName 'vuln'
-
-        $storeExists = Test-VulnStoreExistence -BasePath $BasePath
-        $partitionCount = $Script:VulnDiskPartitionCount
-        $latestKnownSnapshot = if ($storeExists) { Get-VulnStoreLatestSnapshotDate -BasePath $BasePath } else { $null }
-        $snapshotDates = @($legacyFiles | ForEach-Object { Get-VulnSnapshotDateFromName -Name $_.Name } | Sort-Object -Unique)
-
-        if (-not [string]::IsNullOrWhiteSpace($latestKnownSnapshot)) {
-            $duplicateLatestDates = @($snapshotDates | Where-Object { ([datetime]$_) -eq ([datetime]$latestKnownSnapshot) })
-            if ($duplicateLatestDates.Count -gt 0) {
-                Write-Verbose "Skipping legacy snapshot dates already represented by the current store latest snapshot date. StoreLatest=$latestKnownSnapshot Incoming=$($duplicateLatestDates -join ', ')"
-                $snapshotDates = @($snapshotDates | Where-Object { ([datetime]$_) -ne ([datetime]$latestKnownSnapshot) })
-            }
-
-            $backfillDates = @($snapshotDates | Where-Object { ([datetime]$_) -lt ([datetime]$latestKnownSnapshot) })
-            if ($backfillDates.Count -gt 0) {
-                throw ("Legacy snapshot date(s) {0} are older than the current store latest snapshot date {1}. Incremental import would skip or mis-order those older snapshots. Rebuild the vulnerability store from the full legacy snapshot set before importing backfilled history." -f ($backfillDates -join ', '), $latestKnownSnapshot)
-            }
-        }
-
-        if ($snapshotDates.Count -eq 0 -and $storeExists) {
-            $canonicalState = Publish-VulnStoreExistingCanonicalState -BasePath $BasePath -LatestSnapshotDate $latestKnownSnapshot
-            return [PSCustomObject]@{
-                DownloadedFiles = $legacyFiles.Count
-                CurrentRows = $canonicalState.CurrentRows
-                HistoryYears = $canonicalState.HistoryYears
-                LatestSnapshotDate = $canonicalState.LatestSnapshotDate
-                MigratedLegacy = $canonicalState.MigratedLegacy
-                RemovedLegacyFiles = $false
-            }
-        }
-
-        $filesByDate = Get-VulnLegacyFilesBySnapshotDate -LegacyFiles $legacyFiles -SnapshotDates $snapshotDates
-
-        $stageRoot = Join-Path $BasePath ('.vuln-store-staging-' + [guid]::NewGuid().ToString('N'))
-        [void](New-Item -Path $stageRoot -ItemType Directory -Force)
-
-        $historyAppendState = @{}
-        try {
-            $currentPath = Get-VulnCurrentPath -BasePath $BasePath
-            $currentPartitionRoot = Join-Path $stageRoot 'current-partitions'
-            [void](New-Item -Path $currentPartitionRoot -ItemType Directory -Force)
-            if ($storeExists -and (Test-Path -LiteralPath $currentPath -PathType Leaf)) {
-                [void](Split-VulnJsonPartition -InputPaths @($currentPath) -OutputRoot $currentPartitionRoot -Prefix 'current' -PartitionCount $partitionCount)
-            }
-
-            Write-Output ("  Canonicalizing {0} new snapshot date(s) across {1} file(s) using {2} disk partition(s)..." -f $snapshotDates.Count, $legacyFiles.Count, $partitionCount)
-            foreach ($snapshotDate in $snapshotDates) {
-                $closedOn = Get-VulnPreviousDay -Date $snapshotDate
-                $snapshotPartitionRoot = Join-Path $stageRoot ('snapshot-' + $snapshotDate)
-                [void](New-Item -Path $snapshotPartitionRoot -ItemType Directory -Force)
-                $snapshotFilesForDate = @($filesByDate[$snapshotDate] ?? @())
-                $snapshotIndex = [array]::IndexOf($snapshotDates, $snapshotDate) + 1
-                Write-Output ("  [{0}/{1}] Processing snapshot date {2} from {3} file(s)..." -f $snapshotIndex, $snapshotDates.Count, $snapshotDate, $snapshotFilesForDate.Count)
-                if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
-                    Write-MemoryUsage -Label ("VulnStore " + $snapshotDate + " Start")
-                }
-
-                try {
-                    [void](Split-VulnJsonPartition `
-                        -InputPaths @($snapshotFilesForDate | ForEach-Object { $_.FullName }) `
-                        -OutputRoot $snapshotPartitionRoot `
-                        -Prefix 'snapshot' `
-                        -OnboardedOnly `
-                        -PartitionCount $partitionCount)
-
-                    for ($partitionIndex = 0; $partitionIndex -lt $partitionCount; $partitionIndex++) {
-                        $currentPartitionPath = Get-VulnPartitionFilePath -Root $currentPartitionRoot -Prefix 'current' -Index $partitionIndex
-                        $snapshotPartitionPath = Get-VulnPartitionFilePath -Root $snapshotPartitionRoot -Prefix 'snapshot' -Index $partitionIndex
-
-                        if (-not (Test-Path -LiteralPath $currentPartitionPath -PathType Leaf) -and -not (Test-Path -LiteralPath $snapshotPartitionPath -PathType Leaf)) {
-                            continue
-                        }
-
-                        $currentMap = Read-VulnPartitionMapFile -Path $currentPartitionPath
-                        $snapshotRows = Read-VulnPartitionMapFile -Path $snapshotPartitionPath
-
-                        foreach ($id in @($currentMap.Keys)) {
-                            if ($snapshotRows.ContainsKey($id)) { continue }
-
-                            $closedEntry = New-ClosedVulnEntry -Record ($currentMap[$id].Json | ConvertFrom-Json -Depth 20) -Reason 'removed' -ClosedOn $closedOn
-                            Add-VulnHistoryEntryToAppendStore -AppendStateByPeriod $historyAppendState -ScratchRoot $stageRoot -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry
-                        }
-
-                        foreach ($id in @($snapshotRows.Keys)) {
-                            $incomingVersion = $snapshotRows[$id]
-                            $incomingRecord = $incomingVersion.Json | ConvertFrom-Json -Depth 20
-                            $existing = $currentMap[$id]
-                            $versionStartDate = if ($null -eq $existing -or [string]::IsNullOrWhiteSpace([string]$existing.VersionStartDate)) {
-                                $snapshotDate
-                            }
-                            else {
-                                [string]$existing.VersionStartDate
-                            }
-
-                            if ($null -ne $existing -and [string]$existing.Signature -ne [string]$incomingVersion.Signature) {
-                                $closedEntry = New-ClosedVulnEntry -Record ($existing.Json | ConvertFrom-Json -Depth 20) -Reason 'changed' -ClosedOn $closedOn -ReplacementId $id
-                                Add-VulnHistoryEntryToAppendStore -AppendStateByPeriod $historyAppendState -ScratchRoot $stageRoot -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry
-                                $versionStartDate = $snapshotDate
-                            }
-
-                            $openRecord = New-OpenVulnRecord -Record $incomingRecord -VersionStartDate $versionStartDate
-                            $snapshotRows[$id] = [PSCustomObject]@{
-                                Json = $openRecord | ConvertTo-Json -Compress -Depth 20
-                                Signature = [string]$incomingVersion.Signature
-                                VersionStartDate = $versionStartDate
-                            }
-                        }
-
-                        [void](Write-VulnPartitionMapFile -Path $currentPartitionPath -RowsById $snapshotRows)
-                    }
-                }
-                finally {
-                    if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
-                        Write-MemoryUsage -Label ("VulnStore " + $snapshotDate + " End")
-                    }
-                    if (Test-Path -LiteralPath $snapshotPartitionRoot) {
-                        Remove-Item -LiteralPath $snapshotPartitionRoot -Recurse -Force -ErrorAction SilentlyContinue
-                    }
-                }
-            }
-
-            Close-VulnHistoryAppendStore -AppendStateByPeriod $historyAppendState
-
-            $stagedCurrentPath = Get-VulnCurrentPath -BasePath $stageRoot
-            [void](Write-VulnCurrentFileFromPartition -PartitionRoot $currentPartitionRoot -PartitionPrefix 'current' -OutputPath $stagedCurrentPath -PartitionCount $partitionCount)
-            $currentCount = Test-VulnCurrentFile -Path $stagedCurrentPath
-
-            $filesToPublish = [System.Collections.Generic.List[object]]::new()
-            $filesToPublish.Add([PSCustomObject]@{
-                StagePath = $stagedCurrentPath
-                TargetPath = Get-VulnCurrentPath -BasePath $BasePath
-            })
-
-            $existingHistoryByPeriod = @{}
-            foreach ($historyDocument in Get-VulnHistoryDocumentList -BasePath $BasePath) {
-                $existingHistoryByPeriod[(Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument)] = $historyDocument
-            }
-
-            $touchedPeriods = @($historyAppendState.Keys | Sort-Object)
-            foreach ($periodKey in $touchedPeriods) {
-                $appendState = $historyAppendState[$periodKey]
-                $existingDocument = if ($existingHistoryByPeriod.ContainsKey($periodKey)) {
-                    $existingHistoryByPeriod[$periodKey]
-                }
-                else {
-                    $null
-                }
-                $existingLatestDate = if ($null -ne $existingDocument) {
-                    Get-VulnHistoryDocumentLatestDate -HistoryDocument $existingDocument
-                }
-                else {
-                    $null
-                }
-
-                $finalLatestDate = Get-MaxVulnDate `
-                    -Primary $existingLatestDate `
-                    -Secondary ([string]$appendState.LatestDate)
-                $historyStagePath = Get-VulnHistoryPath -BasePath $stageRoot -PeriodKey $periodKey
-                Write-VulnHistoryDocumentFromAppendFile `
-                    -Path $historyStagePath `
-                    -PeriodKey $periodKey `
-                    -ExistingDocument $existingDocument `
-                    -AppendPath ([string]$appendState.AppendPath) `
-                    -LatestDate $finalLatestDate
-                [void](Test-VulnHistoryFileLightweight -Path $historyStagePath)
-                $historyRowsStagePath = Get-VulnHistoryRowsPath -BasePath $stageRoot -PeriodKey $periodKey
-                Write-VulnHistoryRowsFileFromAppendFile `
-                    -Path $historyRowsStagePath `
-                    -ExistingDocument $existingDocument `
-                    -AppendPath ([string]$appendState.AppendPath)
-
-                $filesToPublish.Add([PSCustomObject]@{
-                    StagePath = $historyStagePath
-                    TargetPath = Get-VulnHistoryPath -BasePath $BasePath -PeriodKey $periodKey
-                })
-                $filesToPublish.Add([PSCustomObject]@{
-                    StagePath = $historyRowsStagePath
-                    TargetPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
-                })
-            }
-
-            foreach ($periodKey in @($existingHistoryByPeriod.Keys | Sort-Object)) {
-                if ($periodKey -in $touchedPeriods) { continue }
-
-                $historyRowsTargetPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
-                if (Test-Path -LiteralPath $historyRowsTargetPath -PathType Leaf) { continue }
-
-                $historyRowsStagePath = Get-VulnHistoryRowsPath -BasePath $stageRoot -PeriodKey $periodKey
-                Write-VulnHistoryRowsFile -Path $historyRowsStagePath -HistoryDocument $existingHistoryByPeriod[$periodKey]
-                $filesToPublish.Add([PSCustomObject]@{
-                    StagePath = $historyRowsStagePath
-                    TargetPath = $historyRowsTargetPath
-                })
-            }
-
-            $finalHistoryPeriods = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($periodKey in $existingHistoryByPeriod.Keys) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
-            foreach ($periodKey in $touchedPeriods) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
-
-            $publishedHistoryNames = if ($finalHistoryPeriods.Count -gt 0) {
-                Get-VulnHistoryPublishedNameSet -PeriodKeys @($finalHistoryPeriods)
-            }
-            else {
-                [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            }
-            $historyFilesToRemove = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedHistoryNames
-            Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths $historyFilesToRemove
-            $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
-            Publish-VulnContentStoreUnlocked -BasePath $BasePath
-
-            return [PSCustomObject]@{
-                DownloadedFiles = $legacyFiles.Count
-                CurrentRows = $currentCount
-                HistoryYears = if ($historyPeriodCount -gt 0) { $historyPeriodCount } else { $finalHistoryPeriods.Count }
-                LatestSnapshotDate = if ($snapshotDates.Count -gt 0) { $snapshotDates[-1] } else { $latestKnownSnapshot }
-                MigratedLegacy = $true
-                RemovedLegacyFiles = $false
-            }
-        }
-        finally {
-            Close-VulnHistoryAppendStore -AppendStateByPeriod $historyAppendState
-            if (Test-Path -LiteralPath $stageRoot) {
-                Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
-            }
-        }
-    })
-
-    $publishResult = $null
-    foreach ($item in $publishOutput) {
-        if ($null -ne $item -and $item.PSObject.Properties.Match('MigratedLegacy').Count -gt 0) {
-            $publishResult = $item
-            continue
-        }
-
-        if ($null -ne $item) {
-            Write-Host ([string]$item)
-        }
-    }
-
-    if ($null -eq $publishResult) {
-        throw 'Publish-VulnStoreFromLegacySnapshot did not return a publish result.'
-    }
-
-    if ($RemoveLegacyFiles) {
-        foreach ($legacyFile in @(Get-VulnLegacySnapshotFile -BasePath $BasePath)) {
-            Remove-Item -Path $legacyFile.FullName -Force
-        }
-    }
-
-    return [PSCustomObject]@{
-        DownloadedFiles = $publishResult.DownloadedFiles
-        CurrentRows = $publishResult.CurrentRows
-        HistoryYears = $publishResult.HistoryYears
-        LatestSnapshotDate = $publishResult.LatestSnapshotDate
-        MigratedLegacy = $publishResult.MigratedLegacy
-        RemovedLegacyFiles = ($RemoveLegacyFiles -eq $true)
-    }
-}
+# Canonical vulnerability store readers and validators used by generation,
+# export refresh, and regression tests.
 
 function Read-VulnStoreRow {
     [CmdletBinding()]
@@ -3610,64 +3579,6 @@ function Read-VulnStoreRow {
     } | Write-Output
 }
 
-function Write-VulnCompatibilitySnapshotFromStore {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        $Store,
-
-        [Parameter(Mandatory = $true)]
-        [string]$OutputPath
-    )
-
-    $fileStream = [System.IO.File]::Create($OutputPath)
-    $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
-    $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
-    try {
-        foreach ($record in $Store.CurrentRecords) {
-            if ($null -eq $record) { continue }
-            $writer.WriteLine(($record | ConvertTo-Json -Compress -Depth 20))
-        }
-
-        foreach ($historyDocument in $Store.HistoryDocuments) {
-            foreach ($snapshot in $historyDocument.snapshots) {
-                foreach ($entry in $snapshot.closed) {
-                    $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
-                    if ($null -eq $row) { continue }
-                    $writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
-                }
-            }
-        }
-    }
-    finally {
-        $writer.Dispose()
-    }
-}
-
-function Write-VulnCompatibilitySnapshot {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$BasePath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$OutputPath
-    )
-
-    $fileStream = [System.IO.File]::Create($OutputPath)
-    $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
-    $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
-    try {
-        foreach ($record in Read-VulnStoreRow -BasePath $BasePath) {
-            if ($null -eq $record) { continue }
-            $writer.WriteLine(($record | ConvertTo-Json -Compress -Depth 20))
-        }
-    }
-    finally {
-        $writer.Dispose()
-    }
-}
-
 function Test-VulnCurrentFile {
     [CmdletBinding()]
     param(
@@ -3680,7 +3591,7 @@ function Test-VulnCurrentFile {
     foreach ($row in Read-VulnNdjsonRecordsFromPath -Path $Path) {
         $id = [string](Get-VulnPropertyValue -InputObject $row -Name 'Id')
         if ([string]::IsNullOrWhiteSpace($id)) {
-            throw "Current vulnerability store contains a row without Id."
+            throw 'Current vulnerability store contains a row without Id.'
         }
         if (-not $idSet.Add($id)) {
             throw "Current vulnerability store contains duplicate Id '$id'."
@@ -3870,284 +3781,395 @@ function Get-VulnStoreLatestSnapshotDate {
     return $maxDate
 }
 
-function Add-VulnHistoryEntry {
+
+# Bulk snapshot import helpers. The downloaded file names retain the historic
+# VulnExport_* shape, but local normalization no longer supports that format as
+# a first-class input.
+
+function Test-VulnStoreRequiresCanonicalRepair {
     [CmdletBinding()]
+    [OutputType([bool])]
     param(
         [Parameter(Mandatory = $true)]
-        [hashtable]$HistoryByPeriod,
+        [string]$BasePath,
 
         [Parameter(Mandatory = $true)]
-        [string]$SnapshotDate,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ClosedOn,
-
-        [Parameter(Mandatory = $true)]
-        $Entry,
-
-        [hashtable]$SnapshotMaps = $null
+        [AllowEmptyCollection()]
+        [object[]]$HistoryDocuments
     )
 
-    $periodKey = Get-VulnHistoryPeriodKeyFromDate -Date $ClosedOn
-    if (-not $HistoryByPeriod.ContainsKey($periodKey)) {
-        $HistoryByPeriod[$periodKey] = Get-VulnHistorySeed -PeriodKey $periodKey
+    $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue)
+    if (@($historyFiles | Where-Object { $_.BaseName -match '^VulnHistory_\d{4}$' }).Count -gt 0) {
+        return $true
     }
 
-    if ($null -ne $SnapshotMaps) {
-        if (-not $SnapshotMaps.ContainsKey($periodKey)) {
-            $SnapshotMaps[$periodKey] = Get-VulnHistorySnapshotMap -HistoryDocument $HistoryByPeriod[$periodKey]
-        }
-        $snapshotMap = $SnapshotMaps[$periodKey]
-        if (-not $snapshotMap.ContainsKey($SnapshotDate)) {
-            $newSnapshot = [PSCustomObject]@{ date = $SnapshotDate; closed = @() }
-            $HistoryByPeriod[$periodKey].snapshots += $newSnapshot
-            $snapshotMap[$SnapshotDate] = $newSnapshot
-        }
-    } else {
-        $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $HistoryByPeriod[$periodKey]
-        if (-not $snapshotMap.ContainsKey($SnapshotDate)) {
-            $HistoryByPeriod[$periodKey].snapshots += [PSCustomObject]@{ date = $SnapshotDate; closed = @() }
-            $snapshotMap = Get-VulnHistorySnapshotMap -HistoryDocument $HistoryByPeriod[$periodKey]
+    foreach ($historyDocument in @($HistoryDocuments)) {
+        $periodKey = Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument
+        $rowsPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
+        if (-not (Test-Path -LiteralPath $rowsPath -PathType Leaf)) {
+            return $true
         }
     }
 
-    $snapshotMap[$SnapshotDate].closed += $Entry
+    return $false
+}
 
-    $currentLatest = [string](Get-VulnPropertyValue -InputObject $HistoryByPeriod[$periodKey] -Name 'latestDate')
-    $newLatest = Get-MaxVulnDate -Primary $currentLatest -Secondary $SnapshotDate
-    if ($HistoryByPeriod[$periodKey] -is [System.Collections.IDictionary]) {
-        $HistoryByPeriod[$periodKey]['latestDate'] = $newLatest
-    } else {
-        $HistoryByPeriod[$periodKey] | Add-Member -NotePropertyName 'latestDate' -NotePropertyValue $newLatest -Force
+function Publish-VulnStoreExistingCanonicalState {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [string]$LatestSnapshotDate
+    )
+
+    $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+    $historyDocuments = @(Get-VulnHistoryDocumentList -BasePath $BasePath)
+    $requiresCanonicalRepair = Test-VulnStoreRequiresCanonicalRepair -BasePath $BasePath -HistoryDocuments $historyDocuments
+    if ($requiresCanonicalRepair) {
+        $currentRecords = if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
+            @(Read-VulnNdjsonRecordsFromPath -Path $currentPath)
+        }
+        else {
+            @()
+        }
+
+        [void](Publish-VulnStoreUnlocked -BasePath $BasePath -Store ([PSCustomObject]@{
+            CurrentRecords = $currentRecords
+            HistoryDocuments = $historyDocuments
+            LatestSnapshotDate = $LatestSnapshotDate
+        }))
+    }
+
+    $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
+    $currentRows = if (Test-Path -LiteralPath $currentPath -PathType Leaf) { Test-VulnCurrentFile -Path $currentPath } else { 0 }
+    Publish-VulnContentStoreUnlocked -BasePath $BasePath
+
+    return [PSCustomObject]@{
+        CurrentRows = $currentRows
+        HistoryYears = if ($historyPeriodCount -gt 0) { $historyPeriodCount } else { $historyDocuments.Count }
+        LatestSnapshotDate = $LatestSnapshotDate
+        CanonicalRepairPerformed = $requiresCanonicalRepair
     }
 }
 
-function Update-VulnStoreFromLegacySnapshot {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+function Get-VulnSnapshotFilesBySnapshotDate {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo[]]$SnapshotFiles,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$SnapshotDates
+    )
+
+    $filesByDate = @{}
+    foreach ($file in @($SnapshotFiles)) {
+        $date = Get-VulnSnapshotDateFromName -Name $file.Name
+        if ($date -notin $SnapshotDates) { continue }
+        if (-not $filesByDate.ContainsKey($date)) {
+            $filesByDate[$date] = [System.Collections.Generic.List[object]]::new()
+        }
+        $filesByDate[$date].Add($file)
+    }
+
+    return $filesByDate
+}
+
+function Publish-VulnStoreFromBulkSnapshot {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string]$BasePath,
 
         [Parameter(Mandatory = $false)]
-        [string[]]$LegacyFilePaths
+        [string[]]$SnapshotFilePaths,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$RemoveSnapshotFiles
     )
 
-    $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath -LegacyFilePaths $LegacyFilePaths)
+    $snapshotFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath -LegacyFilePaths $SnapshotFilePaths)
 
-    if ($legacyFiles.Count -eq 0) {
-        throw "No legacy VulnExport snapshot files found in '$BasePath'."
-    }
-
-    if (-not (Test-VulnStoreExistence -BasePath $BasePath)) {
-        return (Convert-LegacyVulnSnapshotsToStore -BasePath $BasePath)
-    }
-
-    $currentMap = @{}
-    $currentPath = Get-VulnCurrentPath -BasePath $BasePath
-    if (Test-Path -Path $currentPath) {
-        foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $currentPath) {
-            $id = [string](Get-VulnPropertyValue -InputObject $record -Name 'Id')
-            if ([string]::IsNullOrWhiteSpace($id)) { continue }
-
-            $versionStartDate = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $record -Name 'FirstSeenTimestamp')
-            $currentMap[$id] = [PSCustomObject]@{
-                Record = $record
-                Signature = Get-VulnCanonicalRowSignature -Row $record
-                VersionStartDate = $versionStartDate
-            }
-        }
-    }
-
-    $historyByPeriod = @{}
-    foreach ($document in Get-VulnHistoryDocumentList -BasePath $BasePath) {
-        $historyByPeriod[(Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $document)] = $document
-    }
-    $snapshotMaps = @{}
-
-    $latestKnownSnapshot = Get-VulnStoreLatestSnapshotDate -BasePath $BasePath
-    $snapshotDates = @($legacyFiles | ForEach-Object { Get-VulnSnapshotDateFromName -Name $_.Name } | Sort-Object -Unique)
-
-    if (-not [string]::IsNullOrWhiteSpace($latestKnownSnapshot)) {
-        $duplicateLatestDates = @($snapshotDates | Where-Object { ([datetime]$_) -eq ([datetime]$latestKnownSnapshot) })
-        if ($duplicateLatestDates.Count -gt 0) {
-            Write-Verbose "Skipping legacy snapshot dates already represented by the current store latest snapshot date. StoreLatest=$latestKnownSnapshot Incoming=$($duplicateLatestDates -join ', ')"
-            $snapshotDates = @($snapshotDates | Where-Object { ([datetime]$_) -ne ([datetime]$latestKnownSnapshot) })
+    if ($snapshotFiles.Count -eq 0) {
+        if (-not (Test-VulnStoreExistence -BasePath $BasePath)) {
+            throw "No downloaded vulnerability snapshot files were found in '$BasePath'."
         }
 
-        $backfillDates = @($snapshotDates | Where-Object { ([datetime]$_) -lt ([datetime]$latestKnownSnapshot) })
-        if ($backfillDates.Count -gt 0) {
-            throw ("Legacy snapshot date(s) {0} are older than the current store latest snapshot date {1}. Incremental import would skip or mis-order those older snapshots. Rebuild the vulnerability store from the full legacy snapshot set before importing backfilled history." -f ($backfillDates -join ', '), $latestKnownSnapshot)
-        }
-    }
-
-    if ($snapshotDates.Count -eq 0) {
+        $canonicalState = Publish-VulnStoreExistingCanonicalState -BasePath $BasePath -LatestSnapshotDate (Get-VulnStoreLatestSnapshotDate -BasePath $BasePath)
         return [PSCustomObject]@{
-            CurrentRecords = @($currentMap.Values | Sort-Object { $_.Record.Id } | ForEach-Object { $_.Record })
-            HistoryDocuments = @($historyByPeriod.Values | Sort-Object period)
-            SnapshotCount = 0
-            LatestSnapshotDate = $latestKnownSnapshot
+            DownloadedFiles = 0
+            CurrentRows = $canonicalState.CurrentRows
+            HistoryYears = $canonicalState.HistoryYears
+            LatestSnapshotDate = $canonicalState.LatestSnapshotDate
+            CanonicalRepairPerformed = $canonicalState.CanonicalRepairPerformed
+            RemovedSnapshotFiles = $false
         }
     }
 
-    $filesByDate = @{}
-    foreach ($file in $legacyFiles) {
-        $date = Get-VulnSnapshotDateFromName -Name $file.Name
-        if (-not $filesByDate.ContainsKey($date)) { $filesByDate[$date] = [System.Collections.Generic.List[object]]::new() }
-        $filesByDate[$date].Add($file)
-    }
+    $publishOutput = @(Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $BasePath -StoreName 'vuln'
 
-    foreach ($snapshotDate in $snapshotDates) {
-        $snapshotRows = @{}
-        foreach ($file in ($filesByDate[$snapshotDate] ?? @())) {
-            foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $file.FullName) {
-                $id = [string](Get-VulnPropertyValue -InputObject $record -Name 'Id')
-                if ([string]::IsNullOrWhiteSpace($id)) { continue }
-                if ((Get-VulnPropertyValue -InputObject $record -Name 'IsOnboarded') -ne $true) { continue }
-                $snapshotRows[$id] = $record
+        $storeExists = Test-VulnStoreExistence -BasePath $BasePath
+        $partitionCount = $Script:VulnDiskPartitionCount
+        $latestKnownSnapshot = if ($storeExists) { Get-VulnStoreLatestSnapshotDate -BasePath $BasePath } else { $null }
+        $snapshotDates = @($snapshotFiles | ForEach-Object { Get-VulnSnapshotDateFromName -Name $_.Name } | Sort-Object -Unique)
+
+        if (-not [string]::IsNullOrWhiteSpace($latestKnownSnapshot)) {
+            $duplicateLatestDates = @($snapshotDates | Where-Object { ([datetime]$_) -eq ([datetime]$latestKnownSnapshot) })
+            if ($duplicateLatestDates.Count -gt 0) {
+                Write-Verbose "Skipping snapshot dates already represented by the current store latest snapshot date. StoreLatest=$latestKnownSnapshot Incoming=$($duplicateLatestDates -join ', ')"
+                $snapshotDates = @($snapshotDates | Where-Object { ([datetime]$_) -ne ([datetime]$latestKnownSnapshot) })
+            }
+
+            $backfillDates = @($snapshotDates | Where-Object { ([datetime]$_) -lt ([datetime]$latestKnownSnapshot) })
+            if ($backfillDates.Count -gt 0) {
+                throw ("Snapshot date(s) {0} are older than the current store latest snapshot date {1}. Rebuild the vulnerability store from the full snapshot set before importing backfilled history." -f ($backfillDates -join ', '), $latestKnownSnapshot)
             }
         }
 
-        foreach ($id in @($currentMap.Keys)) {
-            if ($snapshotRows.ContainsKey($id)) { continue }
-
-            $closedOn = Get-VulnPreviousDay -Date $snapshotDate
-            $closedEntry = New-ClosedVulnEntry -Record $currentMap[$id].Record -Reason 'removed' -ClosedOn $closedOn
-            Add-VulnHistoryEntry -HistoryByPeriod $historyByPeriod -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry -SnapshotMaps $snapshotMaps
-            $currentMap.Remove($id)
-        }
-
-        foreach ($id in $snapshotRows.Keys) {
-            $record = $snapshotRows[$id]
-            $signature = Get-VulnCanonicalRowSignature -Row $record
-
-            if (-not $currentMap.ContainsKey($id)) {
-                $currentMap[$id] = [PSCustomObject]@{
-                    Record = New-OpenVulnRecord -Record $record -VersionStartDate $snapshotDate
-                    Signature = $signature
-                    VersionStartDate = $snapshotDate
-                }
-                continue
-            }
-
-            $currentVersion = $currentMap[$id]
-            if ($currentVersion.Signature -eq $signature) {
-                $versionStartDate = if ([string]::IsNullOrWhiteSpace($currentVersion.VersionStartDate)) { $snapshotDate } else { $currentVersion.VersionStartDate }
-                $currentMap[$id] = [PSCustomObject]@{
-                    Record = New-OpenVulnRecord -Record $record -VersionStartDate $versionStartDate
-                    Signature = $signature
-                    VersionStartDate = $versionStartDate
-                }
-                continue
-            }
-
-            $closedOn = Get-VulnPreviousDay -Date $snapshotDate
-            $closedEntry = New-ClosedVulnEntry -Record $currentVersion.Record -Reason 'changed' -ClosedOn $closedOn -ReplacementId $id
-            Add-VulnHistoryEntry -HistoryByPeriod $historyByPeriod -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry -SnapshotMaps $snapshotMaps
-
-            $currentMap[$id] = [PSCustomObject]@{
-                Record = New-OpenVulnRecord -Record $record -VersionStartDate $snapshotDate
-                Signature = $signature
-                VersionStartDate = $snapshotDate
-            }
-        }
-    }
-
-    return [PSCustomObject]@{
-        CurrentRecords = @($currentMap.Values | Sort-Object { $_.Record.Id } | ForEach-Object { $_.Record })
-        HistoryDocuments = @($historyByPeriod.Values | Sort-Object period)
-        SnapshotCount = $snapshotDates.Count
-        LatestSnapshotDate = $snapshotDates[-1]
-    }
-}
-
-function Convert-LegacyVulnSnapshotsToStore {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$BasePath
-    )
-
-    $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath)
-    if ($legacyFiles.Count -eq 0) {
-        throw "No legacy VulnExport snapshot files found in '$BasePath'."
-    }
-
-    $openVersions = @{}
-    $historyByPeriod = @{}
-    $snapshotMaps = @{}
-    $allSnapshotDates = @($legacyFiles | ForEach-Object { Get-VulnSnapshotDateFromName -Name $_.Name } | Sort-Object -Unique)
-    $lastSnapshotDate = $allSnapshotDates[-1]
-
-    $filesByDate = @{}
-    foreach ($file in $legacyFiles) {
-        $date = Get-VulnSnapshotDateFromName -Name $file.Name
-        if (-not $filesByDate.ContainsKey($date)) { $filesByDate[$date] = [System.Collections.Generic.List[object]]::new() }
-        $filesByDate[$date].Add($file)
-    }
-
-    foreach ($snapshotDate in $allSnapshotDates) {
-        $snapshotRows = @{}
-        foreach ($file in ($filesByDate[$snapshotDate] ?? @())) {
-            foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $file.FullName) {
-                $id = [string](Get-VulnPropertyValue -InputObject $record -Name 'Id')
-                if ([string]::IsNullOrWhiteSpace($id)) { continue }
-                if ((Get-VulnPropertyValue -InputObject $record -Name 'IsOnboarded') -ne $true) { continue }
-                $snapshotRows[$id] = $record
+        if ($snapshotDates.Count -eq 0 -and $storeExists) {
+            $canonicalState = Publish-VulnStoreExistingCanonicalState -BasePath $BasePath -LatestSnapshotDate $latestKnownSnapshot
+            return [PSCustomObject]@{
+                DownloadedFiles = $snapshotFiles.Count
+                CurrentRows = $canonicalState.CurrentRows
+                HistoryYears = $canonicalState.HistoryYears
+                LatestSnapshotDate = $canonicalState.LatestSnapshotDate
+                CanonicalRepairPerformed = $canonicalState.CanonicalRepairPerformed
+                RemovedSnapshotFiles = $false
             }
         }
 
-        foreach ($id in @($openVersions.Keys)) {
-            if (-not $snapshotRows.ContainsKey($id)) {
+        $filesByDate = Get-VulnSnapshotFilesBySnapshotDate -SnapshotFiles $snapshotFiles -SnapshotDates $snapshotDates
+
+        $stageRoot = Join-Path $BasePath ('.vuln-store-staging-' + [guid]::NewGuid().ToString('N'))
+        [void](New-Item -Path $stageRoot -ItemType Directory -Force)
+
+        $historyAppendState = @{}
+        try {
+            $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+            $currentPartitionRoot = Join-Path $stageRoot 'current-partitions'
+            [void](New-Item -Path $currentPartitionRoot -ItemType Directory -Force)
+            if ($storeExists -and (Test-Path -LiteralPath $currentPath -PathType Leaf)) {
+                [void](Split-VulnJsonPartition -InputPaths @($currentPath) -OutputRoot $currentPartitionRoot -Prefix 'current' -PartitionCount $partitionCount)
+            }
+
+            Write-Output ("  Canonicalizing {0} new snapshot date(s) across {1} file(s) using {2} disk partition(s)..." -f $snapshotDates.Count, $snapshotFiles.Count, $partitionCount)
+            foreach ($snapshotDate in $snapshotDates) {
                 $closedOn = Get-VulnPreviousDay -Date $snapshotDate
-                $closedEntry = New-ClosedVulnEntry -Record $openVersions[$id].Record -Reason 'removed' -ClosedOn $closedOn
-                Add-VulnHistoryEntry -HistoryByPeriod $historyByPeriod -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry -SnapshotMaps $snapshotMaps
-                $openVersions.Remove($id)
+                $snapshotPartitionRoot = Join-Path $stageRoot ('snapshot-' + $snapshotDate)
+                [void](New-Item -Path $snapshotPartitionRoot -ItemType Directory -Force)
+                $snapshotFilesForDate = @($filesByDate[$snapshotDate] ?? @())
+                $snapshotIndex = [array]::IndexOf($snapshotDates, $snapshotDate) + 1
+                Write-Output ("  [{0}/{1}] Processing snapshot date {2} from {3} file(s)..." -f $snapshotIndex, $snapshotDates.Count, $snapshotDate, $snapshotFilesForDate.Count)
+                if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+                    Write-MemoryUsage -Label ("VulnStore " + $snapshotDate + ' Start')
+                }
+
+                try {
+                    [void](Split-VulnJsonPartition `
+                        -InputPaths @($snapshotFilesForDate | ForEach-Object { $_.FullName }) `
+                        -OutputRoot $snapshotPartitionRoot `
+                        -Prefix 'snapshot' `
+                        -OnboardedOnly `
+                        -PartitionCount $partitionCount)
+
+                    for ($partitionIndex = 0; $partitionIndex -lt $partitionCount; $partitionIndex++) {
+                        $currentPartitionPath = Get-VulnPartitionFilePath -Root $currentPartitionRoot -Prefix 'current' -Index $partitionIndex
+                        $snapshotPartitionPath = Get-VulnPartitionFilePath -Root $snapshotPartitionRoot -Prefix 'snapshot' -Index $partitionIndex
+
+                        if (-not (Test-Path -LiteralPath $currentPartitionPath -PathType Leaf) -and -not (Test-Path -LiteralPath $snapshotPartitionPath -PathType Leaf)) {
+                            continue
+                        }
+
+                        $currentMap = Read-VulnPartitionMapFile -Path $currentPartitionPath
+                        $snapshotRows = Read-VulnPartitionMapFile -Path $snapshotPartitionPath
+
+                        foreach ($id in @($currentMap.Keys)) {
+                            if ($snapshotRows.ContainsKey($id)) { continue }
+
+                            $closedEntry = New-ClosedVulnEntry -Record ($currentMap[$id].Json | ConvertFrom-Json -Depth 20) -Reason 'removed' -ClosedOn $closedOn
+                            Add-VulnHistoryEntryToAppendStore -AppendStateByPeriod $historyAppendState -ScratchRoot $stageRoot -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry
+                        }
+
+                        foreach ($id in @($snapshotRows.Keys)) {
+                            $incomingVersion = $snapshotRows[$id]
+                            $incomingRecord = $incomingVersion.Json | ConvertFrom-Json -Depth 20
+                            $existing = $currentMap[$id]
+                            $versionStartDate = if ($null -eq $existing -or [string]::IsNullOrWhiteSpace([string]$existing.VersionStartDate)) {
+                                $snapshotDate
+                            }
+                            else {
+                                [string]$existing.VersionStartDate
+                            }
+
+                            if ($null -ne $existing -and [string]$existing.Signature -ne [string]$incomingVersion.Signature) {
+                                $closedEntry = New-ClosedVulnEntry -Record ($existing.Json | ConvertFrom-Json -Depth 20) -Reason 'changed' -ClosedOn $closedOn -ReplacementId $id
+                                Add-VulnHistoryEntryToAppendStore -AppendStateByPeriod $historyAppendState -ScratchRoot $stageRoot -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry
+                                $versionStartDate = $snapshotDate
+                            }
+
+                            $openRecord = New-OpenVulnRecord -Record $incomingRecord -VersionStartDate $versionStartDate
+                            $snapshotRows[$id] = [PSCustomObject]@{
+                                Json = $openRecord | ConvertTo-Json -Compress -Depth 20
+                                Signature = [string]$incomingVersion.Signature
+                                VersionStartDate = $versionStartDate
+                            }
+                        }
+
+                        [void](Write-VulnPartitionMapFile -Path $currentPartitionPath -RowsById $snapshotRows)
+                    }
+                }
+                finally {
+                    if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+                        Write-MemoryUsage -Label ("VulnStore " + $snapshotDate + ' End')
+                    }
+                    if (Test-Path -LiteralPath $snapshotPartitionRoot) {
+                        Remove-Item -LiteralPath $snapshotPartitionRoot -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+
+            Close-VulnHistoryAppendStore -AppendStateByPeriod $historyAppendState
+
+            $stagedCurrentPath = Get-VulnCurrentPath -BasePath $stageRoot
+            [void](Write-VulnCurrentFileFromPartition -PartitionRoot $currentPartitionRoot -PartitionPrefix 'current' -OutputPath $stagedCurrentPath -PartitionCount $partitionCount)
+            $currentCount = Test-VulnCurrentFile -Path $stagedCurrentPath
+
+            $filesToPublish = [System.Collections.Generic.List[object]]::new()
+            $filesToPublish.Add([PSCustomObject]@{
+                StagePath = $stagedCurrentPath
+                TargetPath = Get-VulnCurrentPath -BasePath $BasePath
+            })
+
+            $existingHistoryByPeriod = @{}
+            foreach ($historyDocument in Get-VulnHistoryDocumentList -BasePath $BasePath) {
+                $existingHistoryByPeriod[(Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument)] = $historyDocument
+            }
+
+            $touchedPeriods = @($historyAppendState.Keys | Sort-Object)
+            foreach ($periodKey in $touchedPeriods) {
+                $appendState = $historyAppendState[$periodKey]
+                $existingDocument = if ($existingHistoryByPeriod.ContainsKey($periodKey)) {
+                    $existingHistoryByPeriod[$periodKey]
+                }
+                else {
+                    $null
+                }
+                $existingLatestDate = if ($null -ne $existingDocument) {
+                    Get-VulnHistoryDocumentLatestDate -HistoryDocument $existingDocument
+                }
+                else {
+                    $null
+                }
+
+                $finalLatestDate = Get-MaxVulnDate `
+                    -Primary $existingLatestDate `
+                    -Secondary ([string]$appendState.LatestDate)
+                $historyStagePath = Get-VulnHistoryPath -BasePath $stageRoot -PeriodKey $periodKey
+                Write-VulnHistoryDocumentFromAppendFile `
+                    -Path $historyStagePath `
+                    -PeriodKey $periodKey `
+                    -ExistingDocument $existingDocument `
+                    -AppendPath ([string]$appendState.AppendPath) `
+                    -LatestDate $finalLatestDate
+                [void](Test-VulnHistoryFileLightweight -Path $historyStagePath)
+                $historyRowsStagePath = Get-VulnHistoryRowsPath -BasePath $stageRoot -PeriodKey $periodKey
+                Write-VulnHistoryRowsFileFromAppendFile `
+                    -Path $historyRowsStagePath `
+                    -ExistingDocument $existingDocument `
+                    -AppendPath ([string]$appendState.AppendPath)
+
+                $filesToPublish.Add([PSCustomObject]@{
+                    StagePath = $historyStagePath
+                    TargetPath = Get-VulnHistoryPath -BasePath $BasePath -PeriodKey $periodKey
+                })
+                $filesToPublish.Add([PSCustomObject]@{
+                    StagePath = $historyRowsStagePath
+                    TargetPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
+                })
+            }
+
+            foreach ($periodKey in @($existingHistoryByPeriod.Keys | Sort-Object)) {
+                if ($periodKey -in $touchedPeriods) { continue }
+
+                $historyRowsTargetPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
+                if (Test-Path -LiteralPath $historyRowsTargetPath -PathType Leaf) { continue }
+
+                $historyRowsStagePath = Get-VulnHistoryRowsPath -BasePath $stageRoot -PeriodKey $periodKey
+                Write-VulnHistoryRowsFile -Path $historyRowsStagePath -HistoryDocument $existingHistoryByPeriod[$periodKey]
+                $filesToPublish.Add([PSCustomObject]@{
+                    StagePath = $historyRowsStagePath
+                    TargetPath = $historyRowsTargetPath
+                })
+            }
+
+            $finalHistoryPeriods = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($periodKey in $existingHistoryByPeriod.Keys) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
+            foreach ($periodKey in $touchedPeriods) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
+
+            $publishedHistoryNames = if ($finalHistoryPeriods.Count -gt 0) {
+                Get-VulnHistoryPublishedNameSet -PeriodKeys @($finalHistoryPeriods)
+            }
+            else {
+                [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            }
+            $historyFilesToRemove = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedHistoryNames
+            Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths $historyFilesToRemove
+            $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
+            Publish-VulnContentStoreUnlocked -BasePath $BasePath
+
+            return [PSCustomObject]@{
+                DownloadedFiles = $snapshotFiles.Count
+                CurrentRows = $currentCount
+                HistoryYears = if ($historyPeriodCount -gt 0) { $historyPeriodCount } else { $finalHistoryPeriods.Count }
+                LatestSnapshotDate = if ($snapshotDates.Count -gt 0) { $snapshotDates[-1] } else { $latestKnownSnapshot }
+                CanonicalRepairPerformed = $false
+                RemovedSnapshotFiles = $false
             }
         }
-
-        foreach ($id in $snapshotRows.Keys) {
-            $record = $snapshotRows[$id]
-            $signature = Get-VulnCanonicalRowSignature -Row $record
-
-            if (-not $openVersions.ContainsKey($id)) {
-                $openVersions[$id] = [PSCustomObject]@{
-                    Record = New-OpenVulnRecord -Record $record -VersionStartDate $snapshotDate
-                    Signature = $signature
-                    VersionStartDate = $snapshotDate
-                }
-                continue
+        finally {
+            Close-VulnHistoryAppendStore -AppendStateByPeriod $historyAppendState
+            if (Test-Path -LiteralPath $stageRoot) {
+                Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
             }
+        }
+    })
 
-            $openVersion = $openVersions[$id]
-            if ($openVersion.Signature -eq $signature) {
-                $updatedRecord = New-OpenVulnRecord -Record $record -VersionStartDate $openVersion.VersionStartDate
-                $openVersions[$id] = [PSCustomObject]@{
-                    Record = $updatedRecord
-                    Signature = $signature
-                    VersionStartDate = $openVersion.VersionStartDate
-                }
-                continue
-            }
+    $publishResult = $null
+    foreach ($item in $publishOutput) {
+        if ($null -ne $item -and $item.PSObject.Properties.Match('CurrentRows').Count -gt 0 -and $item.PSObject.Properties.Match('HistoryYears').Count -gt 0) {
+            $publishResult = $item
+            continue
+        }
 
-            $closedOn = Get-VulnPreviousDay -Date $snapshotDate
-            $closedEntry = New-ClosedVulnEntry -Record $openVersion.Record -Reason 'changed' -ClosedOn $closedOn -ReplacementId $id
-            Add-VulnHistoryEntry -HistoryByPeriod $historyByPeriod -SnapshotDate $snapshotDate -ClosedOn $closedOn -Entry $closedEntry -SnapshotMaps $snapshotMaps
-
-            $openVersions[$id] = [PSCustomObject]@{
-                Record = New-OpenVulnRecord -Record $record -VersionStartDate $snapshotDate
-                Signature = $signature
-                VersionStartDate = $snapshotDate
-            }
+        if ($null -ne $item) {
+            Write-Host ([string]$item)
         }
     }
 
-    $currentRecords = @($openVersions.Values | Sort-Object { $_.Record.Id } | ForEach-Object { $_.Record })
+    if ($null -eq $publishResult) {
+        throw 'Publish-VulnStoreFromBulkSnapshot did not return a publish result.'
+    }
+
+    if ($RemoveSnapshotFiles) {
+        foreach ($snapshotFile in @(Get-VulnLegacySnapshotFile -BasePath $BasePath)) {
+            Remove-Item -Path $snapshotFile.FullName -Force
+        }
+    }
+
     return [PSCustomObject]@{
-        CurrentRecords = $currentRecords
-        HistoryDocuments = @($historyByPeriod.Values | Sort-Object period)
-        SnapshotCount = $allSnapshotDates.Count
-        LatestSnapshotDate = $lastSnapshotDate
+        DownloadedFiles = $publishResult.DownloadedFiles
+        CurrentRows = $publishResult.CurrentRows
+        HistoryYears = $publishResult.HistoryYears
+        LatestSnapshotDate = $publishResult.LatestSnapshotDate
+        CanonicalRepairPerformed = ($publishResult.PSObject.Properties['CanonicalRepairPerformed']?.Value -eq $true)
+        RemovedSnapshotFiles = ($RemoveSnapshotFiles -eq $true)
     }
 }
 
@@ -4645,11 +4667,21 @@ function Write-NdjsonRecordsFile {
 
         foreach ($record in $Records) {
             if ($null -eq $record) { continue }
-            $dict = [System.Collections.Generic.Dictionary[string,object]]::new()
-            foreach ($prop in $record.PSObject.Properties) {
-                $dict[$prop.Name] = $prop.Value
+
+            $lineWriter = $null
+            $jsonWriter = $null
+            try {
+                $lineWriter = [System.IO.StringWriter]::new([System.Globalization.CultureInfo]::InvariantCulture)
+                $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($lineWriter)
+                $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
+                Write-JsonValueToWriter -Writer $jsonWriter -Value $record
+                $jsonWriter.Flush()
+                $writer.WriteLine($lineWriter.ToString())
             }
-            $writer.WriteLine([System.Text.Json.JsonSerializer]::Serialize[System.Collections.Generic.Dictionary[string,object]]($dict))
+            finally {
+                if ($jsonWriter) { $jsonWriter.Close() }
+                elseif ($lineWriter) { $lineWriter.Dispose() }
+            }
         }
     }
     finally {
@@ -5854,38 +5886,60 @@ function Open-CompactVulnColumnWriterSet {
         }
     }
 
+    $columnOrder = @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp')
+    $columnStates = [object[]]::new(10)
+    for ($i = 0; $i -lt 10; $i++) {
+        $columnStates[$i] = $writers[$columnOrder[$i]]
+    }
+
     return [PSCustomObject]@{
         DirectoryPath = $DirectoryPath
         Paths = $paths
         Writers = $writers
+        ColumnStates = $columnStates
     }
 }
 
 function Write-CompactVulnRecordColumnSet {
-    [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
         [pscustomobject]$WriterSet,
-
-        [Parameter(Mandatory = $false)]
-        [AllowNull()]
-        [object[]]$Record
+        [object]$Record
     )
 
     if ($null -eq $Record) {
         throw 'Compact vulnerability record cannot be null.'
     }
 
-    Add-CompactVulnColumnValue -ColumnState $WriterSet.Writers.d -Value $Record[0]
-    Add-CompactVulnColumnValue -ColumnState $WriterSet.Writers.c -Value $Record[1]
-    Add-CompactVulnColumnValue -ColumnState $WriterSet.Writers.s -Value $Record[2]
-    Add-CompactVulnColumnValue -ColumnState $WriterSet.Writers.v -Value $Record[3]
-    Add-CompactVulnColumnValue -ColumnState $WriterSet.Writers.f -Value $Record[4]
-    Add-CompactVulnColumnValue -ColumnState $WriterSet.Writers.l -Value $Record[5]
-    Add-CompactVulnColumnValue -ColumnState $WriterSet.Writers.ua -Value $Record[6]
-    Add-CompactVulnColumnValue -ColumnState $WriterSet.Writers.u -Value $Record[7]
-    Add-CompactVulnColumnValue -ColumnState $WriterSet.Writers.dp -Value $Record[8]
-    Add-CompactVulnColumnValue -ColumnState $WriterSet.Writers.rp -Value $Record[9]
+    $recordValues = @($Record)
+    $states = $WriterSet.ColumnStates
+    for ($i = 0; $i -lt 10; $i++) {
+        $col = $states[$i]
+        $val = $recordValues[$i]
+        $buf = $col.Buffer
+
+        if ($col.HasValue) { [void]$buf.Append(',') } else { $col.HasValue = $true }
+
+        if ($null -eq $val) {
+            [void]$buf.Append('null')
+        }
+        elseif ($val -is [System.Collections.IEnumerable] -and $val -isnot [string]) {
+            [void]$buf.Append('[')
+            $isFirst = $true
+            foreach ($nv in $val) {
+                if ($isFirst) { $isFirst = $false } else { [void]$buf.Append(',') }
+                if ($null -eq $nv) { [void]$buf.Append('null') } else { [void]$buf.Append([string]$nv) }
+            }
+            [void]$buf.Append(']')
+        }
+        else {
+            [void]$buf.Append([string]$val)
+        }
+
+        if ($buf.Length -ge 131072) {
+            $col.StreamWriter.Write($buf.ToString())
+            [void]$buf.Clear()
+        }
+    }
 }
 
 function Add-CompactVulnColumnValue {
@@ -6009,6 +6063,164 @@ function Read-CompactJsonReaderValue {
     }
 }
 
+function Skip-JsonReaderValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader
+    )
+
+    if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartArray -and
+        $Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+        return
+    }
+
+    $depth = 1
+    while ($depth -gt 0 -and $Reader.Read()) {
+        switch ($Reader.TokenType) {
+            ([Newtonsoft.Json.JsonToken]::StartArray) { $depth++ }
+            ([Newtonsoft.Json.JsonToken]::StartObject) { $depth++ }
+            ([Newtonsoft.Json.JsonToken]::EndArray) { $depth-- }
+            ([Newtonsoft.Json.JsonToken]::EndObject) { $depth-- }
+        }
+    }
+}
+
+function Get-JsonReaderArrayElementCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartArray) {
+        throw "Expected JSON array in '$Path', found '$($Reader.TokenType)'."
+    }
+
+    $count = 0
+    while ($Reader.Read()) {
+        if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndArray) {
+            break
+        }
+
+        Skip-JsonReaderValue -Reader $Reader
+        $count++
+    }
+
+    return $count
+}
+
+function Get-PayloadVulnCountFromJsonReader {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not $Reader.Read() -or $Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+        throw "Expected JSON object payload in '$Path'."
+    }
+
+    $vulnsFormat = $null
+    while ($Reader.Read()) {
+        if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndObject) {
+            break
+        }
+
+        if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) {
+            continue
+        }
+
+        $propertyName = [string]$Reader.Value
+        if (-not $Reader.Read()) {
+            throw "Unexpected end of payload while reading '$Path'."
+        }
+
+        if ($propertyName -eq 'vulnsFormat') {
+            $vulnsFormat = [string]$Reader.Value
+            continue
+        }
+
+        if ($propertyName -ne 'vulns') {
+            Skip-JsonReaderValue -Reader $Reader
+            continue
+        }
+
+        if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::StartArray) {
+            return (Get-JsonReaderArrayElementCount -Reader $Reader -Path $Path)
+        }
+
+        if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+            throw "Expected 'vulns' property in '$Path' to be an array or object, found '$($Reader.TokenType)'."
+        }
+
+        while ($Reader.Read()) {
+            if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndObject) {
+                break
+            }
+
+            if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) {
+                continue
+            }
+
+            $columnName = [string]$Reader.Value
+            if (-not $Reader.Read()) {
+                throw "Unexpected end of payload while reading vuln columns in '$Path'."
+            }
+
+            if ($columnName -eq 'd') {
+                return (Get-JsonReaderArrayElementCount -Reader $Reader -Path $Path)
+            }
+
+            Skip-JsonReaderValue -Reader $Reader
+        }
+
+        if ($vulnsFormat) {
+            throw "Unable to locate vuln count column for payload format '$vulnsFormat' in '$Path'."
+        }
+
+        throw "Unable to locate vulnerability rows in '$Path'."
+    }
+
+    return 0
+}
+
+function Get-CompressedPayloadVulnCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fileStream = $null
+    $gzip = $null
+    $reader = $null
+    $jsonReader = $null
+
+    try {
+        $fileStream = [System.IO.File]::OpenRead($Path)
+        $gzip = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        $reader = [System.IO.StreamReader]::new($gzip, [System.Text.Encoding]::UTF8)
+        $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
+        return (Get-PayloadVulnCountFromJsonReader -Reader $jsonReader -Path $Path)
+    }
+    finally {
+        if ($jsonReader) { $jsonReader.Close() }
+        elseif ($reader) { $reader.Dispose() }
+        elseif ($gzip) { $gzip.Dispose() }
+        elseif ($fileStream) { $fileStream.Dispose() }
+    }
+}
+
 function ConvertTo-VulnColumnFileSet {
     [CmdletBinding()]
     param(
@@ -6099,7 +6311,7 @@ function Get-CompactVulnJsonRowCount {
                 throw "Expected compact vulnerability row array in '$Path', found '$($jsonReader.TokenType)'."
             }
 
-            [void](Read-CompactJsonReaderValue -Reader $jsonReader)
+            Skip-JsonReaderValue -Reader $jsonReader
             $rowCount++
         }
 
@@ -6108,6 +6320,328 @@ function Get-CompactVulnJsonRowCount {
     finally {
         if ($jsonReader) { $jsonReader.Close() }
         if ($reader) { $reader.Dispose() }
+    }
+}
+
+function Write-CombinedPayloadLookups {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextWriter]$Writer,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Lookups
+    )
+
+    $Writer.WritePropertyName('lookups')
+    $Writer.WriteStartObject()
+    foreach ($lookupPropertyName in @(
+            'vendors',
+            'severities',
+            'exploitLevels',
+            'groups',
+            'platforms',
+            'tags',
+            'updates',
+            'versions',
+            'dates',
+            'diskPaths',
+            'regPaths',
+            'affSoftware',
+            'batchTitles',
+            'devices',
+            'software',
+            'cves',
+            'noTagsIdx'
+        )) {
+        $Writer.WritePropertyName($lookupPropertyName)
+        if ($Lookups -is [System.Collections.IDictionary]) {
+            $lookupValue = $Lookups[$lookupPropertyName]
+        }
+        else {
+            $lookupValue = $Lookups.PSObject.Properties[$lookupPropertyName].Value
+        }
+        Write-JsonValueToWriter -Writer $Writer -Value $lookupValue
+    }
+    $Writer.WriteEndObject()
+}
+
+function Open-CombinedPayloadWriter {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$VulnsFormat
+    )
+
+    $fileStream = $null
+    $gzipStream = $null
+    $writer = $null
+    $jsonWriter = $null
+
+    try {
+        $fileStream = [System.IO.File]::Create($OutputPath)
+        $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionLevel]::Fastest)
+        $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
+        $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($writer)
+        $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
+        $jsonWriter.WriteStartObject()
+        $jsonWriter.WritePropertyName('vulnsFormat')
+        $jsonWriter.WriteValue($VulnsFormat)
+        $jsonWriter.WritePropertyName('vulns')
+
+        return [PSCustomObject]@{
+            OutputPath = $OutputPath
+            FileStream = $fileStream
+            GzipStream = $gzipStream
+            StreamWriter = $writer
+            JsonWriter = $jsonWriter
+        }
+    }
+    catch {
+        if ($jsonWriter) { $jsonWriter.Close() }
+        elseif ($writer) { $writer.Dispose() }
+        elseif ($gzipStream) { $gzipStream.Dispose() }
+        elseif ($fileStream) { $fileStream.Dispose() }
+        throw
+    }
+}
+
+function Close-CombinedPayloadWriter {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$WriterState,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Lookups
+    )
+
+    try {
+        Update-NormalizedAffectedSoftwareLookup -Lookups $Lookups
+        Write-CombinedPayloadLookups -Writer $WriterState.JsonWriter -Lookups $Lookups
+        $WriterState.JsonWriter.WriteEndObject()
+        $WriterState.JsonWriter.Flush()
+    }
+    finally {
+        if ($WriterState.JsonWriter) { $WriterState.JsonWriter.Close() }
+        elseif ($WriterState.StreamWriter) { $WriterState.StreamWriter.Dispose() }
+        elseif ($WriterState.GzipStream) { $WriterState.GzipStream.Dispose() }
+        elseif ($WriterState.FileStream) { $WriterState.FileStream.Dispose() }
+    }
+}
+
+function Update-NormalizedAffectedSoftwareLookup {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only mutates in-memory lookup data before serialization.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Lookups
+    )
+
+    if ($null -eq $Lookups) {
+        return
+    }
+
+    $vendors = $null
+    $cves = $null
+    $affSoftware = $null
+    if ($Lookups -is [System.Collections.IDictionary]) {
+        $vendors = $Lookups['vendors']
+        $cves = $Lookups['cves']
+        $affSoftware = $Lookups['affSoftware']
+    }
+    else {
+        $vendors = $Lookups.PSObject.Properties['vendors']?.Value
+        $cves = $Lookups.PSObject.Properties['cves']?.Value
+        $affSoftware = $Lookups.PSObject.Properties['affSoftware']?.Value
+    }
+
+    if ($null -eq $vendors -or $null -eq $cves -or $null -eq $affSoftware) {
+        return
+    }
+
+    $datasetVendors = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($vendor in @($vendors)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$vendor)) {
+            [void]$datasetVendors.Add((Get-VendorMatchKey -Vendor $vendor))
+        }
+    }
+
+    $affectedSoftwareLookupCount = @($affSoftware).Count
+    foreach ($cve in @($cves)) {
+        if ($null -eq $cve -or $null -eq $cve.as -or @($cve.as).Count -eq 0) {
+            continue
+        }
+
+        $filteredIndices = [System.Collections.Generic.List[int]]::new()
+        foreach ($asIdx in @($cve.as)) {
+            $resolvedIndex = -1
+            try {
+                $resolvedIndex = [int]$asIdx
+            }
+            catch {
+                continue
+            }
+
+            if ($resolvedIndex -lt 0 -or $resolvedIndex -ge $affectedSoftwareLookupCount) {
+                continue
+            }
+
+            $swStr = [string]$affSoftware[$resolvedIndex]
+            if ([string]::IsNullOrWhiteSpace($swStr)) {
+                continue
+            }
+
+            $separatorIndex = $swStr.IndexOf(':')
+            $swVendor = if ($separatorIndex -ge 0) { $swStr.Substring(0, $separatorIndex) } else { $swStr }
+            if ($datasetVendors.Contains((Get-VendorMatchKey -Vendor $swVendor))) {
+                $filteredIndices.Add($resolvedIndex)
+            }
+        }
+
+        $cve.as = if ($filteredIndices.Count -gt 0) { $filteredIndices } else { $null }
+    }
+}
+
+function Open-NormalizedVulnWriter {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$VulnOutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$VulnColumnDirectoryPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$PayloadOutputPath
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($PayloadOutputPath)) {
+        $payloadWriter = Open-CombinedPayloadWriter -OutputPath $PayloadOutputPath -VulnsFormat 'rows-v1'
+        $payloadWriter.JsonWriter.WriteStartArray()
+        return [PSCustomObject]@{
+            Mode = 'payload'
+            JsonWriter = $payloadWriter.JsonWriter
+            PayloadWriter = $payloadWriter
+            PayloadPath = $PayloadOutputPath
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($VulnColumnDirectoryPath)) {
+        $columnWriterSet = Open-CompactVulnColumnWriterSet -DirectoryPath $VulnColumnDirectoryPath
+        return [PSCustomObject]@{
+            Mode = 'column'
+            ColumnWriterSet = $columnWriterSet
+            VulnColumnPaths = $columnWriterSet.Paths
+        }
+    }
+
+    $vulnWriter = [System.IO.StreamWriter]::new($VulnOutputPath, $false, [System.Text.UTF8Encoding]::new($false))
+    $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($vulnWriter)
+    $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
+    $jsonWriter.WriteStartArray()
+    return [PSCustomObject]@{
+        Mode = 'rows'
+        JsonWriter = $jsonWriter
+        VulnWriter = $vulnWriter
+        VulnsPath = $VulnOutputPath
+    }
+}
+
+function Write-NormalizedCompactRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$WriterState,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Record
+    )
+
+    if ($WriterState.Mode -eq 'column') {
+        Write-CompactVulnRecordColumnSet -WriterSet $WriterState.ColumnWriterSet -Record $Record
+        return
+    }
+
+    Write-CompactVulnRecordJson -Writer $WriterState.JsonWriter -Record $Record
+}
+
+function Sync-NormalizedVulnWriter {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$WriterState
+    )
+
+    if ($WriterState.Mode -eq 'column') {
+        Sync-CompactVulnColumnWriterSet -WriterSet $WriterState.ColumnWriterSet
+        return
+    }
+
+    if ($WriterState.JsonWriter) {
+        $WriterState.JsonWriter.Flush()
+    }
+}
+
+function Close-NormalizedVulnWriter {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$WriterState,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Lookups
+    )
+
+    if ($WriterState.Mode -eq 'column') {
+        Sync-CompactVulnColumnWriterSet -WriterSet $WriterState.ColumnWriterSet
+        Close-CompactVulnColumnWriterSet -WriterSet $WriterState.ColumnWriterSet
+        return [PSCustomObject]@{
+            Mode = 'column'
+            VulnsPath = $null
+            VulnColumnPaths = $WriterState.VulnColumnPaths
+            PayloadPath = $null
+        }
+    }
+
+    if ($WriterState.Mode -eq 'payload') {
+        $WriterState.JsonWriter.WriteEndArray()
+        Close-CombinedPayloadWriter -WriterState $WriterState.PayloadWriter -Lookups $Lookups
+        return [PSCustomObject]@{
+            Mode = 'payload'
+            VulnsPath = $null
+            VulnColumnPaths = $null
+            PayloadPath = $WriterState.PayloadPath
+        }
+    }
+
+    try {
+        $WriterState.JsonWriter.WriteEndArray()
+        $WriterState.JsonWriter.Flush()
+    }
+    finally {
+        if ($WriterState.JsonWriter) {
+            $WriterState.JsonWriter.Close()
+        }
+        if ($WriterState.VulnWriter) {
+            $WriterState.VulnWriter.Dispose()
+        }
+    }
+
+    return [PSCustomObject]@{
+        Mode = 'rows'
+        VulnsPath = $WriterState.VulnsPath
+        VulnColumnPaths = $null
+        PayloadPath = $null
     }
 }
 
@@ -6127,54 +6661,16 @@ function Write-CombinedPayloadGzip {
         [string]$OutputPath
     )
 
-    $fileStream = $null
-    $gzipStream = $null
-    $writer = $null
-    $jsonWriter = $null
+    $payloadWriter = $null
     $columnReaders = [System.Collections.Generic.List[System.IDisposable]]::new()
     $activeColumnPaths = $null
 
     try {
-        $fileStream = [System.IO.File]::Create($OutputPath)
-        $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionLevel]::Fastest)
-        $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
-        $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($writer)
-        $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
-
-        $jsonWriter.WriteStartObject()
-        $jsonWriter.WritePropertyName('lookups')
-        $jsonWriter.WriteStartObject()
-        $lookupPropertyNames = @(
-            'vendors',
-            'severities',
-            'exploitLevels',
-            'groups',
-            'platforms',
-            'tags',
-            'updates',
-            'versions',
-            'dates',
-            'diskPaths',
-            'regPaths',
-            'affSoftware',
-            'batchTitles',
-            'devices',
-            'software',
-            'cves',
-            'noTagsIdx'
-        )
-        foreach ($lookupPropertyName in $lookupPropertyNames) {
-            $jsonWriter.WritePropertyName($lookupPropertyName)
-            $lookupValue = $Lookups.PSObject.Properties[$lookupPropertyName].Value
-            Write-JsonValueToWriter -Writer $jsonWriter -Value $lookupValue
-        }
-        $jsonWriter.WriteEndObject()
+        $payloadWriter = Open-CombinedPayloadWriter -OutputPath $OutputPath -VulnsFormat $(if ($VulnColumnPaths) { 'columns-v1' } else { 'rows-v1' })
+        $jsonWriter = $payloadWriter.JsonWriter
 
         if ($VulnColumnPaths) {
             $activeColumnPaths = $VulnColumnPaths
-            $jsonWriter.WritePropertyName('vulnsFormat')
-            $jsonWriter.WriteValue('columns-v1')
-            $jsonWriter.WritePropertyName('vulns')
             $jsonWriter.WriteStartObject()
             foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp')) {
                 $jsonWriter.WritePropertyName($columnName)
@@ -6191,9 +6687,6 @@ function Write-CombinedPayloadGzip {
                 throw 'Write-CombinedPayloadGzip requires either -VulnsPath or -VulnColumnPaths.'
             }
 
-            $jsonWriter.WritePropertyName('vulnsFormat')
-            $jsonWriter.WriteValue('rows-v1')
-            $jsonWriter.WritePropertyName('vulns')
             $vulnsReader = [System.IO.StreamReader]::new($VulnsPath, [System.Text.Encoding]::UTF8)
             $vulnsJsonReader = [Newtonsoft.Json.JsonTextReader]::new($vulnsReader)
             [void]$columnReaders.Add($vulnsJsonReader)
@@ -6201,17 +6694,16 @@ function Write-CombinedPayloadGzip {
             $jsonWriter.WriteToken($vulnsJsonReader)
         }
 
-        $jsonWriter.WriteEndObject()
-        $jsonWriter.Flush()
+        Close-CombinedPayloadWriter -WriterState $payloadWriter -Lookups $Lookups
+        $payloadWriter = $null
     }
     finally {
         foreach ($columnDisposable in $columnReaders) {
             $columnDisposable.Dispose()
         }
-        if ($jsonWriter) { $jsonWriter.Close() }
-        elseif ($writer) { $writer.Dispose() }
-        elseif ($gzipStream) { $gzipStream.Dispose() }
-        elseif ($fileStream) { $fileStream.Dispose() }
+        if ($payloadWriter) {
+            Close-CombinedPayloadWriter -WriterState $payloadWriter -Lookups $Lookups
+        }
     }
 }
 
@@ -6712,6 +7204,39 @@ function Get-FileSha256Hex {
     }
 }
 
+function Sync-VulnContentStoreSidecar {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    if (Test-VulnContentStoreExistence -BasePath $BasePath) {
+        return $true
+    }
+
+    if (-not (Test-VulnStoreExistence -BasePath $BasePath)) {
+        return $false
+    }
+
+    try {
+        Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
+            Restore-StoreTransaction -BasePath $BasePath -StoreName 'vuln'
+
+            if (-not (Test-VulnContentStoreExistence -BasePath $BasePath)) {
+                Write-Information '  Rebuilding content-store sidecars from raw vulnerability store...' -InformationAction Continue
+                Publish-VulnContentStoreUnlocked -BasePath $BasePath
+            }
+        } | Out-Null
+    }
+    catch {
+        Write-Verbose "Vulnerability content sidecar rebuild failed; falling back to raw/object normalization. $_"
+    }
+
+    return (Test-VulnContentStoreExistence -BasePath $BasePath)
+}
+
 function Get-VulnObservedWindowCacheFingerprint {
     [CmdletBinding()]
     [OutputType([string])]
@@ -6725,7 +7250,8 @@ function Get-VulnObservedWindowCacheFingerprint {
     )
 
     $sourceFiles = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
-    if (Test-VulnContentStoreExistence -BasePath $BasePath) {
+    $contentStoreExists = Sync-VulnContentStoreSidecar -BasePath $BasePath
+    if ($contentStoreExists) {
         foreach ($path in @(
                 (Get-VulnContentDictionaryPath -BasePath $BasePath)
                 (Get-VulnCurrentRefsPath -BasePath $BasePath)
@@ -6755,8 +7281,9 @@ function Get-VulnObservedWindowCacheFingerprint {
     }
 
     $builder = [System.Text.StringBuilder]::new()
-    [void]$builder.AppendLine('observed-window-cache-v1')
+    [void]$builder.AppendLine('observed-window-cache-v2')
     [void]$builder.AppendLine(('AllowedGapDays=' + $AllowedGapDays))
+    [void]$builder.AppendLine(('CacheShape=' + $(if ($contentStoreExists) { 'compact-ref-array-v1' } else { 'row-object-v1' })))
     foreach ($file in @($sourceFiles | Sort-Object FullName -Unique)) {
         $hash = Get-FileSha256Hex -Path $file.FullName
         [void]$builder.Append($file.Name).Append('|')
@@ -6918,7 +7445,19 @@ function Write-MergedVulnContentStoreRefs {
             $refsByIdentity = @{}
             foreach ($line in [System.IO.File]::ReadLines($partPath, [System.Text.UTF8Encoding]::new($false))) {
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                $ref = $line | ConvertFrom-Json -Depth 10
+                # Parse ref array via System.Text.Json (faster than ConvertFrom-Json)
+                $doc = [System.Text.Json.JsonDocument]::Parse($line)
+                try {
+                    $arr = $doc.RootElement
+                    $ref = @(
+                        $arr[0].GetString()         # Id
+                        $arr[1].GetInt32()           # DeviceProfileIdx
+                        $arr[2].GetInt32()           # ContentTemplateIdx
+                        $(if ($arr[3].ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $arr[3].GetString() })  # FST
+                        $(if ($arr[4].ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $arr[4].GetString() })  # LST
+                    )
+                }
+                finally { $doc.Dispose() }
                 $identityKey = [string]$ref[0]
                 if (-not $refsByIdentity.ContainsKey($identityKey)) {
                     $refsByIdentity[$identityKey] = [System.Collections.Generic.List[object]]::new()
@@ -6927,59 +7466,33 @@ function Write-MergedVulnContentStoreRefs {
             }
 
             foreach ($identityKey in @($refsByIdentity.Keys)) {
-                $items = @($refsByIdentity[$identityKey])
-                if ($items.Count -le 1) {
-                    foreach ($item in $items) { ,$item }
-                    continue
+                $items = @($refsByIdentity[$identityKey] | Sort-Object { [string]$_[3] }, { [string]$_[4] })
+                foreach ($mergedRef in @(Merge-VulnObservedWindowSequence `
+                        -Items $items `
+                        -AllowedGapDays $AllowedGapDays `
+                        -GetWindow {
+                            param($item)
+                            Get-NormalizedVulnSeenWindow -FirstSeenValue ([string]$item[3]) -LastSeenValue ([string]$item[4])
+                        } `
+                        -CreateItem {
+                            param($item)
+                            [object[]]$item.Clone()
+                        } `
+                        -CreateMergedItem {
+                            param($candidate, $firstSeenTimestamp, $lastSeenTimestamp)
+                            $merged = [object[]]$candidate.Clone()
+                            $merged[3] = $firstSeenTimestamp
+                            $merged[4] = $lastSeenTimestamp
+                            $merged
+                        } `
+                        -FinalizeItem {
+                            param($item, $window)
+                            $item[3] = $window.FirstSeenTimestamp
+                            $item[4] = $window.LastSeenTimestamp
+                            $item
+                        })) {
+                    ,$mergedRef
                 }
-
-                # Sort by FST, LST and merge overlapping windows
-                $sorted = @($items | Sort-Object { [string]$_[3] }, { [string]$_[4] })
-                $current = $sorted[0]
-                $currentFST = Convert-VulnToYmdDate -DateValue ([string]$current[3])
-                $currentLST = Convert-VulnToYmdDate -DateValue ([string]$current[4])
-                if ($currentFST -and $currentLST -and [datetime]$currentFST -gt [datetime]$currentLST) {
-                    $temp = $currentFST; $currentFST = $currentLST; $currentLST = $temp
-                }
-
-                for ($idx = 1; $idx -lt $sorted.Count; $idx++) {
-                    $candidate = $sorted[$idx]
-                    $candFST = Convert-VulnToYmdDate -DateValue ([string]$candidate[3])
-                    $candLST = Convert-VulnToYmdDate -DateValue ([string]$candidate[4])
-                    if ($candFST -and $candLST -and [datetime]$candFST -gt [datetime]$candLST) {
-                        $temp = $candFST; $candFST = $candLST; $candLST = $temp
-                    }
-
-                    $shouldMerge = $false
-                    if ($currentFST -and $currentLST -and $candFST -and $candLST) {
-                        $mergeThreshold = ([datetime]$currentLST).AddDays($AllowedGapDays + 1).ToString('yyyy-MM-dd')
-                        if ([datetime]$candFST -le [datetime]$mergeThreshold) {
-                            $shouldMerge = $true
-                        }
-                    }
-
-                    if ($shouldMerge) {
-                        $mergedFST = Get-MinVulnDate -Primary $currentFST -Secondary $candFST
-                        $mergedLST = Get-MaxVulnDate -Primary $currentLST -Secondary $candLST
-                        # Take candidate as base (latest data), update timestamps
-                        $current = $candidate
-                        $currentFST = $mergedFST
-                        $currentLST = $mergedLST
-                    }
-                    else {
-                        # Emit current with merged timestamps
-                        $current[3] = $currentFST
-                        $current[4] = $currentLST
-                        ,$current
-                        $current = $candidate
-                        $currentFST = $candFST
-                        $currentLST = $candLST
-                    }
-                }
-
-                $current[3] = $currentFST
-                $current[4] = $currentLST
-                ,$current
             }
 
             $refsByIdentity.Clear()
@@ -7033,23 +7546,39 @@ function Publish-VulnObservedWindowCache {
         $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
 
         if (Test-VulnContentStoreExistence -BasePath $BasePath) {
-            # Memory-efficient path: write compact refs directly instead of
-            # expanding to full PSCustomObjects. Refs are 5-element arrays
-            # [id, deviceProfileIdx, contentTemplateIdx, firstSeen, lastSeen].
-            # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
-            # collecting all 1.5M+ merged refs into memory at once.
+            # Memory-efficient path: merge returns compact ref arrays. Write
+            # raw JSON lines directly using StringBuilder to avoid 1.5M+
+            # ConvertTo-Json calls.
             Write-MergedVulnContentStoreRefs -BasePath $BasePath -AllowedGapDays $AllowedGapDays | ForEach-Object {
                 $ref = $_
                 if ($null -eq $ref) { return }
-                $writer.WriteLine(($ref | ConvertTo-Json -Compress))
+                # Build JSON array string inline — refs are [id, dpIdx, ctIdx, fst, lst]
+                $sb = [System.Text.StringBuilder]::new(128)
+                [void]$sb.Append('["')
+                [void]$sb.Append([string]$ref[0])
+                [void]$sb.Append('",')
+                [void]$sb.Append([string]$ref[1])
+                [void]$sb.Append(',')
+                [void]$sb.Append([string]$ref[2])
+                [void]$sb.Append(',')
+                $fst = $ref[3]; if ($null -eq $fst) { [void]$sb.Append('null') } else { [void]$sb.Append('"'); [void]$sb.Append([string]$fst); [void]$sb.Append('"') }
+                [void]$sb.Append(',')
+                $lst = $ref[4]; if ($null -eq $lst) { [void]$sb.Append('null') } else { [void]$sb.Append('"'); [void]$sb.Append([string]$lst); [void]$sb.Append('"') }
+                [void]$sb.Append(']')
+                $writer.WriteLine($sb.ToString())
             }
         }
         else {
             # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
             # collecting all merged rows into memory at once.
+            $legacyCacheJsonOptions = [System.Text.Json.JsonSerializerOptions]::new()
+            $legacyCacheJsonOptions.WriteIndented = $false
+            $legacyCacheJsonOptions.MaxDepth = 20
             Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $BasePath } -AllowedGapDays $AllowedGapDays | ForEach-Object {
                 if ($null -eq $_) { return }
-                $writer.WriteLine(($_ | ConvertTo-Json -Compress -Depth 20))
+                $dict = [System.Collections.Generic.Dictionary[string,object]]::new()
+                foreach ($prop in $_.PSObject.Properties) { $dict[$prop.Name] = $prop.Value }
+                $writer.WriteLine([System.Text.Json.JsonSerializer]::Serialize($dict, $legacyCacheJsonOptions))
             }
         }
     }
@@ -7149,7 +7678,7 @@ function Get-VulnerabilityPayloadFingerprintSourceFileSet {
     $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-IsSyntheticDataset -BasePath $BasePath))
     $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
 
-    $contentStoreExists = (Test-VulnContentStoreExistence -BasePath $BasePath)
+    $contentStoreExists = Sync-VulnContentStoreSidecar -BasePath $BasePath
     if ((Test-VulnStoreExistence -BasePath $BasePath) -or $contentStoreExists) {
         if ($effectiveSkipObservedWindowMerge) {
             if ($contentStoreExists) {
@@ -7222,7 +7751,7 @@ function Get-DashboardPayloadCacheFingerprint {
     }
 
     $builder = [System.Text.StringBuilder]::new()
-    [void]$builder.AppendLine('dashboard-payload-cache-v2')
+    [void]$builder.AppendLine('dashboard-payload-cache-v4')
     [void]$builder.AppendLine(('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true)))
     foreach ($file in @($files | Sort-Object FullName -Unique)) {
         $hash = Get-FileSha256Hex -Path $file.FullName
@@ -7378,7 +7907,7 @@ function Publish-NormalizedPayloadCache {
 
     Copy-Item -LiteralPath $PayloadPath -Destination $tempPayloadPath -Force
     $manifest = [ordered]@{
-        Version = 'dashboard-payload-cache-v2'
+        Version = 'dashboard-payload-cache-v4'
         Fingerprint = $fingerprint
         GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
         VulnCount = $VulnCount
@@ -7872,6 +8401,256 @@ function Add-NormalizedCve {
     return [int]$cveIndex[$cveKey]
 }
 
+function Resolve-NormalizedLookupIndexList {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object[]]$Values,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.IList]$List,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$IndexMap
+    )
+
+    if ($null -eq $Values -or @($Values).Count -eq 0) {
+        return $null
+    }
+
+    $indices = [System.Collections.Generic.List[int]]::new()
+    foreach ($value in @($Values)) {
+        if ($null -eq $value) { continue }
+        $index = Get-OrCreateIndex -value $value -list $List -indexMap $IndexMap
+        if ($index -ge 0) {
+            $indices.Add($index)
+        }
+    }
+
+    if ($indices.Count -eq 0) {
+        return $null
+    }
+
+    return ,([int[]]$indices.ToArray())
+}
+
+function Resolve-NormalizedSeenWindowIndexSet {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Context,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$FirstSeenValue,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$LastSeenValue,
+
+        [Parameter(Mandatory = $false)]
+        [ref]$FirstLastSwappedCount = ([ref]0)
+    )
+
+    $lookups = $Context.Lookups
+    $dateIndex = $Context.Indexes.dates
+    $firstSeen = Get-NormalizationCachedYmdDate -Context $Context -DateValue $FirstSeenValue
+    $lastSeen = Get-NormalizationCachedYmdDate -Context $Context -DateValue $LastSeenValue
+
+    if ($firstSeen -and $lastSeen -and [datetime]$firstSeen -gt [datetime]$lastSeen) {
+        $temp = $firstSeen
+        $firstSeen = $lastSeen
+        $lastSeen = $temp
+        $FirstLastSwappedCount.Value++
+    }
+
+    if (-not $firstSeen) { $firstSeen = '' }
+    if (-not $lastSeen) { $lastSeen = '' }
+
+    return [PSCustomObject]@{
+        FirstSeenText = $firstSeen
+        LastSeenText = $lastSeen
+        FirstSeenIndex = (Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex)
+        LastSeenIndex = (Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex)
+    }
+}
+
+function Resolve-NormalizedContentLookup {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$SoftwareVendor,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$SoftwareName,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$RecommendationReference,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$CveId,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$CvssScore,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$SeverityLevel,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$ExploitabilityLevel,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$CveUrl,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$CveBatchTitle,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$RecommendedSecurityUpdate,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$RecommendedSecurityUpdateId,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$RecommendedSecurityUpdateUrl,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$SoftwareVersion,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object[]]$DiskPaths,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object[]]$RegistryPaths,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$SecurityUpdateAvailable,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Context
+    )
+
+    $lookups = $Context.Lookups
+    $indexes = $Context.Indexes
+
+    $swIdx = Add-NormalizedSoftware `
+        -SoftwareVendor ([string]($SoftwareVendor ?? '')) `
+        -SoftwareName ([string]($SoftwareName ?? '')) `
+        -RecommendationReference ([string]($RecommendationReference ?? '')) `
+        -Context $Context
+
+    $cveIdx = Add-NormalizedCve `
+        -CveId $CveId `
+        -CvssScore $CvssScore `
+        -SeverityLevel $SeverityLevel `
+        -ExploitabilityLevel $ExploitabilityLevel `
+        -CveUrl (Convert-CveUrl -Url $CveUrl) `
+        -CveBatchTitle $CveBatchTitle `
+        -Context $Context
+
+    $updIdx = Resolve-UpdateLookupIndex `
+        -UpdateName ([string]$RecommendedSecurityUpdate) `
+        -UpdateId ([string]$RecommendedSecurityUpdateId) `
+        -UpdateUrl ([string]$RecommendedSecurityUpdateUrl) `
+        -UpdateList $lookups.updates `
+        -UpdateIndex $indexes.updates
+
+    return [PSCustomObject]@{
+        sw = $swIdx
+        cve = $cveIdx
+        ver = (Get-OrCreateIndex -value $SoftwareVersion -list $lookups.versions -indexMap $indexes.versions)
+        upd = $updIdx
+        ua = [int]($SecurityUpdateAvailable -eq $true)
+        dp = Resolve-NormalizedLookupIndexList -Values $DiskPaths -List $lookups.diskPaths -IndexMap $indexes.diskPaths
+        rp = Resolve-NormalizedLookupIndexList -Values $RegistryPaths -List $lookups.regPaths -IndexMap $indexes.regPaths
+    }
+}
+
+function Set-NormalizedCompactRecordValues {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Record,
+
+        [Parameter(Mandatory = $true)]
+        [int]$DeviceIndex,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$ContentLookup,
+
+        [Parameter(Mandatory = $true)]
+        [int]$FirstSeenIndex,
+
+        [Parameter(Mandatory = $true)]
+        [int]$LastSeenIndex
+    )
+
+    $Record[0] = $DeviceIndex
+    $Record[1] = $ContentLookup.cve
+    $Record[2] = $ContentLookup.sw
+    $Record[3] = $ContentLookup.ver
+    $Record[4] = $FirstSeenIndex
+    $Record[5] = $LastSeenIndex
+    $Record[6] = $ContentLookup.ua
+    $Record[7] = $ContentLookup.upd
+    $Record[8] = $ContentLookup.dp
+    $Record[9] = $ContentLookup.rp
+    return $Record
+}
+
+function Test-NormalizedWriterRowCount {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$WriterCloseResult,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedRowCount
+    )
+
+    switch ($WriterCloseResult.Mode) {
+        'rows' {
+            if ($WriterCloseResult.VulnsPath -and (Test-Path -LiteralPath $WriterCloseResult.VulnsPath -PathType Leaf)) {
+                $actualRowCount = Get-CompactVulnJsonRowCount -Path $WriterCloseResult.VulnsPath
+                if ($actualRowCount -ne $ExpectedRowCount) {
+                    throw ("Normalized vulnerability payload row count mismatch after streaming write. Expected {0}, found {1} in '{2}'." -f $ExpectedRowCount, $actualRowCount, $WriterCloseResult.VulnsPath)
+                }
+            }
+        }
+        'payload' {
+            if ($WriterCloseResult.PayloadPath -and (Test-Path -LiteralPath $WriterCloseResult.PayloadPath -PathType Leaf)) {
+                $actualRowCount = Get-CompressedPayloadVulnCount -Path $WriterCloseResult.PayloadPath
+                if ($actualRowCount -ne $ExpectedRowCount) {
+                    throw ("Normalized payload row count mismatch after direct payload streaming. Expected {0}, found {1} in '{2}'." -f $ExpectedRowCount, $actualRowCount, $WriterCloseResult.PayloadPath)
+                }
+            }
+        }
+    }
+}
+
 function Invoke-ContentStoreNormalization {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -7892,15 +8671,14 @@ function Invoke-ContentStoreNormalization {
         [hashtable]$Machines,
 
         [Parameter(Mandatory = $false)]
-        [hashtable]$AdvancedHuntingData = @{}
-    )
+        [hashtable]$AdvancedHuntingData = @{},
 
-    $lookups = $Context.Lookups
-    $updateIndex = $Context.Indexes.updates
-    $versionIndex = $Context.Indexes.versions
-    $dateIndex = $Context.Indexes.dates
-    $diskPathIndex = $Context.Indexes.diskPaths
-    $regPathIndex = $Context.Indexes.regPaths
+        [Parameter(Mandatory = $false)]
+        [string[]]$MergedRefPaths,
+
+        [Parameter(Mandatory = $false)]
+        [string]$PayloadOutputPath
+    )
 
     $Context.Machines = $Machines
     $Context.AdvancedHuntingData = $AdvancedHuntingData
@@ -7921,10 +8699,8 @@ function Invoke-ContentStoreNormalization {
     $contentLookupCache = New-Object 'System.Object[]' $contentTemplateCount
     $processedCountRef = [ref]0
     $firstLastSwappedCountRef = [ref]0
-    $vulnWriter = $null
-    $jsonWriter = $null
-    $columnWriterSet = $null
-    $vulnColumnPaths = $null
+    $writerState = $null
+    $writerCloseResult = $null
 
     for ($deviceProfileIndexValue = 0; $deviceProfileIndexValue -lt $deviceProfileCount; $deviceProfileIndexValue++) {
         $deviceProfile = $deviceProfiles[$deviceProfileIndexValue]
@@ -7943,186 +8719,187 @@ function Invoke-ContentStoreNormalization {
     for ($contentTemplateIndexValue = 0; $contentTemplateIndexValue -lt $contentTemplateCount; $contentTemplateIndexValue++) {
         $contentTemplate = $contentTemplates[$contentTemplateIndexValue]
 
-        $swIdx = Add-NormalizedSoftware `
+        $contentLookupCache[$contentTemplateIndexValue] = Resolve-NormalizedContentLookup `
             -SoftwareVendor ([string]$contentTemplate.sv) `
             -SoftwareName ([string]$contentTemplate.sn) `
             -RecommendationReference ([string]$contentTemplate.rr) `
-            -Context $Context
-
-        $cveBatchUrl = Convert-CveUrl -Url ([string]$contentTemplate.bu)
-        $cveIdx = Add-NormalizedCve `
             -CveId ([string]$contentTemplate.c) `
             -CvssScore $contentTemplate.sc `
             -SeverityLevel ([string]$contentTemplate.sev) `
             -ExploitabilityLevel ([string]$contentTemplate.ex) `
-            -CveUrl $cveBatchUrl `
+            -CveUrl ([string]$contentTemplate.bu) `
             -CveBatchTitle ([string]$contentTemplate.bt) `
+            -RecommendedSecurityUpdate ([string]$contentTemplate.ru) `
+            -RecommendedSecurityUpdateId ([string]$contentTemplate.rid) `
+            -RecommendedSecurityUpdateUrl ([string]$contentTemplate.url) `
+            -SoftwareVersion ([string]$contentTemplate.ver) `
+            -DiskPaths @($contentTemplate.dp) `
+            -RegistryPaths @($contentTemplate.rp) `
+            -SecurityUpdateAvailable ($contentTemplate.ua -eq $true) `
             -Context $Context
-
-        $recUpdate = [string]$contentTemplate.ru
-        $recUpdateId = [string]$contentTemplate.rid
-        $recUpdateUrl = [string]$contentTemplate.url
-        $updIdx = Resolve-UpdateLookupIndex -UpdateName $recUpdate -UpdateId $recUpdateId -UpdateUrl $recUpdateUrl -UpdateList $lookups.updates -UpdateIndex $updateIndex
-
-        $versionIdx = Get-OrCreateIndex -value ([string]$contentTemplate.ver) -list $lookups.versions -indexMap $versionIndex
-        $diskPathIndices = $null
-        $regPathIndices = $null
-        if ($contentTemplate.dp -and @($contentTemplate.dp).Count -gt 0) {
-            $diskPathIndices = [System.Collections.Generic.List[int]]::new()
-            foreach ($dp in @($contentTemplate.dp)) {
-                $dpIdx = Get-OrCreateIndex -value $dp -list $lookups.diskPaths -indexMap $diskPathIndex
-                if ($dpIdx -ge 0) { $diskPathIndices.Add($dpIdx) }
-            }
-        }
-        if ($contentTemplate.rp -and @($contentTemplate.rp).Count -gt 0) {
-            $regPathIndices = [System.Collections.Generic.List[int]]::new()
-            foreach ($rp in @($contentTemplate.rp)) {
-                $rpIdx = Get-OrCreateIndex -value $rp -list $lookups.regPaths -indexMap $regPathIndex
-                if ($rpIdx -ge 0) { $regPathIndices.Add($rpIdx) }
-            }
-        }
-
-        $contentLookupCache[$contentTemplateIndexValue] = [PSCustomObject]@{
-            sw = $swIdx
-            cve = $cveIdx
-            ver = $versionIdx
-            upd = $updIdx
-            ua = [int]($contentTemplate.ua -eq $true)
-            dp = $diskPathIndices
-            rp = $regPathIndices
-        }
     }
 
     try {
-        if (-not [string]::IsNullOrWhiteSpace($VulnColumnDirectoryPath)) {
-            $columnWriterSet = Open-CompactVulnColumnWriterSet -DirectoryPath $VulnColumnDirectoryPath
-            $vulnColumnPaths = $columnWriterSet.Paths
-        }
-        else {
-            $vulnWriter = [System.IO.StreamWriter]::new($VulnOutputPath, $false, [System.Text.UTF8Encoding]::new($false))
-            $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($vulnWriter)
-            $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
-            $jsonWriter.WriteStartArray()
-        }
+        $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
 
         $refPaths = [System.Collections.Generic.List[pscustomobject]]::new()
-        $currentRefsPath = Get-VulnCurrentRefsPath -BasePath $DataPath
-        if (Test-Path -LiteralPath $currentRefsPath -PathType Leaf) {
-            $refPaths.Add([PSCustomObject]@{
-                Path = $currentRefsPath
-                Label = (Split-Path -Leaf $currentRefsPath)
-            })
+        if ($MergedRefPaths -and $MergedRefPaths.Count -gt 0) {
+            # Use pre-merged ref paths (from observed-window cache or merge output)
+            foreach ($mergedPath in $MergedRefPaths) {
+                $refPaths.Add([PSCustomObject]@{
+                    Path = $mergedPath
+                    Label = (Split-Path -Leaf $mergedPath)
+                })
+            }
         }
+        else {
+            $currentRefsPath = Get-VulnCurrentRefsPath -BasePath $DataPath
+            if (Test-Path -LiteralPath $currentRefsPath -PathType Leaf) {
+                $refPaths.Add([PSCustomObject]@{
+                    Path = $currentRefsPath
+                    Label = (Split-Path -Leaf $currentRefsPath)
+                })
+            }
 
-        foreach ($historyRefsFile in @(Get-ChildItem -Path $DataPath -Filter 'VulnHistoryRefs_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
-            $refPaths.Add([PSCustomObject]@{
-                Path = $historyRefsFile.FullName
-                Label = $historyRefsFile.Name
-            })
-        }
-
-        foreach ($refPath in $refPaths) {
-            Invoke-VulnNdjsonLineAction -Path ([string]$refPath.Path) -Action {
-                param([string]$JsonLine)
-
-                $document = [System.Text.Json.JsonDocument]::Parse($JsonLine)
-                try {
-                    $root = $document.RootElement
-                    $elements = $root.EnumerateArray()
-                    [void]$elements.MoveNext()
-                    [void]$elements.MoveNext()
-                    $deviceProfileIndexValue = $elements.Current.GetInt32()
-                    [void]$elements.MoveNext()
-                    $contentTemplateIndexValue = $elements.Current.GetInt32()
-                    [void]$elements.MoveNext()
-                    $firstSeenValue = if ($elements.Current.ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $elements.Current.GetString() }
-                    [void]$elements.MoveNext()
-                    $lastSeenValue = if ($elements.Current.ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $elements.Current.GetString() }
-
-                    if (($deviceProfileIndexValue -lt 0) -or ($deviceProfileIndexValue -ge $deviceProfileCount)) { return }
-                    if (($contentTemplateIndexValue -lt 0) -or ($contentTemplateIndexValue -ge $contentTemplateCount)) { return }
-                    if (-not $deviceOnboardedFlags[$deviceProfileIndexValue]) { return }
-
-                    $processedCountRef.Value++
-
-                    $seenWindow = Get-NormalizedVulnSeenWindow -FirstSeenValue $firstSeenValue -LastSeenValue $lastSeenValue
-                    $firstSeen = if ($seenWindow.FirstSeenTimestamp) { Get-NormalizationCachedYmdDate -Context $Context -DateValue $seenWindow.FirstSeenTimestamp } else { $null }
-                    $lastSeen = if ($seenWindow.LastSeenTimestamp) { Get-NormalizationCachedYmdDate -Context $Context -DateValue $seenWindow.LastSeenTimestamp } else { $null }
-                    if ($seenWindow.WasReordered) {
-                        $firstLastSwappedCountRef.Value++
-                    }
-
-                    if (-not $firstSeen) { $firstSeen = '' }
-                    if (-not $lastSeen) { $lastSeen = '' }
-                    $firstSeenIdx = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
-                    $lastSeenIdx = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
-
-                    $contentLookup = $contentLookupCache[$contentTemplateIndexValue]
-                    $compactRecord = New-Object object[] 10
-                    $compactRecord[0] = $deviceLookupIndices[$deviceProfileIndexValue]
-                    $compactRecord[1] = $contentLookup.cve
-                    $compactRecord[2] = $contentLookup.sw
-                    $compactRecord[3] = $contentLookup.ver
-                    $compactRecord[4] = $firstSeenIdx
-                    $compactRecord[5] = $lastSeenIdx
-                    $compactRecord[6] = $contentLookup.ua
-                    $compactRecord[7] = $contentLookup.upd
-                    $compactRecord[8] = $contentLookup.dp
-                    $compactRecord[9] = $contentLookup.rp
-
-                    if ($columnWriterSet) {
-                        Write-CompactVulnRecordColumnSet -WriterSet $columnWriterSet -Record $compactRecord
-                    }
-                    else {
-                        Write-CompactVulnRecordJson -Writer $jsonWriter -Record $compactRecord
-                    }
-
-                    if (($processedCountRef.Value % 50000) -eq 0) {
-                        Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCountRef.Value) -InformationAction Continue
-                    }
-
-                    if (($processedCountRef.Value % 100000) -eq 0) {
-                        if ($columnWriterSet) {
-                            Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
-                        }
-                        else {
-                            $jsonWriter.Flush()
-                        }
-                        Invoke-FullGarbageCollection
-                    }
-                }
-                finally {
-                    $document.Dispose()
-                }
+            foreach ($historyRefsFile in @(Get-ChildItem -Path $DataPath -Filter 'VulnHistoryRefs_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+                $refPaths.Add([PSCustomObject]@{
+                    Path = $historyRefsFile.FullName
+                    Label = $historyRefsFile.Name
+                })
             }
         }
 
-        if ($columnWriterSet) {
-            Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
+        foreach ($refPath in $refPaths) {
+            # Inline streaming — eliminates 1.5M scriptblock invocations from
+            # Invoke-VulnNdjsonLineAction. Uses direct .NET GZip + buffer scan.
+            $refFileStream = [System.IO.File]::OpenRead([string]$refPath.Path)
+            $refContentStream = if (([string]$refPath.Path).EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+                [System.IO.Compression.GZipStream]::new($refFileStream, [System.IO.Compression.CompressionMode]::Decompress)
+            } else { $refFileStream }
+            $refBuffer = [byte[]]::new(65536)
+            $refCarryStream = [System.IO.MemoryStream]::new()
+            try {
+                while (($refBytesRead = $refContentStream.Read($refBuffer, 0, $refBuffer.Length)) -gt 0) {
+                    $segmentStart = 0
+                    for ($byteIndex = 0; $byteIndex -lt $refBytesRead; $byteIndex++) {
+                        if ($refBuffer[$byteIndex] -ne 0x0A) { continue }
+
+                        $segmentLength = $byteIndex - $segmentStart
+                        if ($segmentLength -gt 0 -and $refBuffer[$byteIndex - 1] -eq 0x0D) { $segmentLength-- }
+
+                        $jsonLine = $null
+                        if ($refCarryStream.Length -gt 0) {
+                            if ($segmentLength -gt 0) { $refCarryStream.Write($refBuffer, $segmentStart, $segmentLength) }
+                            if ($refCarryStream.Length -gt 0) { $jsonLine = [System.Text.Encoding]::UTF8.GetString($refCarryStream.ToArray()) }
+                            $refCarryStream.SetLength(0)
+                        }
+                        elseif ($segmentLength -gt 0) {
+                            $jsonLine = [System.Text.Encoding]::UTF8.GetString($refBuffer, $segmentStart, $segmentLength)
+                        }
+                        $segmentStart = $byteIndex + 1
+
+                        if ([string]::IsNullOrWhiteSpace($jsonLine)) { continue }
+
+                        # --- Inline ref processing (was the scriptblock body) ---
+                        $document = [System.Text.Json.JsonDocument]::Parse($jsonLine)
+                        try {
+                            $root = $document.RootElement
+                            $elements = $root.EnumerateArray()
+                            [void]$elements.MoveNext()
+                            [void]$elements.MoveNext()
+                            $deviceProfileIndexValue = $elements.Current.GetInt32()
+                            [void]$elements.MoveNext()
+                            $contentTemplateIndexValue = $elements.Current.GetInt32()
+                            [void]$elements.MoveNext()
+                            $firstSeenValue = if ($elements.Current.ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $elements.Current.GetString() }
+                            [void]$elements.MoveNext()
+                            $lastSeenValue = if ($elements.Current.ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $elements.Current.GetString() }
+
+                            if (($deviceProfileIndexValue -lt 0) -or ($deviceProfileIndexValue -ge $deviceProfileCount)) { continue }
+                            if (($contentTemplateIndexValue -lt 0) -or ($contentTemplateIndexValue -ge $contentTemplateCount)) { continue }
+                            if (-not $deviceOnboardedFlags[$deviceProfileIndexValue]) { continue }
+
+                            $processedCountRef.Value++
+
+                            $windowIndexSet = Resolve-NormalizedSeenWindowIndexSet -Context $Context -FirstSeenValue $firstSeenValue -LastSeenValue $lastSeenValue -FirstLastSwappedCount $firstLastSwappedCountRef
+                            $contentLookup = $contentLookupCache[$contentTemplateIndexValue]
+                            Write-NormalizedCompactRecord -WriterState $writerState -Record (Set-NormalizedCompactRecordValues -Record ([object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) -DeviceIndex $deviceLookupIndices[$deviceProfileIndexValue] -ContentLookup $contentLookup -FirstSeenIndex $windowIndexSet.FirstSeenIndex -LastSeenIndex $windowIndexSet.LastSeenIndex)
+
+                            if (($processedCountRef.Value % 50000) -eq 0) {
+                                Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCountRef.Value) -InformationAction Continue
+                            }
+
+                            if (($processedCountRef.Value % 100000) -eq 0) {
+                                Sync-NormalizedVulnWriter -WriterState $writerState
+                                Invoke-FullGarbageCollection
+                            }
+                        }
+                        finally {
+                            $document.Dispose()
+                        }
+                    }
+
+                    $remainingLength = $refBytesRead - $segmentStart
+                    if ($remainingLength -gt 0) { $refCarryStream.Write($refBuffer, $segmentStart, $remainingLength) }
+                }
+
+                # Process final carry bytes
+                if ($refCarryStream.Length -gt 0) {
+                    $lineBytes = $refCarryStream.ToArray()
+                    $lineLength = $lineBytes.Length
+                    if ($lineLength -gt 0 -and $lineBytes[$lineLength - 1] -eq 0x0D) { $lineLength-- }
+                    if ($lineLength -gt 0) {
+                        $jsonLine = [System.Text.Encoding]::UTF8.GetString($lineBytes, 0, $lineLength)
+                        if (-not [string]::IsNullOrWhiteSpace($jsonLine)) {
+                            $document = [System.Text.Json.JsonDocument]::Parse($jsonLine)
+                            try {
+                                $root = $document.RootElement
+                                $elements = $root.EnumerateArray()
+                                [void]$elements.MoveNext()
+                                [void]$elements.MoveNext()
+                                $dpv = $elements.Current.GetInt32()
+                                [void]$elements.MoveNext()
+                                $ctv = $elements.Current.GetInt32()
+                                if (($dpv -ge 0) -and ($dpv -lt $deviceProfileCount) -and ($ctv -ge 0) -and ($ctv -lt $contentTemplateCount) -and $deviceOnboardedFlags[$dpv]) {
+                                    [void]$elements.MoveNext()
+                                    $fv = if ($elements.Current.ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $elements.Current.GetString() }
+                                    [void]$elements.MoveNext()
+                                    $lv = if ($elements.Current.ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $elements.Current.GetString() }
+                                    $processedCountRef.Value++
+                                    $windowIndexSet = Resolve-NormalizedSeenWindowIndexSet -Context $Context -FirstSeenValue $fv -LastSeenValue $lv -FirstLastSwappedCount $firstLastSwappedCountRef
+                                    $cl = $contentLookupCache[$ctv]
+                                    Write-NormalizedCompactRecord -WriterState $writerState -Record (Set-NormalizedCompactRecordValues -Record ([object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) -DeviceIndex $deviceLookupIndices[$dpv] -ContentLookup $cl -FirstSeenIndex $windowIndexSet.FirstSeenIndex -LastSeenIndex $windowIndexSet.LastSeenIndex)
+                                }
+                            }
+                            finally { $document.Dispose() }
+                        }
+                    }
+                }
+            }
+            finally {
+                $refCarryStream.Dispose()
+                if ($refContentStream -ne $refFileStream) { $refContentStream.Dispose() }
+                $refFileStream.Dispose()
+            }
         }
-        else {
-            $jsonWriter.WriteEndArray()
-            $jsonWriter.Flush()
-        }
+
+        Sync-NormalizedVulnWriter -WriterState $writerState
     }
     finally {
-        if ($jsonWriter) {
-            $jsonWriter.Close()
-        }
-        if ($vulnWriter) {
-            $vulnWriter.Dispose()
-        }
-        if ($columnWriterSet) {
-            Close-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
+        if ($writerState) {
+            $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups
         }
     }
+
+    Test-NormalizedWriterRowCount -WriterCloseResult $writerCloseResult -ExpectedRowCount $processedCountRef.Value
 
     return [PSCustomObject]@{
         ProcessedCount = $processedCountRef.Value
         FirstLastSwappedCount = $firstLastSwappedCountRef.Value
         HasNoTags = ($Context.HasNoTags -eq $true)
-        VulnsPath = if ($columnWriterSet) { $null } else { $VulnOutputPath }
-        VulnColumnPaths = $vulnColumnPaths
+        VulnsPath = $writerCloseResult.VulnsPath
+        VulnColumnPaths = $writerCloseResult.VulnColumnPaths
+        PayloadPath = $writerCloseResult.PayloadPath
     }
 }
 
@@ -8146,38 +8923,24 @@ function Invoke-RawStoreNormalization {
         [hashtable]$Machines,
 
         [Parameter(Mandatory = $false)]
-        [hashtable]$AdvancedHuntingData = @{}
+        [hashtable]$AdvancedHuntingData = @{},
+
+        [Parameter(Mandatory = $false)]
+        [string]$PayloadOutputPath
     )
 
     $Context.Machines = $Machines
     $Context.AdvancedHuntingData = $AdvancedHuntingData
     $Context.HasNoTags = $false
 
-    $lookups = $Context.Lookups
-    $updateIndex = $Context.Indexes.updates
-    $versionIndex = $Context.Indexes.versions
-    $dateIndex = $Context.Indexes.dates
-    $diskPathIndex = $Context.Indexes.diskPaths
-    $regPathIndex = $Context.Indexes.regPaths
-
     $processedCountRef = [ref]0
     $firstLastSwappedCountRef = [ref]0
-    $vulnWriter = $null
-    $jsonWriter = $null
-    $columnWriterSet = $null
-    $vulnColumnPaths = $null
+    $writerState = $null
+    $writerCloseResult = $null
+    $compactRecord = [object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
     try {
-        if (-not [string]::IsNullOrWhiteSpace($VulnColumnDirectoryPath)) {
-            $columnWriterSet = Open-CompactVulnColumnWriterSet -DirectoryPath $VulnColumnDirectoryPath
-            $vulnColumnPaths = $columnWriterSet.Paths
-        }
-        else {
-            $vulnWriter = [System.IO.StreamWriter]::new($VulnOutputPath, $false, [System.Text.UTF8Encoding]::new($false))
-            $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($vulnWriter)
-            $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
-            $jsonWriter.WriteStartArray()
-        }
+        $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
 
         Invoke-WithStoreLock -BasePath $DataPath -StoreName 'vuln' -ScriptBlock {
             Restore-StoreTransaction -BasePath $DataPath -StoreName 'vuln'
@@ -8206,109 +8969,327 @@ function Invoke-RawStoreNormalization {
                 Invoke-VulnNdjsonJsonRootAction -Path ([string]$storePath.Path) -Action {
                     param([System.Text.Json.JsonElement]$root)
 
-                        $isOnboarded = Get-JsonElementPropertyValue -Element $root -Name 'IsOnboarded'
+                        $isOnboarded = $false
+                        $deviceId = ''
+                        $deviceName = ''
+                        $groupName = ''
+                        $osPlatform = ''
+                        $osVersion = ''
+                        $machineTags = @()
+                        $softwareVendor = ''
+                        $softwareName = ''
+                        $recommendationReference = ''
+                        $cveId = $null
+                        $cvssScore = $null
+                        $severityLevel = $null
+                        $exploitabilityLevel = $null
+                        $cveBatchUrl = $null
+                        $cveBatchTitle = $null
+                        $recUpdate = $null
+                        $recUpdateId = $null
+                        $recUpdateUrl = $null
+                        $seenFirstValue = $null
+                        $seenLastValue = $null
+                        $versionStr = $null
+                        $rawDiskPaths = @()
+                        $rawRegPaths = @()
+                        $secUpdateAvail = $false
+
+                        foreach ($jsonProperty in $root.EnumerateObject()) {
+                            $propertyValue = $jsonProperty.Value
+                            switch ($jsonProperty.Name) {
+                                'IsOnboarded' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::True) {
+                                        $isOnboarded = $true
+                                    }
+                                    elseif ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::False) {
+                                        $isOnboarded = $false
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $isOnboarded = ((Convert-JsonElementToScalarValue -Element $propertyValue) -eq $true)
+                                    }
+                                }
+                                'DeviceId' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $deviceId = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $deviceId = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                    }
+                                }
+                                'DeviceName' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $deviceName = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $deviceName = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                    }
+                                }
+                                'RbacGroupName' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $groupName = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $groupName = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                    }
+                                }
+                                'OSPlatform' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $osPlatform = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $osPlatform = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                    }
+                                }
+                                'OSVersion' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $osVersion = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $osVersion = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                    }
+                                }
+                                'MachineTags' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+                                        $tagValues = [System.Collections.Generic.List[string]]::new()
+                                        foreach ($tagValueElement in $propertyValue.EnumerateArray()) {
+                                            $tagValue = if ($tagValueElement.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                                $tagValueElement.GetString()
+                                            }
+                                            else {
+                                                Convert-JsonElementToScalarValue -Element $tagValueElement
+                                            }
+                                            if ($null -ne $tagValue -and -not [string]::IsNullOrWhiteSpace([string]$tagValue)) {
+                                                [void]$tagValues.Add([string]$tagValue)
+                                            }
+                                        }
+                                        $machineTags = [string[]]$tagValues.ToArray()
+                                    }
+                                }
+                                'SoftwareVendor' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $softwareVendor = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $softwareVendor = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                    }
+                                }
+                                'SoftwareName' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $softwareName = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $softwareName = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                    }
+                                }
+                                'RecommendationReference' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $recommendationReference = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $recommendationReference = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                    }
+                                }
+                                'CveId' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $cveId = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $cveId = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'CvssScore' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $cvssScore = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Number) {
+                                        $cvssInt64 = 0L
+                                        if ($propertyValue.TryGetInt64([ref]$cvssInt64)) {
+                                            $cvssScore = $cvssInt64
+                                        }
+                                        else {
+                                            $cvssDouble = 0.0
+                                            if ($propertyValue.TryGetDouble([ref]$cvssDouble)) {
+                                                $cvssScore = $cvssDouble
+                                            }
+                                            else {
+                                                $cvssScore = $propertyValue.GetRawText()
+                                            }
+                                        }
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $cvssScore = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'VulnerabilitySeverityLevel' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $severityLevel = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $severityLevel = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'ExploitabilityLevel' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $exploitabilityLevel = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $exploitabilityLevel = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'CveBatchUrl' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $cveBatchUrl = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $cveBatchUrl = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'CveBatchTitle' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $cveBatchTitle = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $cveBatchTitle = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'RecommendedSecurityUpdate' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $recUpdate = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $recUpdate = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'RecommendedSecurityUpdateId' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $recUpdateId = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $recUpdateId = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'RecommendedSecurityUpdateUrl' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $recUpdateUrl = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $recUpdateUrl = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'FirstSeenTimestamp' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $seenFirstValue = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $seenFirstValue = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'LastSeenTimestamp' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $seenLastValue = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $seenLastValue = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'SoftwareVersion' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                        $versionStr = $propertyValue.GetString()
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $versionStr = Convert-JsonElementToScalarValue -Element $propertyValue
+                                    }
+                                }
+                                'DiskPaths' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+                                        $diskPathValues = [System.Collections.Generic.List[string]]::new()
+                                        foreach ($diskPathElement in $propertyValue.EnumerateArray()) {
+                                            $diskPathValue = if ($diskPathElement.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                                $diskPathElement.GetString()
+                                            }
+                                            else {
+                                                Convert-JsonElementToScalarValue -Element $diskPathElement
+                                            }
+                                            if ($null -ne $diskPathValue -and -not [string]::IsNullOrWhiteSpace([string]$diskPathValue)) {
+                                                [void]$diskPathValues.Add([string]$diskPathValue)
+                                            }
+                                        }
+                                        $rawDiskPaths = [string[]]$diskPathValues.ToArray()
+                                    }
+                                }
+                                'RegistryPaths' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+                                        $regPathValues = [System.Collections.Generic.List[string]]::new()
+                                        foreach ($regPathElement in $propertyValue.EnumerateArray()) {
+                                            $regPathValue = if ($regPathElement.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                                $regPathElement.GetString()
+                                            }
+                                            else {
+                                                Convert-JsonElementToScalarValue -Element $regPathElement
+                                            }
+                                            if ($null -ne $regPathValue -and -not [string]::IsNullOrWhiteSpace([string]$regPathValue)) {
+                                                [void]$regPathValues.Add([string]$regPathValue)
+                                            }
+                                        }
+                                        $rawRegPaths = [string[]]$regPathValues.ToArray()
+                                    }
+                                }
+                                'SecurityUpdateAvailable' {
+                                    if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::True) {
+                                        $secUpdateAvail = $true
+                                    }
+                                    elseif ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::False) {
+                                        $secUpdateAvail = $false
+                                    }
+                                    elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                        $secUpdateAvail = ((Convert-JsonElementToScalarValue -Element $propertyValue) -eq $true)
+                                    }
+                                }
+                            }
+                        }
+
                         if ($isOnboarded -ne $true) { return }
 
                         $processedCountRef.Value++
 
-                        $deviceId = [string](Get-JsonElementPropertyValue -Element $root -Name 'DeviceId')
                         $devIdx = Add-NormalizedDevice `
                             -DeviceId $deviceId `
-                            -DeviceName (Get-JsonElementPropertyValue -Element $root -Name 'DeviceName') `
-                            -GroupName (Get-JsonElementPropertyValue -Element $root -Name 'RbacGroupName') `
-                            -OsPlatform (Get-JsonElementPropertyValue -Element $root -Name 'OSPlatform') `
-                            -OsVersion (Get-JsonElementPropertyValue -Element $root -Name 'OSVersion') `
-                            -MachineTags (Get-JsonElementPropertyValue -Element $root -Name 'MachineTags' -AsStringArray) `
+                            -DeviceName $deviceName `
+                            -GroupName $groupName `
+                            -OsPlatform $osPlatform `
+                            -OsVersion $osVersion `
+                            -MachineTags $machineTags `
                             -Context $Context
 
-                        $swIdx = Add-NormalizedSoftware `
-                            -SoftwareVendor ((Get-JsonElementPropertyValue -Element $root -Name 'SoftwareVendor') ?? '') `
-                            -SoftwareName ((Get-JsonElementPropertyValue -Element $root -Name 'SoftwareName') ?? '') `
-                            -RecommendationReference ((Get-JsonElementPropertyValue -Element $root -Name 'RecommendationReference') ?? '') `
-                            -Context $Context
-
-                        $cveId = Get-JsonElementPropertyValue -Element $root -Name 'CveId'
-                        $cveIdx = Add-NormalizedCve `
+                        $contentLookup = Resolve-NormalizedContentLookup `
+                            -SoftwareVendor ($softwareVendor ?? '') `
+                            -SoftwareName ($softwareName ?? '') `
+                            -RecommendationReference ($recommendationReference ?? '') `
                             -CveId $cveId `
-                            -CvssScore (Get-JsonElementPropertyValue -Element $root -Name 'CvssScore') `
-                            -SeverityLevel (Get-JsonElementPropertyValue -Element $root -Name 'VulnerabilitySeverityLevel') `
-                            -ExploitabilityLevel (Get-JsonElementPropertyValue -Element $root -Name 'ExploitabilityLevel') `
-                            -CveUrl (Convert-CveUrl -Url (Get-JsonElementPropertyValue -Element $root -Name 'CveBatchUrl')) `
-                            -CveBatchTitle (Get-JsonElementPropertyValue -Element $root -Name 'CveBatchTitle') `
+                            -CvssScore $cvssScore `
+                            -SeverityLevel $severityLevel `
+                            -ExploitabilityLevel $exploitabilityLevel `
+                            -CveUrl $cveBatchUrl `
+                            -CveBatchTitle $cveBatchTitle `
+                            -RecommendedSecurityUpdate $recUpdate `
+                            -RecommendedSecurityUpdateId $recUpdateId `
+                            -RecommendedSecurityUpdateUrl $recUpdateUrl `
+                            -SoftwareVersion $versionStr `
+                            -DiskPaths @($rawDiskPaths) `
+                            -RegistryPaths @($rawRegPaths) `
+                            -SecurityUpdateAvailable $secUpdateAvail `
                             -Context $Context
-
-                        $recUpdate = Get-JsonElementPropertyValue -Element $root -Name 'RecommendedSecurityUpdate'
-                        $recUpdateId = Get-JsonElementPropertyValue -Element $root -Name 'RecommendedSecurityUpdateId'
-                        $recUpdateUrl = Get-JsonElementPropertyValue -Element $root -Name 'RecommendedSecurityUpdateUrl'
-                        $updIdx = Resolve-UpdateLookupIndex -UpdateName $recUpdate -UpdateId $recUpdateId -UpdateUrl $recUpdateUrl -UpdateList $lookups.updates -UpdateIndex $updateIndex
-
-                        $seenWindow = Get-NormalizedVulnSeenWindow `
-                            -FirstSeenValue (Get-JsonElementPropertyValue -Element $root -Name 'FirstSeenTimestamp') `
-                            -LastSeenValue (Get-JsonElementPropertyValue -Element $root -Name 'LastSeenTimestamp')
-                        $firstSeen = if ($seenWindow.FirstSeenTimestamp) { Get-NormalizationCachedYmdDate -Context $Context -DateValue $seenWindow.FirstSeenTimestamp } else { $null }
-                        $lastSeen = if ($seenWindow.LastSeenTimestamp) { Get-NormalizationCachedYmdDate -Context $Context -DateValue $seenWindow.LastSeenTimestamp } else { $null }
-                        if ($seenWindow.WasReordered) {
-                            $firstLastSwappedCountRef.Value++
-                        }
-
-                        if (-not $firstSeen) { $firstSeen = '' }
-                        if (-not $lastSeen) { $lastSeen = '' }
-                        $firstSeenIdx = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
-                        $lastSeenIdx = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
-
-                        $versionStr = Get-JsonElementPropertyValue -Element $root -Name 'SoftwareVersion'
-                        $versionIdx = Get-OrCreateIndex -value $versionStr -list $lookups.versions -indexMap $versionIndex
-
-                        $rawDiskPaths = Get-JsonElementPropertyValue -Element $root -Name 'DiskPaths' -AsStringArray
-                        $rawRegPaths = Get-JsonElementPropertyValue -Element $root -Name 'RegistryPaths' -AsStringArray
-                        $diskPathIndices = $null
-                        $regPathIndices = $null
-                        if ($rawDiskPaths -and @($rawDiskPaths).Count -gt 0) {
-                            $diskPathIndices = [System.Collections.Generic.List[int]]::new()
-                            foreach ($dp in $rawDiskPaths) {
-                                $dpIdx = Get-OrCreateIndex -value $dp -list $lookups.diskPaths -indexMap $diskPathIndex
-                                if ($dpIdx -ge 0) { $diskPathIndices.Add($dpIdx) }
-                            }
-                        }
-                        if ($rawRegPaths -and @($rawRegPaths).Count -gt 0) {
-                            $regPathIndices = [System.Collections.Generic.List[int]]::new()
-                            foreach ($rp in $rawRegPaths) {
-                                $rpIdx = Get-OrCreateIndex -value $rp -list $lookups.regPaths -indexMap $regPathIndex
-                                if ($rpIdx -ge 0) { $regPathIndices.Add($rpIdx) }
-                            }
-                        }
-
-                        $secUpdateAvail = Get-JsonElementPropertyValue -Element $root -Name 'SecurityUpdateAvailable'
-                        $compactRecord = New-Object object[] 10
-                        $compactRecord[0] = $devIdx
-                        $compactRecord[1] = $cveIdx
-                        $compactRecord[2] = $swIdx
-                        $compactRecord[3] = $versionIdx
-                        $compactRecord[4] = $firstSeenIdx
-                        $compactRecord[5] = $lastSeenIdx
-                        $compactRecord[6] = [int]($secUpdateAvail -eq $true)
-                        $compactRecord[7] = $updIdx
-                        $compactRecord[8] = $diskPathIndices
-                        $compactRecord[9] = $regPathIndices
-
-                        if ($columnWriterSet) {
-                            Write-CompactVulnRecordColumnSet -WriterSet $columnWriterSet -Record $compactRecord
-                        }
-                        else {
-                            Write-CompactVulnRecordJson -Writer $jsonWriter -Record $compactRecord
-                        }
+                        $windowIndexSet = Resolve-NormalizedSeenWindowIndexSet -Context $Context -FirstSeenValue $seenFirstValue -LastSeenValue $seenLastValue -FirstLastSwappedCount $firstLastSwappedCountRef
+                        [void](Set-NormalizedCompactRecordValues -Record $compactRecord -DeviceIndex $devIdx -ContentLookup $contentLookup -FirstSeenIndex $windowIndexSet.FirstSeenIndex -LastSeenIndex $windowIndexSet.LastSeenIndex)
+                        Write-NormalizedCompactRecord -WriterState $writerState -Record $compactRecord
 
                         if (($processedCountRef.Value % 50000) -eq 0) {
                             Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCountRef.Value) -InformationAction Continue
                         }
 
                         if (($processedCountRef.Value % 100000) -eq 0) {
-                            if ($columnWriterSet) {
-                                Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
-                            }
-                            else {
-                                $jsonWriter.Flush()
-                            }
+                            Sync-NormalizedVulnWriter -WriterState $writerState
                             Invoke-FullGarbageCollection
                         }
                 }
@@ -8319,32 +9300,23 @@ function Invoke-RawStoreNormalization {
             }
         } | Out-Null
 
-        if ($columnWriterSet) {
-            Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
-        }
-        else {
-            $jsonWriter.WriteEndArray()
-            $jsonWriter.Flush()
-        }
+        Sync-NormalizedVulnWriter -WriterState $writerState
     }
     finally {
-        if ($jsonWriter) {
-            $jsonWriter.Close()
-        }
-        if ($vulnWriter) {
-            $vulnWriter.Dispose()
-        }
-        if ($columnWriterSet) {
-            Close-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
+        if ($writerState) {
+            $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups
         }
     }
+
+    Test-NormalizedWriterRowCount -WriterCloseResult $writerCloseResult -ExpectedRowCount $processedCountRef.Value
 
     return [PSCustomObject]@{
         ProcessedCount = $processedCountRef.Value
         FirstLastSwappedCount = $firstLastSwappedCountRef.Value
         HasNoTags = ($Context.HasNoTags -eq $true)
-        VulnsPath = if ($columnWriterSet) { $null } else { $VulnOutputPath }
-        VulnColumnPaths = $vulnColumnPaths
+        VulnsPath = $writerCloseResult.VulnsPath
+        VulnColumnPaths = $writerCloseResult.VulnColumnPaths
+        PayloadPath = $writerCloseResult.PayloadPath
     }
 }
 
@@ -8373,6 +9345,98 @@ function Get-VulnObservedWindowIdentityKey {
         [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareName')
         [string](Get-VulnPropertyValue -InputObject $Row -Name 'SoftwareVersion')
     ) -join '|'
+}
+
+function Test-VulnObservedWindowMergeable {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $CurrentWindow,
+
+        [Parameter(Mandatory = $true)]
+        $CandidateWindow,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, 30)]
+        [int]$AllowedGapDays = 1
+    )
+
+    if (
+        [string]::IsNullOrWhiteSpace($CurrentWindow.FirstSeenTimestamp) -or
+        [string]::IsNullOrWhiteSpace($CurrentWindow.LastSeenTimestamp) -or
+        [string]::IsNullOrWhiteSpace($CandidateWindow.FirstSeenTimestamp) -or
+        [string]::IsNullOrWhiteSpace($CandidateWindow.LastSeenTimestamp)
+    ) {
+        return $false
+    }
+
+    $mergeThreshold = ([datetime]$CurrentWindow.LastSeenTimestamp).AddDays($AllowedGapDays + 1).ToString('yyyy-MM-dd')
+    return ([datetime]$CandidateWindow.FirstSeenTimestamp -le [datetime]$mergeThreshold)
+}
+
+function Merge-VulnObservedWindowSequence {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Items,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$GetWindow,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$CreateItem,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$CreateMergedItem,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$FinalizeItem,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, 30)]
+        [int]$AllowedGapDays = 1
+    )
+
+    $itemArray = @($Items)
+    if ($itemArray.Count -eq 0) {
+        return @()
+    }
+
+    if ($itemArray.Count -eq 1) {
+        $singleItemList = [System.Collections.Generic.List[object]]::new()
+        $singleItemList.Add((& $CreateItem $itemArray[0]))
+        return @($singleItemList)
+    }
+
+    $mergedItems = [System.Collections.Generic.List[object]]::new()
+    $current = & $CreateItem $itemArray[0]
+    $currentWindow = & $GetWindow $current
+
+    for ($index = 1; $index -lt $itemArray.Count; $index++) {
+        $candidate = $itemArray[$index]
+        $candidateWindow = & $GetWindow $candidate
+
+        if (Test-VulnObservedWindowMergeable -CurrentWindow $currentWindow -CandidateWindow $candidateWindow -AllowedGapDays $AllowedGapDays) {
+            $mergedFirstSeen = Get-MinVulnDate -Primary $currentWindow.FirstSeenTimestamp -Secondary $candidateWindow.FirstSeenTimestamp
+            $mergedLastSeen = Get-MaxVulnDate -Primary $currentWindow.LastSeenTimestamp -Secondary $candidateWindow.LastSeenTimestamp
+            $current = & $CreateMergedItem $candidate $mergedFirstSeen $mergedLastSeen
+            $currentWindow = [PSCustomObject]@{
+                FirstSeenTimestamp = $mergedFirstSeen
+                LastSeenTimestamp = $mergedLastSeen
+            }
+            continue
+        }
+
+        $mergedItems.Add((& $FinalizeItem $current $currentWindow))
+        $current = & $CreateItem $candidate
+        $currentWindow = $candidateWindow
+    }
+
+    $mergedItems.Add((& $FinalizeItem $current $currentWindow))
+    return @($mergedItems)
 }
 
 function Merge-VulnObservedWindowRows {
@@ -8408,42 +9472,32 @@ function Merge-VulnObservedWindowRows {
         $items = @($rowsByIdentity[$identityKey] | Sort-Object FirstSeenTimestamp, LastSeenTimestamp)
         if ($items.Count -eq 0) { continue }
 
-        $current = Copy-VulnRecord -Record $items[0]
-        for ($index = 1; $index -lt $items.Count; $index++) {
-            $candidate = $items[$index]
-            $currentWindow = Get-NormalizedVulnSeenWindow `
-                -FirstSeenValue (Get-VulnPropertyValue -InputObject $current -Name 'FirstSeenTimestamp') `
-                -LastSeenValue (Get-VulnPropertyValue -InputObject $current -Name 'LastSeenTimestamp')
-            $candidateWindow = Get-NormalizedVulnSeenWindow `
-                -FirstSeenValue (Get-VulnPropertyValue -InputObject $candidate -Name 'FirstSeenTimestamp') `
-                -LastSeenValue (Get-VulnPropertyValue -InputObject $candidate -Name 'LastSeenTimestamp')
-
-            $shouldMerge = $false
-            if (
-                -not [string]::IsNullOrWhiteSpace($currentWindow.FirstSeenTimestamp) -and
-                -not [string]::IsNullOrWhiteSpace($currentWindow.LastSeenTimestamp) -and
-                -not [string]::IsNullOrWhiteSpace($candidateWindow.FirstSeenTimestamp) -and
-                -not [string]::IsNullOrWhiteSpace($candidateWindow.LastSeenTimestamp)
-            ) {
-                $mergeThreshold = ([datetime]$currentWindow.LastSeenTimestamp).AddDays($AllowedGapDays + 1).ToString('yyyy-MM-dd')
-                if ([datetime]$candidateWindow.FirstSeenTimestamp -le [datetime]$mergeThreshold) {
-                    $shouldMerge = $true
-                }
-            }
-
-            if ($shouldMerge) {
-                $merged = Copy-VulnRecord -Record $candidate
-                $merged.FirstSeenTimestamp = Get-MinVulnDate -Primary $currentWindow.FirstSeenTimestamp -Secondary $candidateWindow.FirstSeenTimestamp
-                $merged.LastSeenTimestamp = Get-MaxVulnDate -Primary $currentWindow.LastSeenTimestamp -Secondary $candidateWindow.LastSeenTimestamp
-                $current = $merged
-                continue
-            }
-
-            $mergedRows.Add($current)
-            $current = Copy-VulnRecord -Record $candidate
+        foreach ($mergedRow in @(Merge-VulnObservedWindowSequence `
+                -Items $items `
+                -AllowedGapDays $AllowedGapDays `
+                -GetWindow {
+                    param($item)
+                    Get-NormalizedVulnSeenWindow `
+                        -FirstSeenValue (Get-VulnPropertyValue -InputObject $item -Name 'FirstSeenTimestamp') `
+                        -LastSeenValue (Get-VulnPropertyValue -InputObject $item -Name 'LastSeenTimestamp')
+                } `
+                -CreateItem {
+                    param($item)
+                    Copy-VulnRecord -Record $item
+                } `
+                -CreateMergedItem {
+                    param($candidate, $firstSeenTimestamp, $lastSeenTimestamp)
+                    $merged = Copy-VulnRecord -Record $candidate
+                    $merged.FirstSeenTimestamp = $firstSeenTimestamp
+                    $merged.LastSeenTimestamp = $lastSeenTimestamp
+                    $merged
+                } `
+                -FinalizeItem {
+                    param($item)
+                    $item
+                })) {
+            $mergedRows.Add($mergedRow)
         }
-
-        $mergedRows.Add($current)
     }
 
     return @($mergedRows)
@@ -8480,6 +9534,9 @@ function Write-MergedVulnObservedWindowRows {
     $sourceRowCount = 0
     $mergedRowCount = 0
     $partitionWriters = [System.IO.StreamWriter[]]::new($PartitionCount)
+    $scatterJsonOptions = [System.Text.Json.JsonSerializerOptions]::new()
+    $scatterJsonOptions.WriteIndented = $false
+    $scatterJsonOptions.MaxDepth = 20
 
     try {
         # Pass 1 — scatter: stream source rows to partition files by identity hash
@@ -8500,7 +9557,9 @@ function Write-MergedVulnObservedWindowRows {
                     [System.IO.File]::Create($partPath),
                     [System.Text.UTF8Encoding]::new($false))
             }
-            $partitionWriters[$bucket].WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
+            $dict = [System.Collections.Generic.Dictionary[string,object]]::new()
+            foreach ($prop in $row.PSObject.Properties) { $dict[$prop.Name] = $prop.Value }
+            $partitionWriters[$bucket].WriteLine([System.Text.Json.JsonSerializer]::Serialize($dict, $scatterJsonOptions))
         }
 
         # Flush and close all partition writers
@@ -8656,56 +9715,7 @@ function Get-NormalizationSourceRows {
         return
     }
 
-    $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $DataPath)
-    if ($legacyFiles.Count -eq 0) { throw "No VulnExport snapshot files found in '$DataPath'." }
-
-    $legacyStore = Convert-LegacyVulnSnapshotsToStore -BasePath $DataPath
-    Write-Information "  Found $($legacyFiles.Count) legacy export file(s); canonicalizing in memory for normalization..." -InformationAction Continue
-
-    if ($SkipObservedWindowMerge) {
-        Write-Information '  Synthetic stress dataset detected; skipping observed-window merge.' -InformationAction Continue
-        foreach ($record in @($legacyStore.CurrentRecords)) {
-            if ($null -ne $record) {
-                $record
-            }
-        }
-        foreach ($historyDocument in @($legacyStore.HistoryDocuments)) {
-            foreach ($snapshot in @($historyDocument.snapshots)) {
-                foreach ($entry in @($snapshot.closed)) {
-                    $historyRow = Get-VulnPropertyValue -InputObject $entry -Name 'row'
-                    if ($null -ne $historyRow) {
-                        $historyRow
-                    }
-                }
-            }
-        }
-        return
-    }
-
-    $legacyInputRowCount = 0
-    $legacyNormalizedRowCount = 0
-    Write-MergedVulnObservedWindowRows -Source {
-        foreach ($record in @($legacyStore.CurrentRecords)) {
-            if ($null -ne $record) {
-                $record
-            }
-        }
-
-        foreach ($historyDocument in @($legacyStore.HistoryDocuments)) {
-            foreach ($snapshot in @($historyDocument.snapshots)) {
-                foreach ($entry in @($snapshot.closed)) {
-                    $historyRow = Get-VulnPropertyValue -InputObject $entry -Name 'row'
-                    if ($null -ne $historyRow) {
-                        $historyRow
-                    }
-                }
-            }
-        }
-    } -InputRowCount ([ref]$legacyInputRowCount) -OutputRowCount ([ref]$legacyNormalizedRowCount)
-
-    if ($legacyNormalizedRowCount -ne $legacyInputRowCount) {
-        Write-Information ("  Collapsed {0} vulnerability observation row(s) into {1} normalized window(s)" -f $legacyInputRowCount, $legacyNormalizedRowCount) -InformationAction Continue
-    }
+    throw "No canonical vulnerability store or content-store sidecars were found in '$DataPath'."
 }
 
 function ConvertTo-NormalizedData {
@@ -8728,7 +9738,10 @@ function ConvertTo-NormalizedData {
         [hashtable]$AdvancedHuntingData = @{},
 
         [Parameter(Mandatory = $false)]
-        [switch]$SkipObservedWindowMerge
+        [switch]$SkipObservedWindowMerge,
+
+        [Parameter(Mandatory = $false)]
+        [string]$PayloadOutputPath
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
@@ -8738,52 +9751,69 @@ function ConvertTo-NormalizedData {
     $context.AdvancedHuntingData = $AdvancedHuntingData
     $lookups = $context.Lookups
     $tagIndex = $context.Indexes.tags
-    $updateIndex = $context.Indexes.updates
-    $versionIndex = $context.Indexes.versions
-    $dateIndex = $context.Indexes.dates
-    $diskPathIndex = $context.Indexes.diskPaths
-    $regPathIndex = $context.Indexes.regPaths
 
     $firstLastSwappedCount = 0
     $processedCount = 0
     $hasNoTags = $false
-    $vulnWriter = $null
-    $jsonWriter = $null
-    $columnWriterSet = $null
-    $vulnColumnPaths = $null
-    $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-IsSyntheticDataset -BasePath $DataPath))
-    $contentStoreExists = (Test-VulnContentStoreExistence -BasePath $DataPath)
-    $storeExists = ((Test-VulnStoreExistence -BasePath $DataPath) -or $contentStoreExists)
-    $useRawStoreFastPath = ($effectiveSkipObservedWindowMerge -and $storeExists)
-    $useContentStoreFastPath = ($useRawStoreFastPath -and $contentStoreExists)
+    $writerState = $null
+    $writerCloseResult = $null
+    $autoColumnDir = $null
 
-    if ($useRawStoreFastPath) {
-        if ($useContentStoreFastPath) {
-            Write-Information '  Synthetic stress dataset detected; using content-store normalization fast path.' -InformationAction Continue
-            $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData
+    # Auto-enable column-store format for better gzip compression when caller
+    # has not explicitly specified a column directory.
+    if ([string]::IsNullOrWhiteSpace($PayloadOutputPath) -and [string]::IsNullOrWhiteSpace($VulnColumnDirectoryPath)) {
+        $autoColumnDir = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-cols-' + [System.Guid]::NewGuid().ToString('N'))
+        $VulnColumnDirectoryPath = $autoColumnDir
+        Write-Information '  Auto-using column-store format for payload compression.' -InformationAction Continue
+    }
+
+    $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-IsSyntheticDataset -BasePath $DataPath))
+    $contentStoreExists = Sync-VulnContentStoreSidecar -BasePath $DataPath
+    $storeExists = ((Test-VulnStoreExistence -BasePath $DataPath) -or $contentStoreExists)
+
+    if ($contentStoreExists) {
+        # Content-store path: always use Invoke-ContentStoreNormalization.
+        # For production data, merge refs first via observed-window cache.
+        $mergedRefPaths = $null
+        if (-not $effectiveSkipObservedWindowMerge) {
+            Write-Information '  Content-store detected; building observed-window merge for production normalization...' -InformationAction Continue
+            $observedWindowCachePath = Publish-VulnObservedWindowCache -BasePath $DataPath -AllowedGapDays 1
+            if (-not [string]::IsNullOrWhiteSpace($observedWindowCachePath) -and (Test-Path -LiteralPath $observedWindowCachePath -PathType Leaf)) {
+                Write-Information ("  Using merged ref cache {0}" -f (Split-Path -Leaf $observedWindowCachePath)) -InformationAction Continue
+                $mergedRefPaths = @($observedWindowCachePath)
+            }
         }
         else {
-            Write-Information '  Synthetic stress dataset detected; using raw store normalization fast path.' -InformationAction Continue
-            $rawNormalizationResult = Invoke-RawStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData
+            Write-Information '  Content-store detected; using fast path (no merge).' -InformationAction Continue
         }
+        $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -MergedRefPaths $mergedRefPaths -PayloadOutputPath $PayloadOutputPath
         $processedCount = [int]$rawNormalizationResult.ProcessedCount
         $firstLastSwappedCount = [int]$rawNormalizationResult.FirstLastSwappedCount
         $hasNoTags = ($rawNormalizationResult.HasNoTags -eq $true)
-        $vulnColumnPaths = $rawNormalizationResult.VulnColumnPaths
+        $writerCloseResult = [PSCustomObject]@{
+            Mode = if ($rawNormalizationResult.PayloadPath) { 'payload' } elseif ($rawNormalizationResult.VulnColumnPaths) { 'column' } else { 'rows' }
+            VulnsPath = $rawNormalizationResult.VulnsPath
+            VulnColumnPaths = $rawNormalizationResult.VulnColumnPaths
+            PayloadPath = $rawNormalizationResult.PayloadPath
+        }
+    }
+    elseif ($effectiveSkipObservedWindowMerge -and $storeExists) {
+        Write-Information '  Raw store detected; using raw store normalization fast path.' -InformationAction Continue
+        $rawNormalizationResult = Invoke-RawStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -PayloadOutputPath $PayloadOutputPath
+        $processedCount = [int]$rawNormalizationResult.ProcessedCount
+        $firstLastSwappedCount = [int]$rawNormalizationResult.FirstLastSwappedCount
+        $hasNoTags = ($rawNormalizationResult.HasNoTags -eq $true)
+        $writerCloseResult = [PSCustomObject]@{
+            Mode = if ($rawNormalizationResult.PayloadPath) { 'payload' } elseif ($rawNormalizationResult.VulnColumnPaths) { 'column' } else { 'rows' }
+            VulnsPath = $rawNormalizationResult.VulnsPath
+            VulnColumnPaths = $rawNormalizationResult.VulnColumnPaths
+            PayloadPath = $rawNormalizationResult.PayloadPath
+        }
     }
     else {
-        if (-not [string]::IsNullOrWhiteSpace($VulnColumnDirectoryPath)) {
-            $columnWriterSet = Open-CompactVulnColumnWriterSet -DirectoryPath $VulnColumnDirectoryPath
-            $vulnColumnPaths = $columnWriterSet.Paths
-        }
-
         try {
-            if (-not $columnWriterSet) {
-                $vulnWriter = [System.IO.StreamWriter]::new($VulnOutputPath, $false, [System.Text.UTF8Encoding]::new($false))
-                $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($vulnWriter)
-                $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
-                $jsonWriter.WriteStartArray()
-            }
+            $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
+            $compactRecord = [object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
             # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
             # collecting all source rows into memory at once.
@@ -8792,136 +9822,58 @@ function ConvertTo-NormalizedData {
                 if ($v.PSObject.Properties['IsOnboarded']?.Value -ne $true) { return }
                 $processedCount++
 
-            $devIdx = Add-NormalizedDevice `
-                -DeviceId ([string]$v.DeviceId) `
-                -DeviceName $v.PSObject.Properties['DeviceName']?.Value `
-                -GroupName $v.PSObject.Properties['RbacGroupName']?.Value `
-                -OsPlatform $v.PSObject.Properties['OSPlatform']?.Value `
-                -OsVersion $v.PSObject.Properties['OSVersion']?.Value `
-                -MachineTags $v.PSObject.Properties['MachineTags']?.Value `
-                -Context $context
+                $devIdx = Add-NormalizedDevice `
+                    -DeviceId ([string]$v.DeviceId) `
+                    -DeviceName $v.PSObject.Properties['DeviceName']?.Value `
+                    -GroupName $v.PSObject.Properties['RbacGroupName']?.Value `
+                    -OsPlatform $v.PSObject.Properties['OSPlatform']?.Value `
+                    -OsVersion $v.PSObject.Properties['OSVersion']?.Value `
+                    -MachineTags $v.PSObject.Properties['MachineTags']?.Value `
+                    -Context $context
 
-            $swIdx = Add-NormalizedSoftware `
-                -SoftwareVendor ($v.PSObject.Properties['SoftwareVendor']?.Value ?? '') `
-                -SoftwareName ($v.PSObject.Properties['SoftwareName']?.Value ?? '') `
-                -RecommendationReference ($v.PSObject.Properties['RecommendationReference']?.Value ?? '') `
-                -Context $context
+                $contentLookup = Resolve-NormalizedContentLookup `
+                    -SoftwareVendor ($v.PSObject.Properties['SoftwareVendor']?.Value ?? '') `
+                    -SoftwareName ($v.PSObject.Properties['SoftwareName']?.Value ?? '') `
+                    -RecommendationReference ($v.PSObject.Properties['RecommendationReference']?.Value ?? '') `
+                    -CveId $v.CveId `
+                    -CvssScore $v.PSObject.Properties['CvssScore']?.Value `
+                    -SeverityLevel $v.PSObject.Properties['VulnerabilitySeverityLevel']?.Value `
+                    -ExploitabilityLevel $v.PSObject.Properties['ExploitabilityLevel']?.Value `
+                    -CveUrl $v.PSObject.Properties['CveBatchUrl']?.Value `
+                    -CveBatchTitle $v.PSObject.Properties['CveBatchTitle']?.Value `
+                    -RecommendedSecurityUpdate $v.PSObject.Properties['RecommendedSecurityUpdate']?.Value `
+                    -RecommendedSecurityUpdateId $v.PSObject.Properties['RecommendedSecurityUpdateId']?.Value `
+                    -RecommendedSecurityUpdateUrl $v.PSObject.Properties['RecommendedSecurityUpdateUrl']?.Value `
+                    -SoftwareVersion $v.PSObject.Properties['SoftwareVersion']?.Value `
+                    -DiskPaths @($v.PSObject.Properties['DiskPaths']?.Value) `
+                    -RegistryPaths @($v.PSObject.Properties['RegistryPaths']?.Value) `
+                    -SecurityUpdateAvailable $v.PSObject.Properties['SecurityUpdateAvailable']?.Value `
+                    -Context $context
+                $windowIndexSet = Resolve-NormalizedSeenWindowIndexSet -Context $context -FirstSeenValue $v.PSObject.Properties['FirstSeenTimestamp']?.Value -LastSeenValue $v.PSObject.Properties['LastSeenTimestamp']?.Value -FirstLastSwappedCount ([ref]$firstLastSwappedCount)
+                [void](Set-NormalizedCompactRecordValues -Record $compactRecord -DeviceIndex $devIdx -ContentLookup $contentLookup -FirstSeenIndex $windowIndexSet.FirstSeenIndex -LastSeenIndex $windowIndexSet.LastSeenIndex)
+                Write-NormalizedCompactRecord -WriterState $writerState -Record $compactRecord
 
-            $cveId = $v.CveId
-
-            $cveIdx = Add-NormalizedCve `
-                -CveId $cveId `
-                -CvssScore $v.PSObject.Properties['CvssScore']?.Value `
-                -SeverityLevel $v.PSObject.Properties['VulnerabilitySeverityLevel']?.Value `
-                -ExploitabilityLevel $v.PSObject.Properties['ExploitabilityLevel']?.Value `
-                -CveUrl (Convert-CveUrl -Url $v.PSObject.Properties['CveBatchUrl']?.Value) `
-                -CveBatchTitle $v.PSObject.Properties['CveBatchTitle']?.Value `
-                -Context $context
-
-            $recUpdate = $v.PSObject.Properties['RecommendedSecurityUpdate']?.Value
-            $recUpdateId = $v.PSObject.Properties['RecommendedSecurityUpdateId']?.Value
-            $recUpdateUrl = $v.PSObject.Properties['RecommendedSecurityUpdateUrl']?.Value
-            $updIdx = Resolve-UpdateLookupIndex -UpdateName $recUpdate -UpdateId $recUpdateId -UpdateUrl $recUpdateUrl -UpdateList $lookups.updates -UpdateIndex $updateIndex
-
-            $seenWindow = Get-NormalizedVulnSeenWindow `
-                -FirstSeenValue $v.PSObject.Properties['FirstSeenTimestamp']?.Value `
-                -LastSeenValue $v.PSObject.Properties['LastSeenTimestamp']?.Value
-            $firstSeen = if ($seenWindow.FirstSeenTimestamp) { Get-NormalizationCachedYmdDate -Context $context -DateValue $seenWindow.FirstSeenTimestamp } else { $null }
-            $lastSeen = if ($seenWindow.LastSeenTimestamp) { Get-NormalizationCachedYmdDate -Context $context -DateValue $seenWindow.LastSeenTimestamp } else { $null }
-            if ($seenWindow.WasReordered) {
-                $firstLastSwappedCount++
-            }
-
-            if (-not $firstSeen) { $firstSeen = '' }
-            if (-not $lastSeen) { $lastSeen = '' }
-            $firstSeenIdx = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
-            $lastSeenIdx = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
-
-            $versionStr = $v.PSObject.Properties['SoftwareVersion']?.Value
-            $versionIdx = Get-OrCreateIndex -value $versionStr -list $lookups.versions -indexMap $versionIndex
-
-            $rawDiskPaths = $v.PSObject.Properties['DiskPaths']?.Value
-            $rawRegPaths = $v.PSObject.Properties['RegistryPaths']?.Value
-            $diskPathIndices = $null
-            $regPathIndices = $null
-            if ($rawDiskPaths -and $rawDiskPaths.Count -gt 0) {
-                $diskPathIndices = [System.Collections.Generic.List[int]]::new()
-                foreach ($dp in $rawDiskPaths) {
-                    $dpIdx = Get-OrCreateIndex -value $dp -list $lookups.diskPaths -indexMap $diskPathIndex
-                    if ($dpIdx -ge 0) { $diskPathIndices.Add($dpIdx) }
+                if (($processedCount % 50000) -eq 0) {
+                    Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCount) -InformationAction Continue
                 }
-            }
-            if ($rawRegPaths -and $rawRegPaths.Count -gt 0) {
-                $regPathIndices = [System.Collections.Generic.List[int]]::new()
-                foreach ($rp in $rawRegPaths) {
-                    $rpIdx = Get-OrCreateIndex -value $rp -list $lookups.regPaths -indexMap $regPathIndex
-                    if ($rpIdx -ge 0) { $regPathIndices.Add($rpIdx) }
+
+                if (($processedCount % 100000) -eq 0) {
+                    Sync-NormalizedVulnWriter -WriterState $writerState
+                    Invoke-FullGarbageCollection
                 }
             }
 
-            $secUpdateAvail = $v.PSObject.Properties['SecurityUpdateAvailable']?.Value
-            $compactRecord = New-Object object[] 10
-            $compactRecord[0] = $devIdx
-            $compactRecord[1] = $cveIdx
-            $compactRecord[2] = $swIdx
-            $compactRecord[3] = $versionIdx
-            $compactRecord[4] = $firstSeenIdx
-            $compactRecord[5] = $lastSeenIdx
-            $compactRecord[6] = [int]($secUpdateAvail -eq $true)
-            $compactRecord[7] = $updIdx
-            $compactRecord[8] = $diskPathIndices
-            $compactRecord[9] = $regPathIndices
-
-            if ($columnWriterSet) {
-                Write-CompactVulnRecordColumnSet -WriterSet $columnWriterSet -Record $compactRecord
-            }
-            else {
-                Write-CompactVulnRecordJson -Writer $jsonWriter -Record $compactRecord
-            }
-
-            if (($processedCount % 50000) -eq 0) {
-                Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCount) -InformationAction Continue
-            }
-
-            if (($processedCount % 100000) -eq 0) {
-                if ($columnWriterSet) {
-                    Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
-                }
-                else {
-                    $jsonWriter.Flush()
-                }
-                Invoke-FullGarbageCollection
-            }
-        }
-
-            if ($columnWriterSet) {
-                Sync-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
-            }
-            else {
-                $jsonWriter.WriteEndArray()
-                $jsonWriter.Flush()
-            }
+            Sync-NormalizedVulnWriter -WriterState $writerState
         }
         finally {
-            if ($jsonWriter) {
-                $jsonWriter.Close()
-            }
-            if ($vulnWriter) {
-                $vulnWriter.Dispose()
-            }
-            if ($columnWriterSet) {
-                Close-CompactVulnColumnWriterSet -WriterSet $columnWriterSet
+            if ($writerState) {
+                $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $context.Lookups
             }
         }
         $hasNoTags = $context.HasNoTags
     }
 
-    if ((-not $columnWriterSet) -and -not [string]::IsNullOrWhiteSpace($VulnOutputPath) -and (Test-Path -LiteralPath $VulnOutputPath -PathType Leaf)) {
-        $actualVulnRowCount = Get-CompactVulnJsonRowCount -Path $VulnOutputPath
-        if ($actualVulnRowCount -ne $processedCount) {
-            throw ("Normalized vulnerability payload row count mismatch after streaming write. Expected {0}, found {1} in '{2}'." -f $processedCount, $actualVulnRowCount, $VulnOutputPath)
-        }
-    }
+    Test-NormalizedWriterRowCount -WriterCloseResult $writerCloseResult -ExpectedRowCount $processedCount
 
     if ($processedCount -eq 0) { throw 'No onboarded vulnerabilities found after streaming all export files.' }
     Write-Information "  Loaded $processedCount onboarded vulnerability records" -InformationAction Continue
@@ -8938,25 +9890,7 @@ function ConvertTo-NormalizedData {
         Write-Warning "  Corrected $firstLastSwappedCount record(s) with FirstSeenTimestamp > LastSeenTimestamp"
     }
 
-    $datasetVendors = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($vendor in $lookups.vendors) {
-        [void]$datasetVendors.Add((Get-VendorMatchKey -Vendor $vendor))
-    }
-
-    foreach ($cve in $lookups.cves) {
-        if ($null -ne $cve.as -and $cve.as.Count -gt 0) {
-            $filteredIndices = [System.Collections.Generic.List[int]]::new()
-            foreach ($asIdx in $cve.as) {
-                $swStr = $lookups.affSoftware[$asIdx]
-                $separatorIndex = $swStr.IndexOf(':')
-                $swVendor = if ($separatorIndex -ge 0) { $swStr.Substring(0, $separatorIndex) } else { $swStr }
-                if ($datasetVendors.Contains((Get-VendorMatchKey -Vendor $swVendor))) {
-                    $filteredIndices.Add($asIdx)
-                }
-            }
-            $cve.as = if ($filteredIndices.Count -gt 0) { $filteredIndices } else { $null }
-        }
-    }
+    Update-NormalizedAffectedSoftwareLookup -Lookups $lookups
 
     return @{
         Lookups = [PSCustomObject]@{
@@ -8982,8 +9916,9 @@ function ConvertTo-NormalizedData {
             FirstLastSwappedCount = $firstLastSwappedCount
         }
         VulnCount = $processedCount
-        VulnsPath = if ($columnWriterSet) { $null } else { $VulnOutputPath }
-        VulnColumnPaths = $vulnColumnPaths
+        VulnsPath = $writerCloseResult.VulnsPath
+        VulnColumnPaths = $writerCloseResult.VulnColumnPaths
+        PayloadPath = $writerCloseResult.PayloadPath
     }
 }
 
@@ -9573,6 +10508,8 @@ function Export-ToStaticWebApp {
 # MAIN PIPELINE
 # =============================================================================
 
+$tempRoot = $null
+
 try {
     Write-Output "========================================"
     Write-Output "  Vulnerability Dashboard Pipeline"
@@ -9647,11 +10584,65 @@ try {
     # -----------------------------------------------------------------
     Write-Output "`n--- Stage B: Download historical data ---"
 
-    $tempRoot = Join-Path -Path $env:TEMP -ChildPath "dashboard-pipeline-$(Get-Date -Format 'yyyyMMddHHmmss')"
+    $tempBasePath = $null
+    $tempBaseCandidates = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($candidate in @($env:TEMP, $env:TMP, $env:TMPDIR)) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+            [void]$tempBaseCandidates.Add([string]$candidate)
+        }
+    }
+
+    try {
+        $systemTempPath = [System.IO.Path]::GetTempPath()
+        if (-not [string]::IsNullOrWhiteSpace($systemTempPath)) {
+            [void]$tempBaseCandidates.Add($systemTempPath)
+        }
+    }
+    catch {
+        Write-Verbose ("Unable to read the system temp path: {0}" -f $_.Exception.Message)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:HOME)) {
+        [void]$tempBaseCandidates.Add([System.IO.Path]::Combine([string]$env:HOME, 'site', 'tmp'))
+    }
+
+    foreach ($candidate in @('/tmp', 'C:\Windows\Temp')) {
+        [void]$tempBaseCandidates.Add($candidate)
+    }
+
+    foreach ($candidate in $tempBaseCandidates) {
+        $resolvedCandidate = ([string]$candidate).Trim()
+        if ([string]::IsNullOrWhiteSpace($resolvedCandidate)) {
+            continue
+        }
+
+        try {
+            if (-not (Test-Path -LiteralPath $resolvedCandidate -PathType Container)) {
+                New-Item -Path $resolvedCandidate -ItemType Directory -Force | Out-Null
+            }
+
+            if (Test-Path -LiteralPath $resolvedCandidate -PathType Container) {
+                $tempBasePath = $resolvedCandidate
+                break
+            }
+        }
+        catch {
+            Write-Verbose ("Skipping temp path candidate '{0}': {1}" -f $resolvedCandidate, $_.Exception.Message)
+        }
+    }
+
+    if (-not $tempBasePath) {
+        throw 'Unable to resolve a temporary directory for the dashboard pipeline.'
+    }
+
+    $tempRoot = Join-Path -Path $tempBasePath -ChildPath "dashboard-pipeline-$(Get-Date -Format 'yyyyMMddHHmmss')"
     $tempExports = Join-Path -Path $tempRoot -ChildPath "exports"
     $tempTemplates = Join-Path -Path $tempRoot -ChildPath "templates"
     $tempDashboards = Join-Path -Path $tempRoot -ChildPath "dashboards"
     $tempLibraries = Join-Path -Path $tempRoot -ChildPath "libraries"
+
+    Write-Output "  Temporary workspace: $tempRoot"
 
     New-Item -Path $tempExports -ItemType Directory -Force | Out-Null
     New-Item -Path $tempTemplates -ItemType Directory -Force | Out-Null
@@ -9766,7 +10757,7 @@ try {
         }
 
         Write-Output "Updating vulnerability current/history store..."
-        $vulnStore = Publish-VulnStoreFromLegacySnapshot -BasePath $tempExports -RemoveLegacyFiles
+        $vulnStore = Publish-VulnStoreFromBulkSnapshot -BasePath $tempExports -RemoveSnapshotFiles
         Write-Output "  Saved vulnerability current/history store with $($vulnStore.CurrentRows) current row(s) across $($vulnStore.HistoryYears) history period file(s)"
 
         # Machine data
@@ -9842,7 +10833,7 @@ try {
         if ($skipObservedWindowMerge) {
             Write-Output "Synthetic manifest detected. Skipping observed-window merge for stress normalization."
         }
-        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -SkipObservedWindowMerge:$skipObservedWindowMerge
+        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -SkipObservedWindowMerge:$skipObservedWindowMerge
         $machines = $null
         $advancedHuntingData = $null
         Invoke-FullGarbageCollection
@@ -9852,12 +10843,24 @@ try {
         $vulnCount = $normalizedResult.VulnCount
         $deviceCount = $normalizedResult.Lookups.devices.Count
         $cveCount = $normalizedResult.Lookups.cves.Count
-        $vulnsFileSize = [math]::Round((Get-Item $normalizedResult.VulnsPath).Length / 1KB, 1)
-        Write-Output "  Vulns JSON file: ${vulnsFileSize}KB"
+        if (-not [string]::IsNullOrWhiteSpace($normalizedResult.VulnsPath) -and (Test-Path -LiteralPath $normalizedResult.VulnsPath -PathType Leaf)) {
+            $vulnsFileSize = [math]::Round((Get-Item $normalizedResult.VulnsPath).Length / 1KB, 1)
+            Write-Output "  Vulns JSON file: ${vulnsFileSize}KB"
+        }
+        elseif ($normalizedResult.VulnColumnPaths) {
+            $vulnColumnSizeBytes = 0L
+            foreach ($columnPath in $normalizedResult.VulnColumnPaths.Values) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$columnPath) -and (Test-Path -LiteralPath ([string]$columnPath) -PathType Leaf)) {
+                    $vulnColumnSizeBytes += (Get-Item -LiteralPath ([string]$columnPath)).Length
+                }
+            }
+            Write-Output ("  Compact vuln columns: {0}KB" -f [math]::Round($vulnColumnSizeBytes / 1KB, 1))
+        }
 
-        Write-Output "  Compressing embedded data..."
         $normalizedQuality = $normalizedResult['Quality']
-        Write-CombinedPayloadGzip -Lookups $normalizedResult.Lookups -VulnsPath $normalizedResult.VulnsPath -OutputPath $tempPayloadPath
+        if (-not (Test-Path -LiteralPath $tempPayloadPath -PathType Leaf)) {
+            throw 'Normalization did not produce the expected payload output.'
+        }
         $normalizedResult = $null
         if (Test-Path -LiteralPath $tempVulnsPath -PathType Leaf) {
             Remove-Item -LiteralPath $tempVulnsPath -Force -ErrorAction SilentlyContinue

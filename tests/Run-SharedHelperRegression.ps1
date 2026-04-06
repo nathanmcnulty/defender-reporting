@@ -74,14 +74,17 @@ function Test-CanonicalLayoutHelper {
     param()
 
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('layout-helper-test-' + [guid]::NewGuid().ToString('N'))
+    $advancedHuntingCurrentFileName = Split-Path -Leaf (Get-AdvancedHuntingCurrentPath -BasePath $tempRoot)
+    $machineCurrentFileName = Split-Path -Leaf (Get-MachineCurrentPath -BasePath $tempRoot)
+    $vulnCurrentFileName = Split-Path -Leaf (Get-VulnCurrentPath -BasePath $tempRoot)
     [void](New-Item -Path $tempRoot -ItemType Directory -Force)
 
     try {
         foreach ($name in @(
-            $Script:AdvancedHuntingCurrentFileName,
-            $Script:MachineCurrentFileName,
+            $advancedHuntingCurrentFileName,
+            $machineCurrentFileName,
             'Machines_History_2026Q1.json.gz',
-            $Script:VulnCurrentFileName,
+            $vulnCurrentFileName,
             'VulnHistory_2026Q1.json.gz',
             'VulnHistoryRows_2026Q1.json.gz'
         )) {
@@ -150,12 +153,14 @@ function Test-LocalExportArtifactCleanup {
     param()
 
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('export-artifact-cleanup-' + [guid]::NewGuid().ToString('N'))
+    $machineCurrentFileName = Split-Path -Leaf (Get-MachineCurrentPath -BasePath $tempRoot)
+    $vulnCurrentFileName = Split-Path -Leaf (Get-VulnCurrentPath -BasePath $tempRoot)
     [void](New-Item -Path $tempRoot -ItemType Directory -Force)
 
     try {
         foreach ($relativePath in @(
-            $Script:MachineCurrentFileName,
-            $Script:VulnCurrentFileName,
+            $machineCurrentFileName,
+            $vulnCurrentFileName,
             'synthetic-manifest.json',
             '.dashboard-cache/payloads/payload-old.json.gz',
             '.vuln-content-store-staging-123/VulnCurrentRefs.json.gz',
@@ -169,10 +174,10 @@ function Test-LocalExportArtifactCleanup {
             Set-Content -Path $fullPath -Value '' -Encoding utf8
         }
 
-        Clear-StaleLocalExportArtifact -BasePath $tempRoot -KeepNames @($Script:MachineCurrentFileName, $Script:VulnCurrentFileName)
+        Clear-StaleLocalExportArtifact -BasePath $tempRoot -KeepNames @($machineCurrentFileName, $vulnCurrentFileName)
 
-        Assert-True ((Test-Path -LiteralPath (Join-Path $tempRoot $Script:MachineCurrentFileName) -PathType Leaf)) 'Expected canonical machine store file to remain after cleanup.'
-        Assert-True ((Test-Path -LiteralPath (Join-Path $tempRoot $Script:VulnCurrentFileName) -PathType Leaf)) 'Expected canonical vulnerability store file to remain after cleanup.'
+        Assert-True ((Test-Path -LiteralPath (Join-Path $tempRoot $machineCurrentFileName) -PathType Leaf)) 'Expected canonical machine store file to remain after cleanup.'
+        Assert-True ((Test-Path -LiteralPath (Join-Path $tempRoot $vulnCurrentFileName) -PathType Leaf)) 'Expected canonical vulnerability store file to remain after cleanup.'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot 'synthetic-manifest.json'))) 'Expected stale synthetic manifest to be removed.'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot '.dashboard-cache'))) 'Expected transient dashboard cache directory to be removed.'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot '.vuln-content-store-staging-123'))) 'Expected transient content-store staging directory to be removed.'
@@ -185,11 +190,11 @@ function Test-LocalExportArtifactCleanup {
     }
 }
 
-function Test-LegacyVulnMigrationSmoke {
+function Test-BulkSnapshotImportSmoke {
     [CmdletBinding()]
     param()
 
-    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('legacy-vuln-smoke-' + [guid]::NewGuid().ToString('N'))
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('bulk-snapshot-import-smoke-' + [guid]::NewGuid().ToString('N'))
     [void](New-Item -Path $tempRoot -ItemType Directory -Force)
 
     try {
@@ -202,15 +207,15 @@ function Test-LegacyVulnMigrationSmoke {
             [System.IO.File]::WriteAllLines($path, $lines, [System.Text.UTF8Encoding]::new($false))
         }
 
-        $publishResult = Publish-VulnStoreFromLegacySnapshot -BasePath $tempRoot -RemoveLegacyFiles
+        $publishResult = Publish-VulnStoreFromBulkSnapshot -BasePath $tempRoot -RemoveSnapshotFiles
         $storeRows = @(Read-VulnStoreRow -BasePath $tempRoot)
 
         Assert-True ((Test-Path -LiteralPath (Get-VulnCurrentPath -BasePath $tempRoot) -PathType Leaf)) 'Canonical vuln current file was not materialized.'
         Assert-True ((Test-Path -LiteralPath (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -PathType Leaf)) 'Canonical quarterly vuln history file was not materialized.'
         Assert-True ((Test-Path -LiteralPath (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -PathType Leaf)) 'Canonical quarterly vuln history rows file was not materialized.'
-        Assert-True (@(Get-VulnLegacySnapshotFile -BasePath $tempRoot).Count -eq 0) 'Legacy vulnerability snapshots were not removed.'
+        Assert-True (@(Get-VulnLegacySnapshotFile -BasePath $tempRoot).Count -eq 0) 'Downloaded vulnerability snapshots were not removed.'
         Assert-True ($publishResult.CurrentRows -eq 1) 'Expected one current row after migrating the smoke fixture.'
-        Assert-True ($publishResult.HistoryYears -eq 1) 'Expected one history period after migrating the smoke fixture.'
+        Assert-True ($publishResult.HistoryYears -eq 1) 'Expected one history period after importing the smoke fixture.'
         Assert-True ($storeRows.Count -eq 2) 'Expected migrated store to expose one current row and one historical row.'
     }
     finally {
@@ -220,11 +225,11 @@ function Test-LegacyVulnMigrationSmoke {
     }
 }
 
-function Test-LegacyVulnMigrationSingleSnapshot {
+function Test-BulkSnapshotImportSingleSnapshot {
     [CmdletBinding()]
     param()
 
-    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('legacy-vuln-single-' + [guid]::NewGuid().ToString('N'))
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('bulk-snapshot-import-single-' + [guid]::NewGuid().ToString('N'))
     [void](New-Item -Path $tempRoot -ItemType Directory -Force)
 
     try {
@@ -232,14 +237,14 @@ function Test-LegacyVulnMigrationSingleSnapshot {
         $row = Get-TestVulnRow -Id 'single-001' -CveId 'CVE-2026-0099' -SnapshotDate '2026-03-20' -Version '1.0.0'
         [System.IO.File]::WriteAllLines($path, @($row | ConvertTo-Json -Compress -Depth 8), [System.Text.UTF8Encoding]::new($false))
 
-        $publishResult = Publish-VulnStoreFromLegacySnapshot -BasePath $tempRoot -RemoveLegacyFiles
+        $publishResult = Publish-VulnStoreFromBulkSnapshot -BasePath $tempRoot -RemoveSnapshotFiles
         $storeRows = @(Read-VulnStoreRow -BasePath $tempRoot)
 
         Assert-True ((Test-Path -LiteralPath (Get-VulnCurrentPath -BasePath $tempRoot) -PathType Leaf)) 'Canonical vuln current file was not materialized for a single snapshot.'
         Assert-True (@(Get-ChildItem -Path $tempRoot -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue).Count -eq 0) 'Single-snapshot migration should not create history period files.'
-        Assert-True ($publishResult.CurrentRows -eq 1) 'Expected one current row after migrating a single snapshot.'
-        Assert-True ($publishResult.HistoryYears -eq 0) 'Expected zero history periods after migrating a single snapshot.'
-        Assert-True ($storeRows.Count -eq 1) 'Expected single-snapshot migration to expose only one current row.'
+        Assert-True ($publishResult.CurrentRows -eq 1) 'Expected one current row after importing a single snapshot.'
+        Assert-True ($publishResult.HistoryYears -eq 0) 'Expected zero history periods after importing a single snapshot.'
+        Assert-True ($storeRows.Count -eq 1) 'Expected single-snapshot import to expose only one current row.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -374,10 +379,69 @@ function Test-ConvertToNormalizedDataWritesExpectedRowCount {
         Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
 
         $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -Machines @{} -AdvancedHuntingData @{}
-        $writtenRowCount = Get-CompactVulnJsonRowCount -Path $result.VulnsPath
+
+        if ($result.VulnsPath) {
+            $writtenRowCount = Get-CompactVulnJsonRowCount -Path $result.VulnsPath
+        }
+        elseif ($result.VulnColumnPaths) {
+            # Column-store format: count entries in the device-index column
+            $colJson = Get-Content -Path $result.VulnColumnPaths['d'] -Raw
+            $writtenRowCount = ([Newtonsoft.Json.Linq.JArray]::Parse($colJson)).Count
+        }
+        else {
+            throw 'ConvertTo-NormalizedData returned neither VulnsPath nor VulnColumnPaths.'
+        }
 
         Assert-True ($result.VulnCount -eq 2) 'Expected normalized data to include both current and history vulnerability rows.'
         Assert-True ($writtenRowCount -eq $result.VulnCount) 'Expected normalized vuln file row count to match the processed vulnerability count.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ConvertToNormalizedDataWritesDirectPayload {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-direct-payload-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'direct-payload-001' -CveId 'CVE-2026-0111' -SnapshotDate '2026-03-20' -Version '1.0.0'
+        $historyRow = Get-TestVulnRow -Id 'direct-payload-002' -CveId 'CVE-2026-0112' -SnapshotDate '2026-03-18' -Version '1.1.0'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        [void](New-Item -Path (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -ItemType File -Force)
+        Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
+        Write-NdjsonRecordsFile -Path (Get-AdvancedHuntingCurrentPath -BasePath $tempRoot) -Records @(
+            [PSCustomObject]@{
+                CveId = 'CVE-2026-0111'
+                PublishedDate = '2026-03-20'
+                VulnerabilityDescription = 'Direct payload filtering regression.'
+                EpssScore = 0.42
+                AffectedSoftware = @(
+                    'contoso:legacy_agent'
+                    'microsoft:windows_11'
+                )
+            }
+        )
+
+        $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -PayloadOutputPath $payloadPath -Machines @{} -AdvancedHuntingData (Read-AdvancedHuntingData -Path $tempRoot)
+        $payload = Read-GzipTextFile -Path $payloadPath | ConvertFrom-Json -Depth 100
+        $payloadCve = @($payload.lookups.cves | Where-Object { $_.id -eq 'CVE-2026-0111' })[0]
+        $payloadAffectedSoftware = @($payloadCve.as | ForEach-Object { [string]$payload.lookups.affSoftware[[int]$_] } | Sort-Object)
+
+        Assert-True ([string]::IsNullOrWhiteSpace([string]$result.VulnsPath)) 'Expected direct payload mode not to materialize a vuln rows file.'
+        Assert-True ($null -eq $result.VulnColumnPaths) 'Expected direct payload mode not to materialize vuln column files.'
+        Assert-True ([string]$result.PayloadPath -eq $payloadPath) 'Expected direct payload mode to return the payload path.'
+        Assert-True ((Get-CompressedPayloadVulnCount -Path $payloadPath) -eq $result.VulnCount) 'Expected direct payload row count to match the processed vulnerability count.'
+        Assert-True ($payloadAffectedSoftware.Count -eq 1) 'Expected direct payload mode to filter affected software down to dataset vendors.'
+        Assert-True ($payloadAffectedSoftware[0] -eq 'contoso:legacy_agent') 'Expected direct payload mode to preserve only matching affected software vendor entries.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -543,6 +607,12 @@ function Test-DashboardValidationPreservesNoneSeverityData {
 
     try {
         Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
+        $null = Publish-VulnStoreFromBulkSnapshot -BasePath $tempRoot -RemoveSnapshotFiles
+
+        $cachePath = Join-Path $tempRoot '.dashboard-cache'
+        if (Test-Path -LiteralPath $cachePath) {
+            Remove-Item -LiteralPath $cachePath -Recurse -Force -ErrorAction SilentlyContinue
+        }
 
         & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
 
@@ -573,6 +643,12 @@ function Test-DashboardSplitAssetsGenerationAndValidation {
 
     try {
         Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
+        $null = Publish-VulnStoreFromBulkSnapshot -BasePath $tempRoot -RemoveSnapshotFiles
+
+        $cachePath = Join-Path $tempRoot '.dashboard-cache'
+        if (Test-Path -LiteralPath $cachePath) {
+            Remove-Item -LiteralPath $cachePath -Recurse -Force -ErrorAction SilentlyContinue
+        }
 
         & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -SplitAssets -Validate -ValidationOutputPath $auditPath | Out-Null
 
@@ -735,10 +811,10 @@ Test-VulnContentStoreExistenceNeedsRef
 Write-Output '  Content-store existence checks passed.'
 Test-LocalExportArtifactCleanup
 Write-Output '  Local export artifact cleanup checks passed.'
-Test-LegacyVulnMigrationSmoke
-Write-Output '  Legacy vulnerability migration smoke checks passed.'
-Test-LegacyVulnMigrationSingleSnapshot
-Write-Output '  Single-snapshot vulnerability migration checks passed.'
+Test-BulkSnapshotImportSmoke
+Write-Output '  Bulk snapshot import smoke checks passed.'
+Test-BulkSnapshotImportSingleSnapshot
+Write-Output '  Single-snapshot vulnerability import checks passed.'
 Test-VulnCanonicalSignatureStability
 Write-Output '  Canonical vulnerability signature checks passed.'
 Test-MergeVulnObservedWindowRows
@@ -749,6 +825,8 @@ Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
 Write-Output '  Stable device fallback identity checks passed.'
 Test-ConvertToNormalizedDataWritesExpectedRowCount
 Write-Output '  Normalized vuln row-count checks passed.'
+Test-ConvertToNormalizedDataWritesDirectPayload
+Write-Output '  Direct payload normalization checks passed.'
 Test-DashboardValidationUsesStableFallbackDeviceProfile
 Write-Output '  Dashboard validation fallback device profile checks passed.'
 Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff

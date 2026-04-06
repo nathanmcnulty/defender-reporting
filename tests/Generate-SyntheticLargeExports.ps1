@@ -21,13 +21,40 @@ param(
     [int]$TargetTotalVulnRows = 0,
 
     [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 200000)]
+    [int]$PlanningSourceMachineLimit = 50000,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 500000)]
+    [int]$PlanningSourceRowLimit = 100000,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 200000)]
+    [int]$SafetyDeviceLimit = 25000,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 50000000)]
+    [int]$SafetyRowLimit = 2500000,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 256)]
+    [int]$MinimumAvailableMemoryGB = 8,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 2048)]
+    [int]$MinimumFreeDiskGB = 10,
+
+    [Parameter(Mandatory = $false)]
     [int]$Seed = 20260322,
 
     [Parameter(Mandatory = $false)]
     [switch]$CleanOutput,
 
     [Parameter(Mandatory = $false)]
-    [switch]$IncludeRawRows
+    [switch]$IncludeRawRows,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AllowLargeDataset
 )
 
 Set-StrictMode -Version Latest
@@ -64,6 +91,108 @@ function Get-PresetSetting {
         default {
             throw "Unsupported preset '$Name'."
         }
+    }
+}
+
+function Get-AvailableMemoryGB {
+    [CmdletBinding()]
+    [OutputType([double])]
+    param()
+
+    if (-not $IsWindows) {
+        return [double]::NaN
+    }
+
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+    return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
+}
+
+function Get-FreeDiskSpaceGB {
+    [CmdletBinding()]
+    [OutputType([double])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $root = [System.IO.Path]::GetPathRoot($resolvedPath)
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        throw "Unable to determine drive root for '$resolvedPath'."
+    }
+
+    $driveInfo = [System.IO.DriveInfo]::new($root)
+    return [math]::Round(($driveInfo.AvailableFreeSpace / 1GB), 2)
+}
+
+function Test-EquivalentPath {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Left,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Right
+    )
+
+    $leftPath = [System.IO.Path]::GetFullPath($Left).TrimEnd('\', '/')
+    $rightPath = [System.IO.Path]::GetFullPath($Right).TrimEnd('\', '/')
+    return [System.StringComparer]::OrdinalIgnoreCase.Equals($leftPath, $rightPath)
+}
+
+function Assert-SyntheticGenerationPreflight {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$TargetDeviceCount,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TargetTotalVulnRows,
+
+        [Parameter(Mandatory = $true)]
+        [int]$SafetyDeviceLimit,
+
+        [Parameter(Mandatory = $true)]
+        [int]$SafetyRowLimit,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MinimumAvailableMemoryGB,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MinimumFreeDiskGB,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$AllowLargeDataset
+    )
+
+    $requiresOverride = ($TargetDeviceCount -gt $SafetyDeviceLimit) -or ($TargetTotalVulnRows -gt $SafetyRowLimit)
+    if ($requiresOverride -and -not $AllowLargeDataset) {
+        throw ("Requested synthetic dataset size ({0} devices, {1} rows) exceeds the unattended safety limit ({2} devices, {3} rows). Re-run with -AllowLargeDataset only after reviewing memory and disk headroom." -f $TargetDeviceCount, $TargetTotalVulnRows, $SafetyDeviceLimit, $SafetyRowLimit)
+    }
+
+    $availableMemoryGB = Get-AvailableMemoryGB
+    if (-not [double]::IsNaN($availableMemoryGB) -and $availableMemoryGB -lt $MinimumAvailableMemoryGB) {
+        throw ("Available system memory is {0} GB, below the required preflight floor of {1} GB." -f $availableMemoryGB, $MinimumAvailableMemoryGB)
+    }
+
+    $freeDiskGB = Get-FreeDiskSpaceGB -Path $OutputPath
+    if ($freeDiskGB -lt $MinimumFreeDiskGB) {
+        throw ("Available disk space at '{0}' is {1} GB, below the required preflight floor of {2} GB." -f $OutputPath, $freeDiskGB, $MinimumFreeDiskGB)
+    }
+
+    if ($requiresOverride) {
+        Write-Warning ("Large synthetic dataset override enabled for {0} devices / {1} rows." -f $TargetDeviceCount, $TargetTotalVulnRows)
+    }
+
+    return [PSCustomObject]@{
+        availableMemoryGB = $availableMemoryGB
+        freeDiskGB = $freeDiskGB
+        largeDatasetOverrideRequired = $requiresOverride
     }
 }
 
@@ -396,6 +525,37 @@ function Close-GzipWriter {
     }
 }
 
+function Write-GzipJsonRecordLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $WriterState,
+
+        [Parameter(Mandatory = $true)]
+        $Record
+    )
+
+    $lineWriter = $null
+    $jsonWriter = $null
+
+    try {
+        $lineWriter = [System.IO.StringWriter]::new([System.Globalization.CultureInfo]::InvariantCulture)
+        $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($lineWriter)
+        $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
+        Write-JsonValueToWriter -Writer $jsonWriter -Value $Record
+        $jsonWriter.Flush()
+        $WriterState.Writer.WriteLine($lineWriter.ToString())
+    }
+    finally {
+        if ($jsonWriter) {
+            $jsonWriter.Close()
+        }
+        elseif ($lineWriter) {
+            $lineWriter.Dispose()
+        }
+    }
+}
+
 function Get-AllocationCount {
     [CmdletBinding()]
     param(
@@ -504,12 +664,11 @@ function Add-DeltaAcrossPlanSet {
     }
 }
 
-function Get-SampledItemSet {
+function Invoke-SampledItem {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
-        [AllowEmptyCollection()]
-        [object[]]$Items,
+        [System.Collections.IList]$Items,
 
         [Parameter(Mandatory = $true)]
         [int]$Count,
@@ -519,34 +678,19 @@ function Get-SampledItemSet {
     )
 
     if ($Count -le 0 -or $Items.Count -eq 0) {
-        return @()
-    }
-
-    if ($Count -ge $Items.Count) {
-        $copy = [object[]]@($Items)
-        for ($i = $copy.Length - 1; $i -gt 0; $i--) {
-            $swapIndex = $Random.Next(0, $i + 1)
-            $temp = $copy[$i]
-            $copy[$i] = $copy[$swapIndex]
-            $copy[$swapIndex] = $temp
-        }
-        return @($copy)
+        return
     }
 
     $indices = [int[]](0..($Items.Count - 1))
-    for ($i = 0; $i -lt $Count; $i++) {
+    $limit = [Math]::Min($Count, $Items.Count)
+
+    for ($i = 0; $i -lt $limit; $i++) {
         $swapIndex = $Random.Next($i, $indices.Length)
         $temp = $indices[$i]
         $indices[$i] = $indices[$swapIndex]
         $indices[$swapIndex] = $temp
+        $Items[$indices[$i]]
     }
-
-    $selection = [System.Collections.Generic.List[object]]::new()
-    for ($i = 0; $i -lt $Count; $i++) {
-        $selection.Add($Items[$indices[$i]])
-    }
-
-    return @($selection)
 }
 
 function Write-GenerationCheckpoint {
@@ -634,6 +778,23 @@ if ($TargetTotalVulnRows -le 0) {
     $TargetTotalVulnRows = [int]$presetSettings.TargetTotalVulnRows
 }
 
+$SourcePath = [System.IO.Path]::GetFullPath($SourcePath)
+$OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+
+if (Test-EquivalentPath -Left $SourcePath -Right $OutputPath) {
+    throw 'OutputPath must differ from SourcePath.'
+}
+
+$preflight = Assert-SyntheticGenerationPreflight `
+    -TargetDeviceCount $TargetDeviceCount `
+    -TargetTotalVulnRows $TargetTotalVulnRows `
+    -SafetyDeviceLimit $SafetyDeviceLimit `
+    -SafetyRowLimit $SafetyRowLimit `
+    -MinimumAvailableMemoryGB $MinimumAvailableMemoryGB `
+    -MinimumFreeDiskGB $MinimumFreeDiskGB `
+    -OutputPath $OutputPath `
+    -AllowLargeDataset ($AllowLargeDataset -eq $true)
+
 if (-not (Test-Path -LiteralPath $SourcePath -PathType Container)) {
     throw "Source path '$SourcePath' was not found."
 }
@@ -683,6 +844,56 @@ elseif ($CleanOutput) {
 $random = [System.Random]::new($Seed)
 $generationDate = (Get-Date).ToString('yyyy-MM-dd')
 
+$sourceMachinePath = Get-MachineCurrentPath -BasePath $SourcePath
+if (-not (Test-Path -LiteralPath $sourceMachinePath -PathType Leaf)) {
+    throw "Source machine export was not found at '$sourceMachinePath'."
+}
+
+$sourceCurrentPath = Get-VulnCurrentPath -BasePath $SourcePath
+if (-not (Test-Path -LiteralPath $sourceCurrentPath -PathType Leaf)) {
+    throw "Source current vulnerability export was not found at '$sourceCurrentPath'."
+}
+
+$sourceHistoryFiles = @(Get-ChildItem -Path $SourcePath -Filter 'VulnHistoryRows_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)
+
+Write-Output 'Running source-shape preflight...'
+$sourceMachineCountForPlanning = 0
+foreach ($machineRecord in Read-MachineRecordsFromFile -Path $sourceMachinePath) {
+    if ($null -ne $machineRecord) {
+        $sourceMachineCountForPlanning++
+    }
+}
+
+$sourceCurrentCountForPlanning = 0
+foreach ($line in Read-VulnNdjsonLinesFromPath -Path $sourceCurrentPath) {
+    if (-not [string]::IsNullOrWhiteSpace($line)) {
+        $sourceCurrentCountForPlanning++
+    }
+}
+
+$sourceHistoryCountForPlanning = 0
+foreach ($historyRowsFile in $sourceHistoryFiles) {
+    foreach ($line in Read-VulnNdjsonLinesFromPath -Path $historyRowsFile.FullName) {
+        if (-not [string]::IsNullOrWhiteSpace($line)) {
+            $sourceHistoryCountForPlanning++
+        }
+    }
+}
+
+$sourcePlanningRowCount = $sourceCurrentCountForPlanning + $sourceHistoryCountForPlanning
+if ($sourceMachineCountForPlanning -gt $PlanningSourceMachineLimit -and -not $AllowLargeDataset) {
+    throw ("Source template machine count {0} exceeds the in-memory planning limit of {1}. Point the generator at the compact source exports or re-run with -AllowLargeDataset after reviewing memory headroom." -f $sourceMachineCountForPlanning, $PlanningSourceMachineLimit)
+}
+if ($sourcePlanningRowCount -gt $PlanningSourceRowLimit -and -not $AllowLargeDataset) {
+    throw ("Source template row count {0} exceeds the in-memory planning limit of {1}. This generator is intended to plan from a compact export sample, not an already-expanded synthetic dataset." -f $sourcePlanningRowCount, $PlanningSourceRowLimit)
+}
+if ($sourceMachineCountForPlanning -gt $PlanningSourceMachineLimit) {
+    Write-Warning ("Large source machine template set override enabled for {0} machine records." -f $sourceMachineCountForPlanning)
+}
+if ($sourcePlanningRowCount -gt $PlanningSourceRowLimit) {
+    Write-Warning ("Large source vulnerability template set override enabled for {0} rows." -f $sourcePlanningRowCount)
+}
+
 Write-Output "Reading source machine data from '$SourcePath'..."
 $sourceMachines = Read-MachineData -Path $SourcePath
 $machineTemplates = [System.Collections.Generic.List[object]]::new()
@@ -695,11 +906,11 @@ if ($machineTemplates.Count -eq 0) {
 }
 
 Write-Output "Reading source current vulnerability rows..."
-$sourceCurrentRows = @(Read-VulnNdjsonRecordsFromPath -Path (Get-VulnCurrentPath -BasePath $SourcePath))
+$sourceCurrentRows = @(Read-VulnNdjsonRecordsFromPath -Path $sourceCurrentPath)
 
 Write-Output "Reading source history vulnerability rows..."
 $sourceHistoryEntries = [System.Collections.Generic.List[object]]::new()
-foreach ($historyRowsFile in @(Get-ChildItem -Path $SourcePath -Filter 'VulnHistoryRows_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+foreach ($historyRowsFile in $sourceHistoryFiles) {
     $periodKey = Get-PeriodKeyFromFileName -Name $historyRowsFile.Name
     foreach ($row in Read-VulnNdjsonRecordsFromPath -Path $historyRowsFile.FullName) {
         $sourceHistoryEntries.Add([PSCustomObject]@{
@@ -828,6 +1039,7 @@ $generationStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $checkpointIntervalDevices = 250
 $nextCheckpointDevice = $checkpointIntervalDevices
 
+Write-Output ("Preflight resources: {0} GB free memory, {1} GB free disk" -f $preflight.availableMemoryGB, $preflight.freeDiskGB)
 Write-Output "Source rows: $sourceTotalCount total ($sourceCurrentCount current, $sourceHistoryCount history)"
 Write-Output "Target rows: $TargetTotalVulnRows total ($targetCurrentRows current, $targetHistoryRows history)"
 Write-Output ("Scale factor per source device profile: {0:N4}" -f $scaleFactor)
@@ -835,6 +1047,10 @@ Write-GenerationCheckpoint -OutputPath $OutputPath -Stage 'planning' -CompletedD
     targetCurrentRows = $targetCurrentRows
     targetHistoryRows = $targetHistoryRows
     scaleFactor = [math]::Round($scaleFactor, 6)
+    availableMemoryGB = $preflight.availableMemoryGB
+    freeDiskGB = $preflight.freeDiskGB
+    sourceTemplateMachines = $sourceMachineCountForPlanning
+    sourceTemplateRows = $sourcePlanningRowCount
 }
 
 $plans = [System.Collections.Generic.List[object]]::new()
@@ -847,7 +1063,6 @@ for ($i = 0; $i -lt $TargetDeviceCount; $i++) {
     $sourceMachineName = [string](Get-MachineRecordValue -Machine $machineTemplate -Name 'computerDnsName' -Fallback ("device-{0:D5}" -f $deviceOrdinal))
     $deviceId = Get-SyntheticDeviceId -BaseId $sourceMachineId -Index $deviceOrdinal
     $deviceName = Get-SyntheticDeviceName -BaseName $sourceMachineName -Index $deviceOrdinal
-    $syntheticMachine = ConvertTo-SyntheticMachineRecord -TemplateMachine $machineTemplate -DeviceId $deviceId -DeviceName $deviceName -ObservedOn $generationDate
 
     $currentCapacity = $rowProfile.CurrentRows.Count
     $historyCapacity = $rowProfile.HistoryEntries.Count
@@ -868,7 +1083,9 @@ for ($i = 0; $i -lt $TargetDeviceCount; $i++) {
 
     $plans.Add([PSCustomObject]@{
         DeviceOrdinal = $deviceOrdinal
-        Machine = $syntheticMachine
+        MachineTemplate = $machineTemplate
+        DeviceId = $deviceId
+        DeviceName = $deviceName
         RowProfile = $rowProfile
         CurrentTarget = $currentTarget
         HistoryTarget = $historyTarget
@@ -883,7 +1100,22 @@ $historyDelta = $targetHistoryRows - (@($plans | Measure-Object -Property Histor
 Add-DeltaAcrossPlanSet -Plans $plans -Kind 'Current' -Delta $currentDelta -Random $random
 Add-DeltaAcrossPlanSet -Plans $plans -Kind 'History' -Delta $historyDelta -Random $random
 
+$plannedCurrentCapacity = [int](($plans | Measure-Object -Property CurrentCapacity -Sum).Sum)
+$plannedHistoryCapacity = [int](($plans | Measure-Object -Property HistoryCapacity -Sum).Sum)
+$plannedCurrentRows = [int](($plans | Measure-Object -Property CurrentTarget -Sum).Sum)
+$plannedHistoryRows = [int](($plans | Measure-Object -Property HistoryTarget -Sum).Sum)
+
+if ($targetCurrentRows -gt $plannedCurrentCapacity -or $targetHistoryRows -gt $plannedHistoryCapacity) {
+    throw ("The synthetic plan cannot satisfy the requested row targets. Requested current/history rows = {0}/{1}; available capacity after profile assignment = {2}/{3}." -f $targetCurrentRows, $targetHistoryRows, $plannedCurrentCapacity, $plannedHistoryCapacity)
+}
+
+if ($plannedCurrentRows -ne $targetCurrentRows -or $plannedHistoryRows -ne $targetHistoryRows) {
+    throw ("Synthetic planning drift detected before writing any rows. Planned current/history rows = {0}/{1}; requested current/history rows = {2}/{3}." -f $plannedCurrentRows, $plannedHistoryRows, $targetCurrentRows, $targetHistoryRows)
+}
+
 $currentWriter = if ($IncludeRawRows) { Open-GzipWriter -Path (Get-VulnCurrentPath -BasePath $OutputPath) } else { $null }
+$machineCurrentPath = Get-MachineCurrentPath -BasePath $OutputPath
+$machineWriter = Open-GzipWriter -Path $machineCurrentPath
 $currentRefsPath = Get-VulnCurrentRefsPath -BasePath $OutputPath
 $currentRefsWriter = Open-GzipWriter -Path $currentRefsPath
 $historyWriters = @{}
@@ -893,20 +1125,21 @@ $advancedHuntingCveIds = [System.Collections.Generic.HashSet[string]]::new([Syst
 $deviceProfiles = [System.Collections.Generic.List[object]]::new()
 $deviceProfileIndex = @{}
 
-$syntheticMachines = [System.Collections.Generic.List[object]]::new()
 $writtenCurrentRows = 0
 $writtenHistoryRows = 0
 
 try {
     foreach ($plan in $plans) {
-        $syntheticMachines.Add($plan.Machine)
+        $syntheticMachine = ConvertTo-SyntheticMachineRecord -TemplateMachine $plan.MachineTemplate -DeviceId ([string]$plan.DeviceId) -DeviceName ([string]$plan.DeviceName) -ObservedOn $generationDate
+        Write-GzipJsonRecordLine -WriterState $machineWriter -Record (New-MachineSnapshotRecord -Machine $syntheticMachine -ObservedOn $generationDate)
+
         $planDeviceProfileRow = [PSCustomObject]@{
-            DeviceId = [string](Get-MachineRecordValue -Machine $plan.Machine -Name 'id')
-            DeviceName = [string](Get-MachineRecordValue -Machine $plan.Machine -Name 'computerDnsName')
-            RbacGroupName = [string](Get-MachineRecordValue -Machine $plan.Machine -Name 'rbacGroupName')
-            OSPlatform = [string](Get-MachineRecordValue -Machine $plan.Machine -Name 'osPlatform')
-            OSVersion = Get-MachineRecordValue -Machine $plan.Machine -Name 'osVersion'
-            MachineTags = @(Get-NormalizedMachineTag -Tags (Get-MachineRecordValue -Machine $plan.Machine -Name 'machineTags'))
+            DeviceId = [string](Get-MachineRecordValue -Machine $syntheticMachine -Name 'id')
+            DeviceName = [string](Get-MachineRecordValue -Machine $syntheticMachine -Name 'computerDnsName')
+            RbacGroupName = [string](Get-MachineRecordValue -Machine $syntheticMachine -Name 'rbacGroupName')
+            OSPlatform = [string](Get-MachineRecordValue -Machine $syntheticMachine -Name 'osPlatform')
+            OSVersion = Get-MachineRecordValue -Machine $syntheticMachine -Name 'osVersion'
+            MachineTags = @(Get-NormalizedMachineTag -Tags (Get-MachineRecordValue -Machine $syntheticMachine -Name 'machineTags'))
             IsOnboarded = $true
         }
         $deviceSignature = Get-VulnDeviceProfileSignature -Row $planDeviceProfileRow
@@ -917,12 +1150,11 @@ try {
         $deviceIndexValue = [int]$deviceProfileIndex[$deviceSignature]
         $syntheticDeviceId = [string]$planDeviceProfileRow.DeviceId
 
-        $selectedCurrentRows = Get-SampledItemSet -Items @($plan.RowProfile.CurrentRows) -Count ([int]$plan.CurrentTarget) -Random $random
-        foreach ($sourceRow in $selectedCurrentRows) {
+        foreach ($sourceRow in Invoke-SampledItem -Items $plan.RowProfile.CurrentRows -Count ([int]$plan.CurrentTarget) -Random $random) {
             $row = $null
             if ($IncludeRawRows) {
-                $row = ConvertTo-SyntheticRow -SourceRow $sourceRow -SyntheticMachine $plan.Machine -RbacGroupId $plan.RbacGroupId
-                $currentWriter.Writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
+                $row = ConvertTo-SyntheticRow -SourceRow $sourceRow -SyntheticMachine $syntheticMachine -RbacGroupId $plan.RbacGroupId
+                Write-GzipJsonRecordLine -WriterState $currentWriter -Record $row
             }
             $rowId = if ($row) { [string](Get-RowPropertyValue -Row $row -Name 'Id') } else { Get-SyntheticRowId -SourceRow $sourceRow -DeviceId $syntheticDeviceId }
             $firstSeenTimestamp = [string](Get-RowPropertyValue -Row $sourceRow -Name 'FirstSeenTimestamp')
@@ -941,15 +1173,14 @@ try {
             $writtenCurrentRows++
         }
 
-        $selectedHistoryEntries = Get-SampledItemSet -Items @($plan.RowProfile.HistoryEntries) -Count ([int]$plan.HistoryTarget) -Random $random
-        foreach ($historyEntry in $selectedHistoryEntries) {
+        foreach ($historyEntry in Invoke-SampledItem -Items $plan.RowProfile.HistoryEntries -Count ([int]$plan.HistoryTarget) -Random $random) {
             $row = $null
             $periodKey = [string]$historyEntry.PeriodKey
             $sourceHistoryRow = $historyEntry.Row
             $historyLastSeenTimestamp = [string](Get-RowPropertyValue -Row $sourceHistoryRow -Name 'LastSeenTimestamp')
             $historyFirstSeenTimestamp = [string](Get-RowPropertyValue -Row $sourceHistoryRow -Name 'FirstSeenTimestamp')
             if ($IncludeRawRows) {
-                $row = ConvertTo-SyntheticRow -SourceRow $sourceHistoryRow -SyntheticMachine $plan.Machine -RbacGroupId $plan.RbacGroupId
+                $row = ConvertTo-SyntheticRow -SourceRow $sourceHistoryRow -SyntheticMachine $syntheticMachine -RbacGroupId $plan.RbacGroupId
             }
             if ([string]::IsNullOrWhiteSpace($periodKey)) {
                 $periodKey = Get-QuarterPeriodKeyFromDate -Date (Convert-ToYmdDate -DateValue $historyLastSeenTimestamp)
@@ -965,7 +1196,7 @@ try {
             }
 
             if ($historyWriters.ContainsKey($periodKey)) {
-                $historyWriters[$periodKey].Writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
+                Write-GzipJsonRecordLine -WriterState $historyWriters[$periodKey] -Record $row
             }
             $rowId = if ($row) { [string](Get-RowPropertyValue -Row $row -Name 'Id') } else { Get-SyntheticRowId -SourceRow $sourceHistoryRow -DeviceId $syntheticDeviceId }
             $contentIndexValue = [int](Get-RowPropertyValue -Row $sourceHistoryRow -Name 'SyntheticContentTemplateIndex')
@@ -991,6 +1222,7 @@ try {
         }
 
         if ($plan.DeviceOrdinal -ge $nextCheckpointDevice -or $plan.DeviceOrdinal -eq $TargetDeviceCount) {
+            Sync-GzipWriter -WriterState $machineWriter
             if ($currentWriter) {
                 Sync-GzipWriter -WriterState $currentWriter
             }
@@ -1006,13 +1238,14 @@ try {
             Write-GenerationCheckpoint -OutputPath $OutputPath -Stage 'writing-vulnerability-rows' -CompletedDevices $plan.DeviceOrdinal -TotalDevices $TargetDeviceCount -WrittenCurrentRows $writtenCurrentRows -WrittenHistoryRows $writtenHistoryRows -Stopwatch $generationStopwatch -Extra @{
                 targetCurrentRows = $targetCurrentRows
                 targetHistoryRows = $targetHistoryRows
-                activeHistoryPeriods = @($historyWriters.Keys | Sort-Object)
+                activeHistoryPeriods = @($historyRefsWriters.Keys | Sort-Object)
             }
             $nextCheckpointDevice += $checkpointIntervalDevices
         }
     }
 }
 finally {
+    Close-GzipWriter -WriterState $machineWriter
     if ($currentWriter) {
         Close-GzipWriter -WriterState $currentWriter
     }
@@ -1025,11 +1258,9 @@ finally {
     }
 }
 
-$machineCurrentPath = Get-MachineCurrentPath -BasePath $OutputPath
-Write-GenerationCheckpoint -OutputPath $OutputPath -Stage 'writing-machine-data' -CompletedDevices $TargetDeviceCount -TotalDevices $TargetDeviceCount -WrittenCurrentRows $writtenCurrentRows -WrittenHistoryRows $writtenHistoryRows -Stopwatch $generationStopwatch
-Write-NdjsonRecordsFile -Path $machineCurrentPath -Records $syntheticMachines
+Write-GenerationCheckpoint -OutputPath $OutputPath -Stage 'writing-history-metadata' -CompletedDevices $TargetDeviceCount -TotalDevices $TargetDeviceCount -WrittenCurrentRows $writtenCurrentRows -WrittenHistoryRows $writtenHistoryRows -Stopwatch $generationStopwatch
 
-foreach ($periodKey in @($historyWriters.Keys | Sort-Object)) {
+foreach ($periodKey in @($historyRefsWriters.Keys | Sort-Object)) {
     $periodInfo = Get-VulnHistoryPeriodInfo -PeriodKey $periodKey
     $historyDocument = [PSCustomObject]@{
         year = $periodInfo.Year
@@ -1069,7 +1300,7 @@ $manifest = [PSCustomObject]@{
     targetTotalVulnRows = $TargetTotalVulnRows
     targetCurrentRows = $targetCurrentRows
     targetHistoryRows = $targetHistoryRows
-    actualDeviceCount = $syntheticMachines.Count
+    actualDeviceCount = $plans.Count
     includeRawRows = ($IncludeRawRows -eq $true)
     actualCurrentRows = $writtenCurrentRows
     actualHistoryRows = $writtenHistoryRows
@@ -1078,20 +1309,20 @@ $manifest = [PSCustomObject]@{
     sourceCurrentRows = $sourceCurrentCount
     sourceHistoryRows = $sourceHistoryCount
     sourceRowProfiles = $rowProfiles.Count
-    historyPeriods = @($historyWriters.Keys | Sort-Object)
+    historyPeriods = @($historyRefsWriters.Keys | Sort-Object)
     advancedHuntingRows = $filteredAdvancedHunting.Count
 }
 $manifest | ConvertTo-Json -Depth 10 | Set-Content -Path (Join-Path $OutputPath 'synthetic-manifest.json') -Encoding utf8
 $generationStopwatch.Stop()
 Write-GenerationCheckpoint -OutputPath $OutputPath -Stage 'completed' -CompletedDevices $TargetDeviceCount -TotalDevices $TargetDeviceCount -WrittenCurrentRows $writtenCurrentRows -WrittenHistoryRows $writtenHistoryRows -Stopwatch $generationStopwatch -Extra @{
     advancedHuntingRows = $filteredAdvancedHunting.Count
-    historyPeriods = @($historyWriters.Keys | Sort-Object)
+    historyPeriods = @($historyRefsWriters.Keys | Sort-Object)
 }
 
 Write-Output ''
 Write-Output 'Synthetic export generation completed.'
 Write-Output ("  Output path: {0}" -f ([System.IO.Path]::GetFullPath($OutputPath)))
-Write-Output ("  Devices: {0}" -f $syntheticMachines.Count)
+Write-Output ("  Devices: {0}" -f $plans.Count)
 Write-Output ("  Vulnerability rows: {0} current + {1} history = {2} total" -f $writtenCurrentRows, $writtenHistoryRows, ($writtenCurrentRows + $writtenHistoryRows))
 Write-Output ("  Advanced Hunting rows: {0}" -f $filteredAdvancedHunting.Count)
-Write-Output ("  History periods: {0}" -f ((@($historyWriters.Keys | Sort-Object) -join ', ')))
+Write-Output ("  History periods: {0}" -f ((@($historyRefsWriters.Keys | Sort-Object) -join ', ')))

@@ -492,11 +492,21 @@ function Write-NdjsonRecordsFile {
 
         foreach ($record in $Records) {
             if ($null -eq $record) { continue }
-            $dict = [System.Collections.Generic.Dictionary[string,object]]::new()
-            foreach ($prop in $record.PSObject.Properties) {
-                $dict[$prop.Name] = $prop.Value
+
+            $lineWriter = $null
+            $jsonWriter = $null
+            try {
+                $lineWriter = [System.IO.StringWriter]::new([System.Globalization.CultureInfo]::InvariantCulture)
+                $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($lineWriter)
+                $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
+                Write-JsonValueToWriter -Writer $jsonWriter -Value $record
+                $jsonWriter.Flush()
+                $writer.WriteLine($lineWriter.ToString())
             }
-            $writer.WriteLine([System.Text.Json.JsonSerializer]::Serialize[System.Collections.Generic.Dictionary[string,object]]($dict))
+            finally {
+                if ($jsonWriter) { $jsonWriter.Close() }
+                elseif ($lineWriter) { $lineWriter.Dispose() }
+            }
         }
     }
     finally {

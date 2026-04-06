@@ -139,6 +139,9 @@ flowchart TD
 ## Notes
 
 - `azure/Invoke-DashboardPipeline.ps1` and `azure/function-app/ExportAndGenerate/run.ps1` are generated artifacts. Edit `shared-helpers.ps1` and `azure/runbook-source.ps1`, then rebuild with `.\azure\Build-Runbook.ps1` and `.\azure\Build-FunctionApp.ps1`.
+- `validation-helpers.ps1` is a generated artifact. Edit `validation/source/*.ps1`, then rebuild with `.\Build-ValidationHelpers.ps1`.
 - Legacy `VulnExport_<group>_<date>.json(.gz)` compatibility remains temporary through `2026-07-01`.
 - Sample PDF outputs are committed under `reports/`.
-- `exports/.dashboard-cache` is a derived local build cache and is intentionally ignored by git.
+- `.dashboard-cache/` directories are derived local caches and are intentionally ignored by git.
+- Manual troubleshooting harnesses live under `tests/manual/` and default to ignored local output paths.
+- Recorded benchmark baselines are summarized in `docs/performance-baselines.md`; raw benchmark JSON stays local-only.
