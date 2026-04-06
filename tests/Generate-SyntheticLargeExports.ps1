@@ -664,7 +664,7 @@ function Add-DeltaAcrossPlanSet {
     }
 }
 
-function Invoke-SampledItems {
+function Invoke-SampledItem {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -1150,7 +1150,7 @@ try {
         $deviceIndexValue = [int]$deviceProfileIndex[$deviceSignature]
         $syntheticDeviceId = [string]$planDeviceProfileRow.DeviceId
 
-        foreach ($sourceRow in Invoke-SampledItems -Items $plan.RowProfile.CurrentRows -Count ([int]$plan.CurrentTarget) -Random $random) {
+        foreach ($sourceRow in Invoke-SampledItem -Items $plan.RowProfile.CurrentRows -Count ([int]$plan.CurrentTarget) -Random $random) {
             $row = $null
             if ($IncludeRawRows) {
                 $row = ConvertTo-SyntheticRow -SourceRow $sourceRow -SyntheticMachine $syntheticMachine -RbacGroupId $plan.RbacGroupId
@@ -1173,7 +1173,7 @@ try {
             $writtenCurrentRows++
         }
 
-        foreach ($historyEntry in Invoke-SampledItems -Items $plan.RowProfile.HistoryEntries -Count ([int]$plan.HistoryTarget) -Random $random) {
+        foreach ($historyEntry in Invoke-SampledItem -Items $plan.RowProfile.HistoryEntries -Count ([int]$plan.HistoryTarget) -Random $random) {
             $row = $null
             $periodKey = [string]$historyEntry.PeriodKey
             $sourceHistoryRow = $historyEntry.Row

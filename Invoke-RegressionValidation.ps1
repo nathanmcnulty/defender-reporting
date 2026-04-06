@@ -48,13 +48,22 @@ function Test-LastExitCodeFailed {
     return ($null -ne $exitCode -and [int]$exitCode.Value -ne 0)
 }
 
+function Reset-LastExitCode {
+    [CmdletBinding()]
+    param()
+
+    Set-Variable -Name LASTEXITCODE -Scope Global -Value 0
+}
+
 Write-Output 'Building shared helpers...'
+Reset-LastExitCode
 & (Join-Path $repoRoot 'Build-SharedHelpers.ps1')
 if (Test-LastExitCodeFailed) {
     throw 'Build-SharedHelpers.ps1 failed.'
 }
 
 Write-Output 'Building Azure runbook...'
+Reset-LastExitCode
 & (Join-Path $repoRoot 'azure\Build-Runbook.ps1')
 if (Test-LastExitCodeFailed) {
     throw 'azure/Build-Runbook.ps1 failed.'

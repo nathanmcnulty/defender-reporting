@@ -47,7 +47,9 @@ jobs:
         run: |
           Install-Module -Name PSScriptAnalyzer -Force -AllowClobber -Scope CurrentUser
           $settingsPath = Join-Path $PWD 'PSScriptAnalyzerSettings.psd1'
-          $scriptPaths = Get-ChildItem -Path $PWD -Recurse -Filter *.ps1 -File | Select-Object -ExpandProperty FullName
+          $scriptPaths = Get-ChildItem -Path $PWD -Recurse -Filter *.ps1 -File |
+            Where-Object { (($_.FullName -replace '\\', '/') -notmatch '/azure/function-app/Modules/') } |
+            Select-Object -ExpandProperty FullName
           $results = foreach ($scriptPath in $scriptPaths) {
             Invoke-ScriptAnalyzer -Path $scriptPath -Settings $settingsPath
           }

@@ -236,15 +236,29 @@ function Sort-AppendFileBySnapshotDate {
         Remove-Item -LiteralPath $sortedPath -Force
     }
 
-    $sortCommand = Get-Command -Name 'sort.exe' -ErrorAction SilentlyContinue
-    if ($IsWindows -and $null -ne $sortCommand) {
-        & $sortCommand.Source /o $sortedPath $Path | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to sort append file '$Path'."
+    if ($IsWindows) {
+        $sortCommand = Get-Command -Name 'sort.exe' -ErrorAction SilentlyContinue
+        if ($null -ne $sortCommand) {
+            & $sortCommand.Source /o $sortedPath $Path | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to sort append file '$Path'."
+            }
+        }
+        else {
+            Get-Content -LiteralPath $Path | Sort-Object | Set-Content -LiteralPath $sortedPath -Encoding utf8
         }
     }
     else {
-        Get-Content -LiteralPath $Path | Sort-Object | Set-Content -LiteralPath $sortedPath -Encoding utf8
+        $sortCommand = Get-Command -Name 'sort' -ErrorAction SilentlyContinue
+        if ($null -ne $sortCommand) {
+            & $sortCommand.Source -o $sortedPath $Path | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to sort append file '$Path'."
+            }
+        }
+        else {
+            Get-Content -LiteralPath $Path | Sort-Object | Set-Content -LiteralPath $sortedPath -Encoding utf8
+        }
     }
 
     return $sortedPath
