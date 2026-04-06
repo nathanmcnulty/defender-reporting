@@ -48,13 +48,23 @@ function Test-LastExitCodeFailed {
     return ($null -ne $exitCode -and [int]$exitCode.Value -ne 0)
 }
 
+function Reset-LastExitCode {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only resets the session LASTEXITCODE used by regression wrapper checks.')]
+    [CmdletBinding()]
+    param()
+
+    Set-Variable -Name LASTEXITCODE -Scope Global -Value 0
+}
+
 Write-Output 'Building shared helpers...'
+Reset-LastExitCode
 & (Join-Path $repoRoot 'Build-SharedHelpers.ps1')
 if (Test-LastExitCodeFailed) {
     throw 'Build-SharedHelpers.ps1 failed.'
 }
 
 Write-Output 'Building Azure runbook...'
+Reset-LastExitCode
 & (Join-Path $repoRoot 'azure\Build-Runbook.ps1')
 if (Test-LastExitCodeFailed) {
     throw 'azure/Build-Runbook.ps1 failed.'
@@ -81,10 +91,19 @@ if (-not $SkipDashboardFixtureValidation) {
     [void](New-Item -Path $tempRoot -ItemType Directory -Force)
 
     try {
+        $fixtureDataPath = Join-Path $tempRoot 'fixture-data'
+        [void](New-Item -Path $fixtureDataPath -ItemType Directory -Force)
+        Copy-Item -Path (Join-Path $fixturePath '*') -Destination $fixtureDataPath -Recurse -Force
+
+        $fixtureCachePath = Join-Path $fixtureDataPath '.dashboard-cache'
+        if (Test-Path -LiteralPath $fixtureCachePath) {
+            Remove-Item -LiteralPath $fixtureCachePath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
         $fixtureHtmlPath = Join-Path $tempRoot 'fixture-dashboard.html'
         Write-Output 'Running dashboard fixture smoke generation...'
         & (Join-Path $repoRoot 'Generate-VulnerabilityDashboard.ps1') `
-            -DirectoryPath $fixturePath `
+            -DirectoryPath $fixtureDataPath `
             -OutputPath $fixtureHtmlPath `
             -ExportMachineData:$false
         if (Test-LastExitCodeFailed) {

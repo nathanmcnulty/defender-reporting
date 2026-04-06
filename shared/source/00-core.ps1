@@ -2656,11 +2656,16 @@ function Get-VulnDeviceProfileSignature {
         $Row
     )
 
+    $deviceId = [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceId')
+    if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
+        return $deviceId
+    }
+
     $machineTags = @((Get-VulnPropertyValue -InputObject $Row -Name 'MachineTags'))
     $valueDelimiter = [string][char]0x001f
     $listDelimiter = [string][char]0x001e
     return @(
-        [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceId')
+        $deviceId
         [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceName')
         [string](Get-VulnPropertyValue -InputObject $Row -Name 'RbacGroupName')
         [string](Get-VulnPropertyValue -InputObject $Row -Name 'OSPlatform')
@@ -2925,36 +2930,382 @@ function Publish-VulnContentStoreUnlocked {
             $fileStream = $null
             $gzipStream = $null
             $writer = $null
+            $valueDelimiter = [string][char]0x001f
+            $listDelimiter = [string][char]0x001e
             try {
                 $fileStream = [System.IO.File]::Create($OutputPath)
                 $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
                 $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
 
-                Read-VulnNdjsonRecordsFromPath -Path $InputPath | ForEach-Object {
-                    $row = $_
-                    if ($null -eq $row) { return }
+                Invoke-VulnNdjsonJsonRootAction -Path $InputPath -Action {
+                    param([System.Text.Json.JsonElement]$root)
 
-                    $deviceSignature = Get-VulnDeviceProfileSignature -Row $row
+                    $deviceId = ''
+                    $deviceName = ''
+                    $groupName = ''
+                    $osPlatform = ''
+                    $osVersion = ''
+                    $machineTags = @()
+                    $isOnboarded = $false
+                    $cveId = ''
+                    $softwareVendor = ''
+                    $softwareName = ''
+                    $softwareVersion = ''
+                    $severityLevel = ''
+                    $cvssScore = $null
+                    $exploitabilityLevel = ''
+                    $recommendationReference = ''
+                    $recommendedSecurityUpdate = ''
+                    $recommendedSecurityUpdateId = ''
+                    $recommendedSecurityUpdateUrl = ''
+                    $securityUpdateAvailable = $false
+                    $diskPaths = @()
+                    $registryPaths = @()
+                    $cveBatchTitle = ''
+                    $cveBatchUrl = ''
+                    $id = ''
+                    $firstSeenTimestamp = ''
+                    $lastSeenTimestamp = ''
+
+                    foreach ($jsonProperty in $root.EnumerateObject()) {
+                        $propertyValue = $jsonProperty.Value
+                        switch ($jsonProperty.Name) {
+                            'DeviceId' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $deviceId = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $deviceId = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'DeviceName' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $deviceName = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $deviceName = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'RbacGroupName' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $groupName = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $groupName = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'OSPlatform' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $osPlatform = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $osPlatform = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'OSVersion' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $osVersion = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $osVersion = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'MachineTags' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+                                    $tagValues = [System.Collections.Generic.List[string]]::new()
+                                    foreach ($tagValueElement in $propertyValue.EnumerateArray()) {
+                                        $tagValue = if ($tagValueElement.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                            $tagValueElement.GetString()
+                                        }
+                                        else {
+                                            Convert-JsonElementToScalarValue -Element $tagValueElement
+                                        }
+                                        if ($null -ne $tagValue -and -not [string]::IsNullOrWhiteSpace([string]$tagValue)) {
+                                            [void]$tagValues.Add([string]$tagValue)
+                                        }
+                                    }
+                                    $machineTags = [string[]]$tagValues.ToArray()
+                                }
+                            }
+                            'IsOnboarded' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::True) {
+                                    $isOnboarded = $true
+                                }
+                                elseif ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::False) {
+                                    $isOnboarded = $false
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $isOnboarded = ((Convert-JsonElementToScalarValue -Element $propertyValue) -eq $true)
+                                }
+                            }
+                            'CveId' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $cveId = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $cveId = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'SoftwareVendor' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $softwareVendor = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $softwareVendor = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'SoftwareName' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $softwareName = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $softwareName = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'SoftwareVersion' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $softwareVersion = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $softwareVersion = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'VulnerabilitySeverityLevel' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $severityLevel = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $severityLevel = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'CvssScore' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $cvssScore = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Number) {
+                                    $cvssInt64 = 0L
+                                    if ($propertyValue.TryGetInt64([ref]$cvssInt64)) {
+                                        $cvssScore = $cvssInt64
+                                    }
+                                    else {
+                                        $cvssDouble = 0.0
+                                        if ($propertyValue.TryGetDouble([ref]$cvssDouble)) {
+                                            $cvssScore = $cvssDouble
+                                        }
+                                        else {
+                                            $cvssScore = $propertyValue.GetRawText()
+                                        }
+                                    }
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $cvssScore = Convert-JsonElementToScalarValue -Element $propertyValue
+                                }
+                            }
+                            'ExploitabilityLevel' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $exploitabilityLevel = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $exploitabilityLevel = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'RecommendationReference' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $recommendationReference = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $recommendationReference = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'RecommendedSecurityUpdate' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $recommendedSecurityUpdate = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $recommendedSecurityUpdate = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'RecommendedSecurityUpdateId' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $recommendedSecurityUpdateId = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $recommendedSecurityUpdateId = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'RecommendedSecurityUpdateUrl' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $recommendedSecurityUpdateUrl = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $recommendedSecurityUpdateUrl = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'SecurityUpdateAvailable' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::True) {
+                                    $securityUpdateAvailable = $true
+                                }
+                                elseif ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::False) {
+                                    $securityUpdateAvailable = $false
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $securityUpdateAvailable = ((Convert-JsonElementToScalarValue -Element $propertyValue) -eq $true)
+                                }
+                            }
+                            'DiskPaths' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+                                    $diskPathValues = [System.Collections.Generic.List[string]]::new()
+                                    foreach ($diskPathElement in $propertyValue.EnumerateArray()) {
+                                        $diskPathValue = if ($diskPathElement.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                            $diskPathElement.GetString()
+                                        }
+                                        else {
+                                            Convert-JsonElementToScalarValue -Element $diskPathElement
+                                        }
+                                        if ($null -ne $diskPathValue -and -not [string]::IsNullOrWhiteSpace([string]$diskPathValue)) {
+                                            [void]$diskPathValues.Add([string]$diskPathValue)
+                                        }
+                                    }
+                                    $diskPaths = [string[]]$diskPathValues.ToArray()
+                                }
+                            }
+                            'RegistryPaths' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+                                    $registryPathValues = [System.Collections.Generic.List[string]]::new()
+                                    foreach ($registryPathElement in $propertyValue.EnumerateArray()) {
+                                        $registryPathValue = if ($registryPathElement.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                            $registryPathElement.GetString()
+                                        }
+                                        else {
+                                            Convert-JsonElementToScalarValue -Element $registryPathElement
+                                        }
+                                        if ($null -ne $registryPathValue -and -not [string]::IsNullOrWhiteSpace([string]$registryPathValue)) {
+                                            [void]$registryPathValues.Add([string]$registryPathValue)
+                                        }
+                                    }
+                                    $registryPaths = [string[]]$registryPathValues.ToArray()
+                                }
+                            }
+                            'CveBatchTitle' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $cveBatchTitle = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $cveBatchTitle = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'CveBatchUrl' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $cveBatchUrl = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $cveBatchUrl = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'Id' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $id = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $id = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'FirstSeenTimestamp' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $firstSeenTimestamp = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $firstSeenTimestamp = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                            'LastSeenTimestamp' {
+                                if ($propertyValue.ValueKind -eq [System.Text.Json.JsonValueKind]::String) {
+                                    $lastSeenTimestamp = $propertyValue.GetString()
+                                }
+                                elseif ($propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Null -and $propertyValue.ValueKind -ne [System.Text.Json.JsonValueKind]::Undefined) {
+                                    $lastSeenTimestamp = [string](Convert-JsonElementToScalarValue -Element $propertyValue)
+                                }
+                            }
+                        }
+                    }
+
+                    if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
+                        $deviceSignature = $deviceId
+                    }
+                    else {
+                        $deviceSignature = @(
+                            $deviceId
+                            $deviceName
+                            $groupName
+                            $osPlatform
+                            $osVersion
+                            ($machineTags -join $listDelimiter)
+                            [string]$isOnboarded
+                        ) -join $valueDelimiter
+                    }
                     if (-not $deviceProfileIndex.ContainsKey($deviceSignature)) {
                         $deviceProfileIndex[$deviceSignature] = $deviceProfiles.Count
-                        [void]$deviceProfiles.Add((ConvertTo-VulnDeviceProfileTemplate -Row $row))
+                        [void]$deviceProfiles.Add([PSCustomObject]@{
+                            id = $deviceId
+                            n = $deviceName
+                            g = $groupName
+                            o = $osPlatform
+                            ov = $osVersion
+                            t = $machineTags
+                            ob = $isOnboarded
+                        })
                     }
                     $deviceIndexValue = [int]$deviceProfileIndex[$deviceSignature]
 
-                    $contentSignature = Get-VulnContentTemplateSignature -Row $row
+                    $contentSignature = @(
+                        $cveId
+                        $softwareVendor
+                        $softwareName
+                        $softwareVersion
+                        $severityLevel
+                        [string]$cvssScore
+                        $exploitabilityLevel
+                        $recommendationReference
+                        $recommendedSecurityUpdate
+                        $recommendedSecurityUpdateId
+                        $recommendedSecurityUpdateUrl
+                        [string]$securityUpdateAvailable
+                        ($diskPaths -join $listDelimiter)
+                        ($registryPaths -join $listDelimiter)
+                        $cveBatchTitle
+                        $cveBatchUrl
+                    ) -join $valueDelimiter
                     if (-not $contentTemplateIndex.ContainsKey($contentSignature)) {
                         $contentTemplateIndex[$contentSignature] = $contentTemplates.Count
-                        [void]$contentTemplates.Add((ConvertTo-VulnContentTemplate -Row $row))
+                        [void]$contentTemplates.Add([PSCustomObject]@{
+                            c = $cveId
+                            sv = $softwareVendor
+                            sn = $softwareName
+                            ver = $softwareVersion
+                            sev = $severityLevel
+                            sc = $cvssScore
+                            ex = $exploitabilityLevel
+                            rr = $recommendationReference
+                            ru = $recommendedSecurityUpdate
+                            rid = $recommendedSecurityUpdateId
+                            url = $recommendedSecurityUpdateUrl
+                            ua = $securityUpdateAvailable
+                            dp = $diskPaths
+                            rp = $registryPaths
+                            bt = $cveBatchTitle
+                            bu = $cveBatchUrl
+                        })
                     }
                     $contentIndexValue = [int]$contentTemplateIndex[$contentSignature]
-
-                    Write-VulnObservationRefLine `
-                        -Writer $writer `
-                        -Id ([string](Get-VulnPropertyValue -InputObject $row -Name 'Id')) `
-                        -DeviceProfileIndex $deviceIndexValue `
-                        -ContentTemplateIndex $contentIndexValue `
-                        -FirstSeenTimestamp ([string](Get-VulnPropertyValue -InputObject $row -Name 'FirstSeenTimestamp')) `
-                        -LastSeenTimestamp ([string](Get-VulnPropertyValue -InputObject $row -Name 'LastSeenTimestamp'))
+                    $writer.WriteLine((
+                        '[' +
+                        (Convert-ToJsonStringLiteral -Value $id) + ',' +
+                        $deviceIndexValue + ',' +
+                        $contentIndexValue + ',' +
+                        (Convert-ToJsonStringLiteral -Value $firstSeenTimestamp) + ',' +
+                        (Convert-ToJsonStringLiteral -Value $lastSeenTimestamp) +
+                        ']'
+                    ))
                 }
             }
             finally {

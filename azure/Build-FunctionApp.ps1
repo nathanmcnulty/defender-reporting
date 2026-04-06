@@ -28,7 +28,9 @@ $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $buildSharedHelpersPath = Join-Path -Path $repoRoot -ChildPath 'Build-SharedHelpers.ps1'
 $sharedHelpersPath = Join-Path -Path $repoRoot -ChildPath 'shared-helpers.ps1'
 $runbookSourcePath = Join-Path -Path $PSScriptRoot -ChildPath 'runbook-source.ps1'
-$outputPath = Join-Path -Path $PSScriptRoot -ChildPath 'function-app' | Join-Path -ChildPath 'ExportAndGenerate' | Join-Path -ChildPath 'run.ps1'
+$functionAppRoot = Join-Path -Path $PSScriptRoot -ChildPath 'function-app'
+$outputPath = Join-Path -Path $functionAppRoot -ChildPath 'ExportAndGenerate' | Join-Path -ChildPath 'run.ps1'
+$modulesRoot = Join-Path -Path $functionAppRoot -ChildPath 'Modules'
 
 # -------------------------------------------------------------------------
 # Validation
@@ -88,6 +90,7 @@ $functionAppHeader = @'
         INCLUDE_ADVANCED_HUNTING    - true (default) or false
         USE_EXISTING_EXPORTS_ONLY   - true or false (default)
         EXPORT_TARGET               - BlobStorage (default), SharePoint, or StaticWebApp
+        PIPELINE_FILE_TRACE_ENABLED - true to mirror pipeline output into tmp/FunctionsData
 #>
 
 #Requires -Version 7.0
@@ -104,7 +107,82 @@ $IncludeAdvancedHunting = ($env:INCLUDE_ADVANCED_HUNTING -ne 'false')
 $UseExistingExportsOnly = ($env:USE_EXISTING_EXPORTS_ONLY -eq 'true')
 $Export = if ($env:EXPORT_TARGET) { $env:EXPORT_TARGET } else { 'BlobStorage' }
 
-if ($Timer.IsPastDue) {
+$script:PipelineFileTraceEnabled = ($env:PIPELINE_FILE_TRACE_ENABLED -eq 'true')
+$script:PipelineFileTracePath = $null
+
+function Write-PipelineFileTraceLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Message
+    )
+
+    if (-not $script:PipelineFileTraceEnabled) {
+        return
+    }
+
+    try {
+        if (-not $script:PipelineFileTracePath) {
+            $traceRoot = if (-not [string]::IsNullOrWhiteSpace($env:TEMP)) {
+                Join-Path -Path $env:TEMP -ChildPath 'FunctionsData'
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($env:HOME)) {
+                Join-Path -Path $env:HOME -ChildPath 'site/diagnostics'
+            }
+            else {
+                return
+            }
+
+            New-Item -Path $traceRoot -ItemType Directory -Force | Out-Null
+            $script:PipelineFileTracePath = Join-Path -Path $traceRoot -ChildPath 'ExportAndGenerate.trace.log'
+        }
+
+        $timestamp = ([datetime]::UtcNow).ToString('o')
+        $text = if ($null -eq $Message) { '<null>' } else { [string]$Message }
+        Add-Content -Path $script:PipelineFileTracePath -Value ("[{0}] {1}" -f $timestamp, $text)
+    }
+    catch {
+        Write-Verbose ("Pipeline trace write failed: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Write-Output {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Function App entry point mirrors Write-Output to a trace file while preserving stdout behavior.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromPipeline = $true, ValueFromRemainingArguments = $true, Position = 0)]
+        [AllowNull()]
+        [object[]]$InputObject,
+
+        [switch]$NoEnumerate
+    )
+
+    process {
+        if ($NoEnumerate) {
+            Write-PipelineFileTraceLine -Message $InputObject
+            Microsoft.PowerShell.Utility\Write-Output -InputObject $InputObject -NoEnumerate
+            return
+        }
+
+        if ($null -eq $InputObject -or $InputObject.Count -eq 0) {
+            Write-PipelineFileTraceLine -Message ''
+            return
+        }
+
+        foreach ($item in $InputObject) {
+            Write-PipelineFileTraceLine -Message $item
+            Microsoft.PowerShell.Utility\Write-Output -InputObject $item
+        }
+    }
+}
+
+$isPastDue = $false
+if ($null -ne $Timer -and $Timer.PSObject.Properties['IsPastDue']) {
+    $isPastDue = [bool]$Timer.PSObject.Properties['IsPastDue'].Value
+}
+
+if ($isPastDue) {
     Write-Output "Timer function ran past due!"
 }
 '@
@@ -115,7 +193,9 @@ $headerPattern = "(?s)\A\uFEFF?.*?\`$ProgressPreference\s*=\s*'SilentlyContinue'
 if ($runbookSource -notmatch $headerPattern) {
     throw "Could not locate the header section (through `$ProgressPreference) in runbook-source.ps1."
 }
-$assembled = $runbookSource -replace $headerPattern, ($functionAppHeader -replace '\$', '$$')
+
+$headerMatch = [regex]::Match($runbookSource, $headerPattern)
+$assembled = $functionAppHeader + $runbookSource.Substring($headerMatch.Length)
 
 # -------------------------------------------------------------------------
 # Replace Automation variable resolution with Function App config
@@ -176,6 +256,29 @@ if (-not $assembled.Contains($normalizedMarker)) {
 $assembled = $assembled.Replace($normalizedMarker, $normalizedSharedHelpers + $lineEnding + $lineEnding)
 
 # -------------------------------------------------------------------------
+# Stage bundled PowerShell modules for Flex Consumption
+# -------------------------------------------------------------------------
+
+$azAccountsModule = Get-Module -ListAvailable -Name 'Az.Accounts' |
+    Sort-Object -Property Version -Descending |
+    Select-Object -First 1
+
+if (-not $azAccountsModule) {
+    throw "Az.Accounts is required to build the Function App package. Install it locally before running Build-FunctionApp.ps1."
+}
+
+$azAccountsModuleRoot = Split-Path -Path $azAccountsModule.ModuleBase -Parent
+$targetAzAccountsRoot = Join-Path -Path $modulesRoot -ChildPath 'Az.Accounts'
+
+New-Item -Path $modulesRoot -ItemType Directory -Force | Out-Null
+if (Test-Path -Path $targetAzAccountsRoot) {
+    Remove-Item -Path $targetAzAccountsRoot -Recurse -Force
+}
+
+New-Item -Path $targetAzAccountsRoot -ItemType Directory -Force | Out-Null
+Copy-Item -Path (Join-Path -Path $azAccountsModuleRoot -ChildPath '*') -Destination $targetAzAccountsRoot -Recurse -Force
+
+# -------------------------------------------------------------------------
 # Write output
 # -------------------------------------------------------------------------
 
@@ -187,3 +290,4 @@ if (-not (Test-Path -Path $outputDir)) {
 [System.IO.File]::WriteAllText($outputPath, $assembled, [System.Text.UTF8Encoding]::new($true))
 
 Write-Output "Generated function app entry point: $outputPath"
+Write-Output ("Staged Az.Accounts module {0} into {1}" -f $azAccountsModule.Version, $targetAzAccountsRoot)

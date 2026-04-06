@@ -2,6 +2,12 @@
 
 This folder contains lightweight PowerShell regression coverage for the Defender reporting pipeline.
 
+## Layout
+
+- `tests/fixtures/` contains committed, minimal regression datasets.
+- `tests/manual/` contains ad hoc troubleshooting harnesses that are useful during development but are not part of `Invoke-RegressionValidation.ps1`.
+- The top-level scripts in `tests/` are the supported automation entrypoints for regression validation, stress generation, benchmarking, and synthetic live-export creation.
+
 ## Runbook-safe regression entrypoint
 
 Run the full local regression bundle with:
@@ -22,6 +28,8 @@ Important note:
 - `Machines_Current.json` is a single JSON object
 
 These shapes match what the pipeline readers already support, even though NDJSON files are not a single valid JSON document when opened in a generic JSON validator.
+
+The fixture smoke runs in `Invoke-RegressionValidation.ps1` and the legacy fixture regression path both execute against temp copies so derived `.dashboard-cache/` output does not pollute the committed fixture.
 
 ## Large synthetic stress dataset
 
@@ -52,3 +60,32 @@ Supported presets:
 - `DeviceCardinalityFirst`
 - `BalancedMediumHeavy`
 - `CurrentDensity`
+
+## Synthetic live export
+
+Create a shifted synthetic dataset that preserves the original export shape while moving the latest observation date forward:
+
+```powershell
+pwsh -NoProfile -File .\tests\New-SyntheticLiveExport.ps1 -SkipContentStoreSidecars
+```
+
+Defaults:
+- source path: `.\exports-synthetic`
+- output path: `.\exports-synthetic-live`
+- target latest date: current UTC date
+
+`-SkipContentStoreSidecars` keeps the output in raw-export form so downstream validation paths can rebuild sidecars on demand.
+
+## Benchmarking
+
+Capture a current-branch-only benchmark baseline with:
+
+```powershell
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+pwsh -NoProfile -File .\tests\Measure-BranchVsMainBenchmark.ps1 -CurrentOnly -CurrentBaselineName 'current-live' -DatasetPath .\exports-synthetic-live -ResultsOutputPath (Join-Path $PWD ('.local\current-baseline-live-' + $stamp + '.json'))
+```
+
+Recommendations:
+- keep raw benchmark outputs under `.local/`
+- use the staged local copy behavior in `Measure-BranchVsMainBenchmark.ps1` when benchmarking raw datasets without sidecars
+- use `docs/performance-baselines.md` for the merge-tracked summary of recorded baseline numbers

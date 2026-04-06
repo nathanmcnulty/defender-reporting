@@ -1394,11 +1394,12 @@ try {
 
     if ($callerObjectId) {
         $callerRoleAssignmentId = [guid]::NewGuid().ToString()
+        $callerRoleDefId = "$subPath/providers/Microsoft.Authorization/roleDefinitions/$($Script:StorageBlobDataContributorRoleId)"
         $callerRolePath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName/providers/Microsoft.Authorization/roleAssignments/${callerRoleAssignmentId}?api-version=$($Script:ArmApiVersions.RoleAssignment)"
         $callerRolePayload = @{
             properties = @{
                 principalId      = $callerObjectId
-                roleDefinitionId = $roleDefId
+                roleDefinitionId = $callerRoleDefId
                 principalType    = "User"
             }
         } | ConvertTo-Json -Depth 5
