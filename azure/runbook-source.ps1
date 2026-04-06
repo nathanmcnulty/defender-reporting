@@ -963,7 +963,7 @@ try {
         }
 
         Write-Output "Updating vulnerability current/history store..."
-        $vulnStore = Publish-VulnStoreFromLegacySnapshot -BasePath $tempExports -RemoveLegacyFiles
+        $vulnStore = Publish-VulnStoreFromBulkSnapshot -BasePath $tempExports -RemoveSnapshotFiles
         Write-Output "  Saved vulnerability current/history store with $($vulnStore.CurrentRows) current row(s) across $($vulnStore.HistoryYears) history period file(s)"
 
         # Machine data
@@ -1039,7 +1039,7 @@ try {
         if ($skipObservedWindowMerge) {
             Write-Output "Synthetic manifest detected. Skipping observed-window merge for stress normalization."
         }
-        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -SkipObservedWindowMerge:$skipObservedWindowMerge
+        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -SkipObservedWindowMerge:$skipObservedWindowMerge
         $machines = $null
         $advancedHuntingData = $null
         Invoke-FullGarbageCollection
@@ -1063,9 +1063,10 @@ try {
             Write-Output ("  Compact vuln columns: {0}KB" -f [math]::Round($vulnColumnSizeBytes / 1KB, 1))
         }
 
-        Write-Output "  Compressing embedded data..."
         $normalizedQuality = $normalizedResult['Quality']
-        Write-CombinedPayloadGzip -Lookups $normalizedResult.Lookups -VulnsPath $normalizedResult.VulnsPath -VulnColumnPaths $normalizedResult.VulnColumnPaths -OutputPath $tempPayloadPath
+        if (-not (Test-Path -LiteralPath $tempPayloadPath -PathType Leaf)) {
+            throw 'Normalization did not produce the expected payload output.'
+        }
         $normalizedResult = $null
         if (Test-Path -LiteralPath $tempVulnsPath -PathType Leaf) {
             Remove-Item -LiteralPath $tempVulnsPath -Force -ErrorAction SilentlyContinue

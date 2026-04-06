@@ -187,7 +187,9 @@ $headerPattern = "(?s)\A\uFEFF?.*?\`$ProgressPreference\s*=\s*'SilentlyContinue'
 if ($runbookSource -notmatch $headerPattern) {
     throw "Could not locate the header section (through `$ProgressPreference) in runbook-source.ps1."
 }
-$assembled = $runbookSource -replace $headerPattern, ($functionAppHeader -replace '\$', '$$')
+
+$headerMatch = [regex]::Match($runbookSource, $headerPattern)
+$assembled = $functionAppHeader + $runbookSource.Substring($headerMatch.Length)
 
 # -------------------------------------------------------------------------
 # Replace Automation variable resolution with Function App config

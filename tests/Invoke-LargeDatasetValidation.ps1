@@ -21,7 +21,34 @@ param(
     [int]$TargetTotalVulnRows = 0,
 
     [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 200000)]
+    [int]$PlanningSourceMachineLimit = 50000,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 500000)]
+    [int]$PlanningSourceRowLimit = 100000,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 200000)]
+    [int]$SafetyDeviceLimit = 25000,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 50000000)]
+    [int]$SafetyRowLimit = 2500000,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 256)]
+    [int]$MinimumAvailableMemoryGB = 8,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 2048)]
+    [int]$MinimumFreeDiskGB = 10,
+
+    [Parameter(Mandatory = $false)]
     [int]$Seed = 20260322,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AllowLargeDataset,
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipSyntheticGeneration,
@@ -73,6 +100,15 @@ if (-not $SkipSyntheticGeneration) {
     }
     if ($TargetTotalVulnRows -gt 0) {
         $generatorArgs.TargetTotalVulnRows = $TargetTotalVulnRows
+    }
+    $generatorArgs.PlanningSourceMachineLimit = $PlanningSourceMachineLimit
+    $generatorArgs.PlanningSourceRowLimit = $PlanningSourceRowLimit
+    $generatorArgs.SafetyDeviceLimit = $SafetyDeviceLimit
+    $generatorArgs.SafetyRowLimit = $SafetyRowLimit
+    $generatorArgs.MinimumAvailableMemoryGB = $MinimumAvailableMemoryGB
+    $generatorArgs.MinimumFreeDiskGB = $MinimumFreeDiskGB
+    if ($AllowLargeDataset) {
+        $generatorArgs.AllowLargeDataset = $true
     }
 
     & $generatorScript @generatorArgs

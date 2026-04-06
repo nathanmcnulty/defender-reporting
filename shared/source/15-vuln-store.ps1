@@ -1,0 +1,264 @@
+﻿
+# Canonical vulnerability store readers and validators used by generation,
+# export refresh, and regression tests.
+
+function Read-VulnStoreRow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    Invoke-WithStoreLock -BasePath $BasePath -StoreName 'vuln' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $BasePath -StoreName 'vuln'
+
+        if (-not (Test-VulnContentStoreExistence -BasePath $BasePath)) {
+            try {
+                Publish-VulnContentStoreUnlocked -BasePath $BasePath
+            }
+            catch {
+                Write-Verbose "Vulnerability content sidecar rebuild failed; falling back to raw row files. $_"
+            }
+        }
+
+        if (Test-VulnContentStoreExistence -BasePath $BasePath) {
+            Read-VulnContentStoreRow -BasePath $BasePath
+            return
+        }
+
+        $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+        if (Test-Path -Path $currentPath) {
+            Read-VulnNdjsonRecordsFromPath -Path $currentPath
+        }
+
+        $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File | Sort-Object Name)
+        foreach ($file in $historyFiles) {
+            $periodMatch = [regex]::Match($file.Name, '^VulnHistory_(?<period>\d{4}Q[1-4]|\d{4})\.json\.gz$')
+            $rowsPath = if ($periodMatch.Success) {
+                Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodMatch.Groups['period'].Value
+            }
+            else {
+                $null
+            }
+            $rowsReadPath = if (-not [string]::IsNullOrWhiteSpace($rowsPath) -and (Test-Path -LiteralPath $rowsPath -PathType Leaf)) {
+                $rowsPath
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($rowsPath)) {
+                $legacyRowsPath = $rowsPath -replace '\.gz$', ''
+                if (Test-Path -LiteralPath $legacyRowsPath -PathType Leaf) { $legacyRowsPath } else { $null }
+            }
+            else {
+                $null
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($rowsReadPath)) {
+                Read-VulnNdjsonRecordsFromPath -Path $rowsReadPath
+                continue
+            }
+
+            Read-VulnHistoryRowsFromPath -Path $file.FullName
+        }
+    } | Write-Output
+}
+
+function Test-VulnCurrentFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $idSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $rowCount = 0
+    foreach ($row in Read-VulnNdjsonRecordsFromPath -Path $Path) {
+        $id = [string](Get-VulnPropertyValue -InputObject $row -Name 'Id')
+        if ([string]::IsNullOrWhiteSpace($id)) {
+            throw 'Current vulnerability store contains a row without Id.'
+        }
+        if (-not $idSet.Add($id)) {
+            throw "Current vulnerability store contains duplicate Id '$id'."
+        }
+        $rowCount++
+    }
+
+    return $rowCount
+}
+
+function Test-VulnHistoryFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $document = Read-VulnHistoryDocument -Path $Path
+    $hasYear = $null -ne $document.PSObject.Properties['year']
+    $hasPeriod = $null -ne $document.PSObject.Properties['period']
+    $hasQuarter = $null -ne $document.PSObject.Properties['quarter']
+    if ((-not $hasYear) -or (($hasPeriod -or $hasQuarter) -and -not ($hasPeriod -and $hasQuarter))) {
+        throw "History file '$Path' is missing required partition metadata."
+    }
+    if ($null -eq $document.PSObject.Properties['snapshots']) {
+        throw "History file '$Path' is missing 'snapshots'."
+    }
+
+    $snapshotDates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($snapshot in @($document.snapshots)) {
+        if ($null -eq $snapshot) { continue }
+        $date = [string](Get-VulnPropertyValue -InputObject $snapshot -Name 'date')
+        if ([string]::IsNullOrWhiteSpace($date)) {
+            throw "History file '$Path' contains a snapshot without date."
+        }
+        if (-not $snapshotDates.Add($date)) {
+            throw "History file '$Path' contains duplicate snapshot date '$date'."
+        }
+        foreach ($entry in @($snapshot.closed)) {
+            if ($null -eq $entry) { continue }
+            $reason = [string](Get-VulnPropertyValue -InputObject $entry -Name 'reason')
+            if ($reason -notin @('removed', 'changed')) {
+                throw "History file '$Path' contains invalid close reason '$reason'."
+            }
+            $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
+            if ($null -eq $row) {
+                throw "History file '$Path' contains a closed entry without row payload."
+            }
+            $id = [string](Get-VulnPropertyValue -InputObject $row -Name 'Id')
+            if ([string]::IsNullOrWhiteSpace($id)) {
+                throw "History file '$Path' contains a closed row without Id."
+            }
+        }
+    }
+
+    $storedLatestDate = [string](Get-VulnPropertyValue -InputObject $document -Name 'latestDate')
+    if (-not [string]::IsNullOrWhiteSpace($storedLatestDate) -and $snapshotDates.Count -gt 0) {
+        $maxSnapshotDate = @($snapshotDates | Sort-Object)[-1]
+        if ($storedLatestDate -ne $maxSnapshotDate) {
+            throw "History file '$Path' latestDate '$storedLatestDate' does not match max snapshot date '$maxSnapshotDate'."
+        }
+    }
+
+    return @($document.snapshots).Count
+}
+
+function Test-VulnHistoryFileLightweight {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fileStream = [System.IO.File]::OpenRead($Path)
+    try {
+        $header = New-Object byte[] 2
+        $bytesRead = $fileStream.Read($header, 0, $header.Length)
+        $fileStream.Position = 0
+
+        $contentStream = if (($bytesRead -eq 2) -and $header[0] -eq 0x1f -and $header[1] -eq 0x8b) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        }
+        else {
+            $fileStream
+        }
+
+        try {
+            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
+            try {
+                $prefixBuilder = [System.Text.StringBuilder]::new()
+                $buffer = New-Object char[] 8192
+                $totalChars = 0
+
+                while (($charsRead = $reader.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    if ($prefixBuilder.Length -lt 4096) {
+                        $charsToKeep = [Math]::Min(4096 - $prefixBuilder.Length, $charsRead)
+                        [void]$prefixBuilder.Append($buffer, 0, $charsToKeep)
+                    }
+                    $totalChars += $charsRead
+                }
+
+                if ($totalChars -eq 0) {
+                    throw "History file '$Path' is empty."
+                }
+
+                $prefix = $prefixBuilder.ToString()
+                if ($prefix -notmatch '^\s*\{') {
+                    throw "History file '$Path' does not begin with a JSON object."
+                }
+                if ($prefix -notmatch '"year"\s*:') {
+                    throw "History file '$Path' is missing 'year'."
+                }
+                if ($prefix -notmatch '"latestDate"\s*:') {
+                    throw "History file '$Path' is missing 'latestDate'."
+                }
+                if ($prefix -notmatch '"snapshots"\s*:') {
+                    throw "History file '$Path' is missing 'snapshots'."
+                }
+                $hasPeriod = $prefix -match '"period"\s*:'
+                $hasQuarter = $prefix -match '"quarter"\s*:'
+                if ($hasPeriod -xor $hasQuarter) {
+                    throw "History file '$Path' has incomplete quarter partition metadata."
+                }
+
+                return $totalChars
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            if ($contentStream -ne $fileStream) {
+                $contentStream.Dispose()
+            }
+        }
+    }
+    finally {
+        $fileStream.Dispose()
+    }
+}
+
+function Get-VulnHistoryDocumentList {
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $documents = [System.Collections.Generic.List[object]]::new()
+    foreach ($file in Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name) {
+        foreach ($document in Convert-VulnHistoryDocumentToQuarterlyDocuments -HistoryDocument (Read-VulnHistoryDocument -Path $file.FullName)) {
+            $documents.Add($document)
+        }
+    }
+
+    return @($documents)
+}
+
+function Get-VulnStoreLatestSnapshotDate {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $maxDate = $null
+
+    $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+    if (Test-Path -Path $currentPath) {
+        foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $currentPath) {
+            $lastSeen = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $record -Name 'LastSeenTimestamp')
+            if (-not [string]::IsNullOrWhiteSpace($lastSeen)) {
+                $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $lastSeen
+            }
+        }
+    }
+
+    foreach ($file in Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name) {
+        $docLatest = Get-VulnHistoryFileLatestDate -Path $file.FullName
+        if (-not [string]::IsNullOrWhiteSpace($docLatest)) {
+            $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $docLatest
+        }
+    }
+
+    return $maxDate
+}

@@ -618,7 +618,6 @@ function Get-StreamingDashboardAuditResult {
         Invoke-FullGarbageCollection
     }
 
-    $legacyFiles = @(Get-VulnLegacySnapshotFile -BasePath $ResolvedExportsPath)
     return [PSCustomObject]@{
         GeneratedOn = (Get-Date).ToString('o')
         HtmlPath = $ResolvedHtmlPath
@@ -654,10 +653,11 @@ function Get-StreamingDashboardAuditResult {
             Reason = 'Streaming large-dataset audit mode'
         }
         LegacyMigrationAudit = [PSCustomObject]@{
-            Enabled = ($legacyFiles.Count -gt 0)
+            Enabled = $false
+            Removed = $true
             RemovalDate = $Script:LegacyVulnMigrationRemovalDate
-            LegacySnapshotFileCount = $legacyFiles.Count
-            Skipped = ($legacyFiles.Count -eq 0)
+            Reason = 'Legacy snapshot normalization fallback has been removed.'
+            Skipped = $true
         }
         PayloadParity = [PSCustomObject]@{
             Match = (($dashboardPayloadSha256 -eq $cachedPayloadSha256) -and ($dashboardPayloadRowCount -eq $cachedPayloadRowCount))
