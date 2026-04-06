@@ -177,7 +177,7 @@ function Get-DatasetFiles {
     )
 }
 
-function Get-FreeDiskSpaceBytes {
+function Get-FreeDiskByteCount {
     [CmdletBinding()]
     [OutputType([int64])]
     param(
@@ -277,7 +277,7 @@ function Assert-BenchmarkDatasetReady {
         throw ("Available system memory is {0} GB, below the benchmark preflight floor of {1} GB." -f $availableMemoryGB, $MinimumAvailableMemoryGB)
     }
 
-    $freeDiskBytes = Get-FreeDiskSpaceBytes -Path $OutputDirectory
+    $freeDiskBytes = Get-FreeDiskByteCount -Path $OutputDirectory
     $requiredFreeDiskBytes = [Math]::Max(([int64]$MinimumFreeDiskGB * 1GB), (($datasetBytes * 2) + 2GB))
     if ($freeDiskBytes -lt $requiredFreeDiskBytes) {
         throw ("Available disk space on the benchmark output drive is {0:N2} GB, but at least {1:N2} GB is required for the dataset copy and outputs." -f ($freeDiskBytes / 1GB), ($requiredFreeDiskBytes / 1GB))

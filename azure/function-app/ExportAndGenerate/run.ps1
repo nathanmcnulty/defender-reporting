@@ -86,6 +86,12 @@ function Write-Output {
     )
 
     process {
+        if ($NoEnumerate) {
+            Write-PipelineFileTraceLine -Message $InputObject
+            Microsoft.PowerShell.Utility\Write-Output -InputObject $InputObject -NoEnumerate
+            return
+        }
+
         if ($null -eq $InputObject -or $InputObject.Count -eq 0) {
             Write-PipelineFileTraceLine -Message ''
             return
@@ -93,7 +99,7 @@ function Write-Output {
 
         foreach ($item in $InputObject) {
             Write-PipelineFileTraceLine -Message $item
-            Microsoft.PowerShell.Utility\Write-Output -InputObject $item -NoEnumerate:$NoEnumerate
+            Microsoft.PowerShell.Utility\Write-Output -InputObject $item
         }
     }
 }
