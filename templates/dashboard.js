@@ -241,6 +241,15 @@ function createEmptySeverityCounts() {
     };
 }
 
+function createEmptySeveritySeries() {
+    return {
+        Critical: [],
+        High: [],
+        Medium: [],
+        Low: []
+    };
+}
+
 function createEmptyAggregateCache() {
     return {
         activeRowsAsOfDate: null,
@@ -3857,6 +3866,134 @@ function sortRemediationDetailsTable(columnIndex) {
 // =============================================================================
 
 /**
+ * Build the impact chart time series for current and projected counts.
+ * @param {Array} rows
+ * @param {Set<number>} top25VulnIds
+ * @param {Array<string>} sortedDates
+ * @returns {{currentSeverityCounts: Object, projectedSeverityCounts: Object, currentTotalCounts: Array<number>, projectedTotalCounts: Array<number>}}
+ */
+function buildImpactChartSeries(rows, top25VulnIds, sortedDates) {
+    const currentSeverityCounts = createEmptySeveritySeries();
+    const projectedSeverityCounts = createEmptySeveritySeries();
+    const currentTotalCounts = [];
+    const projectedTotalCounts = [];
+
+    if (!Array.isArray(sortedDates) || sortedDates.length === 0) {
+        return {
+            currentSeverityCounts,
+            projectedSeverityCounts,
+            currentTotalCounts,
+            projectedTotalCounts
+        };
+    }
+
+    const impactEvents = new Map();
+    const getImpactEventBucket = (date) => {
+        let bucket = impactEvents.get(date);
+        if (!bucket) {
+            bucket = {
+                currentStartTotal: 0,
+                currentEndTotal: 0,
+                projectedStartTotal: 0,
+                projectedEndTotal: 0,
+                currentStarts: createEmptySeverityCounts(),
+                currentEnds: createEmptySeverityCounts(),
+                projectedStarts: createEmptySeverityCounts(),
+                projectedEnds: createEmptySeverityCounts()
+            };
+            impactEvents.set(date, bucket);
+        }
+        return bucket;
+    };
+
+    rows.forEach(v => {
+        const severity = v.VulnerabilitySeverityLevel;
+        const isTop25 = top25VulnIds.has(v._index);
+        const startDate = v._firstSeenDate;
+        let endDate = nextDay(v._effectiveOpenEndDate);
+
+        if (endDate <= startDate) {
+            endDate = nextDay(startDate);
+        }
+
+        const startBucket = getImpactEventBucket(startDate);
+        startBucket.currentStartTotal++;
+        if (startBucket.currentStarts[severity] !== undefined) {
+            startBucket.currentStarts[severity]++;
+        }
+
+        const endBucket = getImpactEventBucket(endDate);
+        endBucket.currentEndTotal++;
+        if (endBucket.currentEnds[severity] !== undefined) {
+            endBucket.currentEnds[severity]++;
+        }
+
+        if (!isTop25) {
+            startBucket.projectedStartTotal++;
+            if (startBucket.projectedStarts[severity] !== undefined) {
+                startBucket.projectedStarts[severity]++;
+            }
+
+            endBucket.projectedEndTotal++;
+            if (endBucket.projectedEnds[severity] !== undefined) {
+                endBucket.projectedEnds[severity]++;
+            }
+        }
+    });
+
+    let sweepCurrentTotal = 0;
+    let sweepProjectedTotal = 0;
+    const sweepCurrentSev = createEmptySeverityCounts();
+    const sweepProjectedSev = createEmptySeverityCounts();
+    const applyImpactEvent = (bucket) => {
+        sweepCurrentTotal += bucket.currentStartTotal - bucket.currentEndTotal;
+        sweepProjectedTotal += bucket.projectedStartTotal - bucket.projectedEndTotal;
+
+        sweepCurrentSev.Critical += bucket.currentStarts.Critical - bucket.currentEnds.Critical;
+        sweepCurrentSev.High += bucket.currentStarts.High - bucket.currentEnds.High;
+        sweepCurrentSev.Medium += bucket.currentStarts.Medium - bucket.currentEnds.Medium;
+        sweepCurrentSev.Low += bucket.currentStarts.Low - bucket.currentEnds.Low;
+
+        sweepProjectedSev.Critical += bucket.projectedStarts.Critical - bucket.projectedEnds.Critical;
+        sweepProjectedSev.High += bucket.projectedStarts.High - bucket.projectedEnds.High;
+        sweepProjectedSev.Medium += bucket.projectedStarts.Medium - bucket.projectedEnds.Medium;
+        sweepProjectedSev.Low += bucket.projectedStarts.Low - bucket.projectedEnds.Low;
+    };
+
+    const rangeStart = sortedDates[0];
+    const allImpactDates = [...impactEvents.keys()].sort();
+    for (const eventDate of allImpactDates) {
+        if (eventDate >= rangeStart) break;
+        applyImpactEvent(impactEvents.get(eventDate));
+    }
+
+    sortedDates.forEach(date => {
+        const bucket = impactEvents.get(date);
+        if (bucket) {
+            applyImpactEvent(bucket);
+        }
+
+        currentTotalCounts.push(sweepCurrentTotal);
+        projectedTotalCounts.push(sweepProjectedTotal);
+        currentSeverityCounts.Critical.push(sweepCurrentSev.Critical);
+        currentSeverityCounts.High.push(sweepCurrentSev.High);
+        currentSeverityCounts.Medium.push(sweepCurrentSev.Medium);
+        currentSeverityCounts.Low.push(sweepCurrentSev.Low);
+        projectedSeverityCounts.Critical.push(sweepProjectedSev.Critical);
+        projectedSeverityCounts.High.push(sweepProjectedSev.High);
+        projectedSeverityCounts.Medium.push(sweepProjectedSev.Medium);
+        projectedSeverityCounts.Low.push(sweepProjectedSev.Low);
+    });
+
+    return {
+        currentSeverityCounts,
+        projectedSeverityCounts,
+        currentTotalCounts,
+        projectedTotalCounts
+    };
+}
+
+/**
  * Render the impact analysis chart
  */
 /**
@@ -3875,99 +4012,14 @@ function renderImpactChart() {
         return;
     }
     
-    const { top25, top25VulnIds } = getImpactAnalysisData();
+    const { top25VulnIds } = getImpactAnalysisData();
     const sortedDates = generateDateRange(startDate, endDate);
-    
-    // Calculate current and projected counts for each date
-    const currentSeverityCounts = {
-        Critical: [],
-        High: [],
-        Medium: [],
-        Low: []
-    };
-    const projectedSeverityCounts = {
-        Critical: [],
-        High: [],
-        Medium: [],
-        Low: []
-    };
-    const currentTotalCounts = [];
-    const projectedTotalCounts = [];
-    
-    // Build start/end events for sweep-line
-    const impactEvents = new Map();
-    
-    filteredData.forEach(v => {
-        const isTop25 = top25VulnIds.has(v._index);
-        const sd = v._firstSeenDate;
-        let ed = nextDay(v._effectiveOpenEndDate);
-        
-        // Data validation: ensure end date is after start date
-        if (ed <= sd) {
-            ed = nextDay(sd);
-        }
-        
-        if (!impactEvents.has(sd)) impactEvents.set(sd, { starts: [], ends: [], isTop25Starts: new Set(), isTop25Ends: new Set() });
-        impactEvents.get(sd).starts.push(v);
-        if (isTop25) impactEvents.get(sd).isTop25Starts.add(v._index);
-        if (!impactEvents.has(ed)) impactEvents.set(ed, { starts: [], ends: [], isTop25Starts: new Set(), isTop25Ends: new Set() });
-        impactEvents.get(ed).ends.push(v);
-        if (isTop25) impactEvents.get(ed).isTop25Ends.add(v._index);
-    });
-    
-    let sweepCurrentTotal = 0;
-    let sweepProjectedTotal = 0;
-    let sweepCurrentSev = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-    let sweepProjectedSev = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-    
-    const processImpactStart = (v, isTop25) => {
-        sweepCurrentTotal++;
-        const sev = v.VulnerabilitySeverityLevel;
-        if (sweepCurrentSev[sev] !== undefined) sweepCurrentSev[sev]++;
-        if (!isTop25) {
-            sweepProjectedTotal++;
-            if (sweepProjectedSev[sev] !== undefined) sweepProjectedSev[sev]++;
-        }
-    };
-    
-    const processImpactEnd = (v, isTop25) => {
-        if (sweepCurrentTotal > 0) sweepCurrentTotal--;
-        const sev = v.VulnerabilitySeverityLevel;
-        if (sweepCurrentSev[sev] !== undefined && sweepCurrentSev[sev] > 0) sweepCurrentSev[sev]--;
-        if (!isTop25) {
-            if (sweepProjectedTotal > 0) sweepProjectedTotal--;
-            if (sweepProjectedSev[sev] !== undefined && sweepProjectedSev[sev] > 0) sweepProjectedSev[sev]--;
-        }
-    };
-    
-    const impactRangeStart = sortedDates[0];
-    const allImpactDates = [...impactEvents.keys()].sort();
-    for (const eventDate of allImpactDates) {
-        if (eventDate >= impactRangeStart) break;
-        const ev = impactEvents.get(eventDate);
-        ev.starts.forEach(v => processImpactStart(v, ev.isTop25Starts.has(v._index)));
-        ev.ends.forEach(v => processImpactEnd(v, ev.isTop25Ends.has(v._index)));
-    }
-    
-    // Sweep through visible dates
-    sortedDates.forEach(date => {
-        const ev = impactEvents.get(date);
-        if (ev) {
-            ev.starts.forEach(v => processImpactStart(v, ev.isTop25Starts.has(v._index)));
-            ev.ends.forEach(v => processImpactEnd(v, ev.isTop25Ends.has(v._index)));
-        }
-        
-        currentTotalCounts.push(sweepCurrentTotal);
-        projectedTotalCounts.push(sweepProjectedTotal);
-        currentSeverityCounts.Critical.push(sweepCurrentSev.Critical);
-        currentSeverityCounts.High.push(sweepCurrentSev.High);
-        currentSeverityCounts.Medium.push(sweepCurrentSev.Medium);
-        currentSeverityCounts.Low.push(sweepCurrentSev.Low);
-        projectedSeverityCounts.Critical.push(sweepProjectedSev.Critical);
-        projectedSeverityCounts.High.push(sweepProjectedSev.High);
-        projectedSeverityCounts.Medium.push(sweepProjectedSev.Medium);
-        projectedSeverityCounts.Low.push(sweepProjectedSev.Low);
-    });
+    const {
+        currentSeverityCounts,
+        projectedSeverityCounts,
+        currentTotalCounts,
+        projectedTotalCounts
+    } = buildImpactChartSeries(filteredData, top25VulnIds, sortedDates);
     
     // Find the index where we transition from actual data to projected (dashed) data
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
