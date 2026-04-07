@@ -6206,6 +6206,20 @@ function Write-CombinedPayloadLookups {
     )
 
     $Writer.WritePropertyName('lookups')
+    Write-CombinedPayloadLookupsValue -Writer $Writer -Lookups $Lookups
+}
+
+function Write-CombinedPayloadLookupsValue {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextWriter]$Writer,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Lookups
+    )
+
     $Writer.WriteStartObject()
     foreach ($lookupPropertyName in @(
             'vendors',
@@ -6534,6 +6548,7 @@ function Write-CombinedPayloadGzip {
 
     $payloadWriter = $null
     $columnReaders = [System.Collections.Generic.List[System.IDisposable]]::new()
+    $jsonWriter = $null
     $activeColumnPaths = $null
 
     try {
