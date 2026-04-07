@@ -56,6 +56,7 @@ const dataFormat = getScriptElementText('dataFormat');
 let lookups = null;
 let rawVulns = null;
 let dataQualityMeta = { firstLastSwapped: 0, generatedOnUtc: null };
+let dataQualitySummary = createEmptyDataQualitySummary();
 
 // Denormalized vulnerability data (expanded from normalized format)
 let vulnerabilityData = [];
@@ -166,6 +167,9 @@ let cascadingFilterCountCacheKey = null;
 let cascadingFilterCountCache = null;
 let chartDataCacheKey = null;
 let chartDataCache = null;
+let reportDataWarmupHandle = null;
+let reportDataWarmupUsesIdleCallback = false;
+let reportDataWarmupToken = 0;
 
 // Remediation table scroll state
 let remediationLoadedCount = 0;
@@ -220,17 +224,53 @@ function createEmptyFilterState() {
     };
 }
 
+function createEmptyDataQualitySummary() {
+    return {
+        totalRecords: 0,
+        uniqueDevices: 0,
+        uniqueCves: 0,
+        missingPublished: 0,
+        nonYmdPublished: 0,
+        invertedRanges: 0
+    };
+}
+
+function createEmptySeverityCounts() {
+    return {
+        Critical: 0,
+        High: 0,
+        Medium: 0,
+        Low: 0
+    };
+}
+
+function createEmptySeveritySeries() {
+    return {
+        Critical: [],
+        High: [],
+        Medium: [],
+        Low: []
+    };
+}
+
 function createEmptyAggregateCache() {
     return {
         activeRowsAsOfDate: null,
         activeRowsAsOfDateKey: null,
         activeRowsForCurrentSelection: null,
         activeRowsForCurrentSelectionKey: null,
+        selectionSeverityCounts: null,
+        selectionSeverityCountsKey: null,
         provenRemediationRows: null,
         provenRemediationRowsKey: null,
+        remediationChartData: null,
+        remediationChartDataKey: null,
         remediationTableData: null,
         remediationDetailsData: null,
         impactData: null,
+        impactChartData: null,
+        impactChartDataKey: null,
+        impactAnalysisTableData: null,
         devicesByRemediationData: null,
         remediationsByDeviceData: null
     };
@@ -314,6 +354,7 @@ function hasAnyCascadingFilterSelection(filterId) {
 }
 
 function invalidateAggregateCache() {
+    cancelReportDataWarmup();
     aggregateCacheKey = null;
     aggregateCache = createEmptyAggregateCache();
     cascadingFilterCountCacheKey = null;
@@ -385,6 +426,51 @@ function scheduleApplyFilters(immediate = false) {
         applyFiltersTimer = null;
         applyFilters();
     }, APPLY_FILTER_DEBOUNCE_MS);
+}
+
+function cancelReportDataWarmup() {
+    if (reportDataWarmupHandle == null) {
+        return;
+    }
+
+    if (reportDataWarmupUsesIdleCallback && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(reportDataWarmupHandle);
+    } else {
+        clearTimeout(reportDataWarmupHandle);
+    }
+
+    reportDataWarmupHandle = null;
+    reportDataWarmupUsesIdleCallback = false;
+}
+
+function scheduleReportDataWarmup() {
+    cancelReportDataWarmup();
+
+    const scheduledFilterKey = filterState.key;
+    const scheduledMostRecentLastSeenDate = mostRecentLastSeenDate;
+    const warmupToken = ++reportDataWarmupToken;
+    const runWarmup = () => {
+        reportDataWarmupHandle = null;
+        reportDataWarmupUsesIdleCallback = false;
+
+        if (warmupToken !== reportDataWarmupToken) return;
+        if (filterState.key !== scheduledFilterKey) return;
+        if (mostRecentLastSeenDate !== scheduledMostRecentLastSeenDate) return;
+
+        getRemediationDetailsData();
+        getImpactAnalysisData();
+        getImpactAnalysisTableData();
+        getRemediationChartData();
+        getImpactChartData();
+    };
+
+    if (typeof window.requestIdleCallback === 'function') {
+        reportDataWarmupUsesIdleCallback = true;
+        reportDataWarmupHandle = window.requestIdleCallback(runWarmup, { timeout: 200 });
+        return;
+    }
+
+    reportDataWarmupHandle = window.setTimeout(runWarmup, 0);
 }
 
 function getAggregateCache() {
@@ -1196,6 +1282,9 @@ function denormalizeAllVulns() {
     }
 
     const earliestFirstSeenByIssue = new Map();
+    const qualitySummary = createEmptyDataQualitySummary();
+    const qualityDeviceKeys = new Set();
+    const qualityCveIds = new Set();
     let _maxLatestActivity = '';
 
     for (let i = 0; i < rawCount; i++) {
@@ -1285,8 +1374,26 @@ function denormalizeAllVulns() {
     for (let i = 0; i < rawCount; i++) {
         const v = vulnerabilityData[i];
         v._environmentFirstSeenDate = earliestFirstSeenByIssue.get(v._issueKey) || v._firstSeenDate;
+
+        qualitySummary.totalRecords++;
+        const deviceKey = getDeviceIdentityKey(v);
+        if (deviceKey) qualityDeviceKeys.add(deviceKey);
+        if (v.CveId) qualityCveIds.add(v.CveId);
+
+        if (!v.PublishedDate) {
+            qualitySummary.missingPublished++;
+        } else if (!/^\d{4}-\d{2}-\d{2}$/.test(v.PublishedDate)) {
+            qualitySummary.nonYmdPublished++;
+        }
+
+        if (v._firstSeenDate && v._lastSeenDate && v._firstSeenDate > v._lastSeenDate) {
+            qualitySummary.invertedRanges++;
+        }
     }
 
+    qualitySummary.uniqueDevices = qualityDeviceKeys.size;
+    qualitySummary.uniqueCves = qualityCveIds.size;
+    dataQualitySummary = qualitySummary;
     mostRecentLastSeenDate = _maxLatestActivity;
     const elapsed = Math.round(performance.now() - startTime);
     logDebug('Denormalization complete in', elapsed, 'ms');
@@ -1611,10 +1718,10 @@ function buildDeviceFilterCatalog() {
     deviceFilterCatalog = lookups.devices.map(device => ({
         deviceId: device.id,
         deviceName: device.n,
-        rbacGroup: getDeviceGroupName(device),
-        deviceTags: device.t && device.t.length > 0
+        rbacGroup: device._normalizedGroup || getDeviceGroupName(device),
+        deviceTags: device._tagValues || (device.t && device.t.length > 0
             ? device.t.map(tagIndex => lookups.tags[tagIndex])
-            : NO_TAGS_ARRAY
+            : NO_TAGS_ARRAY)
     }));
 }
 
@@ -2311,6 +2418,11 @@ function applyFilters() {
     const hasOsPlatform = fs.osPlatformSet.size > 0;
     const startDate = fs.startDate;
     const endDate = fs.endDate;
+    const hasDateWindow = hasSelectedDateWindow(fs);
+    const currentSelectionKey = getCurrentSelectionCacheKey(fs);
+    const pointInTimeAsOfDate = hasDateWindow ? '' : getPointInTimeReferenceDate(fs);
+    const selectionSeverityCounts = createEmptySeverityCounts();
+    const pointInTimeRows = hasDateWindow ? null : [];
 
     // Cascading count accumulators (device-Set per option per filter dimension)
     const deviceSetsByFilter = Object.fromEntries(CASCADING_FILTER_IDS.map(filterId => [
@@ -2366,6 +2478,16 @@ function applyFilters() {
         // Main filtered result: all dimensions must match
         if (matchesDevName && matchesGroup && matchesTags) {
             result.push(v);
+            if (hasDateWindow) {
+                if (selectionSeverityCounts[v.VulnerabilitySeverityLevel] !== undefined) {
+                    selectionSeverityCounts[v.VulnerabilitySeverityLevel]++;
+                }
+            } else if (isVulnerabilityActiveOnDate(v, pointInTimeAsOfDate)) {
+                pointInTimeRows.push(v);
+                if (selectionSeverityCounts[v.VulnerabilitySeverityLevel] !== undefined) {
+                    selectionSeverityCounts[v.VulnerabilitySeverityLevel]++;
+                }
+            }
         }
     }
     filteredData = result;
@@ -2384,9 +2506,24 @@ function applyFilters() {
     console.log(`[perf] cascading filter render: ${(performance.now() - _tCascade).toFixed(1)}ms`);
 
     invalidateAggregateCache();
+    const cache = getAggregateCache();
+    if (hasDateWindow) {
+        cache.activeRowsForCurrentSelectionKey = currentSelectionKey;
+        cache.activeRowsForCurrentSelection = result;
+    } else {
+        cache.activeRowsAsOfDateKey = pointInTimeAsOfDate;
+        cache.activeRowsAsOfDate = pointInTimeRows;
+        cache.activeRowsForCurrentSelectionKey = currentSelectionKey;
+        cache.activeRowsForCurrentSelection = pointInTimeRows;
+    }
+    cache.selectionSeverityCountsKey = currentSelectionKey;
+    cache.selectionSeverityCounts = selectionSeverityCounts;
     updateStats();
     markAllReportsDirty();
-    requestAnimationFrame(() => renderActiveReport(true));
+    requestAnimationFrame(() => {
+        renderActiveReport(true);
+        scheduleReportDataWarmup();
+    });
     console.log(`[perf] applyFilters: ${(performance.now() - _t0).toFixed(1)}ms  (${result.length}/${len} rows passed)`);
 }
 
@@ -2411,23 +2548,30 @@ function getStatElements() {
 }
 
 function updateStats() {
-    const statsRows = getActiveRowsForCurrentSelection();
-    let critical = 0, high = 0, medium = 0, low = 0;
+    const cache = getAggregateCache();
+    const cacheKey = getCurrentSelectionCacheKey();
+    let counts = cache.selectionSeverityCountsKey === cacheKey ? cache.selectionSeverityCounts : null;
 
-    for (let i = 0, len = statsRows.length; i < len; i++) {
-        switch (statsRows[i].VulnerabilitySeverityLevel) {
-            case 'Critical': critical++; break;
-            case 'High': high++; break;
-            case 'Medium': medium++; break;
-            case 'Low': low++; break;
+    if (!counts) {
+        counts = createEmptySeverityCounts();
+        const statsRows = getActiveRowsForCurrentSelection();
+        for (let i = 0, len = statsRows.length; i < len; i++) {
+            switch (statsRows[i].VulnerabilitySeverityLevel) {
+                case 'Critical': counts.Critical++; break;
+                case 'High': counts.High++; break;
+                case 'Medium': counts.Medium++; break;
+                case 'Low': counts.Low++; break;
+            }
         }
+        cache.selectionSeverityCountsKey = cacheKey;
+        cache.selectionSeverityCounts = counts;
     }
 
     const els = getStatElements();
-    els.critical.textContent = critical;
-    els.high.textContent = high;
-    els.medium.textContent = medium;
-    els.low.textContent = low;
+    els.critical.textContent = counts.Critical;
+    els.high.textContent = counts.High;
+    els.medium.textContent = counts.Medium;
+    els.low.textContent = counts.Low;
 }
 
 /**
@@ -2437,46 +2581,17 @@ function updateDataQualitySummary() {
     if (!document.querySelector('.data-quality-panel')) return;
     if (!Array.isArray(vulnerabilityData) || vulnerabilityData.length === 0) return;
 
-    const totalRecords = vulnerabilityData.length;
-    const uniqueDevices = new Set();
-    const uniqueCves = new Set();
-    let missingPublished = 0;
-    let nonYmdPublished = 0;
-    let invertedRanges = 0;
-
-    vulnerabilityData.forEach(v => {
-        const deviceKey = getDeviceIdentityKey(v);
-        if (deviceKey) uniqueDevices.add(deviceKey);
-        if (v.CveId) uniqueCves.add(v.CveId);
-
-        const publishedDate = v.PublishedDate;
-        if (!publishedDate) {
-            missingPublished++;
-        } else {
-            const normalizedPublished = formatDateYMD(publishedDate);
-            if (normalizedPublished === '-' || !/^\d{4}-\d{2}-\d{2}$/.test(normalizedPublished)) {
-                nonYmdPublished++;
-            }
-        }
-
-        const firstSeen = getFirstSeenDate(v);
-        const lastSeen = getLastSeenDate(v);
-        if (firstSeen && firstSeen !== '-' && lastSeen && lastSeen !== '-' && firstSeen > lastSeen) {
-            invertedRanges++;
-        }
-    });
-
     const setText = (id, value) => {
         const element = document.getElementById(id);
         if (element) element.textContent = value.toLocaleString();
     };
 
-    setText('dqTotalRecords', totalRecords);
-    setText('dqUniqueDevices', uniqueDevices.size);
-    setText('dqUniqueCves', uniqueCves.size);
-    setText('dqMissingPublished', missingPublished);
-    setText('dqNonYmdPublished', nonYmdPublished);
-    setText('dqInvertedRanges', invertedRanges);
+    setText('dqTotalRecords', dataQualitySummary.totalRecords);
+    setText('dqUniqueDevices', dataQualitySummary.uniqueDevices);
+    setText('dqUniqueCves', dataQualitySummary.uniqueCves);
+    setText('dqMissingPublished', dataQualitySummary.missingPublished);
+    setText('dqNonYmdPublished', dataQualitySummary.nonYmdPublished);
+    setText('dqInvertedRanges', dataQualitySummary.invertedRanges);
     setText('dqCorrectedRanges', Number(dataQualityMeta.firstLastSwapped || 0));
 }
 
@@ -2504,12 +2619,18 @@ function formatSoftwareName(vendor, product) {
     return `${formatPart(vendor)} - ${formatPart(product)}`;
 }
 
-function getPointInTimeReferenceDate() {
-    return filterState.endDate || mostRecentLastSeenDate;
+function getPointInTimeReferenceDate(state = filterState) {
+    return state.endDate || mostRecentLastSeenDate;
 }
 
 function hasSelectedDateWindow(state = filterState) {
     return Boolean(state.startDate || state.endDate);
+}
+
+function getCurrentSelectionCacheKey(state = filterState) {
+    return hasSelectedDateWindow(state)
+        ? `range:${state.startDate || ''}:${state.endDate || ''}`
+        : `point:${getPointInTimeReferenceDate(state)}`;
 }
 
 function getPointInTimeActiveRows(asOfDate = getPointInTimeReferenceDate()) {
@@ -2525,9 +2646,7 @@ function getPointInTimeActiveRows(asOfDate = getPointInTimeReferenceDate()) {
 
 function getActiveRowsForCurrentSelection() {
     const cache = getAggregateCache();
-    const cacheKey = hasSelectedDateWindow()
-        ? `range:${filterState.startDate || ''}:${filterState.endDate || ''}`
-        : `point:${getPointInTimeReferenceDate()}`;
+    const cacheKey = getCurrentSelectionCacheKey();
 
     if (cache.activeRowsForCurrentSelectionKey === cacheKey && cache.activeRowsForCurrentSelection) {
         return cache.activeRowsForCurrentSelection;
@@ -2662,6 +2781,9 @@ function applyDerivedVulnerabilityFields(rows) {
     if (!Array.isArray(rows)) return;
 
     const earliestEnvironmentFirstSeenByIssue = new Map();
+    const qualitySummary = createEmptyDataQualitySummary();
+    const qualityDeviceKeys = new Set();
+    const qualityCveIds = new Set();
 
     rows.forEach(v => {
         const issueKey = getEnvironmentIssueKey(v);
@@ -2681,6 +2803,7 @@ function applyDerivedVulnerabilityFields(rows) {
         if (latestActivityDate > _maxLatest) _maxLatest = latestActivityDate;
         const remediationEvidence = hasKnownPatchEvidence(v);
         const firstSeenDate = getFirstSeenDate(v);
+        const lastSeenDate = getLastSeenDate(v);
         const effectiveOpenEndDate = getEffectiveOpenEndDate(v);
         const environmentFirstSeenDate = earliestEnvironmentFirstSeenByIssue.get(getEnvironmentIssueKey(v)) || firstSeenDate;
 
@@ -2689,13 +2812,30 @@ function applyDerivedVulnerabilityFields(rows) {
         v._latestActivityDate = latestActivityDate;
         v._hasPatchEvidence = remediationEvidence;
         v._effectiveOpenEndDate = effectiveOpenEndDate;
-        v._remediationDate = remediationEvidence ? getLastSeenDate(v) : '';
+        v._remediationDate = remediationEvidence ? lastSeenDate : '';
         v._remediationString = buildRemediationString(v);
         v._environmentFirstSeenDate = environmentFirstSeenDate;
         v._deviceFilterKey = v.DeviceId || v.DeviceName || '';
         v._normalizedGroup = normalizeGroupName(v.RbacGroupName);
         v._tagValues = v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : NO_TAGS_ARRAY;
+
+        qualitySummary.totalRecords++;
+        if (v._deviceFilterKey) qualityDeviceKeys.add(v._deviceFilterKey);
+        if (v.CveId) qualityCveIds.add(v.CveId);
+
+        if (!v.PublishedDate) {
+            qualitySummary.missingPublished++;
+        } else if (!/^\d{4}-\d{2}-\d{2}$/.test(v.PublishedDate)) {
+            qualitySummary.nonYmdPublished++;
+        }
+
+        if (firstSeenDate && lastSeenDate && firstSeenDate > lastSeenDate) {
+            qualitySummary.invertedRanges++;
+        }
     });
+    qualitySummary.uniqueDevices = qualityDeviceKeys.size;
+    qualitySummary.uniqueCves = qualityCveIds.size;
+    dataQualitySummary = qualitySummary;
     mostRecentLastSeenDate = _maxLatest;
 }
 
@@ -2710,6 +2850,124 @@ function createSegmentStyle(cutoffIdx) {
             const index = ctx.p0DataIndex;
             return (cutoffIdx !== -1 && index >= cutoffIdx - 1) ? [5, 5] : [];
         }
+    };
+}
+
+/**
+ * Build the active vulnerabilities chart time series.
+ * @param {Array} rows
+ * @param {string} startDate
+ * @param {string} endDate
+ * @returns {{sortedDates: Array<string>, severityCounts: Object, totalCounts: Array<number>, deviceCounts: Array<number>}}
+ */
+function buildActiveChartSeries(rows, startDate, endDate) {
+    const sortedDates = generateDateRange(startDate, endDate);
+    const severityCounts = createEmptySeveritySeries();
+    const totalCounts = [];
+    const deviceCounts = [];
+
+    if (!Array.isArray(sortedDates) || sortedDates.length === 0) {
+        return {
+            sortedDates,
+            severityCounts,
+            totalCounts,
+            deviceCounts
+        };
+    }
+
+    const chartEvents = new Map();
+    const getChartEventBucket = (date) => {
+        let bucket = chartEvents.get(date);
+        if (!bucket) {
+            bucket = {
+                totalDelta: 0,
+                severityDelta: createEmptySeverityCounts(),
+                deviceDeltas: new Map()
+            };
+            chartEvents.set(date, bucket);
+        }
+        return bucket;
+    };
+
+    rows.forEach(v => {
+        const severity = v.VulnerabilitySeverityLevel;
+        const rowStartDate = v._firstSeenDate;
+        let rowEndDate = nextDay(v._effectiveOpenEndDate);
+
+        if (!rowStartDate || !rowEndDate) {
+            return;
+        }
+
+        if (rowEndDate <= rowStartDate) {
+            rowEndDate = nextDay(rowStartDate);
+        }
+
+        const deviceKey = v.DeviceId || v.DeviceName;
+        const startBucket = getChartEventBucket(rowStartDate);
+        startBucket.totalDelta++;
+        if (startBucket.severityDelta[severity] !== undefined) {
+            startBucket.severityDelta[severity]++;
+        }
+        if (deviceKey) {
+            startBucket.deviceDeltas.set(deviceKey, (startBucket.deviceDeltas.get(deviceKey) || 0) + 1);
+        }
+
+        const endBucket = getChartEventBucket(rowEndDate);
+        endBucket.totalDelta--;
+        if (endBucket.severityDelta[severity] !== undefined) {
+            endBucket.severityDelta[severity]--;
+        }
+        if (deviceKey) {
+            endBucket.deviceDeltas.set(deviceKey, (endBucket.deviceDeltas.get(deviceKey) || 0) - 1);
+        }
+    });
+
+    let sweepTotal = 0;
+    const sweepSeverity = createEmptySeverityCounts();
+    const deviceActive = new Map();
+    const applyChartEvent = (bucket) => {
+        sweepTotal += bucket.totalDelta;
+        sweepSeverity.Critical += bucket.severityDelta.Critical;
+        sweepSeverity.High += bucket.severityDelta.High;
+        sweepSeverity.Medium += bucket.severityDelta.Medium;
+        sweepSeverity.Low += bucket.severityDelta.Low;
+
+        bucket.deviceDeltas.forEach((delta, deviceKey) => {
+            const nextCount = (deviceActive.get(deviceKey) || 0) + delta;
+            if (nextCount <= 0) {
+                deviceActive.delete(deviceKey);
+            } else {
+                deviceActive.set(deviceKey, nextCount);
+            }
+        });
+    };
+
+    const rangeStart = sortedDates[0];
+    const allChartDates = [...chartEvents.keys()].sort();
+    for (const eventDate of allChartDates) {
+        if (eventDate >= rangeStart) break;
+        applyChartEvent(chartEvents.get(eventDate));
+    }
+
+    sortedDates.forEach(date => {
+        const bucket = chartEvents.get(date);
+        if (bucket) {
+            applyChartEvent(bucket);
+        }
+
+        totalCounts.push(sweepTotal);
+        deviceCounts.push(deviceActive.size);
+        severityCounts.Critical.push(sweepSeverity.Critical);
+        severityCounts.High.push(sweepSeverity.High);
+        severityCounts.Medium.push(sweepSeverity.Medium);
+        severityCounts.Low.push(sweepSeverity.Low);
+    });
+
+    return {
+        sortedDates,
+        severityCounts,
+        totalCounts,
+        deviceCounts
     };
 }
 
@@ -2922,68 +3180,12 @@ function renderChart() {
         totalCounts = chartDataCache.totalCounts;
         deviceCounts = chartDataCache.deviceCounts;
     } else {
-        sortedDates = generateDateRange(startDate, endDate);
-        severityCounts = { Critical: [], High: [], Medium: [], Low: [] };
-        totalCounts = [];
-        deviceCounts = [];
-        const candidates = filteredData;
-
-        const events = new Map();
-        candidates.forEach(v => {
-            const sd = v._firstSeenDate;
-            let ed = nextDay(v._effectiveOpenEndDate);
-            if (ed <= sd) { ed = nextDay(sd); }
-            if (!events.has(sd)) events.set(sd, { starts: [], ends: [] });
-            events.get(sd).starts.push(v);
-            if (!events.has(ed)) events.set(ed, { starts: [], ends: [] });
-            events.get(ed).ends.push(v);
-        });
-
-        let sweepTotal = 0;
-        const sweepSeverity = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-        const deviceActive = new Map();
-        const processStart = (v) => {
-            sweepTotal++;
-            const sev = v.VulnerabilitySeverityLevel;
-            if (sweepSeverity[sev] !== undefined) sweepSeverity[sev]++;
-            const deviceKey = v.DeviceId || v.DeviceName;
-            deviceActive.set(deviceKey, (deviceActive.get(deviceKey) || 0) + 1);
-        };
-        const processEnd = (v) => {
-            if (sweepTotal > 0) sweepTotal--;
-            const sev = v.VulnerabilitySeverityLevel;
-            if (sweepSeverity[sev] !== undefined && sweepSeverity[sev] > 0) sweepSeverity[sev]--;
-            const deviceKey = v.DeviceId || v.DeviceName;
-            const dc = deviceActive.get(deviceKey);
-            if (dc <= 1) deviceActive.delete(deviceKey);
-            else deviceActive.set(deviceKey, dc - 1);
-        };
-
-        const rangeStart = sortedDates[0];
-        const allEventDates = [...events.keys()].sort();
-        for (const eventDate of allEventDates) {
-            if (eventDate >= rangeStart) break;
-            const ev = events.get(eventDate);
-            ev.starts.forEach(processStart);
-            ev.ends.forEach(processEnd);
-        }
-
-        sortedDates.forEach(date => {
-            const ev = events.get(date);
-            if (ev) {
-                ev.starts.forEach(processStart);
-                ev.ends.forEach(processEnd);
-            }
-            totalCounts.push(sweepTotal);
-            deviceCounts.push(deviceActive.size);
-            severityCounts.Critical.push(sweepSeverity.Critical);
-            severityCounts.High.push(sweepSeverity.High);
-            severityCounts.Medium.push(sweepSeverity.Medium);
-            severityCounts.Low.push(sweepSeverity.Low);
-        });
-
-        chartDataCache = { sortedDates, severityCounts, totalCounts, deviceCounts };
+        chartDataCache = buildActiveChartSeries(filteredData, startDate, endDate);
         chartDataCacheKey = cacheKey;
+        sortedDates = chartDataCache.sortedDates;
+        severityCounts = chartDataCache.severityCounts;
+        totalCounts = chartDataCache.totalCounts;
+        deviceCounts = chartDataCache.deviceCounts;
     }
 
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
@@ -3242,6 +3444,83 @@ function getRemediationDetailsData() {
     return cache.remediationDetailsData;
 }
 
+function getRemediationChartData() {
+    const { startDate, endDate } = filterState;
+    if (!startDate || !endDate) {
+        return null;
+    }
+
+    const cache = getAggregateCache();
+    const cacheKey = filterState.key + '|' + mostRecentLastSeenDate;
+    if (cache.remediationChartDataKey === cacheKey && cache.remediationChartData) {
+        return cache.remediationChartData;
+    }
+
+    const sortedDates = generateDateRange(startDate, endDate);
+    const severityCounts = createEmptySeveritySeries();
+    const totalRemediationCounts = [];
+    const deviceCounts = [];
+    const remediationIndex = new Map();
+
+    getProvenRemediationRows().forEach(v => {
+        const lastSeenDate = v._remediationDate;
+        if (!remediationIndex.has(lastSeenDate)) remediationIndex.set(lastSeenDate, []);
+        remediationIndex.get(lastSeenDate).push(v);
+    });
+
+    sortedDates.forEach(date => {
+        if (date > mostRecentLastSeenDate) {
+            severityCounts.Critical.push(0);
+            severityCounts.High.push(0);
+            severityCounts.Medium.push(0);
+            severityCounts.Low.push(0);
+            totalRemediationCounts.push(0);
+            deviceCounts.push(0);
+            return;
+        }
+
+        const vulnsOnDate = remediationIndex.get(date);
+        if (!vulnsOnDate) {
+            severityCounts.Critical.push(0);
+            severityCounts.High.push(0);
+            severityCounts.Medium.push(0);
+            severityCounts.Low.push(0);
+            totalRemediationCounts.push(0);
+            deviceCounts.push(0);
+            return;
+        }
+
+        const remediationsOnDate = new Set();
+        const devicesOnDate = new Set();
+        const severityRemediations = createEmptySeverityCounts();
+
+        vulnsOnDate.forEach(v => {
+            remediationsOnDate.add(v._index);
+            devicesOnDate.add(getDeviceIdentityKey(v));
+            if (severityRemediations[v.VulnerabilitySeverityLevel] !== undefined) {
+                severityRemediations[v.VulnerabilitySeverityLevel]++;
+            }
+        });
+
+        severityCounts.Critical.push(severityRemediations.Critical);
+        severityCounts.High.push(severityRemediations.High);
+        severityCounts.Medium.push(severityRemediations.Medium);
+        severityCounts.Low.push(severityRemediations.Low);
+        totalRemediationCounts.push(remediationsOnDate.size);
+        deviceCounts.push(devicesOnDate.size);
+    });
+
+    cache.remediationChartDataKey = cacheKey;
+    cache.remediationChartData = {
+        sortedDates,
+        severityCounts,
+        totalRemediationCounts,
+        deviceCounts
+    };
+
+    return cache.remediationChartData;
+}
+
 function getImpactAnalysisData() {
     const cache = getAggregateCache();
     if (cache.impactData) return cache.impactData;
@@ -3286,6 +3565,53 @@ function getImpactAnalysisData() {
     };
 
     return cache.impactData;
+}
+
+function getImpactAnalysisTableData() {
+    const cache = getAggregateCache();
+    if (cache.impactAnalysisTableData) return cache.impactAnalysisTableData;
+
+    const { top25 } = getImpactAnalysisData();
+    cache.impactAnalysisTableData = top25.map((item, index) => {
+        const cveIds = new Set(item.vulnerabilities.map(v => v.CveId));
+        const devices = new Set(item.vulnerabilities.map(v => getDeviceIdentityKey(v)));
+        return {
+            rank: index + 1,
+            name: item.name,
+            nameHtml: item.nameHtml || escapeHtml(item.name),
+            devices: devices.size,
+            cveIds: cveIds.size,
+            impact: item.impact,
+            details: item
+        };
+    });
+
+    return cache.impactAnalysisTableData;
+}
+
+function getImpactChartData() {
+    const { startDate, endDate } = filterState;
+    if (!startDate || !endDate) {
+        return null;
+    }
+
+    const cache = getAggregateCache();
+    const cacheKey = filterState.key + '|' + mostRecentLastSeenDate;
+    if (cache.impactChartDataKey === cacheKey && cache.impactChartData) {
+        return cache.impactChartData;
+    }
+
+    const { top25VulnIds } = getImpactAnalysisData();
+    const sortedDates = generateDateRange(startDate, endDate);
+    const series = buildImpactChartSeries(filteredData, top25VulnIds, sortedDates);
+
+    cache.impactChartDataKey = cacheKey;
+    cache.impactChartData = {
+        sortedDates,
+        ...series
+    };
+
+    return cache.impactChartData;
 }
 
 function updateTableSortState(tableId, activeColumnIndex, ascending) {
@@ -3443,67 +3769,8 @@ function renderRemediationChart() {
         logDebug('No date range selected for remediation chart');
         return;
     }
-    
-    const sortedDates = generateDateRange(startDate, endDate);
-    
-    // Track remediations (vulnerabilities that ended) per day
-    const severityCounts = {
-        Critical: [],
-        High: [],
-        Medium: [],
-        Low: []
-    };
-    const totalRemediationCounts = [];
-    const deviceCounts = [];
-    
-    // Build remediation index: O(F) pre-computation instead of O(D×F) scanning
-    const remediationIndex = new Map();
-    getProvenRemediationRows().forEach(v => {
-        const lastSeenDate = v._remediationDate;
-        if (!remediationIndex.has(lastSeenDate)) remediationIndex.set(lastSeenDate, []);
-        remediationIndex.get(lastSeenDate).push(v);
-    });
-    
-    sortedDates.forEach(date => {
-        if (date > mostRecentLastSeenDate) {
-            severityCounts.Critical.push(0);
-            severityCounts.High.push(0);
-            severityCounts.Medium.push(0);
-            severityCounts.Low.push(0);
-            totalRemediationCounts.push(0);
-            deviceCounts.push(0);
-            return;
-        }
-        
-        const vulnsOnDate = remediationIndex.get(date);
-        if (!vulnsOnDate) {
-            severityCounts.Critical.push(0);
-            severityCounts.High.push(0);
-            severityCounts.Medium.push(0);
-            severityCounts.Low.push(0);
-            totalRemediationCounts.push(0);
-            deviceCounts.push(0);
-            return;
-        }
-        
-        const remediationsOnDate = new Set();
-        const devicesOnDate = new Set();
-        const severityRemediations = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-        
-        vulnsOnDate.forEach(v => {
-            const severity = v.VulnerabilitySeverityLevel;
-            remediationsOnDate.add(v._index);
-            devicesOnDate.add(getDeviceIdentityKey(v));
-            if (severityRemediations[severity] !== undefined) severityRemediations[severity]++;
-        });
-        
-        severityCounts.Critical.push(severityRemediations.Critical);
-        severityCounts.High.push(severityRemediations.High);
-        severityCounts.Medium.push(severityRemediations.Medium);
-        severityCounts.Low.push(severityRemediations.Low);
-        totalRemediationCounts.push(remediationsOnDate.size);
-        deviceCounts.push(devicesOnDate.size);
-    });
+    const chartData = getRemediationChartData();
+    const { sortedDates, severityCounts, totalRemediationCounts, deviceCounts } = chartData;
     
     // Find the index where we transition from actual data to projected (dashed) data
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
@@ -3783,6 +4050,134 @@ function sortRemediationDetailsTable(columnIndex) {
 // =============================================================================
 
 /**
+ * Build the impact chart time series for current and projected counts.
+ * @param {Array} rows
+ * @param {Set<number>} top25VulnIds
+ * @param {Array<string>} sortedDates
+ * @returns {{currentSeverityCounts: Object, projectedSeverityCounts: Object, currentTotalCounts: Array<number>, projectedTotalCounts: Array<number>}}
+ */
+function buildImpactChartSeries(rows, top25VulnIds, sortedDates) {
+    const currentSeverityCounts = createEmptySeveritySeries();
+    const projectedSeverityCounts = createEmptySeveritySeries();
+    const currentTotalCounts = [];
+    const projectedTotalCounts = [];
+
+    if (!Array.isArray(sortedDates) || sortedDates.length === 0) {
+        return {
+            currentSeverityCounts,
+            projectedSeverityCounts,
+            currentTotalCounts,
+            projectedTotalCounts
+        };
+    }
+
+    const impactEvents = new Map();
+    const getImpactEventBucket = (date) => {
+        let bucket = impactEvents.get(date);
+        if (!bucket) {
+            bucket = {
+                currentStartTotal: 0,
+                currentEndTotal: 0,
+                projectedStartTotal: 0,
+                projectedEndTotal: 0,
+                currentStarts: createEmptySeverityCounts(),
+                currentEnds: createEmptySeverityCounts(),
+                projectedStarts: createEmptySeverityCounts(),
+                projectedEnds: createEmptySeverityCounts()
+            };
+            impactEvents.set(date, bucket);
+        }
+        return bucket;
+    };
+
+    rows.forEach(v => {
+        const severity = v.VulnerabilitySeverityLevel;
+        const isTop25 = top25VulnIds.has(v._index);
+        const startDate = v._firstSeenDate;
+        let endDate = nextDay(v._effectiveOpenEndDate);
+
+        if (endDate <= startDate) {
+            endDate = nextDay(startDate);
+        }
+
+        const startBucket = getImpactEventBucket(startDate);
+        startBucket.currentStartTotal++;
+        if (startBucket.currentStarts[severity] !== undefined) {
+            startBucket.currentStarts[severity]++;
+        }
+
+        const endBucket = getImpactEventBucket(endDate);
+        endBucket.currentEndTotal++;
+        if (endBucket.currentEnds[severity] !== undefined) {
+            endBucket.currentEnds[severity]++;
+        }
+
+        if (!isTop25) {
+            startBucket.projectedStartTotal++;
+            if (startBucket.projectedStarts[severity] !== undefined) {
+                startBucket.projectedStarts[severity]++;
+            }
+
+            endBucket.projectedEndTotal++;
+            if (endBucket.projectedEnds[severity] !== undefined) {
+                endBucket.projectedEnds[severity]++;
+            }
+        }
+    });
+
+    let sweepCurrentTotal = 0;
+    let sweepProjectedTotal = 0;
+    const sweepCurrentSev = createEmptySeverityCounts();
+    const sweepProjectedSev = createEmptySeverityCounts();
+    const applyImpactEvent = (bucket) => {
+        sweepCurrentTotal += bucket.currentStartTotal - bucket.currentEndTotal;
+        sweepProjectedTotal += bucket.projectedStartTotal - bucket.projectedEndTotal;
+
+        sweepCurrentSev.Critical += bucket.currentStarts.Critical - bucket.currentEnds.Critical;
+        sweepCurrentSev.High += bucket.currentStarts.High - bucket.currentEnds.High;
+        sweepCurrentSev.Medium += bucket.currentStarts.Medium - bucket.currentEnds.Medium;
+        sweepCurrentSev.Low += bucket.currentStarts.Low - bucket.currentEnds.Low;
+
+        sweepProjectedSev.Critical += bucket.projectedStarts.Critical - bucket.projectedEnds.Critical;
+        sweepProjectedSev.High += bucket.projectedStarts.High - bucket.projectedEnds.High;
+        sweepProjectedSev.Medium += bucket.projectedStarts.Medium - bucket.projectedEnds.Medium;
+        sweepProjectedSev.Low += bucket.projectedStarts.Low - bucket.projectedEnds.Low;
+    };
+
+    const rangeStart = sortedDates[0];
+    const allImpactDates = [...impactEvents.keys()].sort();
+    for (const eventDate of allImpactDates) {
+        if (eventDate >= rangeStart) break;
+        applyImpactEvent(impactEvents.get(eventDate));
+    }
+
+    sortedDates.forEach(date => {
+        const bucket = impactEvents.get(date);
+        if (bucket) {
+            applyImpactEvent(bucket);
+        }
+
+        currentTotalCounts.push(sweepCurrentTotal);
+        projectedTotalCounts.push(sweepProjectedTotal);
+        currentSeverityCounts.Critical.push(sweepCurrentSev.Critical);
+        currentSeverityCounts.High.push(sweepCurrentSev.High);
+        currentSeverityCounts.Medium.push(sweepCurrentSev.Medium);
+        currentSeverityCounts.Low.push(sweepCurrentSev.Low);
+        projectedSeverityCounts.Critical.push(sweepProjectedSev.Critical);
+        projectedSeverityCounts.High.push(sweepProjectedSev.High);
+        projectedSeverityCounts.Medium.push(sweepProjectedSev.Medium);
+        projectedSeverityCounts.Low.push(sweepProjectedSev.Low);
+    });
+
+    return {
+        currentSeverityCounts,
+        projectedSeverityCounts,
+        currentTotalCounts,
+        projectedTotalCounts
+    };
+}
+
+/**
  * Render the impact analysis chart
  */
 /**
@@ -3800,100 +4195,13 @@ function renderImpactChart() {
         logDebug('No date range selected for impact chart');
         return;
     }
-    
-    const { top25, top25VulnIds } = getImpactAnalysisData();
-    const sortedDates = generateDateRange(startDate, endDate);
-    
-    // Calculate current and projected counts for each date
-    const currentSeverityCounts = {
-        Critical: [],
-        High: [],
-        Medium: [],
-        Low: []
-    };
-    const projectedSeverityCounts = {
-        Critical: [],
-        High: [],
-        Medium: [],
-        Low: []
-    };
-    const currentTotalCounts = [];
-    const projectedTotalCounts = [];
-    
-    // Build start/end events for sweep-line
-    const impactEvents = new Map();
-    
-    filteredData.forEach(v => {
-        const isTop25 = top25VulnIds.has(v._index);
-        const sd = v._firstSeenDate;
-        let ed = nextDay(v._effectiveOpenEndDate);
-        
-        // Data validation: ensure end date is after start date
-        if (ed <= sd) {
-            ed = nextDay(sd);
-        }
-        
-        if (!impactEvents.has(sd)) impactEvents.set(sd, { starts: [], ends: [], isTop25Starts: new Set(), isTop25Ends: new Set() });
-        impactEvents.get(sd).starts.push(v);
-        if (isTop25) impactEvents.get(sd).isTop25Starts.add(v._index);
-        if (!impactEvents.has(ed)) impactEvents.set(ed, { starts: [], ends: [], isTop25Starts: new Set(), isTop25Ends: new Set() });
-        impactEvents.get(ed).ends.push(v);
-        if (isTop25) impactEvents.get(ed).isTop25Ends.add(v._index);
-    });
-    
-    let sweepCurrentTotal = 0;
-    let sweepProjectedTotal = 0;
-    let sweepCurrentSev = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-    let sweepProjectedSev = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-    
-    const processImpactStart = (v, isTop25) => {
-        sweepCurrentTotal++;
-        const sev = v.VulnerabilitySeverityLevel;
-        if (sweepCurrentSev[sev] !== undefined) sweepCurrentSev[sev]++;
-        if (!isTop25) {
-            sweepProjectedTotal++;
-            if (sweepProjectedSev[sev] !== undefined) sweepProjectedSev[sev]++;
-        }
-    };
-    
-    const processImpactEnd = (v, isTop25) => {
-        if (sweepCurrentTotal > 0) sweepCurrentTotal--;
-        const sev = v.VulnerabilitySeverityLevel;
-        if (sweepCurrentSev[sev] !== undefined && sweepCurrentSev[sev] > 0) sweepCurrentSev[sev]--;
-        if (!isTop25) {
-            if (sweepProjectedTotal > 0) sweepProjectedTotal--;
-            if (sweepProjectedSev[sev] !== undefined && sweepProjectedSev[sev] > 0) sweepProjectedSev[sev]--;
-        }
-    };
-    
-    const impactRangeStart = sortedDates[0];
-    const allImpactDates = [...impactEvents.keys()].sort();
-    for (const eventDate of allImpactDates) {
-        if (eventDate >= impactRangeStart) break;
-        const ev = impactEvents.get(eventDate);
-        ev.starts.forEach(v => processImpactStart(v, ev.isTop25Starts.has(v._index)));
-        ev.ends.forEach(v => processImpactEnd(v, ev.isTop25Ends.has(v._index)));
-    }
-    
-    // Sweep through visible dates
-    sortedDates.forEach(date => {
-        const ev = impactEvents.get(date);
-        if (ev) {
-            ev.starts.forEach(v => processImpactStart(v, ev.isTop25Starts.has(v._index)));
-            ev.ends.forEach(v => processImpactEnd(v, ev.isTop25Ends.has(v._index)));
-        }
-        
-        currentTotalCounts.push(sweepCurrentTotal);
-        projectedTotalCounts.push(sweepProjectedTotal);
-        currentSeverityCounts.Critical.push(sweepCurrentSev.Critical);
-        currentSeverityCounts.High.push(sweepCurrentSev.High);
-        currentSeverityCounts.Medium.push(sweepCurrentSev.Medium);
-        currentSeverityCounts.Low.push(sweepCurrentSev.Low);
-        projectedSeverityCounts.Critical.push(sweepProjectedSev.Critical);
-        projectedSeverityCounts.High.push(sweepProjectedSev.High);
-        projectedSeverityCounts.Medium.push(sweepProjectedSev.Medium);
-        projectedSeverityCounts.Low.push(sweepProjectedSev.Low);
-    });
+    const {
+        sortedDates,
+        currentSeverityCounts,
+        projectedSeverityCounts,
+        currentTotalCounts,
+        projectedTotalCounts
+    } = getImpactChartData();
     
     // Find the index where we transition from actual data to projected (dashed) data
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
@@ -4097,27 +4405,13 @@ function renderImpactAnalysisTable() {
     const tbody = document.getElementById('impactAnalysisTableBody');
     tbody.innerHTML = '';
 
-    const { top25 } = getImpactAnalysisData();
-    if (!top25 || top25.length === 0) {
+    impactAnalysisAllData = getImpactAnalysisTableData().slice();
+    if (!impactAnalysisAllData || impactAnalysisAllData.length === 0) {
         const row = tbody.insertRow();
         row.innerHTML = '<td colspan="5">No data available</td>';
         updateImpactAnalysisScrollInfo();
         return;
     }
-
-    impactAnalysisAllData = top25.map((item, index) => {
-        const cveIds = new Set(item.vulnerabilities.map(v => v.CveId));
-        const devices = new Set(item.vulnerabilities.map(v => getDeviceIdentityKey(v)));
-        return {
-            rank: index + 1,
-            name: item.name,
-            nameHtml: item.nameHtml || escapeHtml(item.name),
-            devices: devices.size,
-            cveIds: cveIds.size,
-            impact: item.impact,
-            details: item
-        };
-    });
     
     // Reset loaded count and render initial batch
     impactAnalysisLoadedCount = 0;
@@ -5364,6 +5658,8 @@ function groupDevicesByCveSignature(details) {
         const candidateFirstSeen = getFirstSeenDate(candidate);
         const existingLastSeen = getLastSeenDate(existing);
         const candidateLastSeen = getLastSeenDate(candidate);
+        const existingEnvironmentFirstSeen = getEnvironmentFirstSeenDate(existing);
+        const candidateEnvironmentFirstSeen = getEnvironmentFirstSeenDate(candidate);
         const existingRecency = getMostRecentYmdDate([existingLastSeen, getRowLatestActivityDate(existing)]);
         const candidateRecency = getMostRecentYmdDate([candidateLastSeen, getRowLatestActivityDate(candidate)]);
         const useCandidateMetadata = Boolean(candidateRecency && (!existingRecency || candidateRecency >= existingRecency));
@@ -5373,13 +5669,21 @@ function groupDevicesByCveSignature(details) {
 
         const earliestFirstSeen = getEarliestYmdDate([existingFirstSeen, candidateFirstSeen]);
         const latestLastSeen = getMostRecentYmdDate([existingLastSeen, candidateLastSeen]);
+        const earliestEnvironmentFirstSeen = getEarliestYmdDate([existingEnvironmentFirstSeen, candidateEnvironmentFirstSeen]);
 
         if (earliestFirstSeen) {
             merged._firstSeenDate = earliestFirstSeen;
+            merged.FirstSeenTimestamp = earliestFirstSeen;
         }
 
         if (latestLastSeen) {
             merged._lastSeenDate = latestLastSeen;
+            merged.LastSeenTimestamp = latestLastSeen;
+        }
+
+        if (earliestEnvironmentFirstSeen) {
+            merged._environmentFirstSeenDate = earliestEnvironmentFirstSeen;
+            merged.EnvironmentFirstSeenTimestamp = earliestEnvironmentFirstSeen;
         }
 
         merged.DiskPaths = Array.from(new Set([...(existing.DiskPaths || []), ...(candidate.DiskPaths || [])]));
