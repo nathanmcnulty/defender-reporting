@@ -1282,31 +1282,38 @@ function Write-TemplatedHtml {
         [switch]$InsertBase64LineBreaks
     )
 
-    $builder = [System.Text.StringBuilder]::new($Template.Length + 262144)
-    $position = 0
-    foreach ($segment in $Segments) {
-        $placeholder = $segment.Placeholder
-        $index = $Template.IndexOf($placeholder, $position, [System.StringComparison]::Ordinal)
-        if ($index -lt 0) {
-            throw "Template placeholder not found: $placeholder"
+    $writer = $null
+    try {
+        $writer = [System.IO.StreamWriter]::new($OutputPath, $false, [System.Text.UTF8Encoding]::new($false))
+        $position = 0
+        foreach ($segment in $Segments) {
+            $placeholder = $segment.Placeholder
+            $index = $Template.IndexOf($placeholder, $position, [System.StringComparison]::Ordinal)
+            if ($index -lt 0) {
+                throw "Template placeholder not found: $placeholder"
+            }
+
+            $writer.Write($Template.Substring($position, $index - $position))
+            if ($segment.ContainsKey('Base64FilePath')) {
+                Write-Base64FileContent -Writer $writer -FilePath $segment.Base64FilePath -InsertLineBreaks:$InsertBase64LineBreaks
+            }
+            elseif ($segment.ContainsKey('FilePath')) {
+                $writer.Write([System.IO.File]::ReadAllText([string]$segment.FilePath, [System.Text.Encoding]::UTF8))
+            }
+            else {
+                $writer.Write([string]$segment.Value)
+            }
+
+            $position = $index + $placeholder.Length
         }
 
-        [void]$builder.Append($Template.Substring($position, $index - $position))
-        if ($segment.ContainsKey('Base64FilePath')) {
-            [void]$builder.Append((Get-Base64FileContent -FilePath $segment.Base64FilePath -InsertLineBreaks:$InsertBase64LineBreaks))
-        }
-        elseif ($segment.ContainsKey('FilePath')) {
-            [void]$builder.Append([System.IO.File]::ReadAllText([string]$segment.FilePath, [System.Text.Encoding]::UTF8))
-        }
-        else {
-            [void]$builder.Append([string]$segment.Value)
-        }
-
-        $position = $index + $placeholder.Length
+        $writer.Write($Template.Substring($position))
     }
-
-    [void]$builder.Append($Template.Substring($position))
-    [System.IO.File]::WriteAllText($OutputPath, $builder.ToString(), [System.Text.UTF8Encoding]::new($false))
+    finally {
+        if ($writer) {
+            $writer.Dispose()
+        }
+    }
 }
 
 function Write-Utf8File {
