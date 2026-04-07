@@ -450,6 +450,75 @@ function Test-ConvertToNormalizedDataWritesDirectPayload {
     }
 }
 
+function Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-device-users-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'device-users-001' -CveId 'CVE-2026-0121' -SnapshotDate '2026-03-20' -Version '1.0.0'
+        $currentRow.DeviceId = 'device-users-001'
+        $currentRow.DeviceName = 'device-users-001.contoso.com'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        Write-NdjsonRecordsFile -Path (Get-AdvancedHuntingCurrentPath -BasePath $tempRoot) -Records @(
+            [PSCustomObject]@{
+                CveId = 'CVE-2026-0121'
+                PublishedDate = '2026-03-20'
+                VulnerabilityDescription = 'Device-user tooltip regression.'
+                EpssScore = 0.15
+                AffectedSoftware = @('contoso:legacy_agent')
+            }
+            [PSCustomObject]@{
+                DeviceId = 'device-users-001'
+                LoggedOnUsers = '[{"AccountName":"alice","DomainName":"CONTOSO"},{"UserPrincipalName":"bob@contoso.com"},{"AccountName":"alice","DomainName":"CONTOSO"}]'
+                LastModifiedTime = '2026-03-20T08:30:00Z'
+            }
+        )
+
+        $machines = @{
+            'device-users-001' = [PSCustomObject]@{
+                id = 'device-users-001'
+                computerDnsName = 'device-users-001.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows 11'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = '10.0.0.21'
+                lastExternalIpAddress = '52.0.0.21'
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'Medium'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-20'
+                firstSeen = '2026-02-01'
+            }
+        }
+
+        $advancedHuntingData = Read-AdvancedHuntingData -Path $tempRoot
+        $advancedHuntingDeviceUsers = Read-AdvancedHuntingDeviceUserMap -Path $tempRoot
+        $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers
+
+        $device = @($result.Lookups.devices | Where-Object { $_.id -eq 'device-users-001' })[0]
+        $users = @($device.m.u)
+
+        Assert-True ($advancedHuntingDeviceUsers.Count -eq 1) 'Expected one device-user entry to be loaded from Advanced Hunting.'
+        Assert-True ($users.Count -eq 2) 'Expected normalized machine info to include two unique logged-on users.'
+        Assert-True ('CONTOSO\alice' -in $users) 'Expected normalized device users to include the domain-qualified account name.'
+        Assert-True ('bob@contoso.com' -in $users) 'Expected normalized device users to include the user principal name.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-WriteCombinedPayloadGzipPreservesColumnPayload {
     [CmdletBinding()]
     param()
@@ -863,6 +932,8 @@ Test-ConvertToNormalizedDataWritesExpectedRowCount
 Write-Output '  Normalized vuln row-count checks passed.'
 Test-ConvertToNormalizedDataWritesDirectPayload
 Write-Output '  Direct payload normalization checks passed.'
+Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
+Write-Output '  Advanced Hunting device-user normalization checks passed.'
 Test-WriteCombinedPayloadGzipPreservesColumnPayload
 Write-Output '  Combined payload writer column-path checks passed.'
 Test-DashboardValidationUsesStableFallbackDeviceProfile
