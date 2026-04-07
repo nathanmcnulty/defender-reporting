@@ -2854,6 +2854,124 @@ function createSegmentStyle(cutoffIdx) {
 }
 
 /**
+ * Build the active vulnerabilities chart time series.
+ * @param {Array} rows
+ * @param {string} startDate
+ * @param {string} endDate
+ * @returns {{sortedDates: Array<string>, severityCounts: Object, totalCounts: Array<number>, deviceCounts: Array<number>}}
+ */
+function buildActiveChartSeries(rows, startDate, endDate) {
+    const sortedDates = generateDateRange(startDate, endDate);
+    const severityCounts = createEmptySeveritySeries();
+    const totalCounts = [];
+    const deviceCounts = [];
+
+    if (!Array.isArray(sortedDates) || sortedDates.length === 0) {
+        return {
+            sortedDates,
+            severityCounts,
+            totalCounts,
+            deviceCounts
+        };
+    }
+
+    const chartEvents = new Map();
+    const getChartEventBucket = (date) => {
+        let bucket = chartEvents.get(date);
+        if (!bucket) {
+            bucket = {
+                totalDelta: 0,
+                severityDelta: createEmptySeverityCounts(),
+                deviceDeltas: new Map()
+            };
+            chartEvents.set(date, bucket);
+        }
+        return bucket;
+    };
+
+    rows.forEach(v => {
+        const severity = v.VulnerabilitySeverityLevel;
+        const rowStartDate = v._firstSeenDate;
+        let rowEndDate = nextDay(v._effectiveOpenEndDate);
+
+        if (!rowStartDate || !rowEndDate) {
+            return;
+        }
+
+        if (rowEndDate <= rowStartDate) {
+            rowEndDate = nextDay(rowStartDate);
+        }
+
+        const deviceKey = v.DeviceId || v.DeviceName;
+        const startBucket = getChartEventBucket(rowStartDate);
+        startBucket.totalDelta++;
+        if (startBucket.severityDelta[severity] !== undefined) {
+            startBucket.severityDelta[severity]++;
+        }
+        if (deviceKey) {
+            startBucket.deviceDeltas.set(deviceKey, (startBucket.deviceDeltas.get(deviceKey) || 0) + 1);
+        }
+
+        const endBucket = getChartEventBucket(rowEndDate);
+        endBucket.totalDelta--;
+        if (endBucket.severityDelta[severity] !== undefined) {
+            endBucket.severityDelta[severity]--;
+        }
+        if (deviceKey) {
+            endBucket.deviceDeltas.set(deviceKey, (endBucket.deviceDeltas.get(deviceKey) || 0) - 1);
+        }
+    });
+
+    let sweepTotal = 0;
+    const sweepSeverity = createEmptySeverityCounts();
+    const deviceActive = new Map();
+    const applyChartEvent = (bucket) => {
+        sweepTotal += bucket.totalDelta;
+        sweepSeverity.Critical += bucket.severityDelta.Critical;
+        sweepSeverity.High += bucket.severityDelta.High;
+        sweepSeverity.Medium += bucket.severityDelta.Medium;
+        sweepSeverity.Low += bucket.severityDelta.Low;
+
+        bucket.deviceDeltas.forEach((delta, deviceKey) => {
+            const nextCount = (deviceActive.get(deviceKey) || 0) + delta;
+            if (nextCount <= 0) {
+                deviceActive.delete(deviceKey);
+            } else {
+                deviceActive.set(deviceKey, nextCount);
+            }
+        });
+    };
+
+    const rangeStart = sortedDates[0];
+    const allChartDates = [...chartEvents.keys()].sort();
+    for (const eventDate of allChartDates) {
+        if (eventDate >= rangeStart) break;
+        applyChartEvent(chartEvents.get(eventDate));
+    }
+
+    sortedDates.forEach(date => {
+        const bucket = chartEvents.get(date);
+        if (bucket) {
+            applyChartEvent(bucket);
+        }
+
+        totalCounts.push(sweepTotal);
+        deviceCounts.push(deviceActive.size);
+        severityCounts.Critical.push(sweepSeverity.Critical);
+        severityCounts.High.push(sweepSeverity.High);
+        severityCounts.Medium.push(sweepSeverity.Medium);
+        severityCounts.Low.push(sweepSeverity.Low);
+    });
+
+    return {
+        sortedDates,
+        severityCounts,
+        totalCounts,
+        deviceCounts
+    };
+}
+
+/**
  * Map ExploitabilityLevel to a friendly display name
  * @param {string} level - Raw ExploitabilityLevel value
  * @returns {string} Human-readable exploitability description
@@ -3062,68 +3180,12 @@ function renderChart() {
         totalCounts = chartDataCache.totalCounts;
         deviceCounts = chartDataCache.deviceCounts;
     } else {
-        sortedDates = generateDateRange(startDate, endDate);
-        severityCounts = { Critical: [], High: [], Medium: [], Low: [] };
-        totalCounts = [];
-        deviceCounts = [];
-        const candidates = filteredData;
-
-        const events = new Map();
-        candidates.forEach(v => {
-            const sd = v._firstSeenDate;
-            let ed = nextDay(v._effectiveOpenEndDate);
-            if (ed <= sd) { ed = nextDay(sd); }
-            if (!events.has(sd)) events.set(sd, { starts: [], ends: [] });
-            events.get(sd).starts.push(v);
-            if (!events.has(ed)) events.set(ed, { starts: [], ends: [] });
-            events.get(ed).ends.push(v);
-        });
-
-        let sweepTotal = 0;
-        const sweepSeverity = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-        const deviceActive = new Map();
-        const processStart = (v) => {
-            sweepTotal++;
-            const sev = v.VulnerabilitySeverityLevel;
-            if (sweepSeverity[sev] !== undefined) sweepSeverity[sev]++;
-            const deviceKey = v.DeviceId || v.DeviceName;
-            deviceActive.set(deviceKey, (deviceActive.get(deviceKey) || 0) + 1);
-        };
-        const processEnd = (v) => {
-            if (sweepTotal > 0) sweepTotal--;
-            const sev = v.VulnerabilitySeverityLevel;
-            if (sweepSeverity[sev] !== undefined && sweepSeverity[sev] > 0) sweepSeverity[sev]--;
-            const deviceKey = v.DeviceId || v.DeviceName;
-            const dc = deviceActive.get(deviceKey);
-            if (dc <= 1) deviceActive.delete(deviceKey);
-            else deviceActive.set(deviceKey, dc - 1);
-        };
-
-        const rangeStart = sortedDates[0];
-        const allEventDates = [...events.keys()].sort();
-        for (const eventDate of allEventDates) {
-            if (eventDate >= rangeStart) break;
-            const ev = events.get(eventDate);
-            ev.starts.forEach(processStart);
-            ev.ends.forEach(processEnd);
-        }
-
-        sortedDates.forEach(date => {
-            const ev = events.get(date);
-            if (ev) {
-                ev.starts.forEach(processStart);
-                ev.ends.forEach(processEnd);
-            }
-            totalCounts.push(sweepTotal);
-            deviceCounts.push(deviceActive.size);
-            severityCounts.Critical.push(sweepSeverity.Critical);
-            severityCounts.High.push(sweepSeverity.High);
-            severityCounts.Medium.push(sweepSeverity.Medium);
-            severityCounts.Low.push(sweepSeverity.Low);
-        });
-
-        chartDataCache = { sortedDates, severityCounts, totalCounts, deviceCounts };
+        chartDataCache = buildActiveChartSeries(filteredData, startDate, endDate);
         chartDataCacheKey = cacheKey;
+        sortedDates = chartDataCache.sortedDates;
+        severityCounts = chartDataCache.severityCounts;
+        totalCounts = chartDataCache.totalCounts;
+        deviceCounts = chartDataCache.deviceCounts;
     }
 
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
