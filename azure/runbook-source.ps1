@@ -1032,7 +1032,7 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         $machines = Read-MachineData -Path $tempExports
         $advancedHuntingData = Read-AdvancedHuntingData -Path $tempExports
-        $advancedHuntingDeviceUsers = Read-AdvancedHuntingDeviceUsers -Path $tempExports
+        $advancedHuntingDeviceUsers = Read-AdvancedHuntingDeviceUserMap -Path $tempExports
         Write-MemoryUsage -Label "Post-NormalizationInputs"
 
         # Step 2: Normalize data while the working set is still lean

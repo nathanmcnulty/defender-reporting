@@ -450,7 +450,7 @@ function Test-ConvertToNormalizedDataWritesDirectPayload {
     }
 }
 
-function Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUsers {
+function Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap {
     [CmdletBinding()]
     param()
 
@@ -501,7 +501,7 @@ function Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUsers {
         }
 
         $advancedHuntingData = Read-AdvancedHuntingData -Path $tempRoot
-        $advancedHuntingDeviceUsers = Read-AdvancedHuntingDeviceUsers -Path $tempRoot
+        $advancedHuntingDeviceUsers = Read-AdvancedHuntingDeviceUserMap -Path $tempRoot
         $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers
 
         $device = @($result.Lookups.devices | Where-Object { $_.id -eq 'device-users-001' })[0]
@@ -932,7 +932,7 @@ Test-ConvertToNormalizedDataWritesExpectedRowCount
 Write-Output '  Normalized vuln row-count checks passed.'
 Test-ConvertToNormalizedDataWritesDirectPayload
 Write-Output '  Direct payload normalization checks passed.'
-Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUsers
+Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
 Write-Output '  Advanced Hunting device-user normalization checks passed.'
 Test-WriteCombinedPayloadGzipPreservesColumnPayload
 Write-Output '  Combined payload writer column-path checks passed.'
