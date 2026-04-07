@@ -1032,6 +1032,7 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         $machines = Read-MachineData -Path $tempExports
         $advancedHuntingData = Read-AdvancedHuntingData -Path $tempExports
+        $advancedHuntingDeviceUsers = Read-AdvancedHuntingDeviceUsers -Path $tempExports
         Write-MemoryUsage -Label "Post-NormalizationInputs"
 
         # Step 2: Normalize data while the working set is still lean
@@ -1039,9 +1040,10 @@ try {
         if ($skipObservedWindowMerge) {
             Write-Output "Synthetic manifest detected. Skipping observed-window merge for stress normalization."
         }
-        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -SkipObservedWindowMerge:$skipObservedWindowMerge
+        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge
         $machines = $null
         $advancedHuntingData = $null
+        $advancedHuntingDeviceUsers = $null
         Invoke-FullGarbageCollection
 
         # Step 3: Prepare payload for embedding
