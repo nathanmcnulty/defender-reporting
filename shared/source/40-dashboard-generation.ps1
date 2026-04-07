@@ -1683,8 +1683,8 @@ function Read-AdvancedHuntingData {
             Write-Information "  Processing $($file.Name)..." -InformationAction Continue
             foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
                 try {
-                    $cveId = $record.CveId
-                    if ($cveId -and -not $ahData.ContainsKey($cveId)) {
+                    $cveId = [string]$record.PSObject.Properties['CveId']?.Value
+                    if (-not [string]::IsNullOrWhiteSpace($cveId) -and -not $ahData.ContainsKey($cveId)) {
                         $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
                         $rawDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
                         $rawAffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
@@ -1712,6 +1712,196 @@ function Read-AdvancedHuntingData {
 
         Write-Information "  Loaded enrichment data for $($ahData.Count) unique CVEs" -InformationAction Continue
         return $ahData
+    }
+}
+
+function Read-AdvancedHuntingDeviceUsers {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    function Add-AdvancedHuntingLoggedOnUserValue {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $Value,
+
+            [Parameter(Mandatory = $true)]
+            [AllowEmptyCollection()]
+            [System.Collections.Generic.List[string]]$Values,
+
+            [Parameter(Mandatory = $true)]
+            [AllowEmptyCollection()]
+            [System.Collections.Generic.HashSet[string]]$Seen
+        )
+
+        if ($null -eq $Value) {
+            return
+        }
+
+        if ($Value -is [string]) {
+            $text = $Value.Trim()
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                return
+            }
+
+            if ((($text.StartsWith('[') -and $text.EndsWith(']')) -or ($text.StartsWith('{') -and $text.EndsWith('}')))) {
+                try {
+                    $parsedValue = $text | ConvertFrom-Json -Depth 20
+                    Add-AdvancedHuntingLoggedOnUserValue -Value $parsedValue -Values $Values -Seen $Seen
+                    return
+                }
+                catch {
+                }
+            }
+
+            if ($Seen.Add($text)) {
+                $Values.Add($text)
+            }
+            return
+        }
+
+        if ($Value -is [pscustomobject] -or $Value -is [System.Collections.IDictionary]) {
+            $propertyBag = $Value.PSObject.Properties
+            $upn = [string]$propertyBag['UserPrincipalName']?.Value
+            $domainName = [string]$propertyBag['DomainName']?.Value
+            $accountName = [string]$propertyBag['AccountName']?.Value
+            $userName = [string]$propertyBag['UserName']?.Value
+            $displayName = [string]$propertyBag['Name']?.Value
+
+            $resolvedName = $null
+            if (-not [string]::IsNullOrWhiteSpace($upn)) {
+                $resolvedName = $upn.Trim()
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($accountName)) {
+                $resolvedName = if (-not [string]::IsNullOrWhiteSpace($domainName)) {
+                    $domainName.Trim() + '\' + $accountName.Trim()
+                }
+                else {
+                    $accountName.Trim()
+                }
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($userName)) {
+                $resolvedName = if (-not [string]::IsNullOrWhiteSpace($domainName)) {
+                    $domainName.Trim() + '\' + $userName.Trim()
+                }
+                else {
+                    $userName.Trim()
+                }
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($displayName)) {
+                $resolvedName = $displayName.Trim()
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($resolvedName)) {
+                if ($Seen.Add($resolvedName)) {
+                    $Values.Add($resolvedName)
+                }
+                return
+            }
+
+            foreach ($property in $propertyBag) {
+                Add-AdvancedHuntingLoggedOnUserValue -Value $property.Value -Values $Values -Seen $Seen
+            }
+            return
+        }
+
+        if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+            foreach ($item in $Value) {
+                Add-AdvancedHuntingLoggedOnUserValue -Value $item -Values $Values -Seen $Seen
+            }
+            return
+        }
+
+        $fallbackText = [string]$Value
+        if (-not [string]::IsNullOrWhiteSpace($fallbackText) -and $Seen.Add($fallbackText)) {
+            $Values.Add($fallbackText)
+        }
+    }
+
+    function ConvertTo-AdvancedHuntingLoggedOnUsers {
+        [CmdletBinding()]
+        [OutputType([string[]])]
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $Value
+        )
+
+        $values = [System.Collections.Generic.List[string]]::new()
+        $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        Add-AdvancedHuntingLoggedOnUserValue -Value $Value -Values $values -Seen $seen
+        return [string[]]$values.ToArray()
+    }
+
+    return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
+
+        Write-Information "Reading Advanced Hunting device-user data from $Path..." -InformationAction Continue
+
+        $deviceUsers = @{}
+        $parseErrors = 0
+        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
+        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
+
+        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
+            $currentPath = $legacyCurrentPath
+        }
+
+        if (Test-Path -Path $currentPath) {
+            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
+            $sourceFiles = @(Get-Item -Path $currentPath)
+        }
+        else {
+            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
+                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
+                Sort-Object Name -Descending)
+
+            if ($sourceFiles.Count -eq 0) {
+                Write-Information '  No Advanced Hunting device-user data files found.' -InformationAction Continue
+                return @{}
+            }
+
+            Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
+        }
+
+        foreach ($file in $sourceFiles) {
+            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
+            foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
+                try {
+                    if ((Get-AdvancedHuntingRecordType -Record $record) -ne 'DeviceUsers') {
+                        continue
+                    }
+
+                    $deviceId = [string]$record.PSObject.Properties['DeviceId']?.Value
+                    if ([string]::IsNullOrWhiteSpace($deviceId) -or $deviceUsers.ContainsKey($deviceId)) {
+                        continue
+                    }
+
+                    $loggedOnUsers = @(ConvertTo-AdvancedHuntingLoggedOnUsers -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
+                    if ($loggedOnUsers.Count -gt 0) {
+                        $deviceUsers[$deviceId] = @($loggedOnUsers)
+                    }
+                }
+                catch {
+                    $parseErrors++
+                    if ($parseErrors -le 5) {
+                        Write-Warning "Failed to process Advanced Hunting device-user record in $($file.Name): $_"
+                    }
+                }
+            }
+        }
+
+        if ($parseErrors -gt 0) {
+            Write-Warning "Total parse errors: $parseErrors"
+        }
+
+        Write-Information "  Loaded logged-on user data for $($deviceUsers.Count) device(s)" -InformationAction Continue
+        return $deviceUsers
     }
 }
 
@@ -2584,6 +2774,7 @@ function Get-NormalizationContext {
         DateValueCache = @{}
         Machines = @{}
         AdvancedHuntingData = @{}
+        AdvancedHuntingDeviceUsers = @{}
         HasNoTags = $false
     }
 }
@@ -2801,6 +2992,17 @@ function Add-NormalizedDevice {
 
     if (-not $deviceIndex.ContainsKey($deviceKey)) {
         $machine = if (-not [string]::IsNullOrWhiteSpace($DeviceId)) { $Context.Machines[$DeviceId] } else { $null }
+        $machineUsers = [string[]]@()
+        if ($null -ne $Context.AdvancedHuntingDeviceUsers -and -not [string]::IsNullOrWhiteSpace($DeviceId)) {
+            $rawMachineUsers = $Context.AdvancedHuntingDeviceUsers[[string]$DeviceId]
+            if ($null -ne $rawMachineUsers) {
+                $machineUsers = [string[]]@($rawMachineUsers | ForEach-Object {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$_)) {
+                        [string]$_
+                    }
+                })
+            }
+        }
 
         $resolvedGroupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $GroupName }
         if ([string]::IsNullOrWhiteSpace([string]$resolvedGroupName)) {
@@ -2824,18 +3026,19 @@ function Add-NormalizedDevice {
         $deviceIndex[$deviceKey] = $lookups.devices.Count
 
         $machineInfo = $null
-        if ($machine) {
-            $machineLastSeen = $machine.PSObject.Properties['lastSeen']?.Value
-            $machineFirstSeen = $machine.PSObject.Properties['firstSeen']?.Value
+        if ($machine -or $machineUsers.Count -gt 0) {
+            $machineLastSeen = if ($machine) { $machine.PSObject.Properties['lastSeen']?.Value } else { $null }
+            $machineFirstSeen = if ($machine) { $machine.PSObject.Properties['firstSeen']?.Value } else { $null }
             $machineInfo = [PSCustomObject]@{
-                ip = $machine.PSObject.Properties['lastIpAddress']?.Value
-                eip = $machine.PSObject.Properties['lastExternalIpAddress']?.Value
-                hs = $machine.PSObject.Properties['healthStatus']?.Value
-                rs = $machine.PSObject.Properties['riskScore']?.Value
-                el = $machine.PSObject.Properties['exposureLevel']?.Value
-                dv = $machine.PSObject.Properties['deviceValue']?.Value
-                mb = $machine.PSObject.Properties['managedBy']?.Value
-                aad = $machine.PSObject.Properties['isAadJoined']?.Value
+                ip = if ($machine) { $machine.PSObject.Properties['lastIpAddress']?.Value } else { $null }
+                eip = if ($machine) { $machine.PSObject.Properties['lastExternalIpAddress']?.Value } else { $null }
+                u = if ($machineUsers.Count -gt 0) { @($machineUsers) } else { $null }
+                hs = if ($machine) { $machine.PSObject.Properties['healthStatus']?.Value } else { $null }
+                rs = if ($machine) { $machine.PSObject.Properties['riskScore']?.Value } else { $null }
+                el = if ($machine) { $machine.PSObject.Properties['exposureLevel']?.Value } else { $null }
+                dv = if ($machine) { $machine.PSObject.Properties['deviceValue']?.Value } else { $null }
+                mb = if ($machine) { $machine.PSObject.Properties['managedBy']?.Value } else { $null }
+                aad = if ($machine) { $machine.PSObject.Properties['isAadJoined']?.Value } else { $null }
                 ls = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineLastSeen
                 fs = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineFirstSeen
             }
@@ -3568,6 +3771,9 @@ function Invoke-ContentStoreNormalization {
         [hashtable]$AdvancedHuntingData = @{},
 
         [Parameter(Mandatory = $false)]
+        [hashtable]$AdvancedHuntingDeviceUsers = @{},
+
+        [Parameter(Mandatory = $false)]
         [string[]]$MergedRefPaths,
 
         [Parameter(Mandatory = $false)]
@@ -3580,6 +3786,7 @@ function Invoke-ContentStoreNormalization {
 
     $Context.Machines = $Machines
     $Context.AdvancedHuntingData = $AdvancedHuntingData
+    $Context.AdvancedHuntingDeviceUsers = $AdvancedHuntingDeviceUsers
     $Context.HasNoTags = $false
 
     $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $DataPath
@@ -4021,11 +4228,15 @@ function Invoke-RawStoreNormalization {
         [hashtable]$AdvancedHuntingData = @{},
 
         [Parameter(Mandatory = $false)]
+        [hashtable]$AdvancedHuntingDeviceUsers = @{},
+
+        [Parameter(Mandatory = $false)]
         [string]$PayloadOutputPath
     )
 
     $Context.Machines = $Machines
     $Context.AdvancedHuntingData = $AdvancedHuntingData
+    $Context.AdvancedHuntingDeviceUsers = $AdvancedHuntingDeviceUsers
     $Context.HasNoTags = $false
 
     $processedCountRef = [ref]0
@@ -4822,6 +5033,9 @@ function ConvertTo-NormalizedData {
         [hashtable]$AdvancedHuntingData = @{},
 
         [Parameter(Mandatory = $false)]
+        [hashtable]$AdvancedHuntingDeviceUsers = @{},
+
+        [Parameter(Mandatory = $false)]
         [switch]$SkipObservedWindowMerge,
 
         [Parameter(Mandatory = $false)]
@@ -4829,10 +5043,11 @@ function ConvertTo-NormalizedData {
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
-    Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s)" -f $Machines.Count, $AdvancedHuntingData.Count) -InformationAction Continue
+    Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s)" -f $Machines.Count, $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count) -InformationAction Continue
     $context = Get-NormalizationContext
     $context.Machines = $Machines
     $context.AdvancedHuntingData = $AdvancedHuntingData
+    $context.AdvancedHuntingDeviceUsers = $AdvancedHuntingDeviceUsers
     $lookups = $context.Lookups
     $tagIndex = $context.Indexes.tags
 
@@ -4870,7 +5085,7 @@ function ConvertTo-NormalizedData {
         else {
             Write-Information '  Content-store detected; using fast path (no merge).' -InformationAction Continue
         }
-        $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -MergedRefPaths $mergedRefPaths -PayloadOutputPath $PayloadOutputPath
+        $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -MergedRefPaths $mergedRefPaths -PayloadOutputPath $PayloadOutputPath
         $processedCount = [int]$rawNormalizationResult.ProcessedCount
         $firstLastSwappedCount = [int]$rawNormalizationResult.FirstLastSwappedCount
         $hasNoTags = ($rawNormalizationResult.HasNoTags -eq $true)
@@ -4883,7 +5098,7 @@ function ConvertTo-NormalizedData {
     }
     elseif ($effectiveSkipObservedWindowMerge -and $storeExists) {
         Write-Information '  Raw store detected; using raw store normalization fast path.' -InformationAction Continue
-        $rawNormalizationResult = Invoke-RawStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -PayloadOutputPath $PayloadOutputPath
+        $rawNormalizationResult = Invoke-RawStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -PayloadOutputPath $PayloadOutputPath
         $processedCount = [int]$rawNormalizationResult.ProcessedCount
         $firstLastSwappedCount = [int]$rawNormalizationResult.FirstLastSwappedCount
         $hasNoTags = ($rawNormalizationResult.HasNoTags -eq $true)

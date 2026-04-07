@@ -5593,6 +5593,7 @@ function buildDeviceBubbleHtml(v) {
         const mi = v.MachineInfo;
         if (mi.ip)  tooltipContent += `<br><span class="tooltip-label">IP:</span> ${escapeHtml(mi.ip)}`;
         if (mi.eip) tooltipContent += `<br><span class="tooltip-label">External IP:</span> ${escapeHtml(mi.eip)}`;
+        if (Array.isArray(mi.u) && mi.u.length > 0) tooltipContent += `<br><span class="tooltip-label">Users:</span> ${escapeHtml(mi.u.join(', '))}`;
         if (mi.hs)  tooltipContent += `<br><span class="tooltip-label">Health:</span> ${escapeHtml(mi.hs)}`;
         if (mi.rs)  tooltipContent += `<br><span class="tooltip-label">Risk:</span> ${escapeHtml(mi.rs)}`;
         if (mi.el)  tooltipContent += `<br><span class="tooltip-label">Exposure:</span> ${escapeHtml(mi.el)}`;

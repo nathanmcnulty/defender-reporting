@@ -73,17 +73,60 @@ function Invoke-MdeAdvancedHuntingStoreRefresh {
         [string]$QueryUrl
     )
 
-    $query = @"
-DeviceTvmSoftwareVulnerabilities
-| join kind=leftouter DeviceTvmSoftwareVulnerabilitiesKB on CveId
-| summarize arg_max(LastModifiedTime, PublishedDate, VulnerabilityDescription, IsExploitAvailable, EpssScore, AffectedSoftware) by CveId
-| project CveId, PublishedDate = format_datetime(PublishedDate, 'yyyy-MM-dd'), VulnerabilityDescription, IsExploitAvailable, EpssScore, AffectedSoftware, LastModifiedTime
+    function Invoke-MdeAdvancedHuntingQuery {
+        [CmdletBinding()]
+        [OutputType([object[]])]
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$Query,
+
+            [Parameter(Mandatory = $true)]
+            [string]$Label
+        )
+
+        Write-Information ("  Running Advanced Hunting query: {0}" -f $Label) -InformationAction Continue
+        $body = @{ Query = $Query } | ConvertTo-Json
+        $response = Invoke-RestMethodWithRetry -Uri $QueryUrl -Headers $Headers -Method Post -Body $body
+        if ($null -eq $response -or $null -eq $response.Results) {
+            return @()
+        }
+
+        return @($response.Results)
+    }
+
+    $cveQuery = @"
+let RelevantCves =
+    DeviceTvmSoftwareVulnerabilities
+    | where isnotempty(CveId)
+    | distinct CveId;
+RelevantCves
+| join kind=leftouter (
+    DeviceTvmSoftwareVulnerabilitiesKB
+    | where isnotempty(CveId)
+    | project CveId, PublishedDate, VulnerabilityDescription, EpssScore, AffectedSoftware, LastModifiedTime
+) on CveId
+| summarize arg_max(LastModifiedTime, PublishedDate, VulnerabilityDescription, EpssScore, AffectedSoftware) by CveId
+| project CveId,
+    PublishedDate = format_datetime(PublishedDate, 'yyyy-MM-dd'),
+    VulnerabilityDescription,
+    EpssScore,
+    AffectedSoftware,
+    LastModifiedTime
 "@
 
-    $body = @{ Query = $query } | ConvertTo-Json
-    $response = Invoke-RestMethodWithRetry -Uri $QueryUrl -Headers $Headers -Method Post -Body $body
+    $deviceUsersQuery = @"
+DeviceInfo
+| where OnboardingStatus == 'Onboarded'
+| where isnotempty(DeviceId) and isnotempty(LoggedOnUsers)
+| project DeviceId, Timestamp, LoggedOnUsers
+| summarize arg_max(Timestamp, LoggedOnUsers) by DeviceId
+| project DeviceId, LoggedOnUsers, LastModifiedTime = Timestamp
+"@
 
-    if (-not $response.Results) {
+    $cveResults = @(Invoke-MdeAdvancedHuntingQuery -Query $cveQuery -Label 'cve-enrichment')
+    $deviceUserResults = @(Invoke-MdeAdvancedHuntingQuery -Query $deviceUsersQuery -Label 'device-users')
+
+    if ($cveResults.Count -eq 0 -and $deviceUserResults.Count -eq 0) {
         return [PSCustomObject]@{
             Success = $false
             RecordCount = 0
@@ -96,10 +139,25 @@ DeviceTvmSoftwareVulnerabilities
         Restore-StoreTransaction -BasePath $OutputPath -StoreName 'advancedhunting'
 
         $store = Initialize-AdvancedHuntingStore -Path $OutputPath -RemoveLegacyFiles
-        foreach ($result in $response.Results) {
-            $cveId = $result.PSObject.Properties['CveId']?.Value
-            if ($cveId) {
-                $store.CurrentRecords[$cveId] = $result
+
+        foreach ($existingKey in @($store.CurrentRecords.Keys)) {
+            $existingRecord = $store.CurrentRecords[$existingKey]
+            if ((Get-AdvancedHuntingRecordType -Record $existingRecord) -eq 'DeviceUsers') {
+                [void]$store.CurrentRecords.Remove($existingKey)
+            }
+        }
+
+        foreach ($result in $cveResults) {
+            $storeKey = Get-AdvancedHuntingStoreKey -Record $result
+            if ($storeKey) {
+                $store.CurrentRecords[$storeKey] = $result
+            }
+        }
+
+        foreach ($result in $deviceUserResults) {
+            $storeKey = Get-AdvancedHuntingStoreKey -Record $result
+            if ($storeKey) {
+                $store.CurrentRecords[$storeKey] = $result
             }
         }
 
@@ -118,7 +176,7 @@ DeviceTvmSoftwareVulnerabilities
 
             return [PSCustomObject]@{
                 Success = $true
-                RecordCount = @($response.Results).Count
+                RecordCount = ($cveResults.Count + $deviceUserResults.Count)
                 OutputFile = $store.CurrentPath
                 MigratedLegacy = $store.MigratedLegacy
             }

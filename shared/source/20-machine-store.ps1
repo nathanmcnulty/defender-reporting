@@ -803,6 +803,54 @@ function Get-AdvancedHuntingLastModifiedKey {
     return $FallbackDate
 }
 
+function Get-AdvancedHuntingRecordType {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Record
+    )
+
+    $cveId = [string]$Record.PSObject.Properties['CveId']?.Value
+    if (-not [string]::IsNullOrWhiteSpace($cveId)) {
+        return 'Cve'
+    }
+
+    $deviceId = [string]$Record.PSObject.Properties['DeviceId']?.Value
+    if (-not [string]::IsNullOrWhiteSpace($deviceId) -and $null -ne $Record.PSObject.Properties['LoggedOnUsers']) {
+        return 'DeviceUsers'
+    }
+
+    return $null
+}
+
+function Get-AdvancedHuntingStoreKey {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [psobject]$Record
+    )
+
+    $recordType = Get-AdvancedHuntingRecordType -Record $Record
+    switch ($recordType) {
+        'Cve' {
+            $cveId = [string]$Record.PSObject.Properties['CveId']?.Value
+            if (-not [string]::IsNullOrWhiteSpace($cveId)) {
+                return ('Cve|' + $cveId)
+            }
+        }
+        'DeviceUsers' {
+            $deviceId = [string]$Record.PSObject.Properties['DeviceId']?.Value
+            if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
+                return ('DeviceUsers|' + $deviceId)
+            }
+        }
+    }
+
+    return $null
+}
+
 function Read-AdvancedHuntingRecordsFromFile {
     [CmdletBinding()]
     param(
@@ -877,17 +925,17 @@ function Initialize-AdvancedHuntingStore {
 
     if (Test-Path -Path $currentPath) {
         foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $currentPath) {
-            $cveId = $record.PSObject.Properties['CveId']?.Value
-            if ($cveId) {
-                $currentRecords[$cveId] = $record
+            $storeKey = Get-AdvancedHuntingStoreKey -Record $record
+            if ($storeKey) {
+                $currentRecords[$storeKey] = $record
             }
         }
     }
     elseif (Test-Path -Path $legacyCurrentPath) {
         foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $legacyCurrentPath) {
-            $cveId = $record.PSObject.Properties['CveId']?.Value
-            if ($cveId) {
-                $currentRecords[$cveId] = $record
+            $storeKey = Get-AdvancedHuntingStoreKey -Record $record
+            if ($storeKey) {
+                $currentRecords[$storeKey] = $record
             }
         }
         $migratedLegacy = $true
@@ -897,21 +945,21 @@ function Initialize-AdvancedHuntingStore {
         foreach ($file in $legacyFiles) {
             $fallbackDate = [regex]::Match($file.Name, '\d{4}-\d{2}-\d{2}').Value
             foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
-                $cveId = $record.PSObject.Properties['CveId']?.Value
-                if (-not $cveId) { continue }
+                $storeKey = Get-AdvancedHuntingStoreKey -Record $record
+                if (-not $storeKey) { continue }
 
                 $incomingKey = Get-AdvancedHuntingLastModifiedKey -LastModifiedTime $record.PSObject.Properties['LastModifiedTime']?.Value -FallbackDate $fallbackDate
-                $existing = $currentRecords[$cveId]
+                $existing = $currentRecords[$storeKey]
 
                 if ($null -eq $existing) {
-                    $currentRecords[$cveId] = $record
+                    $currentRecords[$storeKey] = $record
                     $migratedLegacy = $true
                     continue
                 }
 
                 $existingKey = Get-AdvancedHuntingLastModifiedKey -LastModifiedTime $existing.PSObject.Properties['LastModifiedTime']?.Value -FallbackDate ''
                 if ([string]::CompareOrdinal($incomingKey, $existingKey) -gt 0) {
-                    $currentRecords[$cveId] = $record
+                    $currentRecords[$storeKey] = $record
                     $migratedLegacy = $true
                 }
             }
