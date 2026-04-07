@@ -1715,7 +1715,7 @@ function Read-AdvancedHuntingData {
     }
 }
 
-function Read-AdvancedHuntingDeviceUsers {
+function Read-AdvancedHuntingDeviceUserMap {
     [CmdletBinding()]
     [OutputType([hashtable])]
     param(
@@ -1756,6 +1756,7 @@ function Read-AdvancedHuntingDeviceUsers {
                     return
                 }
                 catch {
+                    Write-Verbose ("Falling back to raw LoggedOnUsers text after JSON parse failed: {0}" -f $_.Exception.Message)
                 }
             }
 
@@ -1823,7 +1824,7 @@ function Read-AdvancedHuntingDeviceUsers {
         }
     }
 
-    function ConvertTo-AdvancedHuntingLoggedOnUsers {
+    function ConvertTo-AdvancedHuntingLoggedOnUserList {
         [CmdletBinding()]
         [OutputType([string[]])]
         param(
@@ -1882,7 +1883,7 @@ function Read-AdvancedHuntingDeviceUsers {
                         continue
                     }
 
-                    $loggedOnUsers = @(ConvertTo-AdvancedHuntingLoggedOnUsers -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
+                    $loggedOnUsers = @(ConvertTo-AdvancedHuntingLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
                     if ($loggedOnUsers.Count -gt 0) {
                         $deviceUsers[$deviceId] = @($loggedOnUsers)
                     }

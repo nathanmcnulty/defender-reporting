@@ -78,6 +78,12 @@ function Invoke-MdeAdvancedHuntingStoreRefresh {
         [OutputType([object[]])]
         param(
             [Parameter(Mandatory = $true)]
+            [hashtable]$RequestHeaders,
+
+            [Parameter(Mandatory = $true)]
+            [string]$RequestUrl,
+
+            [Parameter(Mandatory = $true)]
             [string]$Query,
 
             [Parameter(Mandatory = $true)]
@@ -86,7 +92,7 @@ function Invoke-MdeAdvancedHuntingStoreRefresh {
 
         Write-Information ("  Running Advanced Hunting query: {0}" -f $Label) -InformationAction Continue
         $body = @{ Query = $Query } | ConvertTo-Json
-        $response = Invoke-RestMethodWithRetry -Uri $QueryUrl -Headers $Headers -Method Post -Body $body
+        $response = Invoke-RestMethodWithRetry -Uri $RequestUrl -Headers $RequestHeaders -Method Post -Body $body
         if ($null -eq $response -or $null -eq $response.Results) {
             return @()
         }
@@ -123,8 +129,8 @@ DeviceInfo
 | project DeviceId, LoggedOnUsers, LastModifiedTime = Timestamp
 "@
 
-    $cveResults = @(Invoke-MdeAdvancedHuntingQuery -Query $cveQuery -Label 'cve-enrichment')
-    $deviceUserResults = @(Invoke-MdeAdvancedHuntingQuery -Query $deviceUsersQuery -Label 'device-users')
+    $cveResults = @(Invoke-MdeAdvancedHuntingQuery -RequestHeaders $Headers -RequestUrl $QueryUrl -Query $cveQuery -Label 'cve-enrichment')
+    $deviceUserResults = @(Invoke-MdeAdvancedHuntingQuery -RequestHeaders $Headers -RequestUrl $QueryUrl -Query $deviceUsersQuery -Label 'device-users')
 
     if ($cveResults.Count -eq 0 -and $deviceUserResults.Count -eq 0) {
         return [PSCustomObject]@{
