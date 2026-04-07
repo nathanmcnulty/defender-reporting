@@ -5596,6 +5596,8 @@ function groupDevicesByCveSignature(details) {
         const candidateFirstSeen = getFirstSeenDate(candidate);
         const existingLastSeen = getLastSeenDate(existing);
         const candidateLastSeen = getLastSeenDate(candidate);
+        const existingEnvironmentFirstSeen = getEnvironmentFirstSeenDate(existing);
+        const candidateEnvironmentFirstSeen = getEnvironmentFirstSeenDate(candidate);
         const existingRecency = getMostRecentYmdDate([existingLastSeen, getRowLatestActivityDate(existing)]);
         const candidateRecency = getMostRecentYmdDate([candidateLastSeen, getRowLatestActivityDate(candidate)]);
         const useCandidateMetadata = Boolean(candidateRecency && (!existingRecency || candidateRecency >= existingRecency));
@@ -5605,13 +5607,21 @@ function groupDevicesByCveSignature(details) {
 
         const earliestFirstSeen = getEarliestYmdDate([existingFirstSeen, candidateFirstSeen]);
         const latestLastSeen = getMostRecentYmdDate([existingLastSeen, candidateLastSeen]);
+        const earliestEnvironmentFirstSeen = getEarliestYmdDate([existingEnvironmentFirstSeen, candidateEnvironmentFirstSeen]);
 
         if (earliestFirstSeen) {
             merged._firstSeenDate = earliestFirstSeen;
+            merged.FirstSeenTimestamp = earliestFirstSeen;
         }
 
         if (latestLastSeen) {
             merged._lastSeenDate = latestLastSeen;
+            merged.LastSeenTimestamp = latestLastSeen;
+        }
+
+        if (earliestEnvironmentFirstSeen) {
+            merged._environmentFirstSeenDate = earliestEnvironmentFirstSeen;
+            merged.EnvironmentFirstSeenTimestamp = earliestEnvironmentFirstSeen;
         }
 
         merged.DiskPaths = Array.from(new Set([...(existing.DiskPaths || []), ...(candidate.DiskPaths || [])]));
