@@ -167,6 +167,9 @@ let cascadingFilterCountCacheKey = null;
 let cascadingFilterCountCache = null;
 let chartDataCacheKey = null;
 let chartDataCache = null;
+let reportDataWarmupHandle = null;
+let reportDataWarmupUsesIdleCallback = false;
+let reportDataWarmupToken = 0;
 
 // Remediation table scroll state
 let remediationLoadedCount = 0;
@@ -260,9 +263,14 @@ function createEmptyAggregateCache() {
         selectionSeverityCountsKey: null,
         provenRemediationRows: null,
         provenRemediationRowsKey: null,
+        remediationChartData: null,
+        remediationChartDataKey: null,
         remediationTableData: null,
         remediationDetailsData: null,
         impactData: null,
+        impactChartData: null,
+        impactChartDataKey: null,
+        impactAnalysisTableData: null,
         devicesByRemediationData: null,
         remediationsByDeviceData: null
     };
@@ -346,6 +354,7 @@ function hasAnyCascadingFilterSelection(filterId) {
 }
 
 function invalidateAggregateCache() {
+    cancelReportDataWarmup();
     aggregateCacheKey = null;
     aggregateCache = createEmptyAggregateCache();
     cascadingFilterCountCacheKey = null;
@@ -417,6 +426,51 @@ function scheduleApplyFilters(immediate = false) {
         applyFiltersTimer = null;
         applyFilters();
     }, APPLY_FILTER_DEBOUNCE_MS);
+}
+
+function cancelReportDataWarmup() {
+    if (reportDataWarmupHandle == null) {
+        return;
+    }
+
+    if (reportDataWarmupUsesIdleCallback && typeof window.cancelIdleCallback === 'function') {
+        window.cancelIdleCallback(reportDataWarmupHandle);
+    } else {
+        clearTimeout(reportDataWarmupHandle);
+    }
+
+    reportDataWarmupHandle = null;
+    reportDataWarmupUsesIdleCallback = false;
+}
+
+function scheduleReportDataWarmup() {
+    cancelReportDataWarmup();
+
+    const scheduledFilterKey = filterState.key;
+    const scheduledMostRecentLastSeenDate = mostRecentLastSeenDate;
+    const warmupToken = ++reportDataWarmupToken;
+    const runWarmup = () => {
+        reportDataWarmupHandle = null;
+        reportDataWarmupUsesIdleCallback = false;
+
+        if (warmupToken !== reportDataWarmupToken) return;
+        if (filterState.key !== scheduledFilterKey) return;
+        if (mostRecentLastSeenDate !== scheduledMostRecentLastSeenDate) return;
+
+        getRemediationDetailsData();
+        getImpactAnalysisData();
+        getImpactAnalysisTableData();
+        getRemediationChartData();
+        getImpactChartData();
+    };
+
+    if (typeof window.requestIdleCallback === 'function') {
+        reportDataWarmupUsesIdleCallback = true;
+        reportDataWarmupHandle = window.requestIdleCallback(runWarmup, { timeout: 200 });
+        return;
+    }
+
+    reportDataWarmupHandle = window.setTimeout(runWarmup, 0);
 }
 
 function getAggregateCache() {
@@ -2466,7 +2520,10 @@ function applyFilters() {
     cache.selectionSeverityCounts = selectionSeverityCounts;
     updateStats();
     markAllReportsDirty();
-    requestAnimationFrame(() => renderActiveReport(true));
+    requestAnimationFrame(() => {
+        renderActiveReport(true);
+        scheduleReportDataWarmup();
+    });
     console.log(`[perf] applyFilters: ${(performance.now() - _t0).toFixed(1)}ms  (${result.length}/${len} rows passed)`);
 }
 
@@ -3325,6 +3382,83 @@ function getRemediationDetailsData() {
     return cache.remediationDetailsData;
 }
 
+function getRemediationChartData() {
+    const { startDate, endDate } = filterState;
+    if (!startDate || !endDate) {
+        return null;
+    }
+
+    const cache = getAggregateCache();
+    const cacheKey = filterState.key + '|' + mostRecentLastSeenDate;
+    if (cache.remediationChartDataKey === cacheKey && cache.remediationChartData) {
+        return cache.remediationChartData;
+    }
+
+    const sortedDates = generateDateRange(startDate, endDate);
+    const severityCounts = createEmptySeveritySeries();
+    const totalRemediationCounts = [];
+    const deviceCounts = [];
+    const remediationIndex = new Map();
+
+    getProvenRemediationRows().forEach(v => {
+        const lastSeenDate = v._remediationDate;
+        if (!remediationIndex.has(lastSeenDate)) remediationIndex.set(lastSeenDate, []);
+        remediationIndex.get(lastSeenDate).push(v);
+    });
+
+    sortedDates.forEach(date => {
+        if (date > mostRecentLastSeenDate) {
+            severityCounts.Critical.push(0);
+            severityCounts.High.push(0);
+            severityCounts.Medium.push(0);
+            severityCounts.Low.push(0);
+            totalRemediationCounts.push(0);
+            deviceCounts.push(0);
+            return;
+        }
+
+        const vulnsOnDate = remediationIndex.get(date);
+        if (!vulnsOnDate) {
+            severityCounts.Critical.push(0);
+            severityCounts.High.push(0);
+            severityCounts.Medium.push(0);
+            severityCounts.Low.push(0);
+            totalRemediationCounts.push(0);
+            deviceCounts.push(0);
+            return;
+        }
+
+        const remediationsOnDate = new Set();
+        const devicesOnDate = new Set();
+        const severityRemediations = createEmptySeverityCounts();
+
+        vulnsOnDate.forEach(v => {
+            remediationsOnDate.add(v._index);
+            devicesOnDate.add(getDeviceIdentityKey(v));
+            if (severityRemediations[v.VulnerabilitySeverityLevel] !== undefined) {
+                severityRemediations[v.VulnerabilitySeverityLevel]++;
+            }
+        });
+
+        severityCounts.Critical.push(severityRemediations.Critical);
+        severityCounts.High.push(severityRemediations.High);
+        severityCounts.Medium.push(severityRemediations.Medium);
+        severityCounts.Low.push(severityRemediations.Low);
+        totalRemediationCounts.push(remediationsOnDate.size);
+        deviceCounts.push(devicesOnDate.size);
+    });
+
+    cache.remediationChartDataKey = cacheKey;
+    cache.remediationChartData = {
+        sortedDates,
+        severityCounts,
+        totalRemediationCounts,
+        deviceCounts
+    };
+
+    return cache.remediationChartData;
+}
+
 function getImpactAnalysisData() {
     const cache = getAggregateCache();
     if (cache.impactData) return cache.impactData;
@@ -3369,6 +3503,53 @@ function getImpactAnalysisData() {
     };
 
     return cache.impactData;
+}
+
+function getImpactAnalysisTableData() {
+    const cache = getAggregateCache();
+    if (cache.impactAnalysisTableData) return cache.impactAnalysisTableData;
+
+    const { top25 } = getImpactAnalysisData();
+    cache.impactAnalysisTableData = top25.map((item, index) => {
+        const cveIds = new Set(item.vulnerabilities.map(v => v.CveId));
+        const devices = new Set(item.vulnerabilities.map(v => getDeviceIdentityKey(v)));
+        return {
+            rank: index + 1,
+            name: item.name,
+            nameHtml: item.nameHtml || escapeHtml(item.name),
+            devices: devices.size,
+            cveIds: cveIds.size,
+            impact: item.impact,
+            details: item
+        };
+    });
+
+    return cache.impactAnalysisTableData;
+}
+
+function getImpactChartData() {
+    const { startDate, endDate } = filterState;
+    if (!startDate || !endDate) {
+        return null;
+    }
+
+    const cache = getAggregateCache();
+    const cacheKey = filterState.key + '|' + mostRecentLastSeenDate;
+    if (cache.impactChartDataKey === cacheKey && cache.impactChartData) {
+        return cache.impactChartData;
+    }
+
+    const { top25VulnIds } = getImpactAnalysisData();
+    const sortedDates = generateDateRange(startDate, endDate);
+    const series = buildImpactChartSeries(filteredData, top25VulnIds, sortedDates);
+
+    cache.impactChartDataKey = cacheKey;
+    cache.impactChartData = {
+        sortedDates,
+        ...series
+    };
+
+    return cache.impactChartData;
 }
 
 function updateTableSortState(tableId, activeColumnIndex, ascending) {
@@ -3526,67 +3707,8 @@ function renderRemediationChart() {
         logDebug('No date range selected for remediation chart');
         return;
     }
-    
-    const sortedDates = generateDateRange(startDate, endDate);
-    
-    // Track remediations (vulnerabilities that ended) per day
-    const severityCounts = {
-        Critical: [],
-        High: [],
-        Medium: [],
-        Low: []
-    };
-    const totalRemediationCounts = [];
-    const deviceCounts = [];
-    
-    // Build remediation index: O(F) pre-computation instead of O(D×F) scanning
-    const remediationIndex = new Map();
-    getProvenRemediationRows().forEach(v => {
-        const lastSeenDate = v._remediationDate;
-        if (!remediationIndex.has(lastSeenDate)) remediationIndex.set(lastSeenDate, []);
-        remediationIndex.get(lastSeenDate).push(v);
-    });
-    
-    sortedDates.forEach(date => {
-        if (date > mostRecentLastSeenDate) {
-            severityCounts.Critical.push(0);
-            severityCounts.High.push(0);
-            severityCounts.Medium.push(0);
-            severityCounts.Low.push(0);
-            totalRemediationCounts.push(0);
-            deviceCounts.push(0);
-            return;
-        }
-        
-        const vulnsOnDate = remediationIndex.get(date);
-        if (!vulnsOnDate) {
-            severityCounts.Critical.push(0);
-            severityCounts.High.push(0);
-            severityCounts.Medium.push(0);
-            severityCounts.Low.push(0);
-            totalRemediationCounts.push(0);
-            deviceCounts.push(0);
-            return;
-        }
-        
-        const remediationsOnDate = new Set();
-        const devicesOnDate = new Set();
-        const severityRemediations = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-        
-        vulnsOnDate.forEach(v => {
-            const severity = v.VulnerabilitySeverityLevel;
-            remediationsOnDate.add(v._index);
-            devicesOnDate.add(getDeviceIdentityKey(v));
-            if (severityRemediations[severity] !== undefined) severityRemediations[severity]++;
-        });
-        
-        severityCounts.Critical.push(severityRemediations.Critical);
-        severityCounts.High.push(severityRemediations.High);
-        severityCounts.Medium.push(severityRemediations.Medium);
-        severityCounts.Low.push(severityRemediations.Low);
-        totalRemediationCounts.push(remediationsOnDate.size);
-        deviceCounts.push(devicesOnDate.size);
-    });
+    const chartData = getRemediationChartData();
+    const { sortedDates, severityCounts, totalRemediationCounts, deviceCounts } = chartData;
     
     // Find the index where we transition from actual data to projected (dashed) data
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
@@ -4011,15 +4133,13 @@ function renderImpactChart() {
         logDebug('No date range selected for impact chart');
         return;
     }
-    
-    const { top25VulnIds } = getImpactAnalysisData();
-    const sortedDates = generateDateRange(startDate, endDate);
     const {
+        sortedDates,
         currentSeverityCounts,
         projectedSeverityCounts,
         currentTotalCounts,
         projectedTotalCounts
-    } = buildImpactChartSeries(filteredData, top25VulnIds, sortedDates);
+    } = getImpactChartData();
     
     // Find the index where we transition from actual data to projected (dashed) data
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
@@ -4223,27 +4343,13 @@ function renderImpactAnalysisTable() {
     const tbody = document.getElementById('impactAnalysisTableBody');
     tbody.innerHTML = '';
 
-    const { top25 } = getImpactAnalysisData();
-    if (!top25 || top25.length === 0) {
+    impactAnalysisAllData = getImpactAnalysisTableData().slice();
+    if (!impactAnalysisAllData || impactAnalysisAllData.length === 0) {
         const row = tbody.insertRow();
         row.innerHTML = '<td colspan="5">No data available</td>';
         updateImpactAnalysisScrollInfo();
         return;
     }
-
-    impactAnalysisAllData = top25.map((item, index) => {
-        const cveIds = new Set(item.vulnerabilities.map(v => v.CveId));
-        const devices = new Set(item.vulnerabilities.map(v => getDeviceIdentityKey(v)));
-        return {
-            rank: index + 1,
-            name: item.name,
-            nameHtml: item.nameHtml || escapeHtml(item.name),
-            devices: devices.size,
-            cveIds: cveIds.size,
-            impact: item.impact,
-            details: item
-        };
-    });
     
     // Reset loaded count and render initial batch
     impactAnalysisLoadedCount = 0;
