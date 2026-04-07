@@ -56,6 +56,7 @@ const dataFormat = getScriptElementText('dataFormat');
 let lookups = null;
 let rawVulns = null;
 let dataQualityMeta = { firstLastSwapped: 0, generatedOnUtc: null };
+let dataQualitySummary = createEmptyDataQualitySummary();
 
 // Denormalized vulnerability data (expanded from normalized format)
 let vulnerabilityData = [];
@@ -220,12 +221,34 @@ function createEmptyFilterState() {
     };
 }
 
+function createEmptyDataQualitySummary() {
+    return {
+        totalRecords: 0,
+        uniqueDevices: 0,
+        uniqueCves: 0,
+        missingPublished: 0,
+        nonYmdPublished: 0,
+        invertedRanges: 0
+    };
+}
+
+function createEmptySeverityCounts() {
+    return {
+        Critical: 0,
+        High: 0,
+        Medium: 0,
+        Low: 0
+    };
+}
+
 function createEmptyAggregateCache() {
     return {
         activeRowsAsOfDate: null,
         activeRowsAsOfDateKey: null,
         activeRowsForCurrentSelection: null,
         activeRowsForCurrentSelectionKey: null,
+        selectionSeverityCounts: null,
+        selectionSeverityCountsKey: null,
         provenRemediationRows: null,
         provenRemediationRowsKey: null,
         remediationTableData: null,
@@ -1196,6 +1219,9 @@ function denormalizeAllVulns() {
     }
 
     const earliestFirstSeenByIssue = new Map();
+    const qualitySummary = createEmptyDataQualitySummary();
+    const qualityDeviceKeys = new Set();
+    const qualityCveIds = new Set();
     let _maxLatestActivity = '';
 
     for (let i = 0; i < rawCount; i++) {
@@ -1285,8 +1311,26 @@ function denormalizeAllVulns() {
     for (let i = 0; i < rawCount; i++) {
         const v = vulnerabilityData[i];
         v._environmentFirstSeenDate = earliestFirstSeenByIssue.get(v._issueKey) || v._firstSeenDate;
+
+        qualitySummary.totalRecords++;
+        const deviceKey = getDeviceIdentityKey(v);
+        if (deviceKey) qualityDeviceKeys.add(deviceKey);
+        if (v.CveId) qualityCveIds.add(v.CveId);
+
+        if (!v.PublishedDate) {
+            qualitySummary.missingPublished++;
+        } else if (!/^\d{4}-\d{2}-\d{2}$/.test(v.PublishedDate)) {
+            qualitySummary.nonYmdPublished++;
+        }
+
+        if (v._firstSeenDate && v._lastSeenDate && v._firstSeenDate > v._lastSeenDate) {
+            qualitySummary.invertedRanges++;
+        }
     }
 
+    qualitySummary.uniqueDevices = qualityDeviceKeys.size;
+    qualitySummary.uniqueCves = qualityCveIds.size;
+    dataQualitySummary = qualitySummary;
     mostRecentLastSeenDate = _maxLatestActivity;
     const elapsed = Math.round(performance.now() - startTime);
     logDebug('Denormalization complete in', elapsed, 'ms');
@@ -1611,10 +1655,10 @@ function buildDeviceFilterCatalog() {
     deviceFilterCatalog = lookups.devices.map(device => ({
         deviceId: device.id,
         deviceName: device.n,
-        rbacGroup: getDeviceGroupName(device),
-        deviceTags: device.t && device.t.length > 0
+        rbacGroup: device._normalizedGroup || getDeviceGroupName(device),
+        deviceTags: device._tagValues || (device.t && device.t.length > 0
             ? device.t.map(tagIndex => lookups.tags[tagIndex])
-            : NO_TAGS_ARRAY
+            : NO_TAGS_ARRAY)
     }));
 }
 
@@ -2311,6 +2355,11 @@ function applyFilters() {
     const hasOsPlatform = fs.osPlatformSet.size > 0;
     const startDate = fs.startDate;
     const endDate = fs.endDate;
+    const hasDateWindow = hasSelectedDateWindow(fs);
+    const currentSelectionKey = getCurrentSelectionCacheKey(fs);
+    const pointInTimeAsOfDate = hasDateWindow ? '' : getPointInTimeReferenceDate(fs);
+    const selectionSeverityCounts = createEmptySeverityCounts();
+    const pointInTimeRows = hasDateWindow ? null : [];
 
     // Cascading count accumulators (device-Set per option per filter dimension)
     const deviceSetsByFilter = Object.fromEntries(CASCADING_FILTER_IDS.map(filterId => [
@@ -2366,6 +2415,16 @@ function applyFilters() {
         // Main filtered result: all dimensions must match
         if (matchesDevName && matchesGroup && matchesTags) {
             result.push(v);
+            if (hasDateWindow) {
+                if (selectionSeverityCounts[v.VulnerabilitySeverityLevel] !== undefined) {
+                    selectionSeverityCounts[v.VulnerabilitySeverityLevel]++;
+                }
+            } else if (isVulnerabilityActiveOnDate(v, pointInTimeAsOfDate)) {
+                pointInTimeRows.push(v);
+                if (selectionSeverityCounts[v.VulnerabilitySeverityLevel] !== undefined) {
+                    selectionSeverityCounts[v.VulnerabilitySeverityLevel]++;
+                }
+            }
         }
     }
     filteredData = result;
@@ -2384,6 +2443,18 @@ function applyFilters() {
     console.log(`[perf] cascading filter render: ${(performance.now() - _tCascade).toFixed(1)}ms`);
 
     invalidateAggregateCache();
+    const cache = getAggregateCache();
+    if (hasDateWindow) {
+        cache.activeRowsForCurrentSelectionKey = currentSelectionKey;
+        cache.activeRowsForCurrentSelection = result;
+    } else {
+        cache.activeRowsAsOfDateKey = pointInTimeAsOfDate;
+        cache.activeRowsAsOfDate = pointInTimeRows;
+        cache.activeRowsForCurrentSelectionKey = currentSelectionKey;
+        cache.activeRowsForCurrentSelection = pointInTimeRows;
+    }
+    cache.selectionSeverityCountsKey = currentSelectionKey;
+    cache.selectionSeverityCounts = selectionSeverityCounts;
     updateStats();
     markAllReportsDirty();
     requestAnimationFrame(() => renderActiveReport(true));
@@ -2411,23 +2482,30 @@ function getStatElements() {
 }
 
 function updateStats() {
-    const statsRows = getActiveRowsForCurrentSelection();
-    let critical = 0, high = 0, medium = 0, low = 0;
+    const cache = getAggregateCache();
+    const cacheKey = getCurrentSelectionCacheKey();
+    let counts = cache.selectionSeverityCountsKey === cacheKey ? cache.selectionSeverityCounts : null;
 
-    for (let i = 0, len = statsRows.length; i < len; i++) {
-        switch (statsRows[i].VulnerabilitySeverityLevel) {
-            case 'Critical': critical++; break;
-            case 'High': high++; break;
-            case 'Medium': medium++; break;
-            case 'Low': low++; break;
+    if (!counts) {
+        counts = createEmptySeverityCounts();
+        const statsRows = getActiveRowsForCurrentSelection();
+        for (let i = 0, len = statsRows.length; i < len; i++) {
+            switch (statsRows[i].VulnerabilitySeverityLevel) {
+                case 'Critical': counts.Critical++; break;
+                case 'High': counts.High++; break;
+                case 'Medium': counts.Medium++; break;
+                case 'Low': counts.Low++; break;
+            }
         }
+        cache.selectionSeverityCountsKey = cacheKey;
+        cache.selectionSeverityCounts = counts;
     }
 
     const els = getStatElements();
-    els.critical.textContent = critical;
-    els.high.textContent = high;
-    els.medium.textContent = medium;
-    els.low.textContent = low;
+    els.critical.textContent = counts.Critical;
+    els.high.textContent = counts.High;
+    els.medium.textContent = counts.Medium;
+    els.low.textContent = counts.Low;
 }
 
 /**
@@ -2437,46 +2515,17 @@ function updateDataQualitySummary() {
     if (!document.querySelector('.data-quality-panel')) return;
     if (!Array.isArray(vulnerabilityData) || vulnerabilityData.length === 0) return;
 
-    const totalRecords = vulnerabilityData.length;
-    const uniqueDevices = new Set();
-    const uniqueCves = new Set();
-    let missingPublished = 0;
-    let nonYmdPublished = 0;
-    let invertedRanges = 0;
-
-    vulnerabilityData.forEach(v => {
-        const deviceKey = getDeviceIdentityKey(v);
-        if (deviceKey) uniqueDevices.add(deviceKey);
-        if (v.CveId) uniqueCves.add(v.CveId);
-
-        const publishedDate = v.PublishedDate;
-        if (!publishedDate) {
-            missingPublished++;
-        } else {
-            const normalizedPublished = formatDateYMD(publishedDate);
-            if (normalizedPublished === '-' || !/^\d{4}-\d{2}-\d{2}$/.test(normalizedPublished)) {
-                nonYmdPublished++;
-            }
-        }
-
-        const firstSeen = getFirstSeenDate(v);
-        const lastSeen = getLastSeenDate(v);
-        if (firstSeen && firstSeen !== '-' && lastSeen && lastSeen !== '-' && firstSeen > lastSeen) {
-            invertedRanges++;
-        }
-    });
-
     const setText = (id, value) => {
         const element = document.getElementById(id);
         if (element) element.textContent = value.toLocaleString();
     };
 
-    setText('dqTotalRecords', totalRecords);
-    setText('dqUniqueDevices', uniqueDevices.size);
-    setText('dqUniqueCves', uniqueCves.size);
-    setText('dqMissingPublished', missingPublished);
-    setText('dqNonYmdPublished', nonYmdPublished);
-    setText('dqInvertedRanges', invertedRanges);
+    setText('dqTotalRecords', dataQualitySummary.totalRecords);
+    setText('dqUniqueDevices', dataQualitySummary.uniqueDevices);
+    setText('dqUniqueCves', dataQualitySummary.uniqueCves);
+    setText('dqMissingPublished', dataQualitySummary.missingPublished);
+    setText('dqNonYmdPublished', dataQualitySummary.nonYmdPublished);
+    setText('dqInvertedRanges', dataQualitySummary.invertedRanges);
     setText('dqCorrectedRanges', Number(dataQualityMeta.firstLastSwapped || 0));
 }
 
@@ -2504,12 +2553,18 @@ function formatSoftwareName(vendor, product) {
     return `${formatPart(vendor)} - ${formatPart(product)}`;
 }
 
-function getPointInTimeReferenceDate() {
-    return filterState.endDate || mostRecentLastSeenDate;
+function getPointInTimeReferenceDate(state = filterState) {
+    return state.endDate || mostRecentLastSeenDate;
 }
 
 function hasSelectedDateWindow(state = filterState) {
     return Boolean(state.startDate || state.endDate);
+}
+
+function getCurrentSelectionCacheKey(state = filterState) {
+    return hasSelectedDateWindow(state)
+        ? `range:${state.startDate || ''}:${state.endDate || ''}`
+        : `point:${getPointInTimeReferenceDate(state)}`;
 }
 
 function getPointInTimeActiveRows(asOfDate = getPointInTimeReferenceDate()) {
@@ -2525,9 +2580,7 @@ function getPointInTimeActiveRows(asOfDate = getPointInTimeReferenceDate()) {
 
 function getActiveRowsForCurrentSelection() {
     const cache = getAggregateCache();
-    const cacheKey = hasSelectedDateWindow()
-        ? `range:${filterState.startDate || ''}:${filterState.endDate || ''}`
-        : `point:${getPointInTimeReferenceDate()}`;
+    const cacheKey = getCurrentSelectionCacheKey();
 
     if (cache.activeRowsForCurrentSelectionKey === cacheKey && cache.activeRowsForCurrentSelection) {
         return cache.activeRowsForCurrentSelection;
@@ -2662,6 +2715,9 @@ function applyDerivedVulnerabilityFields(rows) {
     if (!Array.isArray(rows)) return;
 
     const earliestEnvironmentFirstSeenByIssue = new Map();
+    const qualitySummary = createEmptyDataQualitySummary();
+    const qualityDeviceKeys = new Set();
+    const qualityCveIds = new Set();
 
     rows.forEach(v => {
         const issueKey = getEnvironmentIssueKey(v);
@@ -2681,6 +2737,7 @@ function applyDerivedVulnerabilityFields(rows) {
         if (latestActivityDate > _maxLatest) _maxLatest = latestActivityDate;
         const remediationEvidence = hasKnownPatchEvidence(v);
         const firstSeenDate = getFirstSeenDate(v);
+        const lastSeenDate = getLastSeenDate(v);
         const effectiveOpenEndDate = getEffectiveOpenEndDate(v);
         const environmentFirstSeenDate = earliestEnvironmentFirstSeenByIssue.get(getEnvironmentIssueKey(v)) || firstSeenDate;
 
@@ -2689,13 +2746,30 @@ function applyDerivedVulnerabilityFields(rows) {
         v._latestActivityDate = latestActivityDate;
         v._hasPatchEvidence = remediationEvidence;
         v._effectiveOpenEndDate = effectiveOpenEndDate;
-        v._remediationDate = remediationEvidence ? getLastSeenDate(v) : '';
+        v._remediationDate = remediationEvidence ? lastSeenDate : '';
         v._remediationString = buildRemediationString(v);
         v._environmentFirstSeenDate = environmentFirstSeenDate;
         v._deviceFilterKey = v.DeviceId || v.DeviceName || '';
         v._normalizedGroup = normalizeGroupName(v.RbacGroupName);
         v._tagValues = v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : NO_TAGS_ARRAY;
+
+        qualitySummary.totalRecords++;
+        if (v._deviceFilterKey) qualityDeviceKeys.add(v._deviceFilterKey);
+        if (v.CveId) qualityCveIds.add(v.CveId);
+
+        if (!v.PublishedDate) {
+            qualitySummary.missingPublished++;
+        } else if (!/^\d{4}-\d{2}-\d{2}$/.test(v.PublishedDate)) {
+            qualitySummary.nonYmdPublished++;
+        }
+
+        if (firstSeenDate && lastSeenDate && firstSeenDate > lastSeenDate) {
+            qualitySummary.invertedRanges++;
+        }
     });
+    qualitySummary.uniqueDevices = qualityDeviceKeys.size;
+    qualitySummary.uniqueCves = qualityCveIds.size;
+    dataQualitySummary = qualitySummary;
     mostRecentLastSeenDate = _maxLatest;
 }
 
