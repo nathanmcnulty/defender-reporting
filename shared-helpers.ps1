@@ -5775,18 +5775,17 @@ function Open-CompactVulnColumnWriterSet {
 function Write-CompactVulnRecordColumnSet {
     param(
         [pscustomobject]$WriterSet,
-        [object]$Record
+        [object[]]$Record
     )
 
     if ($null -eq $Record) {
         throw 'Compact vulnerability record cannot be null.'
     }
 
-    $recordValues = @($Record)
     $states = $WriterSet.ColumnStates
     for ($i = 0; $i -lt 10; $i++) {
         $col = $states[$i]
-        $val = $recordValues[$i]
+        $val = $Record[$i]
         $buf = $col.Buffer
 
         if ($col.HasValue) { [void]$buf.Append(',') } else { $col.HasValue = $true }
@@ -8632,7 +8631,7 @@ function Write-NormalizedCompactRecordFromLookup {
 }
 
 function Write-NormalizedSourceRow {
-    [CmdletBinding(DefaultParameterSetName = 'lookup')]
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [pscustomobject]$WriterState,
@@ -8657,141 +8656,127 @@ function Write-NormalizedSourceRow {
         [Parameter(Mandatory = $false)]
         [ref]$FirstLastSwappedCount = ([ref]0),
 
-        [Parameter(Mandatory = $true, ParameterSetName = 'lookup')]
-        [int]$DeviceIndex,
-
-        [Parameter(Mandatory = $true, ParameterSetName = 'lookup')]
-        [pscustomobject]$ContentLookup,
-
-        [Parameter(Mandatory = $true, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $true)]
         [AllowNull()]
         [object]$DeviceId,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$DeviceName,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$GroupName,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$OsPlatform,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$OsVersion,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object[]]$MachineTags,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$SoftwareVendor,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$SoftwareName,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$RecommendationReference,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$CveId,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$CvssScore,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$SeverityLevel,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$ExploitabilityLevel,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$CveUrl,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$CveBatchTitle,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$RecommendedSecurityUpdate,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$RecommendedSecurityUpdateId,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$RecommendedSecurityUpdateUrl,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$SoftwareVersion,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object[]]$DiskPaths,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object[]]$RegistryPaths,
 
-        [Parameter(Mandatory = $false, ParameterSetName = 'source')]
+        [Parameter(Mandatory = $false)]
         [AllowNull()]
         [object]$SecurityUpdateAvailable
     )
 
-    $effectiveDeviceIndex = $DeviceIndex
-    $effectiveContentLookup = $ContentLookup
-
-    if ($PSCmdlet.ParameterSetName -eq 'source') {
-        $recordLookup = Get-NormalizedRecordLookup `
-            -DeviceId ([string]$DeviceId) `
-            -DeviceName $DeviceName `
-            -GroupName $GroupName `
-            -OsPlatform $OsPlatform `
-            -OsVersion $OsVersion `
-            -MachineTags $MachineTags `
-            -SoftwareVendor $SoftwareVendor `
-            -SoftwareName $SoftwareName `
-            -RecommendationReference $RecommendationReference `
-            -CveId $CveId `
-            -CvssScore $CvssScore `
-            -SeverityLevel $SeverityLevel `
-            -ExploitabilityLevel $ExploitabilityLevel `
-            -CveUrl $CveUrl `
-            -CveBatchTitle $CveBatchTitle `
-            -RecommendedSecurityUpdate $RecommendedSecurityUpdate `
-            -RecommendedSecurityUpdateId $RecommendedSecurityUpdateId `
-            -RecommendedSecurityUpdateUrl $RecommendedSecurityUpdateUrl `
-            -SoftwareVersion $SoftwareVersion `
-            -DiskPaths @($DiskPaths) `
-            -RegistryPaths @($RegistryPaths) `
-            -SecurityUpdateAvailable $SecurityUpdateAvailable `
-            -Context $Context
-
-        $effectiveDeviceIndex = $recordLookup.DeviceIndex
-        $effectiveContentLookup = $recordLookup.ContentLookup
-    }
+    $recordLookup = Get-NormalizedRecordLookup `
+        -DeviceId ([string]$DeviceId) `
+        -DeviceName $DeviceName `
+        -GroupName $GroupName `
+        -OsPlatform $OsPlatform `
+        -OsVersion $OsVersion `
+        -MachineTags $MachineTags `
+        -SoftwareVendor $SoftwareVendor `
+        -SoftwareName $SoftwareName `
+        -RecommendationReference $RecommendationReference `
+        -CveId $CveId `
+        -CvssScore $CvssScore `
+        -SeverityLevel $SeverityLevel `
+        -ExploitabilityLevel $ExploitabilityLevel `
+        -CveUrl $CveUrl `
+        -CveBatchTitle $CveBatchTitle `
+        -RecommendedSecurityUpdate $RecommendedSecurityUpdate `
+        -RecommendedSecurityUpdateId $RecommendedSecurityUpdateId `
+        -RecommendedSecurityUpdateUrl $RecommendedSecurityUpdateUrl `
+        -SoftwareVersion $SoftwareVersion `
+        -DiskPaths @($DiskPaths) `
+        -RegistryPaths @($RegistryPaths) `
+        -SecurityUpdateAvailable $SecurityUpdateAvailable `
+        -Context $Context
 
     $ProcessedCount.Value++
 
     Write-NormalizedCompactRecordFromLookup `
         -WriterState $WriterState `
         -Record $Record `
-        -DeviceIndex $effectiveDeviceIndex `
-        -ContentLookup $effectiveContentLookup `
+        -DeviceIndex $recordLookup.DeviceIndex `
+        -ContentLookup $recordLookup.ContentLookup `
         -Context $Context `
         -FirstSeenValue $FirstSeenValue `
         -LastSeenValue $LastSeenValue `
@@ -8901,6 +8886,10 @@ function Invoke-ContentStoreNormalization {
         [string]$PayloadOutputPath
     )
 
+    $lookups = $Context.Lookups
+    $dateIndex = $Context.Indexes.dates
+    $dateValueCache = $Context.DateValueCache
+
     $Context.Machines = $Machines
     $Context.AdvancedHuntingData = $AdvancedHuntingData
     $Context.HasNoTags = $false
@@ -8962,6 +8951,9 @@ function Invoke-ContentStoreNormalization {
 
     try {
         $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
+        $compactRecord = [object[]]::new(10)
+        $columnStates = if ($writerState.Mode -eq 'column') { $writerState.ColumnWriterSet.ColumnStates } else { $null }
+        $jsonWriter = if ($writerState.Mode -eq 'column') { $null } else { $writerState.JsonWriter }
 
         $refPaths = [System.Collections.Generic.List[pscustomobject]]::new()
         if ($MergedRefPaths -and $MergedRefPaths.Count -gt 0) {
@@ -9040,16 +9032,112 @@ function Invoke-ContentStoreNormalization {
                             if (($contentTemplateIndexValue -lt 0) -or ($contentTemplateIndexValue -ge $contentTemplateCount)) { continue }
                             if (-not $deviceOnboardedFlags[$deviceProfileIndexValue]) { continue }
 
-                            Write-NormalizedSourceRow `
-                                -WriterState $writerState `
-                                -Record ([object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) `
-                                -ProcessedCount $processedCountRef `
-                                -DeviceIndex $deviceLookupIndices[$deviceProfileIndexValue] `
-                                -ContentLookup $contentLookupCache[$contentTemplateIndexValue] `
-                                -Context $Context `
-                                -FirstSeenValue $firstSeenValue `
-                                -LastSeenValue $lastSeenValue `
-                                -FirstLastSwappedCount $firstLastSwappedCountRef
+                            $processedCountRef.Value++
+
+                            $firstSeen = $null
+                            $lastSeen = $null
+                            if ($null -ne $firstSeenValue) {
+                                $firstSeenText = [string]$firstSeenValue
+                                if ($dateValueCache.ContainsKey($firstSeenText)) {
+                                    $firstSeen = $dateValueCache[$firstSeenText]
+                                }
+                                else {
+                                    $firstSeen = if ($firstSeenText.Length -ge 10 -and $firstSeenText[4] -eq '-' -and $firstSeenText[7] -eq '-') { $firstSeenText.Substring(0, 10) } else { Convert-ToYmdDate -DateValue $firstSeenText }
+                                    $dateValueCache[$firstSeenText] = $firstSeen
+                                }
+                            }
+
+                            if ($null -ne $lastSeenValue) {
+                                $lastSeenText = [string]$lastSeenValue
+                                if ($dateValueCache.ContainsKey($lastSeenText)) {
+                                    $lastSeen = $dateValueCache[$lastSeenText]
+                                }
+                                else {
+                                    $lastSeen = if ($lastSeenText.Length -ge 10 -and $lastSeenText[4] -eq '-' -and $lastSeenText[7] -eq '-') { $lastSeenText.Substring(0, 10) } else { Convert-ToYmdDate -DateValue $lastSeenText }
+                                    $dateValueCache[$lastSeenText] = $lastSeen
+                                }
+                            }
+
+                            if ($firstSeen -and $lastSeen -and [datetime]$firstSeen -gt [datetime]$lastSeen) {
+                                $swappedSeenValue = $firstSeen
+                                $firstSeen = $lastSeen
+                                $lastSeen = $swappedSeenValue
+                                $firstLastSwappedCountRef.Value++
+                            }
+
+                            if (-not $firstSeen) { $firstSeen = '' }
+                            if (-not $lastSeen) { $lastSeen = '' }
+
+                            $contentLookup = $contentLookupCache[$contentTemplateIndexValue]
+                            $compactRecord[0] = $deviceLookupIndices[$deviceProfileIndexValue]
+                            $compactRecord[1] = $contentLookup.cve
+                            $compactRecord[2] = $contentLookup.sw
+                            $compactRecord[3] = $contentLookup.ver
+                            $compactRecord[4] = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
+                            $compactRecord[5] = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
+                            $compactRecord[6] = $contentLookup.ua
+                            $compactRecord[7] = $contentLookup.upd
+                            $compactRecord[8] = $contentLookup.dp
+                            $compactRecord[9] = $contentLookup.rp
+
+                            if ($columnStates) {
+                                for ($columnIndex = 0; $columnIndex -lt 10; $columnIndex++) {
+                                    $columnState = $columnStates[$columnIndex]
+                                    $columnValue = $compactRecord[$columnIndex]
+                                    $buffer = $columnState.Buffer
+
+                                    if ($columnState.HasValue) {
+                                        [void]$buffer.Append(',')
+                                    }
+                                    else {
+                                        $columnState.HasValue = $true
+                                    }
+
+                                    if ($null -eq $columnValue) {
+                                        [void]$buffer.Append('null')
+                                    }
+                                    elseif ($columnValue -is [System.Collections.IEnumerable] -and $columnValue -isnot [string]) {
+                                        [void]$buffer.Append('[')
+                                        $isFirstColumnValue = $true
+                                        foreach ($nestedValue in $columnValue) {
+                                            if ($isFirstColumnValue) {
+                                                $isFirstColumnValue = $false
+                                            }
+                                            else {
+                                                [void]$buffer.Append(',')
+                                            }
+
+                                            if ($null -eq $nestedValue) {
+                                                [void]$buffer.Append('null')
+                                            }
+                                            else {
+                                                [void]$buffer.Append([string]$nestedValue)
+                                            }
+                                        }
+                                        [void]$buffer.Append(']')
+                                    }
+                                    else {
+                                        [void]$buffer.Append([string]$columnValue)
+                                    }
+
+                                    if ($buffer.Length -ge 131072) {
+                                        $columnState.StreamWriter.Write($buffer.ToString())
+                                        [void]$buffer.Clear()
+                                    }
+                                }
+                            }
+                            else {
+                                Write-CompactVulnRecordJson -Writer $jsonWriter -Record $compactRecord
+                            }
+
+                            if (($processedCountRef.Value % 50000) -eq 0) {
+                                Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCountRef.Value) -InformationAction Continue
+                            }
+
+                            if (($processedCountRef.Value % 100000) -eq 0) {
+                                Sync-NormalizedVulnWriter -WriterState $writerState
+                                Invoke-FullGarbageCollection
+                            }
                         }
                         finally {
                             $document.Dispose()
@@ -9082,16 +9170,112 @@ function Invoke-ContentStoreNormalization {
                                     $fv = if ($elements.Current.ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $elements.Current.GetString() }
                                     [void]$elements.MoveNext()
                                     $lv = if ($elements.Current.ValueKind -eq [System.Text.Json.JsonValueKind]::Null) { $null } else { $elements.Current.GetString() }
-                                    Write-NormalizedSourceRow `
-                                        -WriterState $writerState `
-                                        -Record ([object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) `
-                                        -ProcessedCount $processedCountRef `
-                                        -DeviceIndex $deviceLookupIndices[$dpv] `
-                                        -ContentLookup $contentLookupCache[$ctv] `
-                                        -Context $Context `
-                                        -FirstSeenValue $fv `
-                                        -LastSeenValue $lv `
-                                        -FirstLastSwappedCount $firstLastSwappedCountRef
+                                    $processedCountRef.Value++
+
+                                    $firstSeen = $null
+                                    $lastSeen = $null
+                                    if ($null -ne $fv) {
+                                        $firstSeenText = [string]$fv
+                                        if ($dateValueCache.ContainsKey($firstSeenText)) {
+                                            $firstSeen = $dateValueCache[$firstSeenText]
+                                        }
+                                        else {
+                                            $firstSeen = if ($firstSeenText.Length -ge 10 -and $firstSeenText[4] -eq '-' -and $firstSeenText[7] -eq '-') { $firstSeenText.Substring(0, 10) } else { Convert-ToYmdDate -DateValue $firstSeenText }
+                                            $dateValueCache[$firstSeenText] = $firstSeen
+                                        }
+                                    }
+
+                                    if ($null -ne $lv) {
+                                        $lastSeenText = [string]$lv
+                                        if ($dateValueCache.ContainsKey($lastSeenText)) {
+                                            $lastSeen = $dateValueCache[$lastSeenText]
+                                        }
+                                        else {
+                                            $lastSeen = if ($lastSeenText.Length -ge 10 -and $lastSeenText[4] -eq '-' -and $lastSeenText[7] -eq '-') { $lastSeenText.Substring(0, 10) } else { Convert-ToYmdDate -DateValue $lastSeenText }
+                                            $dateValueCache[$lastSeenText] = $lastSeen
+                                        }
+                                    }
+
+                                    if ($firstSeen -and $lastSeen -and [datetime]$firstSeen -gt [datetime]$lastSeen) {
+                                        $swappedSeenValue = $firstSeen
+                                        $firstSeen = $lastSeen
+                                        $lastSeen = $swappedSeenValue
+                                        $firstLastSwappedCountRef.Value++
+                                    }
+
+                                    if (-not $firstSeen) { $firstSeen = '' }
+                                    if (-not $lastSeen) { $lastSeen = '' }
+
+                                    $contentLookup = $contentLookupCache[$ctv]
+                                    $compactRecord[0] = $deviceLookupIndices[$dpv]
+                                    $compactRecord[1] = $contentLookup.cve
+                                    $compactRecord[2] = $contentLookup.sw
+                                    $compactRecord[3] = $contentLookup.ver
+                                    $compactRecord[4] = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
+                                    $compactRecord[5] = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
+                                    $compactRecord[6] = $contentLookup.ua
+                                    $compactRecord[7] = $contentLookup.upd
+                                    $compactRecord[8] = $contentLookup.dp
+                                    $compactRecord[9] = $contentLookup.rp
+
+                                    if ($columnStates) {
+                                        for ($columnIndex = 0; $columnIndex -lt 10; $columnIndex++) {
+                                            $columnState = $columnStates[$columnIndex]
+                                            $columnValue = $compactRecord[$columnIndex]
+                                            $buffer = $columnState.Buffer
+
+                                            if ($columnState.HasValue) {
+                                                [void]$buffer.Append(',')
+                                            }
+                                            else {
+                                                $columnState.HasValue = $true
+                                            }
+
+                                            if ($null -eq $columnValue) {
+                                                [void]$buffer.Append('null')
+                                            }
+                                            elseif ($columnValue -is [System.Collections.IEnumerable] -and $columnValue -isnot [string]) {
+                                                [void]$buffer.Append('[')
+                                                $isFirstColumnValue = $true
+                                                foreach ($nestedValue in $columnValue) {
+                                                    if ($isFirstColumnValue) {
+                                                        $isFirstColumnValue = $false
+                                                    }
+                                                    else {
+                                                        [void]$buffer.Append(',')
+                                                    }
+
+                                                    if ($null -eq $nestedValue) {
+                                                        [void]$buffer.Append('null')
+                                                    }
+                                                    else {
+                                                        [void]$buffer.Append([string]$nestedValue)
+                                                    }
+                                                }
+                                                [void]$buffer.Append(']')
+                                            }
+                                            else {
+                                                [void]$buffer.Append([string]$columnValue)
+                                            }
+
+                                            if ($buffer.Length -ge 131072) {
+                                                $columnState.StreamWriter.Write($buffer.ToString())
+                                                [void]$buffer.Clear()
+                                            }
+                                        }
+                                    }
+                                    else {
+                                        Write-CompactVulnRecordJson -Writer $jsonWriter -Record $compactRecord
+                                    }
+
+                                    if (($processedCountRef.Value % 50000) -eq 0) {
+                                        Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCountRef.Value) -InformationAction Continue
+                                    }
+
+                                    if (($processedCountRef.Value % 100000) -eq 0) {
+                                        Sync-NormalizedVulnWriter -WriterState $writerState
+                                        Invoke-FullGarbageCollection
+                                    }
                                 }
                             }
                             finally { $document.Dispose() }
