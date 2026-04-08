@@ -58,8 +58,6 @@ The workflow exposes a `dry_run` input:
 - `false`: commits and pushes generated changes
 - `true`: shows what would change without committing
 
-Pushes to `test/**` branches also behave like dry runs for the commit step.
-
 ## Related docs
 
 - [Azure setup](azure-setup.md)

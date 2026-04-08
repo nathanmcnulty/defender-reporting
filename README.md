@@ -138,8 +138,10 @@ flowchart TD
 
 ## Notes
 
-- `azure/Invoke-DashboardPipeline.ps1` and `azure/function-app/ExportAndGenerate/run.ps1` are generated artifacts. Edit `shared-helpers.ps1` and `azure/runbook-source.ps1`, then rebuild with `.\azure\Build-Runbook.ps1` and `.\azure\Build-FunctionApp.ps1`.
-- `validation-helpers.ps1` is a generated artifact. Edit `validation/source/*.ps1`, then rebuild with `.\Build-ValidationHelpers.ps1`.
+- `shared-helpers.ps1`, `validation-helpers.ps1`, `azure/Invoke-DashboardPipeline.ps1`, and `azure/function-app/ExportAndGenerate/run.ps1` are generated on demand and ignored by git.
+- Edit `shared/source/*.ps1`, `validation/source/*.ps1`, and `azure/runbook-source.ps1`; rebuild generated deployment artifacts with `./azure/Build-Runbook.ps1`, `./azure/Build-FunctionApp.ps1`, `./Build-SharedHelpers.ps1`, or `./Build-ValidationHelpers.ps1` only when you need the materialized outputs.
+- Run `./Invoke-RegressionValidation.ps1` for the deterministic local and PR-aligned preflight path.
+- Run `./Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` when you want the local command that mirrors the live GitHub Actions export and dashboard generation path.
 - Legacy `VulnExport_<group>_<date>.json(.gz)` compatibility remains temporary through `2026-07-01`.
 - Sample PDF outputs are committed under `reports/`.
 - `.dashboard-cache/` directories are derived local caches and are intentionally ignored by git.

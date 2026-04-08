@@ -1533,7 +1533,7 @@ try {
         }
         else {
             Write-Host "  Runbook script not found at: $runbookScriptPath" -ForegroundColor Yellow
-            Write-Host "  Import the runbook content manually via the Azure portal or run this script again after placing Invoke-DashboardPipeline.ps1 in the azure/ folder." -ForegroundColor Yellow
+            Write-Host "  Run .\azure\Build-Runbook.ps1 locally or rerun this setup script to regenerate the artifact before uploading." -ForegroundColor Yellow
         }
     }
 
