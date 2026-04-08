@@ -8,7 +8,7 @@ This folder contains lightweight PowerShell regression coverage for the Defender
 - `tests/manual/` contains ad hoc troubleshooting harnesses that are useful during development but are not part of `Invoke-RegressionValidation.ps1`.
 - The top-level scripts in `tests/` are the supported automation entrypoints for regression validation, stress generation, benchmarking, and synthetic live-export creation.
 
-## Runbook-safe regression entrypoint
+## Deterministic preflight entrypoint
 
 Run the full local regression bundle with:
 
@@ -16,7 +16,22 @@ Run the full local regression bundle with:
 pwsh -NoProfile -File .\Invoke-RegressionValidation.ps1
 ```
 
-That script rebuilds the generated helper/runbook artifacts, runs parser and PSScriptAnalyzer checks, executes focused shared-helper regression tests, and performs a small dashboard fixture smoke generation.
+That script is the authoritative deterministic preflight used for local work and PR validation. It rebuilds the generated deployment artifacts, runs parser and PSScriptAnalyzer checks across source scripts, executes focused shared-helper regression tests, and performs a small dashboard fixture smoke generation.
+
+## CI-aligned live dry run
+
+Run the exact live export and dashboard-generation path locally against your current Az context with:
+
+```powershell
+pwsh -NoProfile -File .\Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext
+```
+
+Defaults:
+- output root: `.local/local-reports/live-dashboard-dry-run/`
+- includes Advanced Hunting by default
+- writes `dashboard-audit.json` and `dashboard-live-run-manifest.json` alongside the generated HTML
+
+Use `-UseRepositoryOutputPaths` only when you intentionally want the live dry run to write into the tracked `exports/` and `VulnerabilityDashboard.html` paths.
 
 ## Legacy migration fixture
 

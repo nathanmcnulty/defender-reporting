@@ -63,7 +63,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-. (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'shared-helpers.ps1')
+. (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Import-SharedHelpers.ps1')
 
 function Get-StreamingCount {
     [CmdletBinding()]

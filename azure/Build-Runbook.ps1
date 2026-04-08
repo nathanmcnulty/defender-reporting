@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Assembles azure/runbook-source.ps1 with the canonical shared helper block
-    from the generated ../shared-helpers.ps1 surface and writes the public,
+    from shared/source/*.ps1 via Build-SharedHelpers.ps1 and writes the public,
     copy/paste-ready azure/Invoke-DashboardPipeline.ps1 artifact.
 
 .EXAMPLE
