@@ -1,9 +1,9 @@
 /**
  * Vulnerability Dashboard - Main JavaScript
- * 
+ *
  * This file contains all the client-side logic for the vulnerability dashboard.
  * It handles data filtering, chart rendering, table management, and PDF export.
- * 
+ *
  * Data is stored in a normalized format for optimal file size:
  * - lookups: Reference tables for devices, CVEs, software, etc.
  * - vulns: Compact array records with indices into lookup tables
@@ -74,8 +74,10 @@ let impactChartInstance = null;
 let chartJsLoadPromise = null;
 const loadedScriptPromises = new Map();
 
-// Device facet catalog used by cascading device filters
+// Device facet catalog used by filtering
 let deviceFilterCatalog = [];
+let deviceFilterLabelByKey = new Map();
+let deviceDuplicateNameCounts = new Map();
 let cascadingFilterOptions = {};
 let cascadingFilterState = {};
 
@@ -148,6 +150,62 @@ const CARD_PAGE_SIZE = 20;
 const CARD_RENDER_BATCH_SIZE = 50;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
 const FACET_SEARCH_MIN_OPTIONS = 8;
+const DATE_PRESET_CONFIG = {
+    '1w': '1 Week',
+    '1m': '1 Month',
+    '3m': '3 Months',
+    '6m': '6 Months',
+    '12m': '12 Months'
+};
+const FILTER_POPOVER_CONFIG = {
+    date: {
+        buttonId: 'filterPillDate',
+        label: 'Date'
+    },
+    filterRbacGroup: {
+        buttonId: 'filterPillRbacGroup',
+        label: 'Device Groups',
+        stateKey: 'rbacGroups',
+        hasAnyKey: 'hasRbacGroups',
+        allText: 'All',
+        summaryNoun: 'groups'
+    },
+    filterDeviceTags: {
+        buttonId: 'filterPillDeviceTags',
+        label: 'Device Tags',
+        stateKey: 'deviceTags',
+        hasAnyKey: 'hasDeviceTags',
+        allText: 'All',
+        summaryNoun: 'tags'
+    },
+    filterOSPlatform: {
+        buttonId: 'filterPillOSPlatform',
+        label: 'Platform',
+        stateKey: 'osPlatforms',
+        hasAnyKey: 'hasOsPlatforms',
+        allText: 'All',
+        summaryNoun: 'platforms'
+    },
+    filterSeverity: {
+        buttonId: 'filterPillSeverity',
+        label: 'Severity',
+        stateKey: 'severities',
+        hasAnyKey: 'hasSeverities',
+        allText: 'All',
+        summaryNoun: 'severities'
+    },
+    filterDeviceName: {
+        buttonId: 'filterPillDeviceName',
+        label: 'Device',
+        stateKey: 'deviceNames',
+        hasAnyKey: 'hasDeviceNames',
+        allText: 'All',
+        summaryNoun: 'devices',
+        searchable: true
+    }
+};
+const FILTER_POPOVER_KEYS = Object.keys(FILTER_POPOVER_CONFIG);
+const FILTER_MULTISELECT_KEYS = FILTER_POPOVER_KEYS.filter(filterKey => filterKey !== 'date');
 const REPORT_IDS = [
     'active-vulnerabilities',
     'remediation-activity',
@@ -162,6 +220,9 @@ const initializedReports = new Set();
 const dirtyReports = new Set(REPORT_IDS);
 
 let filterState = createEmptyFilterState();
+let filterPopoverDraftState = null;
+let activeFilterPopoverKey = null;
+let activeFilterPopoverOptions = [];
 let aggregateCacheKey = null;
 let aggregateCache = createEmptyAggregateCache();
 let cascadingFilterCountCacheKey = null;
@@ -204,6 +265,7 @@ let lastFocusedElementBeforeModal = null;
 
 function createEmptyFilterState() {
     return {
+        datePreset: '',
         startDate: '',
         endDate: '',
         deviceSearch: '',
@@ -225,6 +287,198 @@ function createEmptyFilterState() {
         osPlatformSet: new Set(),
         key: ''
     };
+}
+
+function normalizeFilterValueArray(values) {
+    return Array.isArray(values)
+        ? values.filter(value => typeof value === 'string' && value.length > 0)
+        : [];
+}
+
+function finalizeFilterState(state) {
+    const nextState = createEmptyFilterState();
+    nextState.datePreset = typeof state.datePreset === 'string' ? state.datePreset : '';
+    nextState.startDate = state.startDate || '';
+    nextState.endDate = state.endDate || '';
+    nextState.deviceSearch = state.deviceSearch || '';
+    nextState.deviceSearchNormalized = nextState.deviceSearch.toLowerCase();
+    nextState.deviceNames = normalizeFilterValueArray(state.deviceNames);
+    nextState.rbacGroups = normalizeFilterValueArray(state.rbacGroups);
+    nextState.deviceTags = normalizeFilterValueArray(state.deviceTags);
+    nextState.severities = normalizeFilterValueArray(state.severities);
+    nextState.osPlatforms = normalizeFilterValueArray(state.osPlatforms);
+
+    nextState.hasDeviceNames = state.hasDeviceNames !== undefined ? Boolean(state.hasDeviceNames) : true;
+    nextState.hasRbacGroups = state.hasRbacGroups !== undefined ? Boolean(state.hasRbacGroups) : true;
+    nextState.hasDeviceTags = state.hasDeviceTags !== undefined ? Boolean(state.hasDeviceTags) : true;
+    nextState.hasSeverities = state.hasSeverities !== undefined ? Boolean(state.hasSeverities) : true;
+    nextState.hasOsPlatforms = state.hasOsPlatforms !== undefined ? Boolean(state.hasOsPlatforms) : true;
+
+    if (nextState.deviceNames.length > 0) nextState.hasDeviceNames = true;
+    if (nextState.rbacGroups.length > 0) nextState.hasRbacGroups = true;
+    if (nextState.deviceTags.length > 0) nextState.hasDeviceTags = true;
+    if (nextState.severities.length > 0) nextState.hasSeverities = true;
+    if (nextState.osPlatforms.length > 0) nextState.hasOsPlatforms = true;
+
+    nextState.deviceNameSet = new Set(nextState.deviceNames);
+    nextState.rbacGroupSet = new Set(nextState.rbacGroups);
+    nextState.deviceTagSet = new Set(nextState.deviceTags);
+    nextState.severitySet = new Set(nextState.severities);
+    nextState.osPlatformSet = new Set(nextState.osPlatforms);
+    nextState.key = buildFilterStateKey(nextState);
+    return nextState;
+}
+
+function cloneFilterState(state = filterState) {
+    return finalizeFilterState({
+        datePreset: state.datePreset,
+        startDate: state.startDate,
+        endDate: state.endDate,
+        deviceNames: [...state.deviceNames],
+        rbacGroups: [...state.rbacGroups],
+        deviceTags: [...state.deviceTags],
+        severities: [...state.severities],
+        osPlatforms: [...state.osPlatforms],
+        hasDeviceNames: state.hasDeviceNames,
+        hasRbacGroups: state.hasRbacGroups,
+        hasDeviceTags: state.hasDeviceTags,
+        hasSeverities: state.hasSeverities,
+        hasOsPlatforms: state.hasOsPlatforms
+    });
+}
+
+function getDateRangeValues(range) {
+    const endDate = new Date();
+    const startDate = new Date();
+
+    switch (range) {
+        case '1w':
+            startDate.setDate(startDate.getDate() - 7);
+            break;
+        case '1m':
+            startDate.setMonth(startDate.getMonth() - 1);
+            break;
+        case '3m':
+            startDate.setMonth(startDate.getMonth() - 3);
+            break;
+        case '6m':
+            startDate.setMonth(startDate.getMonth() - 6);
+            break;
+        case '12m':
+            startDate.setFullYear(startDate.getFullYear() - 1);
+            break;
+        default:
+            break;
+    }
+
+    return {
+        startDate: startDate.toISOString().split('T')[0],
+        endDate: endDate.toISOString().split('T')[0]
+    };
+}
+
+function assignDatePreset(state, range) {
+    const nextState = state;
+    const { startDate, endDate } = getDateRangeValues(range);
+    nextState.datePreset = range;
+    nextState.startDate = startDate;
+    nextState.endDate = endDate;
+    return nextState;
+}
+
+function resetFilterInState(state, filterKey) {
+    const nextState = state;
+    if (filterKey === 'date') {
+        return assignDatePreset(nextState, '1w');
+    }
+
+    const config = FILTER_POPOVER_CONFIG[filterKey];
+    if (!config || !config.stateKey) {
+        return nextState;
+    }
+
+    nextState[config.stateKey] = [];
+    if (config.hasAnyKey) {
+        nextState[config.hasAnyKey] = true;
+    }
+    if (filterKey === 'filterDeviceName') {
+        nextState.deviceSearch = '';
+        nextState.deviceSearchNormalized = '';
+    }
+    return nextState;
+}
+
+function formatDateLabel(state = filterState) {
+    if (state.datePreset && DATE_PRESET_CONFIG[state.datePreset]) {
+        return DATE_PRESET_CONFIG[state.datePreset];
+    }
+    return 'Custom';
+}
+
+function isDateFilterDefault(state = filterState) {
+    return state.datePreset === '1w';
+}
+
+function getDeviceSelectionLabelCount(state = filterState) {
+    return state.deviceNames.length;
+}
+
+function getFilterPillValue(filterKey, state = filterState) {
+    if (filterKey === 'date') {
+        return formatDateLabel(state);
+    }
+
+    if (filterKey === 'filterDeviceName') {
+        if (!state.hasDeviceNames) {
+            return '0 selected';
+        }
+        return state.deviceNames.length > 0
+            ? `${state.deviceNames.length} selected`
+            : 'All';
+    }
+
+    const config = FILTER_POPOVER_CONFIG[filterKey];
+    const values = config && config.stateKey ? state[config.stateKey] : [];
+    if (config && config.hasAnyKey && !state[config.hasAnyKey]) {
+        return 'None';
+    }
+    if (!values || values.length === 0) {
+        return config ? config.allText : 'All';
+    }
+    if (values.length === 1) {
+        return values[0];
+    }
+    return `${values.length} selected`;
+}
+
+function isFilterActive(filterKey, state = filterState) {
+    if (filterKey === 'date') {
+        return !isDateFilterDefault(state);
+    }
+
+    const config = FILTER_POPOVER_CONFIG[filterKey];
+    return Boolean(
+        config && config.stateKey && (
+            !state[config.hasAnyKey] || state[config.stateKey].length > 0
+        )
+    );
+}
+
+function renderFilterPills(state = filterState) {
+    FILTER_POPOVER_KEYS.forEach(filterKey => {
+        const config = FILTER_POPOVER_CONFIG[filterKey];
+        const button = document.getElementById(config.buttonId);
+        if (!button) return;
+
+        const value = button.querySelector('.filter-pill-value');
+        if (value) {
+            value.textContent = getFilterPillValue(filterKey, state);
+        }
+
+        button.classList.toggle('is-active', isFilterActive(filterKey, state));
+        button.classList.toggle('is-open', activeFilterPopoverKey === filterKey);
+        button.setAttribute('aria-expanded', activeFilterPopoverKey === filterKey ? 'true' : 'false');
+    });
 }
 
 function createEmptyDataQualitySummary() {
@@ -377,44 +631,25 @@ function getCurrentReportId() {
 
 function buildFilterStateKey(state) {
     return [
+        state.datePreset,
         state.startDate,
         state.endDate,
         state.deviceSearchNormalized,
+        state.hasDeviceNames ? '1' : '0',
         state.deviceNames.join('\u001f'),
+        state.hasRbacGroups ? '1' : '0',
         state.rbacGroups.join('\u001f'),
+        state.hasDeviceTags ? '1' : '0',
         state.deviceTags.join('\u001f'),
+        state.hasSeverities ? '1' : '0',
         state.severities.join('\u001f'),
+        state.hasOsPlatforms ? '1' : '0',
         state.osPlatforms.join('\u001f')
     ].join('\u001e');
 }
 
 function syncFilterStateFromDom() {
-    const nextState = createEmptyFilterState();
-    nextState.startDate = document.getElementById('filterStartDate').value;
-    nextState.endDate = document.getElementById('filterEndDate').value;
-    nextState.deviceSearch = (document.getElementById('filterDeviceSearch')?.value || '').trim();
-    nextState.deviceSearchNormalized = nextState.deviceSearch.toLowerCase();
-    nextState.deviceNames = [];
-    nextState.rbacGroups = isAllChecked('filterRbacGroup') ? [] : getSelectedCheckboxValues('filterRbacGroup');
-    nextState.deviceTags = isAllChecked('filterDeviceTags') ? [] : getSelectedCheckboxValues('filterDeviceTags');
-    nextState.severities = isAllChecked('filterSeverity') ? [] : getSelectedCheckboxValues('filterSeverity');
-    nextState.osPlatforms = isAllChecked('filterOSPlatform') ? [] : getSelectedCheckboxValues('filterOSPlatform');
-
-    nextState.hasDeviceNames = true;
-    nextState.hasRbacGroups = hasAnyChecked('filterRbacGroup');
-    nextState.hasDeviceTags = hasAnyChecked('filterDeviceTags');
-    nextState.hasSeverities = hasAnyChecked('filterSeverity');
-    nextState.hasOsPlatforms = hasAnyChecked('filterOSPlatform');
-
-    nextState.deviceNameSet = new Set(nextState.deviceNames);
-    nextState.rbacGroupSet = new Set(nextState.rbacGroups);
-    nextState.deviceTagSet = new Set(nextState.deviceTags);
-    nextState.severitySet = new Set(nextState.severities);
-    nextState.osPlatformSet = new Set(nextState.osPlatforms);
-    nextState.key = buildFilterStateKey(nextState);
-
-    filterState = nextState;
-    return nextState;
+    return filterState;
 }
 
 function scheduleApplyFilters(immediate = false) {
@@ -1595,6 +1830,7 @@ async function init() {
     setupInfiniteScroll();
     activeReportId = getCurrentReportId();
     setDateRange('1w');
+    scheduleApplyFilters(true);
     clearDashboardStatus();
     console.timeEnd('[perf] init total');
     window._dashboardReady = true;
@@ -1729,6 +1965,26 @@ function buildDeviceFilterCatalog() {
             ? device.t.map(tagIndex => lookups.tags[tagIndex])
             : NO_TAGS_ARRAY)
     }));
+
+    deviceDuplicateNameCounts = deviceFilterCatalog.reduce((counts, device) => {
+        const key = device.deviceName || device.deviceId || '';
+        counts.set(key, (counts.get(key) || 0) + 1);
+        return counts;
+    }, new Map());
+
+    deviceFilterLabelByKey = deviceFilterCatalog.reduce((labels, device) => {
+        const key = getDeviceIdentityKey(device);
+        if (!key) {
+            return labels;
+        }
+
+        const duplicateCount = deviceDuplicateNameCounts.get(device.deviceName || device.deviceId || '') || 0;
+        const label = duplicateCount > 1 && device.deviceName && device.deviceId
+            ? `${device.deviceName} (${device.deviceId})`
+            : (device.deviceName || device.deviceId);
+        labels.set(key, label);
+        return labels;
+    }, new Map());
 }
 
 // =============================================================================
@@ -1837,25 +2093,9 @@ function handleFilterChipClick(event) {
 }
 
 function handleClearAllFilters() {
-    ['filterRbacGroup', 'filterDeviceTags', 'filterOSPlatform', 'filterSeverity'].forEach(containerId => {
-        const container = document.getElementById(containerId);
-        if (!container) return;
-
-        container.querySelectorAll('input[type="checkbox"]').forEach(cb => {
-            cb.checked = true;
-            cb.indeterminate = false;
-        });
-        updateAllCheckbox(containerId);
-
-        const searchInput = document.getElementById(`${containerId}_search`);
-        if (searchInput) searchInput.value = '';
-        container.querySelectorAll('.checkbox-item:not(:first-child)').forEach(item => {
-            item.style.display = 'flex';
-        });
-    });
-
-    const deviceSearchInput = document.getElementById('filterDeviceSearch');
-    if (deviceSearchInput) deviceSearchInput.value = '';
+    closeActiveFilterPopover();
+    filterState = finalizeFilterState(assignDatePreset(createEmptyFilterState(), '1w'));
+    renderFilterPills(filterState);
     scheduleApplyFilters(true);
 }
 
@@ -1871,6 +2111,472 @@ function handleOSPlatformChange() {
  */
 function handleSeverityChange() {
     scheduleApplyFilters();
+}
+
+function areStringArraysEqual(left, right) {
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index++) {
+        if (left[index] !== right[index]) return false;
+    }
+    return true;
+}
+
+function getFilterOptionLabel(filterKey, value) {
+    if (filterKey === 'filterDeviceName') {
+        return deviceFilterLabelByKey.get(value) || value;
+    }
+    return value;
+}
+
+function getFilterOptionSearchText(filterKey, value) {
+    const label = getFilterOptionLabel(filterKey, value);
+    return `${label} ${value}`.trim().toLowerCase();
+}
+
+function getScopedFilterOptions(filterKey, state = filterState) {
+    const scopedState = cloneFilterState(state);
+    resetFilterInState(scopedState, filterKey);
+
+    if (filterKey === 'filterDeviceName') {
+        const devicesByKey = new Map();
+        for (let index = 0; index < vulnerabilityData.length; index++) {
+            const vuln = vulnerabilityData[index];
+            if (!matchesFilterStateDate(vuln, scopedState)) continue;
+            if (!matchesFilterStateNonDate(vuln, scopedState, filterKey)) continue;
+
+            if (!devicesByKey.has(vuln._deviceFilterKey)) {
+                const label = getFilterOptionLabel(filterKey, vuln._deviceFilterKey);
+                devicesByKey.set(vuln._deviceFilterKey, {
+                    value: vuln._deviceFilterKey,
+                    label,
+                    searchText: getFilterOptionSearchText(filterKey, vuln._deviceFilterKey),
+                    count: null
+                });
+            }
+        }
+
+        return Array.from(devicesByKey.values()).sort((left, right) => left.label.localeCompare(right.label));
+    }
+
+    const deviceSetCounts = new Map();
+    const rowCounts = new Map();
+    for (let index = 0; index < vulnerabilityData.length; index++) {
+        const vuln = vulnerabilityData[index];
+        if (!matchesFilterStateDate(vuln, scopedState)) continue;
+        if (!matchesFilterStateNonDate(vuln, scopedState, filterKey)) continue;
+
+        switch (filterKey) {
+            case 'filterRbacGroup': {
+                const key = vuln._normalizedGroup;
+                if (!deviceSetCounts.has(key)) deviceSetCounts.set(key, new Set());
+                deviceSetCounts.get(key).add(vuln._deviceFilterKey);
+                break;
+            }
+            case 'filterDeviceTags': {
+                for (let tagIndex = 0; tagIndex < vuln._tagValues.length; tagIndex++) {
+                    const key = vuln._tagValues[tagIndex];
+                    if (!deviceSetCounts.has(key)) deviceSetCounts.set(key, new Set());
+                    deviceSetCounts.get(key).add(vuln._deviceFilterKey);
+                }
+                break;
+            }
+            case 'filterOSPlatform': {
+                const key = vuln.OSPlatform;
+                if (!deviceSetCounts.has(key)) deviceSetCounts.set(key, new Set());
+                deviceSetCounts.get(key).add(vuln._deviceFilterKey);
+                break;
+            }
+            case 'filterSeverity': {
+                const key = vuln.VulnerabilitySeverityLevel;
+                rowCounts.set(key, (rowCounts.get(key) || 0) + 1);
+                break;
+            }
+        }
+    }
+
+    if (filterKey === 'filterSeverity') {
+        return ['Critical', 'High', 'Medium', 'Low']
+            .filter(value => rowCounts.has(value))
+            .map(value => ({ value, label: value, count: rowCounts.get(value) || 0 }));
+    }
+
+    const values = Array.from(deviceSetCounts.keys()).sort((left, right) => {
+        if (filterKey === 'filterRbacGroup') {
+            if (left === NO_GROUP_VALUE && right !== NO_GROUP_VALUE) return -1;
+            if (right === NO_GROUP_VALUE && left !== NO_GROUP_VALUE) return 1;
+        }
+        if (filterKey === 'filterDeviceTags') {
+            if (left === NO_TAGS_VALUE && right !== NO_TAGS_VALUE) return -1;
+            if (right === NO_TAGS_VALUE && left !== NO_TAGS_VALUE) return 1;
+        }
+        return left.localeCompare(right);
+    });
+
+    return values.map(value => ({
+        value,
+        label: value,
+        count: deviceSetCounts.get(value)?.size || 0,
+        searchText: value.toLowerCase()
+    }));
+}
+
+function isDraftOptionSelected(filterKey, optionValue) {
+    const config = FILTER_POPOVER_CONFIG[filterKey];
+    const values = filterPopoverDraftState?.[config.stateKey] || [];
+    const hasAny = filterPopoverDraftState?.[config.hasAnyKey];
+    if (!hasAny) return false;
+    if (values.length === 0) return true;
+    return values.includes(optionValue);
+}
+
+function getDraftSelectedCount(filterKey) {
+    const config = FILTER_POPOVER_CONFIG[filterKey];
+    if (!config) return 0;
+
+    const values = filterPopoverDraftState?.[config.stateKey] || [];
+    const hasAny = filterPopoverDraftState?.[config.hasAnyKey];
+    if (!hasAny) return 0;
+    if (values.length === 0) return activeFilterPopoverOptions.length;
+    return values.length;
+}
+
+function isFilterDefaultState(filterKey, state = filterState) {
+    if (filterKey === 'date') {
+        return isDateFilterDefault(state);
+    }
+
+    const config = FILTER_POPOVER_CONFIG[filterKey];
+    if (!config) return true;
+    return state[config.hasAnyKey] && state[config.stateKey].length === 0;
+}
+
+function isActiveFilterPopoverDirty() {
+    if (!activeFilterPopoverKey || !filterPopoverDraftState) {
+        return false;
+    }
+
+    if (activeFilterPopoverKey === 'date') {
+        return filterPopoverDraftState.datePreset !== filterState.datePreset
+            || filterPopoverDraftState.startDate !== filterState.startDate
+            || filterPopoverDraftState.endDate !== filterState.endDate;
+    }
+
+    const config = FILTER_POPOVER_CONFIG[activeFilterPopoverKey];
+    return filterPopoverDraftState[config.hasAnyKey] !== filterState[config.hasAnyKey]
+        || !areStringArraysEqual(filterPopoverDraftState[config.stateKey], filterState[config.stateKey]);
+}
+
+function updateFilterPopoverFooterState() {
+    const applyButton = document.getElementById('filterPopoverApplyButton');
+    const resetButton = document.getElementById('filterPopoverResetButton');
+    if (!applyButton || !resetButton || !activeFilterPopoverKey) {
+        return;
+    }
+
+    applyButton.disabled = !isActiveFilterPopoverDirty();
+    resetButton.disabled = isFilterDefaultState(activeFilterPopoverKey, filterPopoverDraftState);
+}
+
+function updateDatePresetButtonState() {
+    document.querySelectorAll('#filterPopoverBody [data-date-preset]').forEach(button => {
+        const isSelected = filterPopoverDraftState?.datePreset === button.dataset.datePreset;
+        button.classList.toggle('selected', Boolean(isSelected));
+        button.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+    });
+}
+
+function updateFilterPopoverSummary() {
+    return;
+}
+
+function updateFilterPopoverAllCheckbox() {
+    const allCheckbox = document.getElementById('filterPopoverAllCheckbox');
+    if (!allCheckbox || !activeFilterPopoverKey || activeFilterPopoverKey === 'date') {
+        return;
+    }
+
+    const selectedCount = getDraftSelectedCount(activeFilterPopoverKey);
+    const optionCount = activeFilterPopoverOptions.length;
+    allCheckbox.indeterminate = selectedCount > 0 && selectedCount < optionCount;
+    allCheckbox.checked = optionCount > 0 && selectedCount === optionCount;
+}
+
+function applyFilterPopoverSearch() {
+    const searchInput = document.getElementById('filterPopoverSearchInput');
+    const searchTerm = (searchInput?.value || '').trim().toLowerCase();
+    document.querySelectorAll('#filterPopoverOptions .checkbox-item[data-search-text]').forEach(item => {
+        const text = item.dataset.searchText || '';
+        item.style.display = text.includes(searchTerm) ? 'flex' : 'none';
+    });
+}
+
+function renderActiveFilterPopover() {
+    const popover = document.getElementById('filterPopover');
+    const title = document.getElementById('filterPopoverTitle');
+    const subtitle = document.getElementById('filterPopoverSubtitle');
+    const body = document.getElementById('filterPopoverBody');
+    if (!popover || !title || !subtitle || !body || !activeFilterPopoverKey || !filterPopoverDraftState) {
+        return;
+    }
+
+    const config = FILTER_POPOVER_CONFIG[activeFilterPopoverKey];
+    title.textContent = config.label;
+    subtitle.textContent = '';
+
+    body.className = 'filter-popover-body';
+
+    popover.dataset.filterKey = activeFilterPopoverKey;
+    activeFilterPopoverOptions = activeFilterPopoverKey === 'date'
+        ? []
+        : getScopedFilterOptions(activeFilterPopoverKey, filterState);
+
+    if (activeFilterPopoverKey === 'date') {
+        body.classList.add('filter-popover-body--date');
+        body.innerHTML = `
+            <div class="filter-popover-date-presets">
+                ${Object.entries(DATE_PRESET_CONFIG).map(([value, label]) => `
+                    <button type="button" class="date-range-option${filterPopoverDraftState.datePreset === value ? ' selected' : ''}" data-date-preset="${value}" aria-pressed="${filterPopoverDraftState.datePreset === value ? 'true' : 'false'}">${label}</button>
+                `).join('')}
+            </div>
+            <div class="filter-popover-date-inputs">
+                <div class="filter-popover-date-field">
+                    <label for="filterPopoverStartDate">Start Date</label>
+                    <input type="date" id="filterPopoverStartDate" value="${escapeHtml(filterPopoverDraftState.startDate)}">
+                </div>
+                <div class="filter-popover-date-field">
+                    <label for="filterPopoverEndDate">End Date</label>
+                    <input type="date" id="filterPopoverEndDate" value="${escapeHtml(filterPopoverDraftState.endDate)}">
+                </div>
+            </div>`;
+        updateFilterPopoverFooterState();
+        return;
+    }
+
+    const optionCount = activeFilterPopoverOptions.length;
+    const selectedCount = getDraftSelectedCount(activeFilterPopoverKey);
+    const shouldShowSearch = config.searchable || optionCount > FACET_SEARCH_MIN_OPTIONS;
+    const searchPlaceholder = activeFilterPopoverKey === 'filterDeviceName'
+        ? 'Search device name or id'
+        : 'Filter options';
+
+    body.classList.add('filter-popover-body--options');
+    body.innerHTML = `
+        ${shouldShowSearch ? `<input type="text" id="filterPopoverSearchInput" class="filter-search filter-popover-search" placeholder="${searchPlaceholder}">` : ''}
+        <div class="filter-popover-options" id="filterPopoverOptions">
+            <div class="checkbox-item checkbox-item-all">
+                <input type="checkbox" id="filterPopoverAllCheckbox" ${optionCount > 0 && selectedCount === optionCount ? 'checked' : ''}>
+                <label for="filterPopoverAllCheckbox">All</label>
+            </div>
+            ${optionCount === 0 ? `<div class="filter-popover-empty">No ${config.summaryNoun} are available in the current scope.</div>` : activeFilterPopoverOptions.map((option, index) => {
+                const checked = isDraftOptionSelected(activeFilterPopoverKey, option.value) ? 'checked' : '';
+                const countMarkup = option.count !== null && option.count !== undefined
+                    ? `<span class="checkbox-count">${option.count}</span>`
+                    : '';
+                return `
+                    <div class="checkbox-item" data-search-text="${escapeHtml(option.searchText || option.label.toLowerCase())}">
+                        <input type="checkbox" id="filterPopoverOption_${index}" data-option-value="${escapeHtml(option.value)}" ${checked}>
+                        <label for="filterPopoverOption_${index}">
+                            <span class="checkbox-label-text">${escapeHtml(option.label)}</span>
+                            ${countMarkup}
+                        </label>
+                    </div>`;
+            }).join('')}
+        </div>`;
+
+    updateFilterPopoverSummary();
+    updateFilterPopoverAllCheckbox();
+    updateFilterPopoverFooterState();
+}
+
+function positionFilterPopover(anchorButton) {
+    const toolbar = document.getElementById('filterToolbar');
+    const popover = document.getElementById('filterPopover');
+    if (!toolbar || !popover || !anchorButton) {
+        return;
+    }
+
+    const toolbarRect = toolbar.getBoundingClientRect();
+    const anchorRect = anchorButton.getBoundingClientRect();
+    const popoverWidth = popover.offsetWidth || Math.min(
+        activeFilterPopoverKey === 'filterDeviceName' ? 520 : 400,
+        toolbar.clientWidth
+    );
+    const anchorCenter = (anchorRect.left - toolbarRect.left) + (anchorRect.width / 2);
+    const maxLeft = Math.max(0, toolbar.clientWidth - popoverWidth);
+    const offset = Math.min(Math.max(0, anchorCenter - (popoverWidth / 2)), maxLeft);
+    popover.style.left = `${offset}px`;
+}
+
+function closeActiveFilterPopover() {
+    const popover = document.getElementById('filterPopover');
+    if (popover) {
+        popover.hidden = true;
+        popover.setAttribute('aria-hidden', 'true');
+        popover.removeAttribute('data-filter-key');
+        popover.style.left = '0px';
+    }
+
+    activeFilterPopoverKey = null;
+    activeFilterPopoverOptions = [];
+    filterPopoverDraftState = null;
+    renderFilterPills(filterState);
+}
+
+function openFilterPopover(filterKey, anchorButton) {
+    if (activeFilterPopoverKey === filterKey) {
+        closeActiveFilterPopover();
+        return;
+    }
+
+    activeFilterPopoverKey = filterKey;
+    filterPopoverDraftState = cloneFilterState(filterState);
+    renderActiveFilterPopover();
+
+    const popover = document.getElementById('filterPopover');
+    if (popover) {
+        popover.hidden = false;
+        popover.setAttribute('aria-hidden', 'false');
+    }
+
+    positionFilterPopover(anchorButton);
+    renderFilterPills(filterState);
+
+    const autofocusTarget = document.getElementById('filterPopoverSearchInput')
+        || document.querySelector('#filterPopoverBody .date-range-option.selected')
+        || document.getElementById('filterPopoverApplyButton');
+    autofocusTarget?.focus();
+}
+
+function syncDraftStateFromPopoverOptions() {
+    if (!activeFilterPopoverKey || activeFilterPopoverKey === 'date') {
+        return;
+    }
+
+    const config = FILTER_POPOVER_CONFIG[activeFilterPopoverKey];
+    const checkedValues = Array.from(document.querySelectorAll('#filterPopoverOptions input[data-option-value]:checked'))
+        .map(checkbox => checkbox.dataset.optionValue);
+
+    if (checkedValues.length === 0) {
+        filterPopoverDraftState[config.stateKey] = [];
+        filterPopoverDraftState[config.hasAnyKey] = false;
+    } else if (checkedValues.length === activeFilterPopoverOptions.length) {
+        filterPopoverDraftState[config.stateKey] = [];
+        filterPopoverDraftState[config.hasAnyKey] = true;
+    } else {
+        filterPopoverDraftState[config.stateKey] = activeFilterPopoverOptions
+            .map(option => option.value)
+            .filter(value => checkedValues.includes(value));
+        filterPopoverDraftState[config.hasAnyKey] = true;
+    }
+
+    updateFilterPopoverSummary();
+    updateFilterPopoverAllCheckbox();
+    updateFilterPopoverFooterState();
+}
+
+function handleFilterPopoverClick(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+        return;
+    }
+
+    if (target.id === 'filterPopoverCloseButton' || target.id === 'filterPopoverCancelButton') {
+        closeActiveFilterPopover();
+        return;
+    }
+
+    if (target.id === 'filterPopoverResetButton') {
+        filterPopoverDraftState = finalizeFilterState(resetFilterInState(cloneFilterState(filterPopoverDraftState), activeFilterPopoverKey));
+        renderActiveFilterPopover();
+        return;
+    }
+
+    if (target.id === 'filterPopoverApplyButton') {
+        filterState = finalizeFilterState(filterPopoverDraftState);
+        closeActiveFilterPopover();
+        renderFilterPills(filterState);
+        scheduleApplyFilters(true);
+        return;
+    }
+
+    if (target.matches('[data-date-preset]')) {
+        filterPopoverDraftState = finalizeFilterState(assignDatePreset(cloneFilterState(filterPopoverDraftState), target.dataset.datePreset));
+        renderActiveFilterPopover();
+        return;
+    }
+
+    if (target.id === 'filterPopoverAllCheckbox') {
+        document.querySelectorAll('#filterPopoverOptions input[data-option-value]').forEach(checkbox => {
+            checkbox.checked = target.checked;
+        });
+        syncDraftStateFromPopoverOptions();
+    }
+}
+
+function handleFilterPopoverInput(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || !activeFilterPopoverKey) {
+        return;
+    }
+
+    if (target.id === 'filterPopoverSearchInput') {
+        applyFilterPopoverSearch();
+        return;
+    }
+
+    if (target.id === 'filterPopoverStartDate' || target.id === 'filterPopoverEndDate') {
+        const startDate = document.getElementById('filterPopoverStartDate')?.value || '';
+        const endDate = document.getElementById('filterPopoverEndDate')?.value || '';
+        filterPopoverDraftState.startDate = startDate;
+        filterPopoverDraftState.endDate = endDate;
+        filterPopoverDraftState.datePreset = 'custom';
+        updateDatePresetButtonState();
+        updateFilterPopoverFooterState();
+        return;
+    }
+
+    if (target.matches('#filterPopoverOptions input[data-option-value]')) {
+        syncDraftStateFromPopoverOptions();
+    }
+}
+
+function handleFilterPillClick(event) {
+    const button = event.currentTarget;
+    const filterKey = button.dataset.filterKey;
+    if (!filterKey) {
+        return;
+    }
+
+    openFilterPopover(filterKey, button);
+}
+
+function handleDocumentPointerDown(event) {
+    const popover = document.getElementById('filterPopover');
+    if (!activeFilterPopoverKey || !popover) {
+        return;
+    }
+
+    const target = event.target;
+    if (!(target instanceof Element)) {
+        closeActiveFilterPopover();
+        return;
+    }
+
+    if (popover.contains(target)) {
+        return;
+    }
+
+    if (target.closest('.filter-pill')) {
+        return;
+    }
+
+    closeActiveFilterPopover();
+}
+
+function handleDocumentKeyDown(event) {
+    if (event.key === 'Escape' && activeFilterPopoverKey) {
+        closeActiveFilterPopover();
+    }
 }
 
 function handleSortButtonClick(event) {
@@ -1894,16 +2600,28 @@ function handleSortButtonClick(event) {
  * Attach event listeners to filter controls
  */
 function attachEventListeners() {
-    document.querySelectorAll('.date-range-option').forEach(option => {
-        option.addEventListener('click', handleDateRangeChange);
-    });
-    document.getElementById('filterStartDate').addEventListener('change', handleManualDateChange);
-    document.getElementById('filterEndDate').addEventListener('change', handleManualDateChange);
-    document.getElementById('filterDeviceSearch')?.addEventListener('input', handleDeviceSearchInput);
     document.getElementById('reportSelector').addEventListener('change', handleReportChange);
     document.getElementById('exportPdfButton').addEventListener('click', exportToPDF);
     document.getElementById('clearAllFiltersButton')?.addEventListener('click', handleClearAllFilters);
-    document.getElementById('filterChipList')?.addEventListener('click', handleFilterChipClick);
+    document.querySelectorAll('.filter-pill').forEach(button => {
+        button.addEventListener('click', handleFilterPillClick);
+    });
+    document.getElementById('filterPopover')?.addEventListener('click', handleFilterPopoverClick);
+    document.getElementById('filterPopover')?.addEventListener('input', handleFilterPopoverInput);
+    document.getElementById('filterPopover')?.addEventListener('change', handleFilterPopoverInput);
+    document.addEventListener('pointerdown', handleDocumentPointerDown);
+    document.addEventListener('keydown', handleDocumentKeyDown);
+    window.addEventListener('resize', () => {
+        if (!activeFilterPopoverKey) {
+            return;
+        }
+
+        const buttonId = FILTER_POPOVER_CONFIG[activeFilterPopoverKey]?.buttonId;
+        const anchorButton = buttonId ? document.getElementById(buttonId) : null;
+        if (anchorButton) {
+            positionFilterPopover(anchorButton);
+        }
+    });
     document.getElementById('closeModalButton').addEventListener('click', closeModal);
     document.querySelectorAll('.sort-button').forEach(button => {
         button.addEventListener('click', handleSortButtonClick);
@@ -1946,30 +2664,8 @@ function attachEventListeners() {
  * @param {string} range - The range preset (1w, 1m, 3m, 6m, 12m)
  */
 function setDateRange(range) {
-    const endDate = new Date();
-    let startDate = new Date();
-    
-    switch(range) {
-        case '1w':
-            startDate.setDate(startDate.getDate() - 7);
-            break;
-        case '1m':
-            startDate.setMonth(startDate.getMonth() - 1);
-            break;
-        case '3m':
-            startDate.setMonth(startDate.getMonth() - 3);
-            break;
-        case '6m':
-            startDate.setMonth(startDate.getMonth() - 6);
-            break;
-        case '12m':
-            startDate.setFullYear(startDate.getFullYear() - 1);
-            break;
-    }
-    
-    document.getElementById('filterStartDate').value = startDate.toISOString().split('T')[0];
-    document.getElementById('filterEndDate').value = endDate.toISOString().split('T')[0];
-    scheduleApplyFilters(true);
+    filterState = finalizeFilterState(assignDatePreset(cloneFilterState(filterState), range));
+    renderFilterPills(filterState);
 }
 
 // =============================================================================
@@ -1981,129 +2677,20 @@ function setDateRange(range) {
  * Uses normalized lookups for efficiency instead of iterating all records
  */
 function populateFilters() {
-    const staticOptions = buildStaticFilterOptions();
-
-    populateCheckboxes('filterRbacGroup', staticOptions.filterRbacGroup, 'All Groups', handleDeviceGroupChange);
-    populateCheckboxes('filterDeviceTags', staticOptions.filterDeviceTags, 'All Tags', handleDeviceTagsChange);
-    populateCheckboxes('filterOSPlatform', staticOptions.filterOSPlatform, 'All Platforms', handleOSPlatformChange);
-    populateCheckboxes('filterSeverity', staticOptions.filterSeverity, 'All Severities', handleSeverityChange);
-    updateDeviceSearchSummary([]);
-    updateFilterSummary(createEmptyFilterState());
+    filterState = finalizeFilterState(assignDatePreset(createEmptyFilterState(), '1w'));
+    renderFilterPills(filterState);
 }
 
 function buildStaticFilterOptions() {
-    const groupCounts = new Map();
-    const tagCounts = new Map();
-    const platformCounts = new Map();
-    const severityCounts = new Map([['Critical', 0], ['High', 0], ['Medium', 0], ['Low', 0]]);
-
-    deviceFilterCatalog.forEach(device => {
-        groupCounts.set(device.rbacGroup, (groupCounts.get(device.rbacGroup) || 0) + 1);
-        device.deviceTags.forEach(tag => {
-            tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
-        });
-    });
-
-    const platformSets = new Map();
-    vulnerabilityData.forEach(v => {
-        if (!platformSets.has(v.OSPlatform)) {
-            platformSets.set(v.OSPlatform, new Set());
-        }
-        platformSets.get(v.OSPlatform).add(v._deviceFilterKey);
-
-        if (severityCounts.has(v.VulnerabilitySeverityLevel)) {
-            severityCounts.set(v.VulnerabilitySeverityLevel, severityCounts.get(v.VulnerabilitySeverityLevel) + 1);
-        }
-    });
-
-    const rbacGroups = Array.from(groupCounts.keys()).sort((a, b) => {
-        if (a === NO_GROUP_VALUE && b !== NO_GROUP_VALUE) return -1;
-        if (b === NO_GROUP_VALUE && a !== NO_GROUP_VALUE) return 1;
-        return a.localeCompare(b);
-    });
-    const deviceTags = Array.from(tagCounts.keys()).sort((a, b) => {
-        if (a === NO_TAGS_VALUE && b !== NO_TAGS_VALUE) return -1;
-        if (b === NO_TAGS_VALUE && a !== NO_TAGS_VALUE) return 1;
-        return a.localeCompare(b);
-    });
-    const osPlatforms = Array.from(platformSets.keys()).sort((a, b) => a.localeCompare(b));
-    const severities = ['Critical', 'High', 'Medium', 'Low'];
-
-    return {
-        filterRbacGroup: rbacGroups.map(value => ({ value, label: value, count: groupCounts.get(value) || 0 })),
-        filterDeviceTags: deviceTags.map(value => ({ value, label: value, count: tagCounts.get(value) || 0 })),
-        filterOSPlatform: osPlatforms.map(value => ({ value, label: value, count: (platformSets.get(value) || new Set()).size })),
-        filterSeverity: severities.map(value => ({ value, label: value, count: severityCounts.get(value) || 0 }))
-    };
-}
-
-function getUniqueDeviceCount(rows) {
-    return new Set((rows || []).map(v => v._deviceFilterKey)).size;
+    return {};
 }
 
 function updateDeviceSearchSummary(rows = filteredData) {
-    const summary = document.getElementById('filterDeviceSearchSummary');
-    if (!summary) return;
-
-    const activeSearch = (document.getElementById('filterDeviceSearch')?.value || '').trim();
-    const deviceCount = getUniqueDeviceCount(rows);
-    if (activeSearch) {
-        summary.textContent = deviceCount === 1
-            ? '1 device matches the current search.'
-            : `${deviceCount} devices match the current search.`;
-        return;
-    }
-
-    summary.textContent = deviceCount === 0
-        ? 'No devices are in the current scope.'
-        : `${deviceCount} devices are in the current scope.`;
-}
-
-function buildFilterChipDescriptors(state = filterState) {
-    const chips = [];
-
-    state.rbacGroups.forEach(value => chips.push({ containerId: 'filterRbacGroup', value, label: `Group: ${value}` }));
-    state.deviceTags.forEach(value => chips.push({ containerId: 'filterDeviceTags', value, label: `Tag: ${value}` }));
-    state.osPlatforms.forEach(value => chips.push({ containerId: 'filterOSPlatform', value, label: `Platform: ${value}` }));
-    state.severities.forEach(value => chips.push({ containerId: 'filterSeverity', value, label: `Severity: ${value}` }));
-
-    if (state.deviceSearch) {
-        chips.push({ containerId: 'filterDeviceSearch', value: '', label: `Search: ${state.deviceSearch}` });
-    }
-
-    return chips;
+    return rows;
 }
 
 function updateFilterSummary(state = filterState) {
-    const chipList = document.getElementById('filterChipList');
-    if (!chipList) return;
-
-    const chips = buildFilterChipDescriptors(state);
-    chipList.innerHTML = '';
-
-    if (chips.length === 0) {
-        const empty = document.createElement('span');
-        empty.className = 'filter-summary-empty';
-        empty.textContent = 'No filters applied.';
-        chipList.appendChild(empty);
-        return;
-    }
-
-    chips.forEach(chip => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'filter-chip';
-        button.dataset.containerId = chip.containerId;
-        button.dataset.filterValue = chip.value;
-        button.append(document.createTextNode(chip.label));
-
-        const remove = document.createElement('span');
-        remove.className = 'filter-chip-remove';
-        remove.textContent = 'x';
-        remove.setAttribute('aria-hidden', 'true');
-        button.appendChild(remove);
-        chipList.appendChild(button);
-    });
+    renderFilterPills(state);
 }
 
 /**
@@ -2114,102 +2701,10 @@ function updateFilterSummary(state = filterState) {
  * @param {Function} onChange - Optional callback for change events
  */
 function populateCheckboxes(containerId, values, allLabel, onChange) {
-    const container = document.getElementById(containerId);
-    const filterGroup = container.parentElement;
-    container.innerHTML = '';
-    
-    // Remove existing search input if present
-    const existingSearch = filterGroup.querySelector('.filter-search');
-    if (existingSearch) existingSearch.remove();
-    
-    if (values.length > FACET_SEARCH_MIN_OPTIONS) {
-        filterGroup.setAttribute('data-has-search', 'true');
-        const searchInput = document.createElement('input');
-        searchInput.type = 'text';
-        searchInput.className = 'filter-search';
-        searchInput.placeholder = 'Filter...';
-        searchInput.id = `${containerId}_search`;
-        let searchTimer = null;
-        searchInput.addEventListener('input', function() {
-            if (searchTimer) clearTimeout(searchTimer);
-            const searchTerm = this.value.toLowerCase();
-            searchTimer = window.setTimeout(() => {
-                const items = container.querySelectorAll('.checkbox-item:not(:first-child)');
-                items.forEach(item => {
-                    const label = item.querySelector('label');
-                    if (label) {
-                        const text = label.textContent.toLowerCase();
-                        item.style.display = text.includes(searchTerm) ? 'flex' : 'none';
-                    }
-                });
-            }, APPLY_FILTER_DEBOUNCE_MS);
-        });
-        filterGroup.insertBefore(searchInput, container);
-    } else {
-        filterGroup.removeAttribute('data-has-search');
-    }
-    
-    // Add "All" checkbox
-    const allDiv = document.createElement('div');
-    allDiv.className = 'checkbox-item';
-    const allCheckbox = document.createElement('input');
-    allCheckbox.type = 'checkbox';
-    allCheckbox.id = `${containerId}_all`;
-    allCheckbox.checked = true;
-    allCheckbox.addEventListener('change', function() {
-        this.indeterminate = false;
-        const checkboxes = container.querySelectorAll('input[type="checkbox"]:not(#' + this.id + ')');
-        checkboxes.forEach(cb => {
-            if (!cb.disabled) {
-                cb.checked = this.checked;
-            }
-        });
-        if (onChange) onChange();
-        else scheduleApplyFilters();
-    });
-    const allLabel2 = document.createElement('label');
-    allLabel2.setAttribute('for', allCheckbox.id);
-    allLabel2.textContent = allLabel;
-    allDiv.appendChild(allCheckbox);
-    allDiv.appendChild(allLabel2);
-    container.appendChild(allDiv);
-    
-    // Add individual checkboxes
-    values.forEach((entry, idx) => {
-        const option = typeof entry === 'string'
-            ? { value: entry, label: entry, count: null }
-            : entry;
-        const div = document.createElement('div');
-        div.className = 'checkbox-item';
-        const checkbox = document.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.value = option.value;
-        checkbox.id = `${containerId}_${idx}`;
-        checkbox.checked = true;
-        checkbox.addEventListener('change', function() {
-            updateAllCheckbox(containerId);
-            if (onChange) onChange();
-            else scheduleApplyFilters();
-        });
-        const label = document.createElement('label');
-        label.setAttribute('for', checkbox.id);
-
-        const labelText = document.createElement('span');
-        labelText.className = 'checkbox-label-text';
-        labelText.textContent = option.label;
-        label.appendChild(labelText);
-
-        if (option.count !== null && option.count !== undefined) {
-            const count = document.createElement('span');
-            count.className = 'checkbox-count';
-            count.textContent = option.count;
-            label.appendChild(count);
-        }
-
-        div.appendChild(checkbox);
-        div.appendChild(label);
-        container.appendChild(div);
-    });
+    void containerId;
+    void values;
+    void allLabel;
+    void onChange;
 }
 
 /**
@@ -2478,12 +2973,45 @@ function getSelectedCheckboxValues(containerId) {
 }
 
 function getSelectedFilterValuesForExport(containerId) {
-    if (containerId === 'filterDeviceSearch') {
-        const searchValue = (document.getElementById('filterDeviceSearch')?.value || '').trim();
-        return searchValue ? [searchValue] : [];
+    switch (containerId) {
+        case 'filterRbacGroup':
+            return filterState.hasRbacGroups ? [...filterState.rbacGroups] : ['None'];
+        case 'filterDeviceTags':
+            return filterState.hasDeviceTags ? [...filterState.deviceTags] : ['None'];
+        case 'filterOSPlatform':
+            return filterState.hasOsPlatforms ? [...filterState.osPlatforms] : ['None'];
+        case 'filterSeverity':
+            return filterState.hasSeverities ? [...filterState.severities] : ['None'];
+        case 'filterDeviceName':
+            if (!filterState.hasDeviceNames) {
+                return ['None'];
+            }
+            return filterState.deviceNames.map(value => getFilterOptionLabel('filterDeviceName', value));
+        default:
+            return [];
+    }
+}
+
+function getExportFilterText(filterKey, allLabel) {
+    const config = FILTER_POPOVER_CONFIG[filterKey];
+    if (!config || !config.stateKey) {
+        return allLabel;
     }
 
-    return isAllChecked(containerId) ? [] : getSelectedCheckboxValues(containerId);
+    if (!filterState[config.hasAnyKey]) {
+        return 'None';
+    }
+
+    const values = filterState[config.stateKey];
+    if (!values || values.length === 0) {
+        return allLabel;
+    }
+
+    if (filterKey === 'filterDeviceName') {
+        return values.map(value => getFilterOptionLabel(filterKey, value)).join(', ');
+    }
+
+    return values.join(', ');
 }
 
 /**
@@ -2508,17 +3036,37 @@ function hasAnyChecked(containerId) {
     return Array.from(checkboxes).some(cb => cb.checked);
 }
 
-function matchesFilterStateNonDate(v, state = filterState) {
+function matchesFilterStateNonDate(v, state = filterState, excludedFilterKey = '') {
     if (state.deviceSearchNormalized && !v._deviceSearchText.includes(state.deviceSearchNormalized)) return false;
-    if (state.rbacGroupSet.size > 0 && !state.rbacGroupSet.has(v._normalizedGroup)) return false;
 
-    if (state.deviceTagSet.size > 0) {
-        const vulnTags = v._tagValues;
-        if (!vulnTags.some(tag => state.deviceTagSet.has(tag))) return false;
+    if (excludedFilterKey !== 'filterDeviceName') {
+        if (!state.hasDeviceNames) return false;
+        if (state.deviceNameSet.size > 0 && !state.deviceNameSet.has(v._deviceFilterKey)) return false;
     }
 
-    if (state.severitySet.size > 0 && !state.severitySet.has(v.VulnerabilitySeverityLevel)) return false;
-    if (state.osPlatformSet.size > 0 && !state.osPlatformSet.has(v.OSPlatform)) return false;
+    if (excludedFilterKey !== 'filterRbacGroup') {
+        if (!state.hasRbacGroups) return false;
+        if (state.rbacGroupSet.size > 0 && !state.rbacGroupSet.has(v._normalizedGroup)) return false;
+    }
+
+    if (excludedFilterKey !== 'filterDeviceTags') {
+        if (!state.hasDeviceTags) return false;
+        if (state.deviceTagSet.size > 0) {
+            const vulnTags = v._tagValues;
+            if (!vulnTags.some(tag => state.deviceTagSet.has(tag))) return false;
+        }
+    }
+
+    if (excludedFilterKey !== 'filterSeverity') {
+        if (!state.hasSeverities) return false;
+        if (state.severitySet.size > 0 && !state.severitySet.has(v.VulnerabilitySeverityLevel)) return false;
+    }
+
+    if (excludedFilterKey !== 'filterOSPlatform') {
+        if (!state.hasOsPlatforms) return false;
+        if (state.osPlatformSet.size > 0 && !state.osPlatformSet.has(v.OSPlatform)) return false;
+    }
+
     return true;
 }
 
@@ -2540,7 +3088,6 @@ function matchesFilterState(v, state = filterState) {
  */
 function applyFilters() {
     const _t0 = performance.now();
-    syncFilterStateFromDom();
     invalidateAggregateCache();
 
     if (!filterState.hasDeviceNames || !filterState.hasRbacGroups || !filterState.hasDeviceTags || !filterState.hasSeverities || !filterState.hasOsPlatforms) {
@@ -5732,8 +6279,6 @@ function buildCveLinkHtml(v) {
 
 /**
  * Group devices by their shared CVE signature (identical set of CVE IDs)
- * @param {Array} details - Array of denormalized vulnerability objects
- * @returns {Array} Array of { signature, deviceBubbles: [{DeviceName,DeviceId,MachineInfo}], vulns: [unique vuln per CVE] }
  */
 function groupDevicesByCveSignature(details) {
     const mergeModalObservationRow = (existing, candidate) => {
@@ -6893,16 +7438,14 @@ async function exportToPDF() {
         updateProgress(70, 'Adding filters...');
         
         // Add filter information  
-        const startDate = document.getElementById('filterStartDate').value;
-        const endDate = document.getElementById('filterEndDate').value;
-        const selectedDateRange = document.querySelector('#filterDateRange .date-range-option.selected');
-        const dateRangeText = selectedDateRange ? selectedDateRange.textContent.trim() : 'Custom';
-        
-        const deviceGroups = getSelectedFilterValuesForExport('filterRbacGroup');
-        const deviceTags = getSelectedFilterValuesForExport('filterDeviceTags');
-        const deviceSearch = getSelectedFilterValuesForExport('filterDeviceSearch');
-        const osPlatforms = getSelectedFilterValuesForExport('filterOSPlatform');
-        const severities = getSelectedFilterValuesForExport('filterSeverity');
+        const startDate = filterState.startDate;
+        const endDate = filterState.endDate;
+        const dateRangeText = formatDateLabel(filterState);
+        const deviceGroupsText = getExportFilterText('filterRbacGroup', 'All Groups');
+        const deviceTagsText = getExportFilterText('filterDeviceTags', 'All Tags');
+        const deviceNamesText = getExportFilterText('filterDeviceName', 'All Devices');
+        const osPlatformsText = getExportFilterText('filterOSPlatform', 'All Platforms');
+        const severitiesText = getExportFilterText('filterSeverity', 'All Severities');
         
         const filterContent = [];
         
@@ -6937,7 +7480,7 @@ async function exportToPDF() {
         filterContent.push({
             text: [
                 { text: 'Device Groups: ', bold: true },
-                { text: deviceGroups.length > 0 ? deviceGroups.join(', ') : 'All Groups' }
+                { text: deviceGroupsText }
             ],
             margin: [0, 2, 0, 2],
             fontSize: 10
@@ -6946,7 +7489,7 @@ async function exportToPDF() {
         filterContent.push({
             text: [
                 { text: 'Device Tags: ', bold: true },
-                { text: deviceTags.length > 0 ? deviceTags.join(', ') : 'All Tags' }
+                { text: deviceTagsText }
             ],
             margin: [0, 2, 0, 2],
             fontSize: 10
@@ -6954,8 +7497,8 @@ async function exportToPDF() {
         
         filterContent.push({
             text: [
-                { text: 'Device Search: ', bold: true },
-                { text: deviceSearch.length > 0 ? deviceSearch[0] : 'Off' }
+                { text: 'Devices: ', bold: true },
+                { text: deviceNamesText }
             ],
             margin: [0, 2, 0, 2],
             fontSize: 10
@@ -6964,7 +7507,7 @@ async function exportToPDF() {
         filterContent.push({
             text: [
                 { text: 'OS Platforms: ', bold: true },
-                { text: osPlatforms.length > 0 ? osPlatforms.join(', ') : 'All Platforms' }
+                { text: osPlatformsText }
             ],
             margin: [0, 2, 0, 2],
             fontSize: 10
@@ -6973,7 +7516,7 @@ async function exportToPDF() {
         filterContent.push({
             text: [
                 { text: 'Severities: ', bold: true },
-                { text: severities.length > 0 ? severities.join(', ') : 'All Severities' }
+                { text: severitiesText }
             ],
             margin: [0, 2, 0, 2],
             fontSize: 10
