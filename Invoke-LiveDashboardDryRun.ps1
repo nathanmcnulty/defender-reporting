@@ -116,6 +116,7 @@ function Test-LastExitCodeFailed {
 }
 
 function Reset-LastExitCode {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only resets the session LASTEXITCODE used by wrapper checks.')]
     [CmdletBinding()]
     param()
 
