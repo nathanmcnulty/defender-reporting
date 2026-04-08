@@ -100,6 +100,31 @@ function Initialize-ParentDirectory {
         [string]$Path
     )
 
+
+function Resolve-AzureTenantId {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$TenantIdentifier
+    )
+
+    $tenantGuid = [guid]::Empty
+    if ([guid]::TryParse($TenantIdentifier, [ref]$tenantGuid)) {
+        return $tenantGuid.Guid
+    }
+
+    $openidConfigUri = "https://login.microsoftonline.com/$TenantIdentifier/v2.0/.well-known/openid-configuration"
+    $openidConfig = Invoke-RestMethod -Uri $openidConfigUri -ErrorAction Stop
+    $issuer = [string]$openidConfig.issuer
+    $issuerMatch = [regex]::Match($issuer, 'https://login\.microsoftonline\.com/(?<tenantId>[0-9a-fA-F-]{36})/v2\.0/?$')
+    if (-not $issuerMatch.Success) {
+        throw "Unable to resolve tenant identifier '$TenantIdentifier' to a tenant id from issuer '$issuer'."
+    }
+
+    return $issuerMatch.Groups['tenantId'].Value
+}
     $parentPath = Split-Path -Path $Path -Parent
     if (-not [string]::IsNullOrWhiteSpace($parentPath) -and -not (Test-Path -LiteralPath $parentPath -PathType Container)) {
         New-Item -Path $parentPath -ItemType Directory -Force | Out-Null
@@ -142,8 +167,9 @@ function Connect-GitHubActionsFederatedAzAccount {
     }
 
     Write-Output 'Connecting to Azure using GitHub Actions federated credentials...'
+    $resolvedTenantId = Resolve-AzureTenantId -TenantIdentifier $TenantId
     $tokenResponse = Invoke-RestMethod -Uri ($env:ACTIONS_ID_TOKEN_REQUEST_URL + '&audience=api://AzureADTokenExchange') -Headers @{ Authorization = "Bearer $($env:ACTIONS_ID_TOKEN_REQUEST_TOKEN)" }
-    Connect-AzAccount -ServicePrincipal -ApplicationId $ClientId -Tenant $TenantId -FederatedToken $tokenResponse.value | Out-Null
+    Connect-AzAccount -ServicePrincipal -ApplicationId $ClientId -Tenant $resolvedTenantId -FederatedToken $tokenResponse.value | Out-Null
 }
 
 function Assert-AzContextAvailable {
