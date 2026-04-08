@@ -45,62 +45,50 @@ __CSS_BLOCK__
             </div>
         </div>
 
-        <div class="filter-summary-bar" id="filterSummary" role="region" aria-label="Selected filters">
-            <div class="filter-summary-header">
-                <span class="filter-summary-title">Selected Filters</span>
-                <button id="clearAllFiltersButton" type="button" class="clear-filters-btn">Clear Filters</button>
+        <div class="filter-toolbar" id="filterToolbar" role="region" aria-label="Dashboard filters">
+            <div class="filter-pill-row" id="filterPillRow">
+                <button id="filterPillDate" type="button" class="filter-pill" data-filter-key="date" aria-haspopup="dialog" aria-expanded="false">
+                    <span class="filter-pill-label">Date</span>
+                    <span class="filter-pill-value">1 Week</span>
+                </button>
+                <button id="filterPillRbacGroup" type="button" class="filter-pill" data-filter-key="filterRbacGroup" aria-haspopup="dialog" aria-expanded="false">
+                    <span class="filter-pill-label">Device Groups</span>
+                    <span class="filter-pill-value">All</span>
+                </button>
+                <button id="filterPillDeviceTags" type="button" class="filter-pill" data-filter-key="filterDeviceTags" aria-haspopup="dialog" aria-expanded="false">
+                    <span class="filter-pill-label">Device Tags</span>
+                    <span class="filter-pill-value">All</span>
+                </button>
+                <button id="filterPillOSPlatform" type="button" class="filter-pill" data-filter-key="filterOSPlatform" aria-haspopup="dialog" aria-expanded="false">
+                    <span class="filter-pill-label">Platform</span>
+                    <span class="filter-pill-value">All</span>
+                </button>
+                <button id="filterPillSeverity" type="button" class="filter-pill" data-filter-key="filterSeverity" aria-haspopup="dialog" aria-expanded="false">
+                    <span class="filter-pill-label">Severity</span>
+                    <span class="filter-pill-value">All</span>
+                </button>
+                <button id="filterPillDeviceName" type="button" class="filter-pill" data-filter-key="filterDeviceName" aria-haspopup="dialog" aria-expanded="false">
+                    <span class="filter-pill-label">Device</span>
+                    <span class="filter-pill-value">All</span>
+                </button>
+                <button id="clearAllFiltersButton" type="button" class="clear-filters-btn">Clear All</button>
             </div>
-            <div class="filter-chip-list" id="filterChipList">
-                <span class="filter-summary-empty">No filters applied.</span>
-            </div>
-        </div>
 
-        <!-- Filters -->
-        <div class="filters" role="region" aria-label="Dashboard filters">
-            <div class="filter-group filter-group-date" role="group" aria-label="Date range filter">
-                <div class="date-inputs" id="dateInputs">
-                    <div class="date-input-group">
-                        <label for="filterStartDate">Start Date</label>
-                        <input type="date" id="filterStartDate">
+            <div id="filterPopover" class="filter-popover" role="dialog" aria-modal="false" aria-labelledby="filterPopoverTitle" aria-hidden="true" hidden>
+                <div class="filter-popover-header">
+                    <div>
+                        <div id="filterPopoverTitle" class="filter-popover-title">Filter</div>
+                        <div id="filterPopoverSubtitle" class="filter-popover-subtitle"></div>
                     </div>
-                    <div class="date-input-group">
-                        <label for="filterEndDate">End Date</label>
-                        <input type="date" id="filterEndDate">
+                    <button id="filterPopoverCloseButton" type="button" class="filter-popover-close" aria-label="Close filter">&times;</button>
+                </div>
+                <div id="filterPopoverBody" class="filter-popover-body"></div>
+                <div class="filter-popover-footer">
+                    <button id="filterPopoverResetButton" type="button" class="filter-popover-reset">Reset Filter</button>
+                    <div class="filter-popover-footer-actions">
+                        <button id="filterPopoverCancelButton" type="button" class="filter-popover-cancel">Cancel</button>
+                        <button id="filterPopoverApplyButton" type="button" class="filter-popover-apply">Apply</button>
                     </div>
-                </div>
-                <div class="checkbox-container" id="filterDateRange">
-                    <div class="date-range-options" role="group" aria-label="Date range presets">
-                        <button type="button" class="date-range-option selected" data-range="1w" aria-pressed="true">1 Week</button>
-                        <button type="button" class="date-range-option" data-range="1m" aria-pressed="false">1 Month</button>
-                        <button type="button" class="date-range-option" data-range="3m" aria-pressed="false">3 Months</button>
-                        <button type="button" class="date-range-option" data-range="6m" aria-pressed="false">6 Months</button>
-                        <button type="button" class="date-range-option" data-range="12m" aria-pressed="false">12 Months</button>
-                    </div>
-                </div>
-            </div>
-            <div class="filter-group filter-group-dynamic" role="group" aria-label="Device Group filter">
-                <label for="filterRbacGroup">Device Group</label>
-                <div class="checkbox-container" id="filterRbacGroup">
-                </div>
-            </div>
-            <div class="filter-group filter-group-dynamic" id="filterDeviceTagsGroup" role="group" aria-label="Device Tags filter">
-                <label for="filterDeviceTags">Device Tags</label>
-                <div class="checkbox-container" id="filterDeviceTags">
-                </div>
-            </div>
-            <div class="filter-group filter-group-search" role="group" aria-label="Device search filter">
-                <label for="filterDeviceSearch">Device Search</label>
-                <input type="text" id="filterDeviceSearch" class="filter-search filter-search-standalone" placeholder="Search device name or id">
-                <div class="filter-helper-text" id="filterDeviceSearchSummary">Search all devices in the current scope.</div>
-            </div>
-            <div class="filter-group filter-group-dynamic" role="group" aria-label="OS Platform filter">
-                <label for="filterOSPlatform">OS Platform</label>
-                <div class="checkbox-container" id="filterOSPlatform">
-                </div>
-            </div>
-            <div class="filter-group filter-group-fixed" role="group" aria-label="Severity filter">
-                <label for="filterSeverity">Severity</label>
-                <div class="checkbox-container" id="filterSeverity">
                 </div>
             </div>
         </div>
