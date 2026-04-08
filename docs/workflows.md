@@ -6,18 +6,18 @@ This repo currently ships three GitHub Actions workflows.
 
 | Workflow | File | Purpose |
 |---|---|---|
-| Update Vulnerability Dashboard | `.github/workflows/update-vulnerability-dashboard.yml` | Export data, rebuild the dashboard, validate it, and commit changes |
-| Validate Dashboard | `.github/workflows/validate-dashboard.yml` | Lint PowerShell, rebuild the generated runbook, and regenerate the dashboard for verification |
+| Update Vulnerability Dashboard | `.github/workflows/update-vulnerability-dashboard.yml` | Run the live export and dashboard validation path, upload artifacts, and optionally publish repo outputs |
+| Validate Dashboard | `.github/workflows/validate-dashboard.yml` | Run the deterministic repo preflight used for local and PR validation |
 | Export Dashboard PDFs | `.github/workflows/export-pdf-reports.yml` | Render PDF report variants from the latest committed dashboard |
 
 ## Flow
 
 ```mermaid
 flowchart TD
-    A["Update dashboard"] --> B["Refresh exports"]
+    A["Update dashboard"] --> B["Live export dry run"]
     B --> C["Generate HTML"]
-    C --> D["Validate output"]
-    D --> E["Commit dashboard changes"]
+    C --> D["Validate output and emit artifacts"]
+    D --> E["Optional publish to repo paths"]
     C --> F["Optional PDF export workflow"]
     F --> G["Commit PDF reports"]
 ```
@@ -28,29 +28,27 @@ Trigger sources:
 
 - Daily schedule at `02:00 UTC`
 - Manual run with optional `dry_run`
-- Pushes to `test/**`
 
 Key behavior:
 
-- Uses Azure OIDC authentication
-- Calls `Invoke-VulnerabilityExport.ps1` with `-IncludeAdvancedHunting`
-- Calls `Generate-VulnerabilityDashboard.ps1` with `-Validate` to regenerate the canonical self-contained `VulnerabilityDashboard.html`
-- Uploads `dashboard-audit.json` as an artifact
-- Commits `exports/` and `VulnerabilityDashboard.html` unless the run is a dry run
+- Uses repo-owned Azure OIDC logic through `Invoke-LiveDashboardDryRun.ps1`
+- Runs the live export and dashboard validation path before any publish step
+- Uploads `dashboard-audit.json`, `dashboard-live-run-manifest.json`, and the generated `VulnerabilityDashboard.html` as workflow artifacts
+- Commits `exports/` and `VulnerabilityDashboard.html` only when the run is not a dry run
 
 ## Validate Dashboard
 
 Trigger sources:
 
 - Pull requests that touch scripts, templates, exports, or workflow files
-- Pushes to `main` and `test/**` for the same paths
+- Pushes to `main` for the same paths
 - Manual run
 
 Key behavior:
 
-- Runs `PSScriptAnalyzer` across repo PowerShell scripts
-- Rebuilds `azure/Invoke-DashboardPipeline.ps1` from source and fails if the generated file is stale
-- Regenerates and validates the dashboard from committed exports
+- Installs `PSScriptAnalyzer`
+- Calls the repo-owned `Invoke-RegressionValidation.ps1` entrypoint
+- Validates generated deployment artifacts, source scripts, regression helpers, and committed-export dashboard generation through one deterministic path
 
 ## Export Dashboard PDFs
 
@@ -69,9 +67,9 @@ Key behavior:
 ## Suggested operating model
 
 - Use the update workflow for the regular daily refresh
-- Let the validation workflow protect changes to scripts and templates
+- Let the validation workflow protect changes to scripts and templates through the same deterministic preflight used locally
 - Run the PDF workflow only when the HTML dashboard changes enough to warrant fresh report exports
-- Keep `VulnerabilityDashboard.html` as the committed repo artifact; publish a separate split-assets build such as `VulnerabilityDashboard.Hosted.html` only when you need an HTTP-hosted bundle
+- Use `Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` locally when you need exact-path validation for the live export flow before publishing
 
 ## Related docs
 

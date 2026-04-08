@@ -10,16 +10,82 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = $PSScriptRoot
-$scriptFiles = @(
-    'Build-SharedHelpers.ps1',
-    'shared-helpers.ps1',
-    'Invoke-VulnerabilityExport.ps1',
-    'Generate-VulnerabilityDashboard.ps1',
-    'azure/Build-Runbook.ps1',
-    'azure/runbook-source.ps1',
-    'azure/Invoke-DashboardPipeline.ps1',
-    'tests/Run-SharedHelperRegression.ps1'
-) | ForEach-Object { Join-Path $repoRoot $_ }
+$settingsPath = Join-Path $repoRoot 'PSScriptAnalyzerSettings.psd1'
+$generatedParseOnlyPaths = @(
+    Join-Path $repoRoot 'azure\Invoke-DashboardPipeline.ps1'
+    Join-Path $repoRoot 'azure\function-app\ExportAndGenerate\run.ps1'
+)
+
+function Test-IsExcludedRepoScriptPath {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ExcludeGeneratedOutputs
+    )
+
+    $normalizedPath = $Path -replace '\\', '/'
+    if ($normalizedPath -match '/azure/function-app/Modules/') {
+        return $true
+    }
+
+    if ($normalizedPath -match '/\.local/') {
+        return $true
+    }
+
+    if (-not $ExcludeGeneratedOutputs) {
+        return $false
+    }
+
+    return (
+        $normalizedPath -match '/shared-helpers\.ps1$' -or
+        $normalizedPath -match '/validation-helpers\.ps1$' -or
+        $normalizedPath -match '/azure/Invoke-DashboardPipeline\.ps1$' -or
+        $normalizedPath -match '/azure/function-app/ExportAndGenerate/run\.ps1$'
+    )
+}
+
+function Get-RepoPowerShellScriptPath {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [switch]$ExcludeGeneratedOutputs
+    )
+
+    return @(
+        Get-ChildItem -Path $repoRoot -Recurse -Filter '*.ps1' -File -ErrorAction Stop |
+            Where-Object {
+                -not (Test-IsExcludedRepoScriptPath -Path $_.FullName -ExcludeGeneratedOutputs:$ExcludeGeneratedOutputs)
+            } |
+            Sort-Object FullName |
+            Select-Object -ExpandProperty FullName
+    )
+}
+
+function Get-ParseValidationPath {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param()
+
+    $paths = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in (Get-RepoPowerShellScriptPath -ExcludeGeneratedOutputs)) {
+        $paths.Add($path)
+    }
+
+    foreach ($generatedPath in $generatedParseOnlyPaths) {
+        if (-not (Test-Path -LiteralPath $generatedPath -PathType Leaf)) {
+            throw "Expected generated script was not produced: '$generatedPath'"
+        }
+
+        $paths.Add($generatedPath)
+    }
+
+    return @($paths | Sort-Object -Unique)
+}
 
 function Invoke-ParseValidation {
     [CmdletBinding()]
@@ -63,6 +129,13 @@ if (Test-LastExitCodeFailed) {
     throw 'Build-SharedHelpers.ps1 failed.'
 }
 
+Write-Output 'Building validation helpers...'
+Reset-LastExitCode
+& (Join-Path $repoRoot 'Build-ValidationHelpers.ps1')
+if (Test-LastExitCodeFailed) {
+    throw 'Build-ValidationHelpers.ps1 failed.'
+}
+
 Write-Output 'Building Azure runbook...'
 Reset-LastExitCode
 & (Join-Path $repoRoot 'azure\Build-Runbook.ps1')
@@ -70,12 +143,21 @@ if (Test-LastExitCodeFailed) {
     throw 'azure/Build-Runbook.ps1 failed.'
 }
 
+Write-Output 'Building Azure Function App entry point...'
+Reset-LastExitCode
+& (Join-Path $repoRoot 'azure\Build-FunctionApp.ps1') -SkipModuleStaging
+if (Test-LastExitCodeFailed) {
+    throw 'azure/Build-FunctionApp.ps1 failed.'
+}
+
 Write-Output 'Running parser validation...'
-Invoke-ParseValidation -Paths $scriptFiles
+$parseValidationPaths = Get-ParseValidationPath
+Invoke-ParseValidation -Paths $parseValidationPaths
 
 Write-Output 'Running ScriptAnalyzer...'
-$analyzerResults = foreach ($path in $scriptFiles) {
-    Invoke-ScriptAnalyzer -Path $path -Severity Warning,Error
+$analyzerScriptPaths = Get-RepoPowerShellScriptPath -ExcludeGeneratedOutputs
+$analyzerResults = foreach ($path in $analyzerScriptPaths) {
+    Invoke-ScriptAnalyzer -Path $path -Settings $settingsPath -Severity Warning,Error
 }
 if ($analyzerResults) {
     $formatted = $analyzerResults | Select-Object RuleName, Severity, ScriptName, Line, Message | Format-Table -AutoSize | Out-String -Width 220
