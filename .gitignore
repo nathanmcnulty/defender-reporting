@@ -1,6 +1,10 @@
 .github/copilot-instructions.md
 .local/
 /dashboard-app
+/shared-helpers.ps1
+/validation-helpers.ps1
+/azure/Invoke-DashboardPipeline.ps1
+/azure/function-app/ExportAndGenerate/run.ps1
 # Derived dashboard caches are rebuilt on demand and should not be committed.
 .dashboard-cache/
 /azure/function-app/Modules/

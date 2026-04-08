@@ -1,5 +1,9 @@
 ﻿name: Validate Dashboard
 
+concurrency:
+  group: validate-dashboard-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   pull_request:
     paths:
@@ -15,7 +19,6 @@ on:
   push:
     branches:
       - main
-      - 'test/**'
     paths:
       - '*.ps1'
       - '**/*.ps1'
@@ -42,38 +45,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Lint PowerShell scripts
+      - name: Install PSScriptAnalyzer
         shell: pwsh
         run: |
           Install-Module -Name PSScriptAnalyzer -Force -AllowClobber -Scope CurrentUser
-          $settingsPath = Join-Path $PWD 'PSScriptAnalyzerSettings.psd1'
-          $scriptPaths = Get-ChildItem -Path $PWD -Recurse -Filter *.ps1 -File |
-            Where-Object { (($_.FullName -replace '\\', '/') -notmatch '/azure/function-app/Modules/') } |
-            Select-Object -ExpandProperty FullName
-          $results = foreach ($scriptPath in $scriptPaths) {
-            Invoke-ScriptAnalyzer -Path $scriptPath -Settings $settingsPath
-          }
-          if ($results) {
-            $results |
-              Sort-Object Path, Line, RuleName |
-              Format-Table Path, RuleName, Severity, Line, Message -Wrap -AutoSize
-            throw "PSScriptAnalyzer found $($results.Count) issue(s) across repo PowerShell scripts."
-          }
 
-      - name: Rebuild generated runbook
+      - name: Run deterministic preflight
         shell: pwsh
         run: |
-          Write-Host "Rebuilding the generated Azure Automation runbook..."
-          .\azure\Build-Runbook.ps1
-          git diff --quiet -- azure/Invoke-DashboardPipeline.ps1
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "azure/Invoke-DashboardPipeline.ps1 is out of date. Run .\azure\Build-Runbook.ps1 and commit the result."
-            git diff -- azure/Invoke-DashboardPipeline.ps1
-            exit 1
-          }
-
-      - name: Regenerate dashboard from committed exports
-        shell: pwsh
-        run: |
-          Write-Host "Regenerating dashboard from repository exports and validating it..."
-          .\Generate-VulnerabilityDashboard.ps1 -Validate -IncludeLegacyFixtureRegression
+          .\Invoke-RegressionValidation.ps1
