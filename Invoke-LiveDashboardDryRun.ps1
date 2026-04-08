@@ -100,6 +100,11 @@ function Initialize-ParentDirectory {
         [string]$Path
     )
 
+    $parentPath = Split-Path -Path $Path -Parent
+    if (-not [string]::IsNullOrWhiteSpace($parentPath) -and -not (Test-Path -LiteralPath $parentPath -PathType Container)) {
+        New-Item -Path $parentPath -ItemType Directory -Force | Out-Null
+    }
+}
 
 function Resolve-AzureTenantId {
     [CmdletBinding()]
@@ -124,11 +129,6 @@ function Resolve-AzureTenantId {
     }
 
     return $issuerMatch.Groups['tenantId'].Value
-}
-    $parentPath = Split-Path -Path $Path -Parent
-    if (-not [string]::IsNullOrWhiteSpace($parentPath) -and -not (Test-Path -LiteralPath $parentPath -PathType Container)) {
-        New-Item -Path $parentPath -ItemType Directory -Force | Out-Null
-    }
 }
 
 function Test-LastExitCodeFailed {
