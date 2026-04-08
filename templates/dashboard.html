@@ -45,6 +45,16 @@ __CSS_BLOCK__
             </div>
         </div>
 
+        <div class="filter-summary-bar" id="filterSummary" role="region" aria-label="Selected filters">
+            <div class="filter-summary-header">
+                <span class="filter-summary-title">Selected Filters</span>
+                <button id="clearAllFiltersButton" type="button" class="clear-filters-btn">Clear Filters</button>
+            </div>
+            <div class="filter-chip-list" id="filterChipList">
+                <span class="filter-summary-empty">No filters applied.</span>
+            </div>
+        </div>
+
         <!-- Filters -->
         <div class="filters" role="region" aria-label="Dashboard filters">
             <div class="filter-group filter-group-date" role="group" aria-label="Date range filter">
@@ -60,7 +70,8 @@ __CSS_BLOCK__
                 </div>
                 <div class="checkbox-container" id="filterDateRange">
                     <div class="date-range-options" role="group" aria-label="Date range presets">
-                        <button type="button" class="date-range-option selected" data-range="1m" aria-pressed="true">1 Month</button>
+                        <button type="button" class="date-range-option selected" data-range="1w" aria-pressed="true">1 Week</button>
+                        <button type="button" class="date-range-option" data-range="1m" aria-pressed="false">1 Month</button>
                         <button type="button" class="date-range-option" data-range="3m" aria-pressed="false">3 Months</button>
                         <button type="button" class="date-range-option" data-range="6m" aria-pressed="false">6 Months</button>
                         <button type="button" class="date-range-option" data-range="12m" aria-pressed="false">12 Months</button>
@@ -77,10 +88,10 @@ __CSS_BLOCK__
                 <div class="checkbox-container" id="filterDeviceTags">
                 </div>
             </div>
-            <div class="filter-group filter-group-dynamic" role="group" aria-label="Device Name filter">
-                <label for="filterDeviceName">Device Name</label>
-                <div class="checkbox-container" id="filterDeviceName">
-                </div>
+            <div class="filter-group filter-group-search" role="group" aria-label="Device search filter">
+                <label for="filterDeviceSearch">Device Search</label>
+                <input type="text" id="filterDeviceSearch" class="filter-search filter-search-standalone" placeholder="Search device name or id">
+                <div class="filter-helper-text" id="filterDeviceSearchSummary">Search all devices in the current scope.</div>
             </div>
             <div class="filter-group filter-group-dynamic" role="group" aria-label="OS Platform filter">
                 <label for="filterOSPlatform">OS Platform</label>

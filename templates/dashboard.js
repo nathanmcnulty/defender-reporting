@@ -147,6 +147,7 @@ const TABLE_PAGE_SIZE = 100;
 const CARD_PAGE_SIZE = 20;
 const CARD_RENDER_BATCH_SIZE = 50;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
+const FACET_SEARCH_MIN_OPTIONS = 8;
 const REPORT_IDS = [
     'active-vulnerabilities',
     'remediation-activity',
@@ -205,6 +206,8 @@ function createEmptyFilterState() {
     return {
         startDate: '',
         endDate: '',
+        deviceSearch: '',
+        deviceSearchNormalized: '',
         deviceNames: [],
         rbacGroups: [],
         deviceTags: [],
@@ -376,6 +379,7 @@ function buildFilterStateKey(state) {
     return [
         state.startDate,
         state.endDate,
+        state.deviceSearchNormalized,
         state.deviceNames.join('\u001f'),
         state.rbacGroups.join('\u001f'),
         state.deviceTags.join('\u001f'),
@@ -388,15 +392,17 @@ function syncFilterStateFromDom() {
     const nextState = createEmptyFilterState();
     nextState.startDate = document.getElementById('filterStartDate').value;
     nextState.endDate = document.getElementById('filterEndDate').value;
-    nextState.deviceNames = getCascadingFilterSelectionValues('filterDeviceName');
-    nextState.rbacGroups = getCascadingFilterSelectionValues('filterRbacGroup');
-    nextState.deviceTags = getCascadingFilterSelectionValues('filterDeviceTags');
-    nextState.severities = getSelectedCheckboxValues('filterSeverity');
-    nextState.osPlatforms = getSelectedCheckboxValues('filterOSPlatform');
+    nextState.deviceSearch = (document.getElementById('filterDeviceSearch')?.value || '').trim();
+    nextState.deviceSearchNormalized = nextState.deviceSearch.toLowerCase();
+    nextState.deviceNames = [];
+    nextState.rbacGroups = isAllChecked('filterRbacGroup') ? [] : getSelectedCheckboxValues('filterRbacGroup');
+    nextState.deviceTags = isAllChecked('filterDeviceTags') ? [] : getSelectedCheckboxValues('filterDeviceTags');
+    nextState.severities = isAllChecked('filterSeverity') ? [] : getSelectedCheckboxValues('filterSeverity');
+    nextState.osPlatforms = isAllChecked('filterOSPlatform') ? [] : getSelectedCheckboxValues('filterOSPlatform');
 
-    nextState.hasDeviceNames = hasAnyCascadingFilterSelection('filterDeviceName');
-    nextState.hasRbacGroups = hasAnyCascadingFilterSelection('filterRbacGroup');
-    nextState.hasDeviceTags = hasAnyCascadingFilterSelection('filterDeviceTags');
+    nextState.hasDeviceNames = true;
+    nextState.hasRbacGroups = hasAnyChecked('filterRbacGroup');
+    nextState.hasDeviceTags = hasAnyChecked('filterDeviceTags');
     nextState.hasSeverities = hasAnyChecked('filterSeverity');
     nextState.hasOsPlatforms = hasAnyChecked('filterOSPlatform');
 
@@ -1588,7 +1594,7 @@ async function init() {
     attachEventListeners();
     setupInfiniteScroll();
     activeReportId = getCurrentReportId();
-    setDateRange('1m');
+    setDateRange('1w');
     clearDashboardStatus();
     console.timeEnd('[perf] init total');
     window._dashboardReady = true;
@@ -1802,6 +1808,57 @@ function handleDeviceNameChange() {
     scheduleApplyFilters();
 }
 
+function handleDeviceSearchInput() {
+    scheduleApplyFilters();
+}
+
+function handleFilterChipClick(event) {
+    const chip = event.target.closest('.filter-chip');
+    if (!chip) return;
+
+    const { containerId, filterValue } = chip.dataset;
+    if (!containerId) return;
+
+    if (containerId === 'filterDeviceSearch') {
+        const searchInput = document.getElementById('filterDeviceSearch');
+        if (searchInput) searchInput.value = '';
+        scheduleApplyFilters(true);
+        return;
+    }
+
+    const container = document.getElementById(containerId);
+    if (!container) return;
+
+    const checkbox = Array.from(container.querySelectorAll('input[type="checkbox"]')).find(cb => cb.value === filterValue);
+    if (!checkbox) return;
+    checkbox.checked = false;
+    updateAllCheckbox(containerId);
+    scheduleApplyFilters(true);
+}
+
+function handleClearAllFilters() {
+    ['filterRbacGroup', 'filterDeviceTags', 'filterOSPlatform', 'filterSeverity'].forEach(containerId => {
+        const container = document.getElementById(containerId);
+        if (!container) return;
+
+        container.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            cb.checked = true;
+            cb.indeterminate = false;
+        });
+        updateAllCheckbox(containerId);
+
+        const searchInput = document.getElementById(`${containerId}_search`);
+        if (searchInput) searchInput.value = '';
+        container.querySelectorAll('.checkbox-item:not(:first-child)').forEach(item => {
+            item.style.display = 'flex';
+        });
+    });
+
+    const deviceSearchInput = document.getElementById('filterDeviceSearch');
+    if (deviceSearchInput) deviceSearchInput.value = '';
+    scheduleApplyFilters(true);
+}
+
 /**
  * Handle OS platform filter change (no cascade, just apply filters)
  */
@@ -1842,8 +1899,11 @@ function attachEventListeners() {
     });
     document.getElementById('filterStartDate').addEventListener('change', handleManualDateChange);
     document.getElementById('filterEndDate').addEventListener('change', handleManualDateChange);
+    document.getElementById('filterDeviceSearch')?.addEventListener('input', handleDeviceSearchInput);
     document.getElementById('reportSelector').addEventListener('change', handleReportChange);
     document.getElementById('exportPdfButton').addEventListener('click', exportToPDF);
+    document.getElementById('clearAllFiltersButton')?.addEventListener('click', handleClearAllFilters);
+    document.getElementById('filterChipList')?.addEventListener('click', handleFilterChipClick);
     document.getElementById('closeModalButton').addEventListener('click', closeModal);
     document.querySelectorAll('.sort-button').forEach(button => {
         button.addEventListener('click', handleSortButtonClick);
@@ -1883,13 +1943,16 @@ function attachEventListeners() {
 
 /**
  * Set date range based on preset selection
- * @param {string} range - The range preset (1m, 3m, 6m, 12m)
+ * @param {string} range - The range preset (1w, 1m, 3m, 6m, 12m)
  */
 function setDateRange(range) {
     const endDate = new Date();
     let startDate = new Date();
     
     switch(range) {
+        case '1w':
+            startDate.setDate(startDate.getDate() - 7);
+            break;
         case '1m':
             startDate.setMonth(startDate.getMonth() - 1);
             break;
@@ -1918,61 +1981,129 @@ function setDateRange(range) {
  * Uses normalized lookups for efficiency instead of iterating all records
  */
 function populateFilters() {
-    const osPlatforms = [...lookups.platforms].sort();
-    const severities = ['Critical', 'High', 'Medium', 'Low'];
+    const staticOptions = buildStaticFilterOptions();
 
-    cascadingFilterOptions = buildCascadingFilterOptions();
-    cascadingFilterState = createDefaultCascadingFilterState();
-
-    renderCascadingFilter('filterRbacGroup');
-    renderCascadingFilter('filterDeviceTags');
-    renderCascadingFilter('filterDeviceName');
-    populateCheckboxes('filterOSPlatform', osPlatforms, 'All Platforms', handleOSPlatformChange);
-    populateCheckboxes('filterSeverity', severities, 'All Severities', handleSeverityChange);
+    populateCheckboxes('filterRbacGroup', staticOptions.filterRbacGroup, 'All Groups', handleDeviceGroupChange);
+    populateCheckboxes('filterDeviceTags', staticOptions.filterDeviceTags, 'All Tags', handleDeviceTagsChange);
+    populateCheckboxes('filterOSPlatform', staticOptions.filterOSPlatform, 'All Platforms', handleOSPlatformChange);
+    populateCheckboxes('filterSeverity', staticOptions.filterSeverity, 'All Severities', handleSeverityChange);
+    updateDeviceSearchSummary([]);
+    updateFilterSummary(createEmptyFilterState());
 }
 
-/**
- * Build the option catalog for the cascading device filters.
- * @returns {Object<string, string[]>} Ordered options for each cascading filter
- */
-function buildCascadingFilterOptions() {
-    const rbacGroups = Array.from(new Set(deviceFilterCatalog.map(device => device.rbacGroup))).sort((a, b) => {
+function buildStaticFilterOptions() {
+    const groupCounts = new Map();
+    const tagCounts = new Map();
+    const platformCounts = new Map();
+    const severityCounts = new Map([['Critical', 0], ['High', 0], ['Medium', 0], ['Low', 0]]);
+
+    deviceFilterCatalog.forEach(device => {
+        groupCounts.set(device.rbacGroup, (groupCounts.get(device.rbacGroup) || 0) + 1);
+        device.deviceTags.forEach(tag => {
+            tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
+        });
+    });
+
+    const platformSets = new Map();
+    vulnerabilityData.forEach(v => {
+        if (!platformSets.has(v.OSPlatform)) {
+            platformSets.set(v.OSPlatform, new Set());
+        }
+        platformSets.get(v.OSPlatform).add(v._deviceFilterKey);
+
+        if (severityCounts.has(v.VulnerabilitySeverityLevel)) {
+            severityCounts.set(v.VulnerabilitySeverityLevel, severityCounts.get(v.VulnerabilitySeverityLevel) + 1);
+        }
+    });
+
+    const rbacGroups = Array.from(groupCounts.keys()).sort((a, b) => {
         if (a === NO_GROUP_VALUE && b !== NO_GROUP_VALUE) return -1;
         if (b === NO_GROUP_VALUE && a !== NO_GROUP_VALUE) return 1;
         return a.localeCompare(b);
     });
-    const deviceTags = Array.from(new Set(deviceFilterCatalog.flatMap(device => device.deviceTags))).sort((a, b) => {
+    const deviceTags = Array.from(tagCounts.keys()).sort((a, b) => {
         if (a === NO_TAGS_VALUE && b !== NO_TAGS_VALUE) return -1;
         if (b === NO_TAGS_VALUE && a !== NO_TAGS_VALUE) return 1;
         return a.localeCompare(b);
     });
-    const duplicateNameCounts = deviceFilterCatalog.reduce((counts, device) => {
-        counts.set(device.deviceName, (counts.get(device.deviceName) || 0) + 1);
-        return counts;
-    }, new Map());
-    const deviceNames = deviceFilterCatalog
-        .map(device => {
-            const filterValue = getDeviceNameFilterValue(device);
-            const hasDuplicateName = (duplicateNameCounts.get(device.deviceName) || 0) > 1;
-            const label = hasDuplicateName && device.deviceId
-                ? `${device.deviceName} (${device.deviceId})`
-                : device.deviceName;
-            return {
-                value: filterValue,
-                label,
-                searchText: hasDuplicateName && device.deviceId
-                    ? `${device.deviceName} ${device.deviceId}`
-                    : device.deviceName,
-                showCount: false
-            };
-        })
-        .sort((a, b) => a.label.localeCompare(b.label));
+    const osPlatforms = Array.from(platformSets.keys()).sort((a, b) => a.localeCompare(b));
+    const severities = ['Critical', 'High', 'Medium', 'Low'];
 
     return {
-        filterRbacGroup: rbacGroups.map(value => ({ value, label: value, searchText: value, showCount: true })),
-        filterDeviceTags: deviceTags.map(value => ({ value, label: value, searchText: value, showCount: true })),
-        filterDeviceName: deviceNames
+        filterRbacGroup: rbacGroups.map(value => ({ value, label: value, count: groupCounts.get(value) || 0 })),
+        filterDeviceTags: deviceTags.map(value => ({ value, label: value, count: tagCounts.get(value) || 0 })),
+        filterOSPlatform: osPlatforms.map(value => ({ value, label: value, count: (platformSets.get(value) || new Set()).size })),
+        filterSeverity: severities.map(value => ({ value, label: value, count: severityCounts.get(value) || 0 }))
     };
+}
+
+function getUniqueDeviceCount(rows) {
+    return new Set((rows || []).map(v => v._deviceFilterKey)).size;
+}
+
+function updateDeviceSearchSummary(rows = filteredData) {
+    const summary = document.getElementById('filterDeviceSearchSummary');
+    if (!summary) return;
+
+    const activeSearch = (document.getElementById('filterDeviceSearch')?.value || '').trim();
+    const deviceCount = getUniqueDeviceCount(rows);
+    if (activeSearch) {
+        summary.textContent = deviceCount === 1
+            ? '1 device matches the current search.'
+            : `${deviceCount} devices match the current search.`;
+        return;
+    }
+
+    summary.textContent = deviceCount === 0
+        ? 'No devices are in the current scope.'
+        : `${deviceCount} devices are in the current scope.`;
+}
+
+function buildFilterChipDescriptors(state = filterState) {
+    const chips = [];
+
+    state.rbacGroups.forEach(value => chips.push({ containerId: 'filterRbacGroup', value, label: `Group: ${value}` }));
+    state.deviceTags.forEach(value => chips.push({ containerId: 'filterDeviceTags', value, label: `Tag: ${value}` }));
+    state.osPlatforms.forEach(value => chips.push({ containerId: 'filterOSPlatform', value, label: `Platform: ${value}` }));
+    state.severities.forEach(value => chips.push({ containerId: 'filterSeverity', value, label: `Severity: ${value}` }));
+
+    if (state.deviceSearch) {
+        chips.push({ containerId: 'filterDeviceSearch', value: '', label: `Search: ${state.deviceSearch}` });
+    }
+
+    return chips;
+}
+
+function updateFilterSummary(state = filterState) {
+    const chipList = document.getElementById('filterChipList');
+    if (!chipList) return;
+
+    const chips = buildFilterChipDescriptors(state);
+    chipList.innerHTML = '';
+
+    if (chips.length === 0) {
+        const empty = document.createElement('span');
+        empty.className = 'filter-summary-empty';
+        empty.textContent = 'No filters applied.';
+        chipList.appendChild(empty);
+        return;
+    }
+
+    chips.forEach(chip => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'filter-chip';
+        button.dataset.containerId = chip.containerId;
+        button.dataset.filterValue = chip.value;
+        button.append(document.createTextNode(chip.label));
+
+        const remove = document.createElement('span');
+        remove.className = 'filter-chip-remove';
+        remove.textContent = 'x';
+        remove.setAttribute('aria-hidden', 'true');
+        button.appendChild(remove);
+        chipList.appendChild(button);
+    });
 }
 
 /**
@@ -1991,9 +2122,7 @@ function populateCheckboxes(containerId, values, allLabel, onChange) {
     const existingSearch = filterGroup.querySelector('.filter-search');
     if (existingSearch) existingSearch.remove();
     
-    // Add search input BEFORE container if there are more than 1 item
-    // Mark the filter group as having search enabled for future rebuilds
-    if (values.length > 1) {
+    if (values.length > FACET_SEARCH_MIN_OPTIONS) {
         filterGroup.setAttribute('data-has-search', 'true');
         const searchInput = document.createElement('input');
         searchInput.type = 'text';
@@ -2016,6 +2145,8 @@ function populateCheckboxes(containerId, values, allLabel, onChange) {
             }, APPLY_FILTER_DEBOUNCE_MS);
         });
         filterGroup.insertBefore(searchInput, container);
+    } else {
+        filterGroup.removeAttribute('data-has-search');
     }
     
     // Add "All" checkbox
@@ -2044,12 +2175,15 @@ function populateCheckboxes(containerId, values, allLabel, onChange) {
     container.appendChild(allDiv);
     
     // Add individual checkboxes
-    values.forEach((value, idx) => {
+    values.forEach((entry, idx) => {
+        const option = typeof entry === 'string'
+            ? { value: entry, label: entry, count: null }
+            : entry;
         const div = document.createElement('div');
         div.className = 'checkbox-item';
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
-        checkbox.value = value;
+        checkbox.value = option.value;
         checkbox.id = `${containerId}_${idx}`;
         checkbox.checked = true;
         checkbox.addEventListener('change', function() {
@@ -2059,7 +2193,19 @@ function populateCheckboxes(containerId, values, allLabel, onChange) {
         });
         const label = document.createElement('label');
         label.setAttribute('for', checkbox.id);
-        label.textContent = value;
+
+        const labelText = document.createElement('span');
+        labelText.className = 'checkbox-label-text';
+        labelText.textContent = option.label;
+        label.appendChild(labelText);
+
+        if (option.count !== null && option.count !== undefined) {
+            const count = document.createElement('span');
+            count.className = 'checkbox-count';
+            count.textContent = option.count;
+            label.appendChild(count);
+        }
+
         div.appendChild(checkbox);
         div.appendChild(label);
         container.appendChild(div);
@@ -2332,8 +2478,9 @@ function getSelectedCheckboxValues(containerId) {
 }
 
 function getSelectedFilterValuesForExport(containerId) {
-    if (CASCADING_FILTER_IDS.includes(containerId)) {
-        return getCascadingFilterSelectionLabels(containerId);
+    if (containerId === 'filterDeviceSearch') {
+        const searchValue = (document.getElementById('filterDeviceSearch')?.value || '').trim();
+        return searchValue ? [searchValue] : [];
     }
 
     return isAllChecked(containerId) ? [] : getSelectedCheckboxValues(containerId);
@@ -2362,7 +2509,7 @@ function hasAnyChecked(containerId) {
 }
 
 function matchesFilterStateNonDate(v, state = filterState) {
-    if (state.deviceNameSet.size > 0 && !state.deviceNameSet.has(v._deviceFilterKey)) return false;
+    if (state.deviceSearchNormalized && !v._deviceSearchText.includes(state.deviceSearchNormalized)) return false;
     if (state.rbacGroupSet.size > 0 && !state.rbacGroupSet.has(v._normalizedGroup)) return false;
 
     if (state.deviceTagSet.size > 0) {
@@ -2394,28 +2541,22 @@ function matchesFilterState(v, state = filterState) {
 function applyFilters() {
     const _t0 = performance.now();
     syncFilterStateFromDom();
+    invalidateAggregateCache();
 
     if (!filterState.hasDeviceNames || !filterState.hasRbacGroups || !filterState.hasDeviceTags || !filterState.hasSeverities || !filterState.hasOsPlatforms) {
         filteredData = [];
-        // Still render cascading filters so the UI stays consistent
-        refreshCascadingFilters();
-        invalidateAggregateCache();
+        updateDeviceSearchSummary([]);
+        updateFilterSummary(filterState);
         updateStats();
         markAllReportsDirty();
         renderActiveReport(true);
         return;
     }
 
-    // ---- Single-pass: compute main filter result AND cascading device counts ----
     const result = [];
     const data = vulnerabilityData;
     const len = data.length;
     const fs = filterState;
-    const hasDeviceName = fs.deviceNameSet.size > 0;
-    const hasRbacGroup = fs.rbacGroupSet.size > 0;
-    const hasDeviceTag = fs.deviceTagSet.size > 0;
-    const hasSeverity = fs.severitySet.size > 0;
-    const hasOsPlatform = fs.osPlatformSet.size > 0;
     const startDate = fs.startDate;
     const endDate = fs.endDate;
     const hasDateWindow = hasSelectedDateWindow(fs);
@@ -2424,88 +2565,29 @@ function applyFilters() {
     const selectionSeverityCounts = createEmptySeverityCounts();
     const pointInTimeRows = hasDateWindow ? null : [];
 
-    // Cascading count accumulators (device-Set per option per filter dimension)
-    const deviceSetsByFilter = Object.fromEntries(CASCADING_FILTER_IDS.map(filterId => [
-        filterId,
-        new Map((cascadingFilterOptions[filterId] || []).map(option => [option.value, new Set()]))
-    ]));
-
     for (let i = 0; i < len; i++) {
         const v = data[i];
-
-        // Base checks shared by both cascading counts and main filter
         if (startDate && v._effectiveOpenEndDate < startDate) continue;
         if (endDate && v._firstSeenDate > endDate) continue;
-        if (hasSeverity && !fs.severitySet.has(v.VulnerabilitySeverityLevel)) continue;
-        if (hasOsPlatform && !fs.osPlatformSet.has(v.OSPlatform)) continue;
+        if (!matchesFilterStateNonDate(v, fs)) continue;
 
-        // Evaluate device-level dimension matches (needed for cross-filter counts)
-        const matchesDevName = !hasDeviceName || fs.deviceNameSet.has(v._deviceFilterKey);
-        const matchesGroup = !hasRbacGroup || fs.rbacGroupSet.has(v._normalizedGroup);
-        let matchesTags = true;
-        if (hasDeviceTag) {
-            const tags = v._tagValues;
-            matchesTags = false;
-            for (let t = 0; t < tags.length; t++) {
-                if (fs.deviceTagSet.has(tags[t])) { matchesTags = true; break; }
+        result.push(v);
+        if (hasDateWindow) {
+            if (selectionSeverityCounts[v.VulnerabilitySeverityLevel] !== undefined) {
+                selectionSeverityCounts[v.VulnerabilitySeverityLevel]++;
             }
-        }
-
-        // Cascading counts: each dimension excludes itself so the user sees
-        // how many devices would match if they toggled that particular option.
-        const deviceKey = v._deviceFilterKey;
-        if (matchesGroup && matchesTags) {
-            const m = deviceSetsByFilter.filterDeviceName;
-            const vals = v._deviceFilterKey;
-            const s = m.get(vals);
-            if (s) s.add(deviceKey); else m.set(vals, new Set([deviceKey]));
-        }
-        if (matchesDevName && matchesTags) {
-            const m = deviceSetsByFilter.filterRbacGroup;
-            const val = v._normalizedGroup;
-            const s = m.get(val);
-            if (s) s.add(deviceKey); else m.set(val, new Set([deviceKey]));
-        }
-        if (matchesDevName && matchesGroup) {
-            const m = deviceSetsByFilter.filterDeviceTags;
-            const tagVals = v._tagValues;
-            for (let t = 0; t < tagVals.length; t++) {
-                const s = m.get(tagVals[t]);
-                if (s) s.add(deviceKey); else m.set(tagVals[t], new Set([deviceKey]));
-            }
-        }
-
-        // Main filtered result: all dimensions must match
-        if (matchesDevName && matchesGroup && matchesTags) {
-            result.push(v);
-            if (hasDateWindow) {
-                if (selectionSeverityCounts[v.VulnerabilitySeverityLevel] !== undefined) {
-                    selectionSeverityCounts[v.VulnerabilitySeverityLevel]++;
-                }
-            } else if (isVulnerabilityActiveOnDate(v, pointInTimeAsOfDate)) {
-                pointInTimeRows.push(v);
-                if (selectionSeverityCounts[v.VulnerabilitySeverityLevel] !== undefined) {
-                    selectionSeverityCounts[v.VulnerabilitySeverityLevel]++;
-                }
+        } else if (isVulnerabilityActiveOnDate(v, pointInTimeAsOfDate)) {
+            pointInTimeRows.push(v);
+            if (selectionSeverityCounts[v.VulnerabilitySeverityLevel] !== undefined) {
+                selectionSeverityCounts[v.VulnerabilitySeverityLevel]++;
             }
         }
     }
+
     filteredData = result;
-    const _tCascade = performance.now();
+    updateDeviceSearchSummary(result);
+    updateFilterSummary(fs);
 
-    // Convert device Sets to counts and render cascading filters
-    const countMaps = Object.fromEntries(CASCADING_FILTER_IDS.map(filterId => [
-        filterId,
-        new Map(Array.from(deviceSetsByFilter[filterId].entries()).map(([value, deviceSet]) => [value, deviceSet.size]))
-    ]));
-    cascadingFilterCountCacheKey = fs.key;
-    cascadingFilterCountCache = countMaps;
-    CASCADING_FILTER_IDS.forEach(filterId => {
-        renderCascadingFilter(filterId, countMaps[filterId]);
-    });
-    console.log(`[perf] cascading filter render: ${(performance.now() - _tCascade).toFixed(1)}ms`);
-
-    invalidateAggregateCache();
     const cache = getAggregateCache();
     if (hasDateWindow) {
         cache.activeRowsForCurrentSelectionKey = currentSelectionKey;
@@ -2816,6 +2898,7 @@ function applyDerivedVulnerabilityFields(rows) {
         v._remediationString = buildRemediationString(v);
         v._environmentFirstSeenDate = environmentFirstSeenDate;
         v._deviceFilterKey = v.DeviceId || v.DeviceName || '';
+        v._deviceSearchText = `${v.DeviceName || ''} ${v.DeviceId || ''}`.toLowerCase();
         v._normalizedGroup = normalizeGroupName(v.RbacGroupName);
         v._tagValues = v.MachineTags && v.MachineTags.length > 0 ? v.MachineTags : NO_TAGS_ARRAY;
 
@@ -6816,7 +6899,8 @@ async function exportToPDF() {
         const dateRangeText = selectedDateRange ? selectedDateRange.textContent.trim() : 'Custom';
         
         const deviceGroups = getSelectedFilterValuesForExport('filterRbacGroup');
-        const deviceNames = getSelectedFilterValuesForExport('filterDeviceName');
+        const deviceTags = getSelectedFilterValuesForExport('filterDeviceTags');
+        const deviceSearch = getSelectedFilterValuesForExport('filterDeviceSearch');
         const osPlatforms = getSelectedFilterValuesForExport('filterOSPlatform');
         const severities = getSelectedFilterValuesForExport('filterSeverity');
         
@@ -6858,35 +6942,24 @@ async function exportToPDF() {
             margin: [0, 2, 0, 2],
             fontSize: 10
         });
+
+        filterContent.push({
+            text: [
+                { text: 'Device Tags: ', bold: true },
+                { text: deviceTags.length > 0 ? deviceTags.join(', ') : 'All Tags' }
+            ],
+            margin: [0, 2, 0, 2],
+            fontSize: 10
+        });
         
-        if (deviceNames.length > 0 && deviceNames.length <= 10) {
-            filterContent.push({
-                text: [
-                    { text: 'Device Names: ', bold: true },
-                    { text: deviceNames.join(', ') }
-                ],
-                margin: [0, 2, 0, 2],
-                fontSize: 10
-            });
-        } else if (deviceNames.length > 10) {
-            filterContent.push({
-                text: [
-                    { text: 'Device Names: ', bold: true },
-                    { text: `${deviceNames.length} devices selected` }
-                ],
-                margin: [0, 2, 0, 2],
-                fontSize: 10
-            });
-        } else {
-            filterContent.push({
-                text: [
-                    { text: 'Device Names: ', bold: true },
-                    { text: 'All Devices' }
-                ],
-                margin: [0, 2, 0, 2],
-                fontSize: 10
-            });
-        }
+        filterContent.push({
+            text: [
+                { text: 'Device Search: ', bold: true },
+                { text: deviceSearch.length > 0 ? deviceSearch[0] : 'Off' }
+            ],
+            margin: [0, 2, 0, 2],
+            fontSize: 10
+        });
         
         filterContent.push({
             text: [
