@@ -150,6 +150,10 @@ const CARD_PAGE_SIZE = 20;
 const CARD_RENDER_BATCH_SIZE = 50;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
 const FACET_SEARCH_MIN_OPTIONS = 8;
+const FILTER_POPOVER_BATCH_FLOOR = 100;
+const FILTER_POPOVER_BATCH_CEILING = 250;
+const FILTER_POPOVER_BATCH_PERCENTAGE = 0.01;
+const FILTER_POPOVER_SCROLL_PRELOAD_PX = 96;
 const DATE_PRESET_CONFIG = {
     '1w': '1 Week',
     '1m': '1 Month',
@@ -223,6 +227,10 @@ let filterState = createEmptyFilterState();
 let filterPopoverDraftState = null;
 let activeFilterPopoverKey = null;
 let activeFilterPopoverOptions = [];
+let activeFilterPopoverFilteredOptions = [];
+let activeFilterPopoverRenderedCount = 0;
+let activeFilterPopoverSearchTerm = '';
+let activeFilterPopoverBatchSize = 0;
 let aggregateCacheKey = null;
 let aggregateCache = createEmptyAggregateCache();
 let cascadingFilterCountCacheKey = null;
@@ -423,18 +431,53 @@ function getDeviceSelectionLabelCount(state = filterState) {
     return state.deviceNames.length;
 }
 
+function formatFilterSelectionProgress(selectedCount, totalCount) {
+    return `${selectedCount.toLocaleString()} of ${totalCount.toLocaleString()} selected`;
+}
+
+function getScopedFilterOptionCount(filterKey, state = filterState) {
+    if (state === filterState && activeFilterPopoverKey === filterKey && activeFilterPopoverOptions.length > 0) {
+        return activeFilterPopoverOptions.length;
+    }
+
+    return getScopedFilterOptions(filterKey, state).length;
+}
+
+function getFilterSelectionCount(filterKey, state = filterState, totalCount = null) {
+    const config = FILTER_POPOVER_CONFIG[filterKey];
+    if (!config || !config.stateKey || filterKey === 'date') {
+        return 0;
+    }
+
+    if (!state[config.hasAnyKey]) {
+        return 0;
+    }
+
+    const values = state[config.stateKey] || [];
+    if (values.length > 0) {
+        return values.length;
+    }
+
+    if (typeof totalCount === 'number') {
+        return totalCount;
+    }
+
+    return getScopedFilterOptionCount(filterKey, state);
+}
+
 function getFilterPillValue(filterKey, state = filterState) {
     if (filterKey === 'date') {
         return formatDateLabel(state);
     }
 
     if (filterKey === 'filterDeviceName') {
-        if (!state.hasDeviceNames) {
-            return '0 selected';
+        const totalCount = getScopedFilterOptionCount(filterKey, state);
+        const selectedCount = getFilterSelectionCount(filterKey, state, totalCount);
+        if (selectedCount === totalCount && totalCount > 0) {
+            return `All (${totalCount.toLocaleString()})`;
         }
-        return state.deviceNames.length > 0
-            ? `${state.deviceNames.length} selected`
-            : 'All';
+
+        return formatFilterSelectionProgress(selectedCount, totalCount);
     }
 
     const config = FILTER_POPOVER_CONFIG[filterKey];
@@ -471,9 +514,12 @@ function renderFilterPills(state = filterState) {
         if (!button) return;
 
         const value = button.querySelector('.filter-pill-value');
+        const pillValue = getFilterPillValue(filterKey, state);
         if (value) {
-            value.textContent = getFilterPillValue(filterKey, state);
+            value.textContent = pillValue;
         }
+
+        button.title = `${config.label}: ${pillValue}`;
 
         button.classList.toggle('is-active', isFilterActive(filterKey, state));
         button.classList.toggle('is-open', activeFilterPopoverKey === filterKey);
@@ -2285,8 +2331,249 @@ function updateDatePresetButtonState() {
     });
 }
 
+function getFilterPopoverBatchSize(filterKey, optionCount) {
+    if (filterKey !== 'filterDeviceName') {
+        return optionCount;
+    }
+
+    const percentageBatchSize = Math.ceil(optionCount * FILTER_POPOVER_BATCH_PERCENTAGE);
+    return Math.min(
+        optionCount,
+        Math.max(FILTER_POPOVER_BATCH_FLOOR, Math.min(FILTER_POPOVER_BATCH_CEILING, percentageBatchSize))
+    );
+}
+
+function shouldIncrementallyRenderFilterPopover(filterKey = activeFilterPopoverKey) {
+    return filterKey === 'filterDeviceName' && activeFilterPopoverOptions.length > activeFilterPopoverBatchSize;
+}
+
+function resetActiveFilterPopoverState() {
+    activeFilterPopoverOptions = [];
+    activeFilterPopoverFilteredOptions = [];
+    activeFilterPopoverRenderedCount = 0;
+    activeFilterPopoverSearchTerm = '';
+    activeFilterPopoverBatchSize = 0;
+}
+
+function buildFilterPopoverOptionMarkup(option, index) {
+    const checked = isDraftOptionSelected(activeFilterPopoverKey, option.value) ? 'checked' : '';
+    const countMarkup = option.count !== null && option.count !== undefined
+        ? `<span class="checkbox-count">${option.count}</span>`
+        : '';
+
+    return `
+        <div class="checkbox-item" data-search-text="${escapeHtml(option.searchText || option.label.toLowerCase())}">
+            <input type="checkbox" id="filterPopoverOption_${index}" data-option-value="${escapeHtml(option.value)}" ${checked}>
+            <label for="filterPopoverOption_${index}">
+                <span class="checkbox-label-text">${escapeHtml(option.label)}</span>
+                ${countMarkup}
+            </label>
+        </div>`;
+}
+
+function getRenderedFilterPopoverOptionCount() {
+    return Math.min(activeFilterPopoverRenderedCount, activeFilterPopoverFilteredOptions.length);
+}
+
+function getMatchingFilterPopoverOptions() {
+    if (!activeFilterPopoverSearchTerm) {
+        return activeFilterPopoverOptions;
+    }
+
+    return activeFilterPopoverOptions.filter(option => {
+        const searchText = option.searchText || option.label.toLowerCase();
+        return searchText.includes(activeFilterPopoverSearchTerm);
+    });
+}
+
+function updateRenderedFilterPopoverOptionSelection() {
+    if (!activeFilterPopoverKey || activeFilterPopoverKey === 'date') {
+        return;
+    }
+
+    document.querySelectorAll('#filterPopoverOptions input[data-option-value]').forEach(checkbox => {
+        checkbox.checked = isDraftOptionSelected(activeFilterPopoverKey, checkbox.dataset.optionValue);
+    });
+}
+
+function renderFilterPopoverOptionRows(resetScroll = false) {
+    const optionsContainer = document.getElementById('filterPopoverOptions');
+    const rowsContainer = document.getElementById('filterPopoverOptionRows');
+    if (!optionsContainer || !rowsContainer) {
+        return;
+    }
+
+    const renderedCount = getRenderedFilterPopoverOptionCount();
+    rowsContainer.innerHTML = activeFilterPopoverFilteredOptions
+        .slice(0, renderedCount)
+        .map((option, index) => buildFilterPopoverOptionMarkup(option, index))
+        .join('');
+
+    if (resetScroll) {
+        optionsContainer.scrollTop = 0;
+    }
+
+    updateRenderedFilterPopoverOptionSelection();
+    updateFilterPopoverSummary();
+    updateFilterPopoverAllCheckbox();
+}
+
+function refreshFilterPopoverOptionRows(resetScroll = false) {
+    activeFilterPopoverFilteredOptions = getMatchingFilterPopoverOptions();
+    const batchSize = shouldIncrementallyRenderFilterPopover()
+        ? activeFilterPopoverBatchSize
+        : activeFilterPopoverFilteredOptions.length;
+    activeFilterPopoverRenderedCount = Math.min(activeFilterPopoverFilteredOptions.length, batchSize);
+    renderFilterPopoverOptionRows(resetScroll);
+}
+
+function appendNextFilterPopoverOptionBatch() {
+    if (!shouldIncrementallyRenderFilterPopover()) {
+        return;
+    }
+
+    const optionsContainer = document.getElementById('filterPopoverOptions');
+    const rowsContainer = document.getElementById('filterPopoverOptionRows');
+    if (!optionsContainer || !rowsContainer) {
+        return;
+    }
+
+    const currentRenderedCount = getRenderedFilterPopoverOptionCount();
+    if (currentRenderedCount >= activeFilterPopoverFilteredOptions.length) {
+        return;
+    }
+
+    const nextRenderedCount = Math.min(
+        activeFilterPopoverFilteredOptions.length,
+        currentRenderedCount + activeFilterPopoverBatchSize
+    );
+    rowsContainer.insertAdjacentHTML(
+        'beforeend',
+        activeFilterPopoverFilteredOptions
+            .slice(currentRenderedCount, nextRenderedCount)
+            .map((option, index) => buildFilterPopoverOptionMarkup(option, currentRenderedCount + index))
+            .join('')
+    );
+    activeFilterPopoverRenderedCount = nextRenderedCount;
+
+    updateRenderedFilterPopoverOptionSelection();
+    updateFilterPopoverSummary();
+    updateFilterPopoverAllCheckbox();
+}
+
+function handleFilterPopoverOptionsScroll(event) {
+    const target = event.target;
+    if (!(target instanceof HTMLElement) || target.id !== 'filterPopoverOptions') {
+        return;
+    }
+
+    if (!shouldIncrementallyRenderFilterPopover()) {
+        return;
+    }
+
+    const threshold = target.scrollHeight - FILTER_POPOVER_SCROLL_PRELOAD_PX;
+    if (target.scrollTop + target.clientHeight >= threshold) {
+        appendNextFilterPopoverOptionBatch();
+    }
+}
+
+function setAllFilterPopoverOptionsSelected(isSelected) {
+    if (!activeFilterPopoverKey || activeFilterPopoverKey === 'date' || !filterPopoverDraftState) {
+        return;
+    }
+
+    const config = FILTER_POPOVER_CONFIG[activeFilterPopoverKey];
+    filterPopoverDraftState[config.stateKey] = [];
+    filterPopoverDraftState[config.hasAnyKey] = isSelected;
+
+    updateRenderedFilterPopoverOptionSelection();
+    updateFilterPopoverSummary();
+    updateFilterPopoverAllCheckbox();
+    updateFilterPopoverFooterState();
+}
+
+function toggleFilterPopoverOptionSelection(optionValue, isSelected) {
+    if (!activeFilterPopoverKey || activeFilterPopoverKey === 'date' || !filterPopoverDraftState) {
+        return;
+    }
+
+    const config = FILTER_POPOVER_CONFIG[activeFilterPopoverKey];
+    const selectedValues = filterPopoverDraftState[config.hasAnyKey]
+        ? (filterPopoverDraftState[config.stateKey].length === 0
+            ? new Set(activeFilterPopoverOptions.map(option => option.value))
+            : new Set(filterPopoverDraftState[config.stateKey]))
+        : new Set();
+
+    if (isSelected) {
+        selectedValues.add(optionValue);
+    } else {
+        selectedValues.delete(optionValue);
+    }
+
+    if (selectedValues.size === 0) {
+        filterPopoverDraftState[config.stateKey] = [];
+        filterPopoverDraftState[config.hasAnyKey] = false;
+    } else if (selectedValues.size === activeFilterPopoverOptions.length) {
+        filterPopoverDraftState[config.stateKey] = [];
+        filterPopoverDraftState[config.hasAnyKey] = true;
+    } else {
+        filterPopoverDraftState[config.stateKey] = activeFilterPopoverOptions
+            .map(option => option.value)
+            .filter(value => selectedValues.has(value));
+        filterPopoverDraftState[config.hasAnyKey] = true;
+    }
+
+    updateFilterPopoverSummary();
+    updateFilterPopoverAllCheckbox();
+    updateFilterPopoverFooterState();
+}
+
 function updateFilterPopoverSummary() {
-    return;
+    const subtitle = document.getElementById('filterPopoverSubtitle');
+    const summary = document.getElementById('filterPopoverSummary');
+    if (subtitle) {
+        subtitle.textContent = '';
+    }
+    if (summary) {
+        summary.textContent = '';
+    }
+
+    if (!activeFilterPopoverKey || activeFilterPopoverKey === 'date' || !filterPopoverDraftState || activeFilterPopoverKey !== 'filterDeviceName') {
+        return;
+    }
+
+    const totalCount = activeFilterPopoverOptions.length;
+    const selectedCount = getDraftSelectedCount(activeFilterPopoverKey);
+    if (subtitle) {
+        subtitle.textContent = formatFilterSelectionProgress(selectedCount, totalCount);
+    }
+
+    if (!summary) {
+        return;
+    }
+
+    if (totalCount === 0) {
+        summary.textContent = 'No devices are available in the current scope.';
+        return;
+    }
+
+    const filteredCount = activeFilterPopoverFilteredOptions.length;
+    const renderedCount = getRenderedFilterPopoverOptionCount();
+    if (activeFilterPopoverSearchTerm) {
+        if (filteredCount === 0) {
+            summary.textContent = `No devices match "${activeFilterPopoverSearchTerm}".`;
+            return;
+        }
+
+        summary.textContent = renderedCount < filteredCount
+            ? `Showing ${renderedCount.toLocaleString()} of ${filteredCount.toLocaleString()} matching devices. Scroll to load more.`
+            : `Showing ${filteredCount.toLocaleString()} matching devices.`;
+        return;
+    }
+
+    summary.textContent = renderedCount < filteredCount
+        ? `Showing ${renderedCount.toLocaleString()} of ${filteredCount.toLocaleString()} devices. Scroll to load more.`
+        : `Showing all ${filteredCount.toLocaleString()} devices.`;
 }
 
 function updateFilterPopoverAllCheckbox() {
@@ -2297,17 +2584,15 @@ function updateFilterPopoverAllCheckbox() {
 
     const selectedCount = getDraftSelectedCount(activeFilterPopoverKey);
     const optionCount = activeFilterPopoverOptions.length;
+    allCheckbox.disabled = optionCount === 0;
     allCheckbox.indeterminate = selectedCount > 0 && selectedCount < optionCount;
     allCheckbox.checked = optionCount > 0 && selectedCount === optionCount;
 }
 
 function applyFilterPopoverSearch() {
     const searchInput = document.getElementById('filterPopoverSearchInput');
-    const searchTerm = (searchInput?.value || '').trim().toLowerCase();
-    document.querySelectorAll('#filterPopoverOptions .checkbox-item[data-search-text]').forEach(item => {
-        const text = item.dataset.searchText || '';
-        item.style.display = text.includes(searchTerm) ? 'flex' : 'none';
-    });
+    activeFilterPopoverSearchTerm = (searchInput?.value || '').trim().toLowerCase();
+    refreshFilterPopoverOptionRows(true);
 }
 
 function renderActiveFilterPopover() {
@@ -2329,6 +2614,9 @@ function renderActiveFilterPopover() {
     activeFilterPopoverOptions = activeFilterPopoverKey === 'date'
         ? []
         : getScopedFilterOptions(activeFilterPopoverKey, filterState);
+    activeFilterPopoverFilteredOptions = activeFilterPopoverOptions;
+    activeFilterPopoverBatchSize = getFilterPopoverBatchSize(activeFilterPopoverKey, activeFilterPopoverOptions.length);
+    activeFilterPopoverRenderedCount = 0;
 
     if (activeFilterPopoverKey === 'date') {
         body.classList.add('filter-popover-body--date');
@@ -2361,30 +2649,19 @@ function renderActiveFilterPopover() {
 
     body.classList.add('filter-popover-body--options');
     body.innerHTML = `
-        ${shouldShowSearch ? `<input type="text" id="filterPopoverSearchInput" class="filter-search filter-popover-search" placeholder="${searchPlaceholder}">` : ''}
+        ${shouldShowSearch ? `<input type="text" id="filterPopoverSearchInput" class="filter-search filter-popover-search" placeholder="${searchPlaceholder}" value="${escapeHtml(activeFilterPopoverSearchTerm)}">` : ''}
+        <div id="filterPopoverSummary" class="filter-popover-summary"></div>
         <div class="filter-popover-options" id="filterPopoverOptions">
             <div class="checkbox-item checkbox-item-all">
-                <input type="checkbox" id="filterPopoverAllCheckbox" ${optionCount > 0 && selectedCount === optionCount ? 'checked' : ''}>
+                <input type="checkbox" id="filterPopoverAllCheckbox" ${optionCount > 0 && selectedCount === optionCount ? 'checked' : ''} ${optionCount === 0 ? 'disabled' : ''}>
                 <label for="filterPopoverAllCheckbox">All</label>
             </div>
-            ${optionCount === 0 ? `<div class="filter-popover-empty">No ${config.summaryNoun} are available in the current scope.</div>` : activeFilterPopoverOptions.map((option, index) => {
-                const checked = isDraftOptionSelected(activeFilterPopoverKey, option.value) ? 'checked' : '';
-                const countMarkup = option.count !== null && option.count !== undefined
-                    ? `<span class="checkbox-count">${option.count}</span>`
-                    : '';
-                return `
-                    <div class="checkbox-item" data-search-text="${escapeHtml(option.searchText || option.label.toLowerCase())}">
-                        <input type="checkbox" id="filterPopoverOption_${index}" data-option-value="${escapeHtml(option.value)}" ${checked}>
-                        <label for="filterPopoverOption_${index}">
-                            <span class="checkbox-label-text">${escapeHtml(option.label)}</span>
-                            ${countMarkup}
-                        </label>
-                    </div>`;
-            }).join('')}
+            <div id="filterPopoverOptionRows"></div>
+            ${optionCount === 0 ? `<div class="filter-popover-empty">No ${config.summaryNoun} are available in the current scope.</div>` : ''}
         </div>`;
 
-    updateFilterPopoverSummary();
-    updateFilterPopoverAllCheckbox();
+    document.getElementById('filterPopoverOptions')?.addEventListener('scroll', handleFilterPopoverOptionsScroll);
+    refreshFilterPopoverOptionRows(true);
     updateFilterPopoverFooterState();
 }
 
@@ -2409,16 +2686,25 @@ function positionFilterPopover(anchorButton) {
 
 function closeActiveFilterPopover() {
     const popover = document.getElementById('filterPopover');
+    const subtitle = document.getElementById('filterPopoverSubtitle');
+    const body = document.getElementById('filterPopoverBody');
     if (popover) {
         popover.hidden = true;
         popover.setAttribute('aria-hidden', 'true');
         popover.removeAttribute('data-filter-key');
         popover.style.left = '0px';
     }
+    if (subtitle) {
+        subtitle.textContent = '';
+    }
+    if (body) {
+        body.className = 'filter-popover-body';
+        body.innerHTML = '';
+    }
 
     activeFilterPopoverKey = null;
-    activeFilterPopoverOptions = [];
     filterPopoverDraftState = null;
+    resetActiveFilterPopoverState();
     renderFilterPills(filterState);
 }
 
@@ -2430,6 +2716,7 @@ function openFilterPopover(filterKey, anchorButton) {
 
     activeFilterPopoverKey = filterKey;
     filterPopoverDraftState = cloneFilterState(filterState);
+    activeFilterPopoverSearchTerm = '';
     renderActiveFilterPopover();
 
     const popover = document.getElementById('filterPopover');
@@ -2445,33 +2732,6 @@ function openFilterPopover(filterKey, anchorButton) {
         || document.querySelector('#filterPopoverBody .date-range-option.selected')
         || document.getElementById('filterPopoverApplyButton');
     autofocusTarget?.focus();
-}
-
-function syncDraftStateFromPopoverOptions() {
-    if (!activeFilterPopoverKey || activeFilterPopoverKey === 'date') {
-        return;
-    }
-
-    const config = FILTER_POPOVER_CONFIG[activeFilterPopoverKey];
-    const checkedValues = Array.from(document.querySelectorAll('#filterPopoverOptions input[data-option-value]:checked'))
-        .map(checkbox => checkbox.dataset.optionValue);
-
-    if (checkedValues.length === 0) {
-        filterPopoverDraftState[config.stateKey] = [];
-        filterPopoverDraftState[config.hasAnyKey] = false;
-    } else if (checkedValues.length === activeFilterPopoverOptions.length) {
-        filterPopoverDraftState[config.stateKey] = [];
-        filterPopoverDraftState[config.hasAnyKey] = true;
-    } else {
-        filterPopoverDraftState[config.stateKey] = activeFilterPopoverOptions
-            .map(option => option.value)
-            .filter(value => checkedValues.includes(value));
-        filterPopoverDraftState[config.hasAnyKey] = true;
-    }
-
-    updateFilterPopoverSummary();
-    updateFilterPopoverAllCheckbox();
-    updateFilterPopoverFooterState();
 }
 
 function handleFilterPopoverClick(event) {
@@ -2502,14 +2762,6 @@ function handleFilterPopoverClick(event) {
     if (target.matches('[data-date-preset]')) {
         filterPopoverDraftState = finalizeFilterState(assignDatePreset(cloneFilterState(filterPopoverDraftState), target.dataset.datePreset));
         renderActiveFilterPopover();
-        return;
-    }
-
-    if (target.id === 'filterPopoverAllCheckbox') {
-        document.querySelectorAll('#filterPopoverOptions input[data-option-value]').forEach(checkbox => {
-            checkbox.checked = target.checked;
-        });
-        syncDraftStateFromPopoverOptions();
     }
 }
 
@@ -2521,6 +2773,11 @@ function handleFilterPopoverInput(event) {
 
     if (target.id === 'filterPopoverSearchInput') {
         applyFilterPopoverSearch();
+        return;
+    }
+
+    if (target.id === 'filterPopoverAllCheckbox') {
+        setAllFilterPopoverOptionsSelected(target.checked);
         return;
     }
 
@@ -2536,7 +2793,7 @@ function handleFilterPopoverInput(event) {
     }
 
     if (target.matches('#filterPopoverOptions input[data-option-value]')) {
-        syncDraftStateFromPopoverOptions();
+        toggleFilterPopoverOptionSelection(target.dataset.optionValue, target.checked);
     }
 }
 
