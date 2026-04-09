@@ -1,0 +1,52 @@
+﻿name: Sync Azure Runbook
+
+concurrency:
+  group: sync-azure-runbook-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    paths:
+      - 'build/Build-SharedHelpers.ps1'
+      - 'build/shared/source/**'
+      - 'build/azure/Build-Runbook.ps1'
+      - 'build/azure/runbook-source.ps1'
+      - '.github/workflows/sync-azure-runbook.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  sync-runbook:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build Azure runbook artifact
+        shell: pwsh
+        run: |
+          .\build\azure\Build-Runbook.ps1
+
+      - name: Commit regenerated runbook
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add azure/Invoke-DashboardPipeline.ps1
+
+          if (git diff --staged --quiet -- azure/Invoke-DashboardPipeline.ps1) {
+            Write-Host "Azure runbook artifact is already up to date"
+            exit 0
+          }
+
+          $message = "chore: regenerate Azure runbook artifact"
+          git commit -m $message
+          git push
+          Write-Host "Committed and pushed regenerated Azure runbook artifact"

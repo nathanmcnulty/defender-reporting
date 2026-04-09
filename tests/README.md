@@ -5,7 +5,7 @@ This folder contains lightweight PowerShell regression coverage for the Defender
 ## Layout
 
 - `tests/fixtures/` contains committed, minimal regression datasets.
-- `tests/manual/` contains ad hoc troubleshooting harnesses that are useful during development but are not part of `Invoke-RegressionValidation.ps1`.
+- `tests/manual/` contains ad hoc troubleshooting harnesses that are useful during development but are not part of `build/Invoke-RegressionValidation.ps1`.
 - The top-level scripts in `tests/` are the supported automation entrypoints for regression validation, stress generation, benchmarking, and synthetic live-export creation.
 
 ## Deterministic preflight entrypoint
@@ -13,7 +13,7 @@ This folder contains lightweight PowerShell regression coverage for the Defender
 Run the full local regression bundle with:
 
 ```powershell
-pwsh -NoProfile -File .\Invoke-RegressionValidation.ps1
+pwsh -NoProfile -File .\build\Invoke-RegressionValidation.ps1
 ```
 
 That script is the authoritative deterministic preflight used for local work and PR validation. It rebuilds the generated deployment artifacts, runs parser and PSScriptAnalyzer checks across source scripts, executes focused shared-helper regression tests, and performs a small dashboard fixture smoke generation.
@@ -23,7 +23,7 @@ That script is the authoritative deterministic preflight used for local work and
 Run the exact live export and dashboard-generation path locally against your current Az context with:
 
 ```powershell
-pwsh -NoProfile -File .\Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext
+pwsh -NoProfile -File .\build\Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext
 ```
 
 Defaults:
@@ -44,7 +44,7 @@ Important note:
 
 These shapes match what the pipeline readers already support, even though NDJSON files are not a single valid JSON document when opened in a generic JSON validator.
 
-The fixture smoke runs in `Invoke-RegressionValidation.ps1` and the legacy fixture regression path both execute against temp copies so derived `.dashboard-cache/` output does not pollute the committed fixture.
+The fixture smoke runs in `build/Invoke-RegressionValidation.ps1` and the legacy fixture regression path both execute against temp copies so derived `.dashboard-cache/` output does not pollute the committed fixture.
 
 ## Large synthetic stress dataset
 

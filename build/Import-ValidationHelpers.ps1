@@ -7,16 +7,16 @@ $__generatedHelperPath = & {
         [string]$RepoRoot
     )
 
-    $buildPath = Join-Path $RepoRoot 'Build-SharedHelpers.ps1'
-    $sourceRoot = Join-Path $RepoRoot 'shared\source'
-    $generatedPath = Join-Path $RepoRoot 'shared-helpers.ps1'
+    $buildPath = Join-Path $RepoRoot 'build\Build-ValidationHelpers.ps1'
+    $sourceRoot = Join-Path $RepoRoot 'build\validation\source'
+    $generatedPath = Join-Path $RepoRoot 'build\generated\validation-helpers.ps1'
 
     if (-not (Test-Path -LiteralPath $buildPath -PathType Leaf)) {
-        throw "Shared helper build script not found at '$buildPath'."
+        throw "Validation helper build script not found at '$buildPath'."
     }
 
     if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
-        throw "Shared helper source directory not found at '$sourceRoot'."
+        throw "Validation helper source directory not found at '$sourceRoot'."
     }
 
     $requiresBuild = -not (Test-Path -LiteralPath $generatedPath -PathType Leaf)
@@ -45,11 +45,11 @@ $__generatedHelperPath = & {
     }
 
     if (-not (Test-Path -LiteralPath $generatedPath -PathType Leaf)) {
-        throw "Shared helpers were not generated at '$generatedPath'."
+        throw "Validation helpers were not generated at '$generatedPath'."
     }
 
     return $generatedPath
-} $PSScriptRoot
+} (Split-Path -Path $PSScriptRoot -Parent)
 
 . $__generatedHelperPath
 Remove-Variable -Name __generatedHelperPath -ErrorAction Ignore

@@ -32,7 +32,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = Join-Path (Join-Path $repoRoot '.local') 'stress-output'
 }
 
-. (Join-Path $repoRoot 'Import-SharedHelpers.ps1')
+. (Join-Path $repoRoot 'build\Import-SharedHelpers.ps1')
 
 if (-not (Test-Path -LiteralPath $BasePath -PathType Container)) {
     throw "BasePath '$BasePath' not found."

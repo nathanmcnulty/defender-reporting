@@ -1,10 +1,10 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string]$HtmlPath = (Join-Path $PSScriptRoot 'VulnerabilityDashboard.html'),
+    [string]$HtmlPath = (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'VulnerabilityDashboard.html'),
 
     [Parameter(Mandatory = $false)]
-    [string]$ExportsPath = (Join-Path $PSScriptRoot 'exports'),
+    [string]$ExportsPath = (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'exports'),
 
     [Parameter(Mandatory = $false)]
     [AllowEmptyString()]
@@ -23,12 +23,13 @@ param(
     [switch]$IncludeLegacyFixtureRegression,
 
     [Parameter(Mandatory = $false)]
-    [string]$LegacyFixturePath = (Join-Path $PSScriptRoot 'tests\fixtures\legacy-migration')
+    [string]$LegacyFixturePath = (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'tests\fixtures\legacy-migration')
 )
 
 $ErrorActionPreference = 'Stop'
 
-$generateScript = Join-Path $PSScriptRoot 'Generate-VulnerabilityDashboard.ps1'
+$repoRoot = Split-Path -Path $PSScriptRoot -Parent
+$generateScript = Join-Path $repoRoot 'Generate-VulnerabilityDashboard.ps1'
 
 & $generateScript `
     -DirectoryPath $ExportsPath `

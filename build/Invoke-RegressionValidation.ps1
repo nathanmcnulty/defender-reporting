@@ -9,8 +9,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = $PSScriptRoot
-$settingsPath = Join-Path $repoRoot 'PSScriptAnalyzerSettings.psd1'
+$buildRoot = $PSScriptRoot
+$repoRoot = Split-Path -Path $buildRoot -Parent
+$settingsPath = Join-Path $buildRoot 'PSScriptAnalyzerSettings.psd1'
 $generatedParseOnlyPaths = @(
     Join-Path $repoRoot 'azure\Invoke-DashboardPipeline.ps1'
     Join-Path $repoRoot 'azure\function-app\ExportAndGenerate\run.ps1'
@@ -41,8 +42,7 @@ function Test-IsExcludedRepoScriptPath {
     }
 
     return (
-        $normalizedPath -match '/shared-helpers\.ps1$' -or
-        $normalizedPath -match '/validation-helpers\.ps1$' -or
+        $normalizedPath -match '/build/generated/' -or
         $normalizedPath -match '/azure/Invoke-DashboardPipeline\.ps1$' -or
         $normalizedPath -match '/azure/function-app/ExportAndGenerate/run\.ps1$'
     )
@@ -124,30 +124,30 @@ function Reset-LastExitCode {
 
 Write-Output 'Building shared helpers...'
 Reset-LastExitCode
-& (Join-Path $repoRoot 'Build-SharedHelpers.ps1')
+& (Join-Path $buildRoot 'Build-SharedHelpers.ps1')
 if (Test-LastExitCodeFailed) {
-    throw 'Build-SharedHelpers.ps1 failed.'
+    throw 'build/Build-SharedHelpers.ps1 failed.'
 }
 
 Write-Output 'Building validation helpers...'
 Reset-LastExitCode
-& (Join-Path $repoRoot 'Build-ValidationHelpers.ps1')
+& (Join-Path $buildRoot 'Build-ValidationHelpers.ps1')
 if (Test-LastExitCodeFailed) {
-    throw 'Build-ValidationHelpers.ps1 failed.'
+    throw 'build/Build-ValidationHelpers.ps1 failed.'
 }
 
 Write-Output 'Building Azure runbook...'
 Reset-LastExitCode
-& (Join-Path $repoRoot 'azure\Build-Runbook.ps1')
+& (Join-Path $buildRoot 'azure\Build-Runbook.ps1')
 if (Test-LastExitCodeFailed) {
-    throw 'azure/Build-Runbook.ps1 failed.'
+    throw 'build/azure/Build-Runbook.ps1 failed.'
 }
 
 Write-Output 'Building Azure Function App entry point...'
 Reset-LastExitCode
-& (Join-Path $repoRoot 'azure\Build-FunctionApp.ps1') -SkipModuleStaging
+& (Join-Path $buildRoot 'azure\Build-FunctionApp.ps1') -SkipModuleStaging
 if (Test-LastExitCodeFailed) {
-    throw 'azure/Build-FunctionApp.ps1 failed.'
+    throw 'build/azure/Build-FunctionApp.ps1 failed.'
 }
 
 Write-Output 'Running parser validation...'
