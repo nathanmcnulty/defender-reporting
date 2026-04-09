@@ -1,6 +1,7 @@
 # Defender Vulnerability Reporting Dashboard
 
-<img width="3014" height="1972" alt="image" src="https://github.com/user-attachments/assets/fc409382-b59c-4a7b-8bcb-fe64d46c4f4e" />
+<img width="3085" height="1970" alt="image" src="https://github.com/user-attachments/assets/c46f9175-c96d-416d-b0a0-4d2e5bdd2a94" />
+
 
 
 Defender for Endpoint vulnerability reporting has always been a pain point, and this felt like a great opportunity to use AI-assisted coding to build a dashboard without a dependency on Power BI or other expensive tools. The result is a PowerShell-built dashboard that defaults to a self-contained HTML artifact for direct-open use, with an opt-in split-assets mode for hosted deployments, along with validation tooling, Azure automation assets, GitHub Actions workflows, and sample PDF report outputs.
