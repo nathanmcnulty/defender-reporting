@@ -403,7 +403,7 @@ function Build-AndDeploy-Runbook {
         [string]$RepoPath
     )
 
-    Invoke-RepoScript -RepoPath $RepoPath -RelativeScriptPath 'azure/Build-Runbook.ps1'
+    Invoke-RepoScript -RepoPath $RepoPath -RelativeScriptPath 'build/azure/Build-Runbook.ps1'
 
     $artifactPath = Join-Path -Path $RepoPath -ChildPath 'azure/Invoke-DashboardPipeline.ps1'
     Invoke-AzCli -Arguments @(
@@ -428,7 +428,7 @@ function Build-AndDeploy-FunctionApp {
         [string]$RepoPath
     )
 
-    Invoke-RepoScript -RepoPath $RepoPath -RelativeScriptPath 'azure/Build-FunctionApp.ps1'
+    Invoke-RepoScript -RepoPath $RepoPath -RelativeScriptPath 'build/azure/Build-FunctionApp.ps1'
 
     $functionAppDir = Join-Path -Path $RepoPath -ChildPath 'azure/function-app'
     $zipPath = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ('funcapp-deploy-' + [guid]::NewGuid().ToString('N') + '.zip')

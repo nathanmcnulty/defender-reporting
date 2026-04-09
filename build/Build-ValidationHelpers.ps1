@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 
 [CmdletBinding()]
 param()
@@ -6,12 +6,11 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = $PSScriptRoot
-$sourceRoot = Join-Path -Path $repoRoot -ChildPath 'shared\source'
-$outputPath = Join-Path -Path $repoRoot -ChildPath 'shared-helpers.ps1'
+$sourceRoot = Join-Path -Path $PSScriptRoot -ChildPath 'validation\source'
+$outputPath = Join-Path -Path $PSScriptRoot -ChildPath 'generated\validation-helpers.ps1'
 
 if (-not (Test-Path -Path $sourceRoot -PathType Container)) {
-    throw "Shared helper source directory not found: $sourceRoot"
+    throw "Validation helper source directory not found: $sourceRoot"
 }
 
 $sourceFiles = @(
@@ -20,7 +19,12 @@ $sourceFiles = @(
 )
 
 if ($sourceFiles.Count -eq 0) {
-    throw "No shared helper source files found under '$sourceRoot'."
+    throw "No validation helper source files found under '$sourceRoot'."
+}
+
+$outputDirectory = Split-Path -Path $outputPath -Parent
+if (-not (Test-Path -Path $outputDirectory -PathType Container)) {
+    New-Item -Path $outputDirectory -ItemType Directory -Force | Out-Null
 }
 
 $combined = [System.Text.StringBuilder]::new()
@@ -37,4 +41,4 @@ for ($index = 0; $index -lt $sourceFiles.Count; $index++) {
 }
 
 [System.IO.File]::WriteAllText($outputPath, $combined.ToString(), [System.Text.UTF8Encoding]::new($true))
-Write-Host "Generated shared helpers: $outputPath" -ForegroundColor Green
+Write-Host "Generated validation helpers: $outputPath" -ForegroundColor Green
