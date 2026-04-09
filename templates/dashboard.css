@@ -442,6 +442,10 @@ h1 {
     font-size: var(--font-size-sm);
 }
 
+.filter-popover-summary:empty {
+    display: none;
+}
+
 .filter-popover-options {
     border: 1px solid var(--color-border);
     border-radius: var(--radius-sm);
