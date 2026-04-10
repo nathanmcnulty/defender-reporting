@@ -1,6 +1,6 @@
 ﻿# Manual Test Harnesses
 
-These scripts are intentionally separate from `Invoke-RegressionValidation.ps1`.
+These scripts are intentionally separate from `build/Invoke-RegressionValidation.ps1`.
 
 Use them when you need to probe a specific normalization or cache path during local troubleshooting.
 

@@ -35,7 +35,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = $PSScriptRoot
+$repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $defaultOutputRoot = Join-Path $repoRoot '.local\local-reports\live-dashboard-dry-run'
 
 function Resolve-RepoPath {
