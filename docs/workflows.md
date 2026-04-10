@@ -1,6 +1,6 @@
 # Workflow Notes
 
-This repo currently ships three GitHub Actions workflows.
+This repo currently ships five GitHub Actions workflows.
 
 ## Workflow summary
 
@@ -8,6 +8,8 @@ This repo currently ships three GitHub Actions workflows.
 |---|---|---|
 | Update Vulnerability Dashboard | `.github/workflows/update-vulnerability-dashboard.yml` | Run the live export and dashboard validation path, upload artifacts, and optionally publish repo outputs |
 | Validate Dashboard | `.github/workflows/validate-dashboard.yml` | Run the deterministic repo preflight used for local and PR validation |
+| Sync Azure Runbook | `.github/workflows/sync-azure-runbook.yml` | Rebuild and commit `azure/Invoke-DashboardPipeline.ps1` when its build sources change |
+| Release Azure Package | `.github/workflows/release-azure-package.yml` | Build a release-ready Azure deployment zip and attach it to published GitHub releases |
 | Export Dashboard PDFs | `.github/workflows/export-pdf-reports.yml` | Render PDF report variants from the latest committed dashboard |
 
 ## Flow
@@ -31,7 +33,7 @@ Trigger sources:
 
 Key behavior:
 
-- Uses repo-owned Azure OIDC logic through `Invoke-LiveDashboardDryRun.ps1`
+- Uses repo-owned Azure OIDC logic through `build/Invoke-LiveDashboardDryRun.ps1`
 - Runs the live export and dashboard validation path before any publish step
 - Uploads `dashboard-audit.json`, `dashboard-live-run-manifest.json`, and the generated `VulnerabilityDashboard.html` as workflow artifacts
 - Commits `exports/` and `VulnerabilityDashboard.html` only when the run is not a dry run
@@ -46,9 +48,10 @@ Trigger sources:
 
 Key behavior:
 
-- Installs `PSScriptAnalyzer`
-- Calls the repo-owned `Invoke-RegressionValidation.ps1` entrypoint
+- Installs `PSScriptAnalyzer` and `Az.Accounts`
+- Calls the repo-owned `build/Invoke-RegressionValidation.ps1` entrypoint
 - Validates generated deployment artifacts, source scripts, regression helpers, and committed-export dashboard generation through one deterministic path
+- Smoke-tests the `Azure-YYMMDD.zip` packaging path with `build/Build-AzureReleasePackage.ps1`
 
 ## Export Dashboard PDFs
 
@@ -64,12 +67,40 @@ Key behavior:
 - Commits updated files under `reports/`
 - Uploads generated PDFs as a workflow artifact
 
+## Sync Azure Runbook
+
+Trigger sources:
+
+- Pushes that touch `build/azure/runbook-source.ps1`, `build/shared/source/`, or the runbook build scripts
+- Manual run
+
+Key behavior:
+
+- Runs `./build/azure/Build-Runbook.ps1`
+- Stages `azure/Invoke-DashboardPipeline.ps1`
+- Commits and pushes the regenerated runbook only when the artifact changed
+
+## Release Azure Package
+
+Trigger sources:
+
+- Published GitHub releases
+
+Key behavior:
+
+- Installs `Az.Accounts`
+- Runs `build/Build-AzureReleasePackage.ps1`
+- Packages `Setup-AzureResources.ps1`, `templates/`, and `azure/` into `Azure-YYMMDD.zip`
+- Uploads the zip as a release asset, replacing any existing asset with the same name
+
 ## Suggested operating model
 
 - Use the update workflow for the regular daily refresh
 - Let the validation workflow protect changes to scripts and templates through the same deterministic preflight used locally
+- Let the runbook sync workflow keep the committed Azure Automation artifact aligned with the build sources
+- Use the release packaging workflow when you want a self-contained Azure deployment bundle attached to a GitHub release
 - Run the PDF workflow only when the HTML dashboard changes enough to warrant fresh report exports
-- Use `Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` locally when you need exact-path validation for the live export flow before publishing
+- Use `build/Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` locally when you need exact-path validation for the live export flow before publishing
 
 ## Related docs
 

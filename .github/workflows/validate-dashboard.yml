@@ -9,26 +9,30 @@ on:
     paths:
       - '*.ps1'
       - '**/*.ps1'
-      - 'PSScriptAnalyzerSettings.psd1'
-      - 'Validate-DashboardReports.ps1'
+      - 'build/PSScriptAnalyzerSettings.psd1'
+      - 'build/Validate-DashboardReports.ps1'
       - 'templates/**'
       - 'exports/**'
       - 'VulnerabilityDashboard.html'
       - '.github/workflows/validate-dashboard.yml'
       - '.github/workflows/update-vulnerability-dashboard.yml'
+      - '.github/workflows/sync-azure-runbook.yml'
+      - '.github/workflows/release-azure-package.yml'
   push:
     branches:
       - main
     paths:
       - '*.ps1'
       - '**/*.ps1'
-      - 'PSScriptAnalyzerSettings.psd1'
-      - 'Validate-DashboardReports.ps1'
+      - 'build/PSScriptAnalyzerSettings.psd1'
+      - 'build/Validate-DashboardReports.ps1'
       - 'templates/**'
       - 'exports/**'
       - 'VulnerabilityDashboard.html'
       - '.github/workflows/validate-dashboard.yml'
       - '.github/workflows/update-vulnerability-dashboard.yml'
+      - '.github/workflows/sync-azure-runbook.yml'
+      - '.github/workflows/release-azure-package.yml'
   workflow_dispatch:
 
 permissions:
@@ -45,12 +49,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install PSScriptAnalyzer
+      - name: Install validation modules
         shell: pwsh
         run: |
           Install-Module -Name PSScriptAnalyzer -Force -AllowClobber -Scope CurrentUser
+          Install-Module -Name Az.Accounts -Force -AllowClobber -Scope CurrentUser
 
       - name: Run deterministic preflight
         shell: pwsh
         run: |
-          .\Invoke-RegressionValidation.ps1
+          .\build\Invoke-RegressionValidation.ps1
+
+      - name: Smoke test Azure release package
+        shell: pwsh
+        run: |
+          .\build\Build-AzureReleasePackage.ps1 -OutputPath (Join-Path $PWD '.local\local-reports\validate-dashboard\Azure-validation.zip')

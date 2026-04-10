@@ -3,12 +3,12 @@
     Generates the self-contained Azure Automation runbook script.
 
 .DESCRIPTION
-    Assembles azure/runbook-source.ps1 with the canonical shared helper block
-    from shared/source/*.ps1 via Build-SharedHelpers.ps1 and writes the public,
+    Assembles build/azure/runbook-source.ps1 with the canonical shared helper block
+    from build/shared/source/*.ps1 via build/Build-SharedHelpers.ps1 and writes the public,
     copy/paste-ready azure/Invoke-DashboardPipeline.ps1 artifact.
 
 .EXAMPLE
-    .\azure\Build-Runbook.ps1
+    .\build\azure\Build-Runbook.ps1
 #>
 
 #Requires -Version 7.0
@@ -19,14 +19,15 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = Split-Path -Path $PSScriptRoot -Parent
-$buildSharedHelpersPath = Join-Path -Path $repoRoot -ChildPath 'Build-SharedHelpers.ps1'
-$sharedHelpersPath = Join-Path -Path $repoRoot -ChildPath 'shared-helpers.ps1'
+$buildRoot = Split-Path -Path $PSScriptRoot -Parent
+$repoRoot = Split-Path -Path $buildRoot -Parent
+$buildSharedHelpersPath = Join-Path -Path $buildRoot -ChildPath 'Build-SharedHelpers.ps1'
+$sharedHelpersPath = Join-Path -Path $buildRoot -ChildPath 'generated\shared-helpers.ps1'
 $runbookSourcePath = Join-Path -Path $PSScriptRoot -ChildPath 'runbook-source.ps1'
-$outputPath = Join-Path -Path $PSScriptRoot -ChildPath 'Invoke-DashboardPipeline.ps1'
+$outputPath = Join-Path -Path $repoRoot -ChildPath 'azure\Invoke-DashboardPipeline.ps1'
 $marker = @'
 # =============================================================================
-# SHARED HELPERS INSERTED BY azure/Build-Runbook.ps1
+# SHARED HELPERS INSERTED BY build/azure/Build-Runbook.ps1
 # =============================================================================
 '@
 

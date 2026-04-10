@@ -1504,7 +1504,7 @@ try {
         Write-Host "  Runbook '$runbookName' created (PowerShell 7.4 / $($Script:RuntimeEnvName))" -ForegroundColor Green
 
         # Rebuild the generated runbook artifact before uploading it to Azure Automation.
-        $runbookBuildPath = Join-Path -Path $PSScriptRoot -ChildPath 'azure' | Join-Path -ChildPath 'Build-Runbook.ps1'
+        $runbookBuildPath = Join-Path -Path $PSScriptRoot -ChildPath 'build\azure\Build-Runbook.ps1'
         if (Test-Path -Path $runbookBuildPath) {
             Write-Host "  Rebuilding runbook artifact from shared helpers..." -ForegroundColor Gray
             & $runbookBuildPath
@@ -1533,7 +1533,7 @@ try {
         }
         else {
             Write-Host "  Runbook script not found at: $runbookScriptPath" -ForegroundColor Yellow
-            Write-Host "  Run .\azure\Build-Runbook.ps1 locally or rerun this setup script to regenerate the artifact before uploading." -ForegroundColor Yellow
+            Write-Host "  Run .\build\azure\Build-Runbook.ps1 locally or rerun this setup script to regenerate the artifact before uploading." -ForegroundColor Yellow
         }
     }
 
@@ -1635,21 +1635,29 @@ try {
             # Steps 9-12 (FunctionApp): Build deployment zip and deploy
             Write-Host "`nSteps 9-12: Building and deploying Function App..." -ForegroundColor Cyan
 
-            # Build the Function App from runbook-source.ps1
-            Write-Host "  Building Function App from runbook-source.ps1..." -ForegroundColor Gray
-            $buildScript = Join-Path $PSScriptRoot 'azure' 'Build-FunctionApp.ps1'
-            if (-not (Test-Path $buildScript)) {
-                throw "Build script not found: $buildScript. Run from the repository root."
+            # Build the Function App from build/azure/runbook-source.ps1 when the build source is available.
+            $buildScript = Join-Path $PSScriptRoot 'build' 'azure' 'Build-FunctionApp.ps1'
+            $functionAppDir = Join-Path $PSScriptRoot 'azure' 'function-app'
+            $functionAppEntryPoint = Join-Path $functionAppDir 'ExportAndGenerate' 'run.ps1'
+            $functionAppModulesPath = Join-Path $functionAppDir 'Modules' 'Az.Accounts'
+
+            if (Test-Path $buildScript) {
+                Write-Host "  Building Function App from build/azure/runbook-source.ps1..." -ForegroundColor Gray
+                & $buildScript
+                # Build-FunctionApp.ps1 uses $ErrorActionPreference = 'Stop' and throws
+                # on failure, so an explicit exit-code check is unnecessary.
+                Write-Host "  Function App built successfully" -ForegroundColor Green
             }
-            & $buildScript
-            # Build-FunctionApp.ps1 uses $ErrorActionPreference = 'Stop' and throws
-            # on failure, so an explicit exit-code check is unnecessary.
-            Write-Host "  Function App built successfully" -ForegroundColor Green
+            elseif ((Test-Path $functionAppEntryPoint) -and (Test-Path $functionAppModulesPath)) {
+                Write-Host "  Build script not present; using prebuilt Function App artifacts from azure/function-app." -ForegroundColor Gray
+            }
+            else {
+                throw "Function App build script not found at $buildScript and prebuilt artifacts are incomplete. Expected '$functionAppEntryPoint' and '$functionAppModulesPath'."
+            }
 
             # Deploy function app code via az CLI zip deployment (Flex Consumption
             # uses a Kudu-lite pipeline that packages and uploads to blob storage)
             Write-Host "  Deploying function app code via zip deployment..." -ForegroundColor Gray
-            $functionAppDir = Join-Path $PSScriptRoot 'azure' 'function-app'
             $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) 'funcapp-deploy.zip'
             if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 

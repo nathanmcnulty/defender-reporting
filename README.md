@@ -96,6 +96,7 @@ For local testing of the split-assets build, use a local HTTP server instead of 
 | Topic | What it covers |
 |---|---|
 | [Azure setup](docs/azure-setup.md) | API permissions, authentication options, Azure Automation provisioning, and Container App publishing |
+| [Build guide](build/README.md) | Maintainer-facing build, validation, and packaging entrypoints |
 | [GitHub Actions setup](docs/github-actions-setup.md) | OIDC service principal setup, required repository secrets, and branch protection guidance |
 | [Workflow notes](docs/workflows.md) | What each workflow does and when to use it |
 | [Changelog](CHANGELOG.md) | Release-style summary of notable changes |
@@ -106,7 +107,7 @@ For local testing of the split-assets build, use a local HTTP server instead of 
 |---|---|
 | `Invoke-VulnerabilityExport.ps1` | Downloads Defender exports and writes the canonical gzip data store |
 | `Generate-VulnerabilityDashboard.ps1` | Builds the dashboard in self-contained or split-assets form and can validate the result |
-| `Validate-DashboardReports.ps1` | Validates an existing dashboard HTML against committed exports |
+| `build/Validate-DashboardReports.ps1` | Validates an existing dashboard HTML against committed exports |
 | `Setup-AzureResources.ps1` | Provisions Azure compute (Automation Account or Function App), storage, scheduling, and optional Container App hosting |
 | `Setup-GitHubActionServicePrincipal.ps1` | Creates the Entra app and federated credential for GitHub Actions OIDC |
 
@@ -140,10 +141,14 @@ flowchart TD
 
 ## Notes
 
-- `shared-helpers.ps1`, `validation-helpers.ps1`, `azure/Invoke-DashboardPipeline.ps1`, and `azure/function-app/ExportAndGenerate/run.ps1` are generated on demand and ignored by git.
-- Edit `shared/source/*.ps1`, `validation/source/*.ps1`, and `azure/runbook-source.ps1`; rebuild generated deployment artifacts with `./azure/Build-Runbook.ps1`, `./azure/Build-FunctionApp.ps1`, `./Build-SharedHelpers.ps1`, or `./Build-ValidationHelpers.ps1` only when you need the materialized outputs.
-- Run `./Invoke-RegressionValidation.ps1` for the deterministic local and PR-aligned preflight path.
-- Run `./Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` when you want the local command that mirrors the live GitHub Actions export and dashboard generation path.
+- Build sources and build scripts now live under `build/`.
+- `build/generated/shared-helpers.ps1`, `build/generated/validation-helpers.ps1`, and `azure/function-app/ExportAndGenerate/run.ps1` are generated on demand and ignored by git.
+- `azure/Invoke-DashboardPipeline.ps1` is generated from the `build/` sources and can be refreshed locally or by CI.
+- Edit `build/shared/source/*.ps1`, `build/validation/source/*.ps1`, and `build/azure/runbook-source.ps1`; rebuild generated deployment artifacts with `./build/azure/Build-Runbook.ps1`, `./build/azure/Build-FunctionApp.ps1`, `./build/Build-SharedHelpers.ps1`, or `./build/Build-ValidationHelpers.ps1` only when you need the materialized outputs.
+- Run `./build/Invoke-RegressionValidation.ps1` for the deterministic local and PR-aligned preflight path.
+- Run `./build/Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` when you want the local command that mirrors the live GitHub Actions export and dashboard generation path.
+- Run `./build/Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName <name> -FunctionAppName <name>` when you want the repo-owned manual validation path that rebuilds locally, redeploys Azure Automation and Function App, and executes both live Azure validation flows.
+- Run `./build/Build-AzureReleasePackage.ps1` when you want the exact local packaging path used by the release workflow.
 - Legacy `VulnExport_<group>_<date>.json(.gz)` compatibility remains temporary through `2026-07-01`.
 - Sample PDF outputs are committed under `reports/`.
 - `.dashboard-cache/` directories are derived local caches and are intentionally ignored by git.

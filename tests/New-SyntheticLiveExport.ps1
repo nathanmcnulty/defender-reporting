@@ -23,7 +23,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
-. (Join-Path $repoRoot 'Import-SharedHelpers.ps1')
+. (Join-Path $repoRoot 'build\Import-SharedHelpers.ps1')
 
 $script:InvariantCulture = [System.Globalization.CultureInfo]::InvariantCulture
 $script:DateShiftDays = 0
