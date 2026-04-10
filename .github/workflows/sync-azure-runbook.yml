@@ -6,6 +6,8 @@ concurrency:
 
 on:
   push:
+    branches:
+      - main
     paths:
       - 'build/Build-SharedHelpers.ps1'
       - 'build/shared/source/**'
@@ -27,6 +29,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
 
       - name: Build Azure runbook artifact
         shell: pwsh
@@ -35,18 +40,29 @@ jobs:
 
       - name: Commit regenerated runbook
         shell: pwsh
+        env:
+          SYNC_BRANCH: ${{ github.ref_name }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add azure/Invoke-DashboardPipeline.ps1
 
-          if (git diff --staged --quiet -- azure/Invoke-DashboardPipeline.ps1) {
+          git diff --staged --quiet -- azure/Invoke-DashboardPipeline.ps1
+          if ($LASTEXITCODE -eq 0) {
             Write-Host "Azure runbook artifact is already up to date"
             exit 0
           }
 
+          if ($LASTEXITCODE -ne 1) {
+            throw "git diff --staged --quiet failed with exit code $LASTEXITCODE"
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:SYNC_BRANCH)) {
+            throw "SYNC_BRANCH is not set."
+          }
+
           $message = "chore: regenerate Azure runbook artifact"
           git commit -m $message
-          git push
+          git push origin HEAD:$env:SYNC_BRANCH
           Write-Host "Committed and pushed regenerated Azure runbook artifact"
