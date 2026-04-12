@@ -3496,18 +3496,26 @@ function updateDataQualitySummary() {
  * @param {string} product - The software product name
  * @returns {string} Formatted software name
  */
+function formatSoftwarePart(text) {
+    if (!text) return '';
+
+    return String(text)
+        .trim()
+        .split('_')
+        .filter(Boolean)
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+        .join(' ');
+}
+
 function formatSoftwareName(vendor, product) {
-    if (!vendor || !product) return 'Unknown';
-    
-    // Capitalize first letter of each word and replace underscores with spaces
-    const formatPart = (text) => {
-        return text
-            .split('_')
-            .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-            .join(' ');
-    };
-    
-    return `${formatPart(vendor)} - ${formatPart(product)}`;
+    const vendorPart = formatSoftwarePart(vendor);
+    const productPart = formatSoftwarePart(product);
+
+    if (!vendorPart && !productPart) return 'Unknown';
+    if (!vendorPart) return productPart;
+    if (!productPart) return vendorPart;
+
+    return `${vendorPart} - ${productPart}`;
 }
 
 function getPointInTimeReferenceDate(state = filterState) {
@@ -4025,6 +4033,115 @@ function buildRemediationString(v) {
         return kbId;
     }
     return 'Not Specified';
+}
+
+function normalizeRemediationText(value) {
+    if (value === null || value === undefined) return '';
+
+    const text = String(value).trim();
+    if (!text || text.toLowerCase() === 'unknown') {
+        return '';
+    }
+
+    return text;
+}
+
+function normalizeKbId(value) {
+    const text = normalizeRemediationText(value);
+    if (!text) return '';
+    return text.toUpperCase().startsWith('KB') ? text.toUpperCase() : 'KB' + text;
+}
+
+function isNumericRemediationReference(value) {
+    return /^\d+$/.test(value) || /^KB\d+$/i.test(value);
+}
+
+function isCveRemediationReference(value) {
+    return /^CVE-\d{4}-\d+$/i.test(value);
+}
+
+function buildRemediationDescriptor(v) {
+    materializeRow(v);
+
+    const advisoryTitle = normalizeRemediationText(v.CveBatchTitle);
+    const updateName = normalizeRemediationText(v.RecommendedSecurityUpdate);
+    const updateId = normalizeRemediationText(v.RecommendedSecurityUpdateId);
+    const kbId = normalizeKbId(updateId);
+    const updateUrl = normalizeRemediationText(v.RecommendedSecurityUpdateUrl);
+    const osPlatform = normalizeRemediationText(v.OSPlatform) || 'Unknown';
+    const recommendationReference = normalizeRemediationText(v.RecommendationReference);
+    const vendorPart = formatSoftwarePart(v.SoftwareVendor);
+    const productPart = formatSoftwarePart(v.SoftwareName);
+    const productLabel = formatSoftwareName(v.SoftwareVendor, v.SoftwareName);
+    const scopeLabel = productPart || productLabel || vendorPart || 'Unknown';
+    const scopeKey = recommendationReference
+        || [normalizeRemediationText(v.SoftwareVendor), normalizeRemediationText(v.SoftwareName)].filter(Boolean).join('|')
+        || scopeLabel;
+    const familyTitle = advisoryTitle || updateName || kbId || recommendationReference || 'Not Specified';
+
+    let title = familyTitle;
+    if (scopeLabel !== 'Unknown') {
+        if (advisoryTitle) {
+            title = advisoryTitle.toLowerCase().includes(scopeLabel.toLowerCase())
+                ? advisoryTitle
+                : `${scopeLabel}: ${advisoryTitle}`;
+        } else if (updateName) {
+            if (isNumericRemediationReference(updateName)) {
+                title = `${scopeLabel} patch ${updateName}`;
+            } else if (isCveRemediationReference(updateName)) {
+                title = `${scopeLabel} advisory ${updateName}`;
+            } else {
+                title = `${scopeLabel}: ${updateName}`;
+            }
+        } else if (kbId) {
+            title = `${scopeLabel} patch ${kbId}`;
+        } else if (recommendationReference && recommendationReference !== scopeLabel) {
+            title = `${scopeLabel}: ${recommendationReference}`;
+        } else {
+            title = scopeLabel;
+        }
+    }
+
+    let patchReference = '';
+    if (updateName && updateName !== advisoryTitle) {
+        patchReference = updateName;
+    } else if (kbId && kbId !== advisoryTitle) {
+        patchReference = kbId;
+    } else if (recommendationReference && recommendationReference !== familyTitle) {
+        patchReference = recommendationReference;
+    }
+
+    return {
+        key: `${scopeKey}|${familyTitle}|${osPlatform}`,
+        title: title,
+        familyTitle: familyTitle,
+        productLabel: productLabel,
+        scopeLabel: scopeLabel,
+        patchReference: patchReference,
+        updateName: updateName || 'Unknown',
+        updateId: updateId,
+        updateUrl: updateUrl,
+        osPlatform: osPlatform
+    };
+}
+
+function buildRemediationReferenceHtml(referenceText, referenceUrl) {
+    if (!referenceText) {
+        return '-';
+    }
+
+    if (referenceUrl) {
+        return `<a href="${escapeHtml(referenceUrl)}" target="_blank" rel="noopener noreferrer" class="remediation-update-badge">
+                 <span>${escapeHtml(referenceText)}</span>
+                 <svg class="link-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                     <polyline points="15 3 21 3 21 9"></polyline>
+                     <line x1="10" y1="14" x2="21" y2="3"></line>
+                 </svg>
+               </a>`;
+    }
+
+    return escapeHtml(referenceText);
 }
 
 /**
@@ -5524,19 +5641,19 @@ function renderDevicesByRemediationTable() {
 
         activeRows.forEach(v => {
             materializeRow(v);
-            const updateName = v.RecommendedSecurityUpdate || 'Unknown';
-            const updateId = v.RecommendedSecurityUpdateId || '';
-            const osPlatform = v.OSPlatform || 'Unknown';
-            const batchTitle = v.CveBatchTitle || updateName;
-            const key = `${updateName}|${updateId}|${osPlatform}`;
+            const remediation = buildRemediationDescriptor(v);
+            const key = remediation.key;
 
             if (!remediationByKey[key]) {
                 remediationByKey[key] = {
-                    updateName: updateName,
-                    batchTitle: batchTitle,
-                    updateId: updateId,
-                    updateUrl: v.RecommendedSecurityUpdateUrl,
-                    osPlatform: osPlatform,
+                    title: remediation.title,
+                    familyTitle: remediation.familyTitle,
+                    productLabel: remediation.productLabel,
+                    patchReference: remediation.patchReference,
+                    updateName: remediation.updateName,
+                    updateId: remediation.updateId,
+                    updateUrl: remediation.updateUrl,
+                    osPlatform: remediation.osPlatform,
                     devices: new Map(),
                     cves: new Set(),
                     severities: { Critical: 0, High: 0, Medium: 0, Low: 0 },
@@ -5583,6 +5700,14 @@ function renderDevicesByRemediationTable() {
             if (v.SoftwareVersion) {
                 cveDetails.versions.add(v.SoftwareVersion);
             }
+
+            if (!remediationByKey[key].patchReference && remediation.patchReference) {
+                remediationByKey[key].patchReference = remediation.patchReference;
+            }
+
+            if (!remediationByKey[key].updateUrl && remediation.updateUrl) {
+                remediationByKey[key].updateUrl = remediation.updateUrl;
+            }
         });
 
         Object.values(remediationByKey).forEach(data => {
@@ -5595,8 +5720,11 @@ function renderDevicesByRemediationTable() {
 
         cache.devicesByRemediationData = Object.entries(remediationByKey).map(([key, data]) => ({
             key: key,
+            title: data.title,
+            familyTitle: data.familyTitle,
+            productLabel: data.productLabel,
+            patchReference: data.patchReference,
             updateName: data.updateName,
-            batchTitle: data.batchTitle,
             updateId: data.updateId,
             updateUrl: data.updateUrl,
             osPlatform: data.osPlatform,
@@ -5771,9 +5899,7 @@ function appendDevicesByRemediationCard(container, data, index) {
     const card = document.createElement('div');
     card.className = 'remediation-card';
     
-    // Build header using CveBatchTitle
-    const kbText = data.updateId ? ` (KB${data.updateId})` : '';
-    const headerText = `${index}. ${data.batchTitle}${kbText}`;
+    const headerText = data.title;
     
     // Extract CVE details
     let mostRecentDate = null;
@@ -5816,41 +5942,35 @@ function appendDevicesByRemediationCard(container, data, index) {
         });
     }
     
-    // Build update link with icon
-    const updateLink = data.updateUrl 
-        ? `<a href="${data.updateUrl}" target="_blank" rel="noopener noreferrer" class="remediation-link">
-             <svg class="link-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-               <path fill="currentColor" d="M7.775 3.275a.75.75 0 001.06 1.06l1.25-1.25a2 2 0 112.83 2.83l-2.5 2.5a2 2 0 01-2.83 0 .75.75 0 00-1.06 1.06 3.5 3.5 0 004.95 0l2.5-2.5a3.5 3.5 0 00-4.95-4.95l-1.25 1.25zm-4.69 9.64a2 2 0 010-2.83l2.5-2.5a2 2 0 012.83 0 .75.75 0 001.06-1.06 3.5 3.5 0 00-4.95 0l-2.5 2.5a3.5 3.5 0 004.95 4.95l1.25-1.25a.75.75 0 00-1.06-1.06l-1.25 1.25a2 2 0 01-2.83 0z"></path>
-             </svg>
-             Recommended Update
-           </a>`
-        : '';
-    
     // Build CVE details section
-    let cveDetailsHtml = '';
-    if (mostRecentDate || data.updateName !== 'Unknown') {
-        cveDetailsHtml = '<div class="cve-details">';
-        
-        // Published date badge
-        if (mostRecentDate) {
-            cveDetailsHtml += `<span class="stat-badge">Published: ${mostRecentDate}</span>`;
-        }
-        
-        // Recommended Update badge
+    const detailBadges = [`<span class="stat-badge">Rank: ${index}</span>`];
+
+    if (data.osPlatform && data.osPlatform !== 'Unknown') {
+        detailBadges.push(`<span class="stat-badge">Platform: ${escapeHtml(data.osPlatform)}</span>`);
+    }
+
+    if (mostRecentDate) {
+        detailBadges.push(`<span class="stat-badge">Published: ${mostRecentDate}</span>`);
+    }
+
+    if (data.patchReference && !data.title.endsWith(`: ${data.patchReference}`) && data.title !== data.patchReference) {
         if (data.updateUrl) {
-            cveDetailsHtml += `<a href="${data.updateUrl}" target="_blank" rel="noopener noreferrer" class="stat-badge remediation-update-badge">
-                <span>Update: ${escapeHtml(data.updateName)}</span>
+            detailBadges.push(`<a href="${data.updateUrl}" target="_blank" rel="noopener noreferrer" class="stat-badge remediation-update-badge">
+                <span>Patch: ${escapeHtml(data.patchReference)}</span>
                 <svg class="link-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
                     <polyline points="15 3 21 3 21 9"></polyline>
                     <line x1="10" y1="14" x2="21" y2="3"></line>
                 </svg>
-            </a>`;
-        } else if (data.updateName && data.updateName !== 'Unknown') {
-            cveDetailsHtml += `<span class="stat-badge">Update: ${escapeHtml(data.updateName)}</span>`;
+            </a>`);
+        } else {
+            detailBadges.push(`<span class="stat-badge">Patch: ${escapeHtml(data.patchReference)}</span>`);
         }
-        
-        cveDetailsHtml += '</div>';
+    }
+
+    let cveDetailsHtml = '';
+    if (detailBadges.length > 0) {
+        cveDetailsHtml = `<div class="cve-details">${detailBadges.join('')}</div>`;
     }
     
     // Create severity summary with tooltips showing CVE IDs per severity
@@ -6053,19 +6173,19 @@ function renderRemediationsByDeviceTable() {
                 deviceCveDetails[deviceId] = new Map();
             }
 
-            const batchTitle = v.CveBatchTitle || v.RecommendedSecurityUpdate || 'Unknown';
-            const updateName = v.RecommendedSecurityUpdate || 'Unknown';
-            const updateId = v.RecommendedSecurityUpdateId || '';
-            const osPlatform = v.OSPlatform || 'Unknown';
-            const remKey = `${batchTitle}|${updateId}|${osPlatform}`;
+            const remediation = buildRemediationDescriptor(v);
+            const remKey = remediation.key;
 
             if (!deviceByKey[deviceId].remediations.has(remKey)) {
                 deviceByKey[deviceId].remediations.set(remKey, {
-                    batchTitle: batchTitle,
-                    updateName: updateName,
-                    updateId: updateId,
-                    updateUrl: v.RecommendedSecurityUpdateUrl,
-                    osPlatform: osPlatform,
+                    title: remediation.title,
+                    familyTitle: remediation.familyTitle,
+                    productLabel: remediation.productLabel,
+                    patchReference: remediation.patchReference,
+                    updateName: remediation.updateName,
+                    updateId: remediation.updateId,
+                    updateUrl: remediation.updateUrl,
+                    osPlatform: remediation.osPlatform,
                     cves: new Set(),
                     cveDetails: new Map(),
                     severities: { Critical: 0, High: 0, Medium: 0, Low: 0 },
@@ -6074,6 +6194,12 @@ function renderRemediationsByDeviceTable() {
             }
 
             const rem = deviceByKey[deviceId].remediations.get(remKey);
+            if (!rem.patchReference && remediation.patchReference) {
+                rem.patchReference = remediation.patchReference;
+            }
+            if (!rem.updateUrl && remediation.updateUrl) {
+                rem.updateUrl = remediation.updateUrl;
+            }
             rem.cves.add(v.CveId);
 
             if (!rem.cveDetails.has(v.CveId)) {
@@ -6207,21 +6333,9 @@ function appendRemediationsByDeviceCard(container, data, index) {
     
     // Build remediation table rows
     const remediationRows = sortedRemediations.map(rem => {
-        // Column 1: Remediation name (batch title + KB)
-        const kbText = rem.updateId ? ` (KB${rem.updateId})` : '';
-        const remediationName = `${rem.batchTitle}${kbText}`;
-        
-        // Column 2: Update link
-        const updateCell = rem.updateUrl 
-            ? `<a href="${rem.updateUrl}" target="_blank" rel="noopener noreferrer" class="remediation-update-badge">
-                 <span>${escapeHtml(rem.updateName)}</span>
-                 <svg class="link-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                     <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                     <polyline points="15 3 21 3 21 9"></polyline>
-                     <line x1="10" y1="14" x2="21" y2="3"></line>
-                 </svg>
-               </a>`
-            : escapeHtml(rem.updateName);
+        const remediationName = rem.title;
+        const referenceText = rem.patchReference || (rem.updateName !== 'Unknown' ? rem.updateName : '');
+        const updateCell = buildRemediationReferenceHtml(referenceText, rem.updateUrl);
         
         // Column 3: Severities with tooltips
         const severityBadges = ['Critical', 'High', 'Medium', 'Low']
@@ -6275,7 +6389,7 @@ function appendRemediationsByDeviceCard(container, data, index) {
                 <thead>
                     <tr>
                         <th>Remediation</th>
-                        <th>Update</th>
+                        <th>Patch Ref</th>
                         <th>Severities</th>
                         <th>CVEs</th>
                         <th>Published</th>
