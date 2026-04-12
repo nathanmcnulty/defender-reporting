@@ -148,6 +148,11 @@ let sortImpactAnalysisDirection = {};
 const TABLE_PAGE_SIZE = 100;
 const CARD_PAGE_SIZE = 20;
 const CARD_RENDER_BATCH_SIZE = 50;
+const configuredPdfPageWarningThreshold = Number(dashboardConfig.pdfExportPageWarningThreshold);
+const PDF_EXPORT_PAGE_WARNING_THRESHOLD = Number.isFinite(configuredPdfPageWarningThreshold) && configuredPdfPageWarningThreshold > 0
+    ? Math.floor(configuredPdfPageWarningThreshold)
+    : 100;
+const PDF_PAGE_COUNT_TIMEOUT_MS = 10000;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
 const FACET_SEARCH_MIN_OPTIONS = 8;
 const FILTER_POPOVER_BATCH_FLOOR = 100;
@@ -7254,10 +7259,9 @@ async function exportCardBasedReportToPdf(selectedReport, reportName) {
     ];
     
     // Extract and render each card as structured PDF content
-    const maxCards = Math.min(cards.length, 50); // Limit to 50 cards
     const isDevicesByRemediation = selectedReport === 'devices-by-remediation';
     
-    for (let i = 0; i < maxCards; i++) {
+    for (let i = 0; i < cards.length; i++) {
         const card = cards[i];
         
         // Extract card header
@@ -7453,16 +7457,6 @@ async function exportCardBasedReportToPdf(selectedReport, reportName) {
         docContent.push(...cardContent);
     }
     
-    if (cards.length > maxCards) {
-        docContent.push({
-            text: `Note: Only the first ${maxCards} remediation items are included in this PDF. The full report contains ${cards.length} items.`,
-            fontSize: 10,
-            italics: true,
-            color: '#666666',
-            margin: [0, 10, 0, 0]
-        });
-    }
-    
     return {
         pageSize: 'A4',
         pageOrientation: 'landscape',
@@ -7633,6 +7627,148 @@ async function exportTableBasedReportToPdf(selectedReport, reportName) {
     return docDefinition;
 }
 
+function shouldSkipPdfPageWarning() {
+    return Boolean(window.__skipPdfExportPageWarning || dashboardConfig.skipPdfExportPageWarning);
+}
+
+function estimateTableBasedPdfPageCount(selectedReport) {
+    let rowCount = 0;
+
+    switch (selectedReport) {
+        case 'active-vulnerabilities':
+            rowCount = remediationAllData.length;
+            break;
+        case 'remediation-activity':
+            rowCount = remediationDetailsAllData.length;
+            break;
+        case 'impact-analysis':
+            rowCount = impactAnalysisAllData.length;
+            break;
+        default:
+            rowCount = 0;
+            break;
+    }
+
+    if (rowCount <= 0) {
+        return 1;
+    }
+
+    const rowsPerPage = selectedReport === 'active-vulnerabilities' ? 26 : 30;
+    return 2 + Math.ceil(rowCount / rowsPerPage);
+}
+
+function estimateCardBasedPdfPageCount(selectedReport) {
+    const activeSection = document.querySelector('.report-section.active');
+    const cards = activeSection ? Array.from(activeSection.querySelectorAll('.remediation-card')) : [];
+
+    if (cards.length === 0) {
+        return 1;
+    }
+
+    const rowsPerPage = selectedReport === 'devices-by-remediation' ? 14 : 10;
+    let pageCount = 2;
+
+    cards.forEach(card => {
+        const rowCount = card.querySelectorAll('.devices-table tbody tr').length;
+        const cveBadgeCount = card.querySelectorAll('.cve-severity-badge').length;
+        const supplementalRows = cveBadgeCount > 15
+            ? 2
+            : (cveBadgeCount > 0 ? 1 : 0);
+        const estimatedRows = Math.max(1, rowCount + supplementalRows);
+        pageCount += Math.max(1, Math.ceil(estimatedRows / rowsPerPage));
+    });
+
+    return pageCount;
+}
+
+function estimatePdfPageCount(selectedReport) {
+    if (selectedReport === 'devices-by-remediation' || selectedReport === 'remediations-by-device') {
+        return estimateCardBasedPdfPageCount(selectedReport);
+    }
+
+    return estimateTableBasedPdfPageCount(selectedReport);
+}
+
+function getPdfPageCount(pdfDoc) {
+    return new Promise(resolve => {
+        let settled = false;
+        const finish = (value) => {
+            if (settled) {
+                return;
+            }
+
+            settled = true;
+            resolve(Number.isFinite(value) && value > 0 ? value : null);
+        };
+
+        try {
+            if (!pdfDoc || typeof pdfDoc._getPages !== 'function') {
+                finish(null);
+                return;
+            }
+
+            const timeoutHandle = window.setTimeout(() => finish(null), PDF_PAGE_COUNT_TIMEOUT_MS);
+            pdfDoc._getPages({}, (pages) => {
+                window.clearTimeout(timeoutHandle);
+
+                if (Array.isArray(pages)) {
+                    finish(pages.length);
+                    return;
+                }
+
+                if (pages && typeof pages.length === 'number') {
+                    finish(pages.length);
+                    return;
+                }
+
+                if (typeof pages === 'number') {
+                    finish(pages);
+                    return;
+                }
+
+                finish(null);
+            });
+        } catch (error) {
+            logDebug('Unable to calculate PDF page count', error);
+            finish(null);
+        }
+    });
+}
+
+async function resolvePdfPageCount(selectedReport, pdfDoc) {
+    const exactPageCount = await getPdfPageCount(pdfDoc);
+    if (Number.isFinite(exactPageCount) && exactPageCount > 0) {
+        return {
+            pageCount: exactPageCount,
+            exact: true
+        };
+    }
+
+    return {
+        pageCount: estimatePdfPageCount(selectedReport),
+        exact: false
+    };
+}
+
+async function maybeConfirmLargePdfExport(selectedReport, reportName, pdfDoc) {
+    if (shouldSkipPdfPageWarning()) {
+        return true;
+    }
+
+    const { pageCount, exact } = await resolvePdfPageCount(selectedReport, pdfDoc);
+    if (!Number.isFinite(pageCount) || pageCount <= PDF_EXPORT_PAGE_WARNING_THRESHOLD) {
+        return true;
+    }
+
+    const countDescription = exact
+        ? `${pageCount} pages`
+        : `about ${pageCount} pages`;
+
+    return window.confirm(
+        `PDF export warning: ${reportName} is expected to generate ${countDescription}, which exceeds the ${PDF_EXPORT_PAGE_WARNING_THRESHOLD}-page warning threshold.\n\nLarge exports can take longer to build and may use significant memory.\n\nSelect OK to continue or Cancel to stop the export.`
+    );
+}
+
 async function exportToPDF() {
     const button = document.querySelector('.export-pdf-btn');
     button.disabled = true;
@@ -7780,9 +7916,17 @@ async function exportToPDF() {
         });
         
         docDefinition.content.push(...filterContent);
+
+        updateProgress(80, 'Checking page count...');
+        const pdfDoc = pdfMake.createPdf(docDefinition);
+        const shouldContinue = await maybeConfirmLargePdfExport(selectedReport, reportName, pdfDoc);
+        if (!shouldContinue) {
+            setDashboardStatus('PDF export canceled.', 'info');
+            return;
+        }
         
         updateProgress(90, 'Creating PDF...');
-        pdfMake.createPdf(docDefinition).download(fileName);
+        pdfDoc.download(fileName);
         updateProgress(100, 'Complete!');
         clearDashboardStatus();
         setTimeout(() => { if (progressDiv.parentNode) progressDiv.remove(); }, 1500);

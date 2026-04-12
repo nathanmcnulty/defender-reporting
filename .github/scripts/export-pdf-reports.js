@@ -69,8 +69,17 @@ function listExistingReportFiles(reportsDir) {
         context = await browser.newContext({ acceptDownloads: true });
         const page = await context.newPage();
 
+        await page.addInitScript(() => {
+            window.__skipPdfExportPageWarning = true;
+        });
+
         page.on('console', msg => {
             if (msg.type() === 'error') console.error('[page]', msg.text());
+        });
+
+        page.on('dialog', async dialog => {
+            console.log(`[dialog:${dialog.type()}] ${dialog.message()}`);
+            await dialog.accept();
         });
 
         console.log(`Opening: ${htmlFile}`);
