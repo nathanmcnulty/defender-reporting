@@ -253,6 +253,34 @@ function Test-BulkSnapshotImportSingleSnapshot {
     }
 }
 
+function Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('repair-vuln-layout-skip-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $periodKey = '2026Q1'
+        $historyPath = Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey $periodKey
+        $historyRowsPath = Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey $periodKey
+        $historyContent = 'skip-deserialize-sentinel'
+
+        Write-GzipTextFile -Path $historyPath -Content $historyContent
+        Write-GzipTextFile -Path $historyRowsPath -Content '{}'
+
+        $repairedPeriods = Repair-VulnHistoryLayout -BasePath $tempRoot
+
+        Assert-True ($repairedPeriods -eq 1) 'Expected canonical quarterly history layout to be treated as already repaired.'
+        Assert-True ((Read-GzipTextFile -Path $historyPath) -eq $historyContent) 'Expected canonical quarterly history file to be left untouched.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-VulnCanonicalSignatureStability {
     [CmdletBinding()]
     param()
@@ -920,6 +948,8 @@ Test-BulkSnapshotImportSmoke
 Write-Output '  Bulk snapshot import smoke checks passed.'
 Test-BulkSnapshotImportSingleSnapshot
 Write-Output '  Single-snapshot vulnerability import checks passed.'
+Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore
+Write-Output '  Canonical quarterly history repair skip checks passed.'
 Test-VulnCanonicalSignatureStability
 Write-Output '  Canonical vulnerability signature checks passed.'
 Test-MergeVulnObservedWindowRows

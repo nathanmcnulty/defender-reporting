@@ -2411,6 +2411,25 @@ function Repair-VulnHistoryLayout {
         return 0
     }
 
+    $requiresRepair = $false
+    foreach ($historyFile in $historyFiles) {
+        if ($historyFile.BaseName -notmatch '^VulnHistory_\d{4}Q[1-4]\.json$') {
+            $requiresRepair = $true
+            break
+        }
+
+        $periodKey = [System.IO.Path]::GetFileNameWithoutExtension($historyFile.BaseName).Substring('VulnHistory_'.Length)
+        $historyRowsPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
+        if (-not (Test-Path -LiteralPath $historyRowsPath -PathType Leaf)) {
+            $requiresRepair = $true
+            break
+        }
+    }
+
+    if (-not $requiresRepair) {
+        return $historyFiles.Count
+    }
+
     $canonicalDocumentsByPeriod = @{}
     foreach ($historyFile in $historyFiles) {
         $sourceDocument = Read-VulnHistoryDocument -Path $historyFile.FullName
