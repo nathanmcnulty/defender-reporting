@@ -8,22 +8,13 @@ function Test-VulnStoreRequiresCanonicalRepair {
     [OutputType([bool])]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$BasePath,
-
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyCollection()]
-        [object[]]$HistoryDocuments
+        [string]$BasePath
     )
 
     $historyFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue)
-    if (@($historyFiles | Where-Object { $_.BaseName -match '^VulnHistory_\d{4}$' }).Count -gt 0) {
-        return $true
-    }
-
-    foreach ($historyDocument in @($HistoryDocuments)) {
-        $periodKey = Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument
-        $rowsPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
-        if (-not (Test-Path -LiteralPath $rowsPath -PathType Leaf)) {
+    foreach ($historyFile in $historyFiles) {
+        $historyLayoutState = Get-VulnHistoryLayoutState -BasePath $BasePath -HistoryFile $historyFile
+        if ($historyLayoutState.RequiresRepair) {
             return $true
         }
     }
@@ -44,30 +35,20 @@ function Publish-VulnStoreExistingCanonicalState {
     )
 
     $currentPath = Get-VulnCurrentPath -BasePath $BasePath
-    $historyDocuments = @(Get-VulnHistoryDocumentList -BasePath $BasePath)
-    $requiresCanonicalRepair = Test-VulnStoreRequiresCanonicalRepair -BasePath $BasePath -HistoryDocuments $historyDocuments
+    $requiresCanonicalRepair = Test-VulnStoreRequiresCanonicalRepair -BasePath $BasePath
     if ($requiresCanonicalRepair) {
-        $currentRecords = if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
-            @(Read-VulnNdjsonRecordsFromPath -Path $currentPath)
-        }
-        else {
-            @()
-        }
-
-        [void](Publish-VulnStoreUnlocked -BasePath $BasePath -Store ([PSCustomObject]@{
-            CurrentRecords = $currentRecords
-            HistoryDocuments = $historyDocuments
-            LatestSnapshotDate = $LatestSnapshotDate
-        }))
+        $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
+    }
+    else {
+        $historyPeriodCount = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name).Count
     }
 
-    $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
     $currentRows = if (Test-Path -LiteralPath $currentPath -PathType Leaf) { Test-VulnCurrentFile -Path $currentPath } else { 0 }
     Publish-VulnContentStoreUnlocked -BasePath $BasePath
 
     return [PSCustomObject]@{
         CurrentRows = $currentRows
-        HistoryYears = if ($historyPeriodCount -gt 0) { $historyPeriodCount } else { $historyDocuments.Count }
+        HistoryYears = $historyPeriodCount
         LatestSnapshotDate = $LatestSnapshotDate
         CanonicalRepairPerformed = $requiresCanonicalRepair
     }
@@ -264,20 +245,10 @@ function Publish-VulnStoreFromBulkSnapshot {
                 TargetPath = Get-VulnCurrentPath -BasePath $BasePath
             })
 
-            $existingHistoryByPeriod = @{}
-            foreach ($historyDocument in Get-VulnHistoryDocumentList -BasePath $BasePath) {
-                $existingHistoryByPeriod[(Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument)] = $historyDocument
-            }
-
             $touchedPeriods = @($historyAppendState.Keys | Sort-Object)
             foreach ($periodKey in $touchedPeriods) {
                 $appendState = $historyAppendState[$periodKey]
-                $existingDocument = if ($existingHistoryByPeriod.ContainsKey($periodKey)) {
-                    $existingHistoryByPeriod[$periodKey]
-                }
-                else {
-                    $null
-                }
+                $existingDocument = Read-VulnHistoryDocumentIfPresent -BasePath $BasePath -PeriodKey $periodKey
                 $existingLatestDate = if ($null -ne $existingDocument) {
                     Get-VulnHistoryDocumentLatestDate -HistoryDocument $existingDocument
                 }
@@ -310,16 +281,21 @@ function Publish-VulnStoreFromBulkSnapshot {
                     StagePath = $historyRowsStagePath
                     TargetPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
                 })
+
+                $existingDocument = $null
             }
 
-            foreach ($periodKey in @($existingHistoryByPeriod.Keys | Sort-Object)) {
+            $existingHistoryFiles = @(Get-ChildItem -Path $BasePath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)
+            foreach ($historyFile in $existingHistoryFiles) {
+                $periodKey = Get-VulnHistoryPeriodKeyFromFileName -Name $historyFile.Name
+                if ([string]::IsNullOrWhiteSpace($periodKey)) { continue }
                 if ($periodKey -in $touchedPeriods) { continue }
 
                 $historyRowsTargetPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
                 if (Test-Path -LiteralPath $historyRowsTargetPath -PathType Leaf) { continue }
 
                 $historyRowsStagePath = Get-VulnHistoryRowsPath -BasePath $stageRoot -PeriodKey $periodKey
-                Write-VulnHistoryRowsFile -Path $historyRowsStagePath -HistoryDocument $existingHistoryByPeriod[$periodKey]
+                Write-VulnHistoryRowsFileFromHistoryPath -HistoryPath $historyFile.FullName -OutputPath $historyRowsStagePath
                 $filesToPublish.Add([PSCustomObject]@{
                     StagePath = $historyRowsStagePath
                     TargetPath = $historyRowsTargetPath
@@ -327,7 +303,12 @@ function Publish-VulnStoreFromBulkSnapshot {
             }
 
             $finalHistoryPeriods = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-            foreach ($periodKey in $existingHistoryByPeriod.Keys) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
+            foreach ($historyFile in $existingHistoryFiles) {
+                $periodKey = Get-VulnHistoryPeriodKeyFromFileName -Name $historyFile.Name
+                if (-not [string]::IsNullOrWhiteSpace($periodKey)) {
+                    [void]$finalHistoryPeriods.Add([string]$periodKey)
+                }
+            }
             foreach ($periodKey in $touchedPeriods) { [void]$finalHistoryPeriods.Add([string]$periodKey) }
 
             $publishedHistoryNames = if ($finalHistoryPeriods.Count -gt 0) {
@@ -338,13 +319,12 @@ function Publish-VulnStoreFromBulkSnapshot {
             }
             $historyFilesToRemove = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedHistoryNames
             Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths $historyFilesToRemove
-            $historyPeriodCount = Repair-VulnHistoryLayout -BasePath $BasePath
             Publish-VulnContentStoreUnlocked -BasePath $BasePath
 
             return [PSCustomObject]@{
                 DownloadedFiles = $snapshotFiles.Count
                 CurrentRows = $currentCount
-                HistoryYears = if ($historyPeriodCount -gt 0) { $historyPeriodCount } else { $finalHistoryPeriods.Count }
+                HistoryYears = $finalHistoryPeriods.Count
                 LatestSnapshotDate = if ($snapshotDates.Count -gt 0) { $snapshotDates[-1] } else { $latestKnownSnapshot }
                 CanonicalRepairPerformed = $false
                 RemovedSnapshotFiles = $false

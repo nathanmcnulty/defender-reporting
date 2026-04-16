@@ -24,7 +24,7 @@ $Script:MachineHistoryFileName = 'Machines_History.json.gz'
 $Script:MachineHistoryQuarterlyFileNamePattern = 'Machines_History_{0}.json.gz'
 $Script:AdvancedHuntingCurrentFileName = 'AdvancedHunting_Current.json.gz'
 $Script:LegacyVulnMigrationRemovalDate = '2026-07-01'
-$Script:VulnDiskPartitionCount = 64
+$Script:VulnDiskPartitionCount = 128
 
 function Get-StoreLockName {
     [CmdletBinding()]
@@ -444,6 +444,7 @@ function Publish-StoreFilesTransactional {
 }
 
 function Get-VulnPropertyValue {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseCmdletCorrectly', '')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -455,9 +456,88 @@ function Get-VulnPropertyValue {
 
     if ($null -eq $InputObject) { return $null }
 
+    if ($InputObject -is [Newtonsoft.Json.Linq.JObject]) {
+        $token = $InputObject[$Name]
+        if ($null -eq $token) { return $null }
+        if ($token -is [Newtonsoft.Json.Linq.JValue]) { return $token.Value }
+        Write-Output -NoEnumerate $token
+        return
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        if (-not $InputObject.Contains($Name)) { return $null }
+        $value = $InputObject[$Name]
+        if ($value -is [Newtonsoft.Json.Linq.JValue]) { return $value.Value }
+        if ($value -is [Newtonsoft.Json.Linq.JToken]) {
+            Write-Output -NoEnumerate $value
+            return
+        }
+        if ($value -is [System.Array]) {
+            Write-Output -NoEnumerate $value
+            return
+        }
+        return $value
+    }
+
     $property = $InputObject.PSObject.Properties[$Name]
     if ($null -eq $property) { return $null }
+    if ($property.Value -is [Newtonsoft.Json.Linq.JValue]) { return $property.Value.Value }
+    if ($property.Value -is [Newtonsoft.Json.Linq.JToken]) {
+        Write-Output -NoEnumerate $property.Value
+        return
+    }
+    if ($property.Value -is [System.Array]) {
+        Write-Output -NoEnumerate $property.Value
+        return
+    }
     return $property.Value
+}
+
+function Test-VulnPropertyPresence {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($null -eq $InputObject) { return $false }
+
+    if ($InputObject -is [Newtonsoft.Json.Linq.JObject]) {
+        return ($null -ne $InputObject.Property($Name))
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        return $InputObject.Contains($Name)
+    }
+
+    return ($null -ne $InputObject.PSObject.Properties[$Name])
+}
+
+function Convert-VulnObjectToCompactJson {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $InputObject,
+
+        [Parameter(Mandatory = $false)]
+        [int]$Depth = 100
+    )
+
+    if ($null -eq $InputObject) {
+        return 'null'
+    }
+
+    if ($InputObject -is [Newtonsoft.Json.Linq.JToken]) {
+        return $InputObject.ToString([Newtonsoft.Json.Formatting]::None)
+    }
+
+    return ($InputObject | ConvertTo-Json -Compress -Depth $Depth)
 }
 
 function Get-VulnCurrentPath {
@@ -718,18 +798,24 @@ function Convert-VulnHistoryDocumentToQuarterlyDocuments {
     if (-not [string]::IsNullOrWhiteSpace($existingPeriodKey)) {
         $periodInfo = Get-VulnHistoryPeriodInfo -PeriodKey $existingPeriodKey
         $latestDate = Get-VulnHistoryDocumentLatestDate -HistoryDocument $HistoryDocument
+        $existingSnapshots = [System.Collections.Generic.List[object]]::new()
+        foreach ($snapshot in @(Get-VulnPropertyValue -InputObject $HistoryDocument -Name 'snapshots')) {
+            if ($null -eq $snapshot) { continue }
+            $existingSnapshots.Add($snapshot)
+        }
+
         return @([PSCustomObject]@{
             year = $periodInfo.Year
             quarter = $periodInfo.Quarter
             period = $periodInfo.PeriodKey
             latestDate = $latestDate
-            snapshots = @($HistoryDocument.snapshots)
+            snapshots = @($existingSnapshots)
         })
     }
 
     $documentsByPeriod = @{}
     $latestByPeriod = @{}
-    foreach ($snapshot in @($HistoryDocument.snapshots)) {
+    foreach ($snapshot in (Get-VulnPropertyValue -InputObject $HistoryDocument -Name 'snapshots')) {
         if ($null -eq $snapshot) { continue }
         $snapshotDate = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $snapshot -Name 'date')
         if ([string]::IsNullOrWhiteSpace($snapshotDate)) { continue }
@@ -737,21 +823,28 @@ function Convert-VulnHistoryDocumentToQuarterlyDocuments {
         $periodKey = Get-VulnHistoryPeriodKeyFromDate -Date $snapshotDate
         if (-not $documentsByPeriod.ContainsKey($periodKey)) {
             $periodInfo = Get-VulnHistoryPeriodInfo -PeriodKey $periodKey
-            $documentsByPeriod[$periodKey] = [PSCustomObject]@{
+            $documentsByPeriod[$periodKey] = [ordered]@{
                 year = $periodInfo.Year
                 quarter = $periodInfo.Quarter
                 period = $periodInfo.PeriodKey
                 latestDate = ''
-                snapshots = @()
+                snapshots = [System.Collections.Generic.List[object]]::new()
             }
         }
 
-        $documentsByPeriod[$periodKey].snapshots += $snapshot
+        $documentsByPeriod[$periodKey].snapshots.Add($snapshot)
         $latestByPeriod[$periodKey] = Get-MaxVulnDate -Primary ([string]$latestByPeriod[$periodKey]) -Secondary $snapshotDate
     }
 
     foreach ($periodKey in @($documentsByPeriod.Keys)) {
-        $documentsByPeriod[$periodKey].latestDate = [string]$latestByPeriod[$periodKey]
+        $periodDocument = $documentsByPeriod[$periodKey]
+        $documentsByPeriod[$periodKey] = [PSCustomObject]@{
+            year = $periodDocument.year
+            quarter = $periodDocument.quarter
+            period = $periodDocument.period
+            latestDate = [string]$latestByPeriod[$periodKey]
+            snapshots = @($periodDocument.snapshots)
+        }
     }
 
     return @($documentsByPeriod.Values | Sort-Object period)
@@ -1428,9 +1521,9 @@ function Get-VulnHistorySnapshotMap {
     )
 
     $map = @{}
-    foreach ($snapshot in @($HistoryDocument.snapshots)) {
+    foreach ($snapshot in (Get-VulnPropertyValue -InputObject $HistoryDocument -Name 'snapshots')) {
         if ($null -eq $snapshot) { continue }
-        $map[[string]$snapshot.date] = $snapshot
+        $map[[string](Get-VulnPropertyValue -InputObject $snapshot -Name 'date')] = $snapshot
     }
     return $map
 }
@@ -1756,6 +1849,10 @@ function Invoke-VulnNdjsonJsonRootAction {
 
         $document = [System.Text.Json.JsonDocument]::Parse($JsonLine)
         try {
+            if ($document.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Object) {
+                return
+            }
+
             & $rootAction $document.RootElement
         }
         finally {
@@ -1857,12 +1954,48 @@ function Read-VulnHistoryDocument {
         [string]$Path
     )
 
-    $content = Read-GzipTextFile -Path $Path
-    if ([string]::IsNullOrWhiteSpace($content)) {
-        throw "History file '$Path' is empty."
-    }
+    $fileStream = [System.IO.File]::OpenRead($Path)
+    try {
+        $header = New-Object byte[] 2
+        $bytesRead = $fileStream.Read($header, 0, $header.Length)
+        $fileStream.Position = 0
 
-    return ($content | ConvertFrom-Json -Depth 100)
+        $contentStream = if (($bytesRead -eq 2) -and $header[0] -eq 0x1f -and $header[1] -eq 0x8b) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        }
+        else {
+            $fileStream
+        }
+
+        try {
+            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
+            try {
+                $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
+                try {
+                    if (-not $jsonReader.Read()) {
+                        throw "History file '$Path' is empty."
+                    }
+
+                    Write-Output -InputObject ([Newtonsoft.Json.Linq.JObject]::Load($jsonReader)) -NoEnumerate
+                    return
+                }
+                finally {
+                    $jsonReader.Close()
+                }
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            if ($contentStream -ne $fileStream) {
+                $contentStream.Dispose()
+            }
+        }
+    }
+    finally {
+        $fileStream.Dispose()
+    }
 }
 
 function Read-VulnHistoryRowsFromPath {
@@ -1899,9 +2032,9 @@ function Read-VulnHistoryRowsFromPath {
                         $rowToken = [Newtonsoft.Json.Linq.JToken]::ReadFrom($jsonReader)
                         if ($null -eq $rowToken) { continue }
 
-                        $row = $rowToken.ToString([Newtonsoft.Json.Formatting]::None) | ConvertFrom-Json -Depth 20
+                        $row = $rowToken
                         if ($null -ne $row) {
-                            $row
+                            Write-Output -InputObject $row -NoEnumerate
                         }
                     }
                 }
@@ -1934,7 +2067,7 @@ function Write-VulnHistoryDocument {
         $HistoryDocument
     )
 
-    $json = $HistoryDocument | ConvertTo-Json -Compress -Depth 100
+    $json = Convert-VulnObjectToCompactJson -InputObject $HistoryDocument -Depth 100
     Write-GzipTextFile -Path $Path -Content $json
 }
 
@@ -1954,13 +2087,13 @@ function Write-VulnHistoryRowsFile {
         try {
             $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
             try {
-                foreach ($snapshot in @($HistoryDocument.snapshots)) {
+                foreach ($snapshot in (Get-VulnPropertyValue -InputObject $HistoryDocument -Name 'snapshots')) {
                     if ($null -eq $snapshot) { continue }
-                    foreach ($entry in @($snapshot.closed)) {
+                    foreach ($entry in (Get-VulnPropertyValue -InputObject $snapshot -Name 'closed')) {
                         if ($null -eq $entry) { continue }
                         $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
                         if ($null -eq $row) { continue }
-                        $writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
+                        $writer.WriteLine((Convert-VulnObjectToCompactJson -InputObject $row -Depth 20))
                     }
                 }
             }
@@ -2008,7 +2141,7 @@ function Get-VulnHistoryDocumentLatestDate {
         return $latestDate
     }
 
-    foreach ($snapshot in @($HistoryDocument.snapshots)) {
+    foreach ($snapshot in (Get-VulnPropertyValue -InputObject $HistoryDocument -Name 'snapshots')) {
         $snapshotDate = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $snapshot -Name 'date')
         if (-not [string]::IsNullOrWhiteSpace($snapshotDate)) {
             $latestDate = Get-MaxVulnDate -Primary $latestDate -Secondary $snapshotDate
@@ -2109,7 +2242,7 @@ function Write-VulnHistoryDocumentFromAppendFile {
                 $writer.Write(',"snapshots":[')
 
                 $existingSnapshots = if ($null -ne $ExistingDocument) {
-                    @($ExistingDocument.snapshots)
+                    Get-VulnPropertyValue -InputObject $ExistingDocument -Name 'snapshots'
                 }
                 else {
                     @()
@@ -2119,7 +2252,7 @@ function Write-VulnHistoryDocumentFromAppendFile {
                 foreach ($snapshot in $existingSnapshots) {
                     if ($null -eq $snapshot) { continue }
                     if ($hasWrittenSnapshot) { $writer.Write(',') }
-                    $writer.Write(($snapshot | ConvertTo-Json -Compress -Depth 100))
+                    $writer.Write((Convert-VulnObjectToCompactJson -InputObject $snapshot -Depth 100))
                     $hasWrittenSnapshot = $true
                 }
 
@@ -2197,9 +2330,9 @@ function Write-VulnHistoryRowsFileFromAppendFile {
             $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
             try {
                 if ($null -ne $ExistingDocument) {
-                    foreach ($snapshot in @($ExistingDocument.snapshots)) {
+                    foreach ($snapshot in (Get-VulnPropertyValue -InputObject $ExistingDocument -Name 'snapshots')) {
                         if ($null -eq $snapshot) { continue }
-                        foreach ($entry in @($snapshot.closed)) {
+                        foreach ($entry in (Get-VulnPropertyValue -InputObject $snapshot -Name 'closed')) {
                             if ($null -eq $entry) { continue }
                             $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
                             if ($null -eq $row) { continue }
@@ -2216,10 +2349,10 @@ function Write-VulnHistoryRowsFileFromAppendFile {
                         }
 
                         $entryJson = $appendLine.Substring($tabIndex + 1)
-                        $entry = $entryJson | ConvertFrom-Json -Depth 100
+                        $entry = [Newtonsoft.Json.Linq.JObject]::Parse($entryJson)
                         $row = Get-VulnPropertyValue -InputObject $entry -Name 'row'
                         if ($null -eq $row) { continue }
-                        $writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
+                        $writer.WriteLine((Convert-VulnObjectToCompactJson -InputObject ([Newtonsoft.Json.Linq.JToken]$row) -Depth 20))
                     }
                 }
             }
@@ -2254,7 +2387,7 @@ function Write-VulnHistoryRowsFileFromHistoryPath {
             try {
                 foreach ($row in Read-VulnHistoryRowsFromPath -Path $HistoryPath) {
                     if ($null -eq $row) { continue }
-                    $writer.WriteLine(($row | ConvertTo-Json -Compress -Depth 20))
+                    $writer.WriteLine((Convert-VulnObjectToCompactJson -InputObject $row -Depth 20))
                 }
             }
             finally {
@@ -2270,6 +2403,40 @@ function Write-VulnHistoryRowsFileFromHistoryPath {
     }
 }
 
+function Get-VulnHistoryPeriodKeyFromFileName {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $match = [regex]::Match($Name, '^VulnHistory_(?<period>\d{4}Q[1-4]|\d{4})\.json\.gz$')
+    if ($match.Success) {
+        return $match.Groups['period'].Value
+    }
+
+    return $null
+}
+
+function Read-VulnHistoryDocumentIfPresent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PeriodKey
+    )
+
+    $historyPath = Get-VulnHistoryPath -BasePath $BasePath -PeriodKey $PeriodKey
+    if (-not (Test-Path -LiteralPath $historyPath -PathType Leaf)) {
+        return $null
+    }
+
+    return (Read-VulnHistoryDocument -Path $historyPath)
+}
+
 function Repair-VulnHistoryLayout {
     [CmdletBinding()]
     [OutputType([int])]
@@ -2283,25 +2450,60 @@ function Repair-VulnHistoryLayout {
         return 0
     }
 
+    $historyLayoutStates = @{}
+    $requiresRepair = $false
+    foreach ($historyFile in $historyFiles) {
+        $historyLayoutState = Get-VulnHistoryLayoutState -BasePath $BasePath -HistoryFile $historyFile
+        $historyLayoutStates[$historyFile.FullName] = $historyLayoutState
+        if ($historyLayoutState.RequiresRepair) {
+            $requiresRepair = $true
+        }
+    }
+
+    if (-not $requiresRepair) {
+        return $historyFiles.Count
+    }
+
     $canonicalDocumentsByPeriod = @{}
     foreach ($historyFile in $historyFiles) {
-        $sourceDocument = Read-VulnHistoryDocument -Path $historyFile.FullName
-        $sourcePeriodKey = Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $sourceDocument
-        $sourceIsCanonical = -not [string]::IsNullOrWhiteSpace($sourcePeriodKey)
+        $sourcePeriodKey = Get-VulnHistoryPeriodKeyFromFileName -Name $historyFile.Name
+        if (-not [string]::IsNullOrWhiteSpace($sourcePeriodKey) -and $sourcePeriodKey -match '^\d{4}Q[1-4]$') {
+            $historyLayoutState = $historyLayoutStates[$historyFile.FullName]
+            if (-not $historyLayoutState.HistoryFileValid) {
+                $validationDetail = if (-not [string]::IsNullOrWhiteSpace($historyLayoutState.ValidationMessage)) {
+                    " $($historyLayoutState.ValidationMessage)"
+                }
+                else {
+                    ''
+                }
 
+                throw "History file '$($historyFile.FullName)' cannot be repaired in place because it is not a valid canonical quarterly history document.$validationDetail"
+            }
+
+            $canonicalDocumentsByPeriod[$sourcePeriodKey] = [PSCustomObject]@{
+                SourcePath = $historyFile.FullName
+                SourcePeriodKey = $sourcePeriodKey
+                SourceIsCanonical = $true
+                CopyRowsSidecar = $historyLayoutState.RowsSidecarValid
+            }
+            continue
+        }
+
+        $sourceDocument = Read-VulnHistoryDocument -Path $historyFile.FullName
         foreach ($historyDocument in Convert-VulnHistoryDocumentToQuarterlyDocuments -HistoryDocument $sourceDocument) {
             $periodKey = Get-VulnHistoryPeriodKeyFromDocument -HistoryDocument $historyDocument
             if ([string]::IsNullOrWhiteSpace($periodKey)) { continue }
 
-            $shouldReplace = -not $canonicalDocumentsByPeriod.ContainsKey($periodKey)
-            if (-not $shouldReplace -and $sourceIsCanonical) {
-                $shouldReplace = $true
-            }
-
-            if ($shouldReplace) {
-                $canonicalDocumentsByPeriod[$periodKey] = $historyDocument
+            $canonicalDocumentsByPeriod[$periodKey] = [PSCustomObject]@{
+                SourcePath = $historyFile.FullName
+                SourcePeriodKey = $periodKey
+                SourceIsCanonical = $false
+                Document = $historyDocument
             }
         }
+
+        $sourceDocument = $null
+        Invoke-FullGarbageCollection
     }
 
     if ($canonicalDocumentsByPeriod.Count -eq 0) {
@@ -2321,11 +2523,26 @@ function Repair-VulnHistoryLayout {
         }
 
         foreach ($periodKey in @($canonicalDocumentsByPeriod.Keys | Sort-Object)) {
-            $historyDocument = $canonicalDocumentsByPeriod[$periodKey]
+            $historySource = $canonicalDocumentsByPeriod[$periodKey]
             $historyStagePath = Get-VulnHistoryPath -BasePath $stageRoot -PeriodKey $periodKey
-            Write-VulnHistoryDocument -Path $historyStagePath -HistoryDocument $historyDocument
             $historyRowsStagePath = Get-VulnHistoryRowsPath -BasePath $stageRoot -PeriodKey $periodKey
-            Write-VulnHistoryRowsFile -Path $historyRowsStagePath -HistoryDocument $historyDocument
+
+            if ($historySource.SourceIsCanonical) {
+                Copy-Item -LiteralPath $historySource.SourcePath -Destination $historyStagePath -Force
+
+                $sourceRowsPath = Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey
+                if ($historySource.CopyRowsSidecar -and (Test-Path -LiteralPath $sourceRowsPath -PathType Leaf)) {
+                    Copy-Item -LiteralPath $sourceRowsPath -Destination $historyRowsStagePath -Force
+                }
+                else {
+                    Write-VulnHistoryRowsFileFromHistoryPath -HistoryPath $historySource.SourcePath -OutputPath $historyRowsStagePath
+                }
+            }
+            else {
+                Write-VulnHistoryDocument -Path $historyStagePath -HistoryDocument $historySource.Document
+                Write-VulnHistoryRowsFile -Path $historyRowsStagePath -HistoryDocument $historySource.Document
+                $historySource.Document = $null
+            }
 
             $filesToPublish.Add([PSCustomObject]@{
                 StagePath = $historyStagePath
@@ -3341,11 +3558,6 @@ function Publish-VulnContentStoreUnlocked {
         }
 
         $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $stageRoot
-        $dictionaryJson = [PSCustomObject]@{
-            version = 'content-dictionary-v1'
-            deviceProfiles = @($deviceProfiles)
-            contentTemplates = @($contentTemplates)
-        } | ConvertTo-Json -Compress -Depth 20
         $dictionaryFileStream = $null
         $dictionaryGzipStream = $null
         $dictionaryWriter = $null
@@ -3353,13 +3565,25 @@ function Publish-VulnContentStoreUnlocked {
             $dictionaryFileStream = [System.IO.File]::Create($dictionaryPath)
             $dictionaryGzipStream = [System.IO.Compression.GZipStream]::new($dictionaryFileStream, [System.IO.Compression.CompressionMode]::Compress)
             $dictionaryWriter = [System.IO.StreamWriter]::new($dictionaryGzipStream, [System.Text.UTF8Encoding]::new($false))
-            $dictionaryWriter.Write($dictionaryJson)
+            $dictionaryWriter.Write('{"version":"content-dictionary-v1","deviceProfiles":[')
+            for ($index = 0; $index -lt $deviceProfiles.Count; $index++) {
+                if ($index -gt 0) { $dictionaryWriter.Write(',') }
+                $dictionaryWriter.Write((ConvertTo-Json -InputObject $deviceProfiles[$index] -Compress -Depth 20))
+            }
+            $dictionaryWriter.Write('],"contentTemplates":[')
+            for ($index = 0; $index -lt $contentTemplates.Count; $index++) {
+                if ($index -gt 0) { $dictionaryWriter.Write(',') }
+                $dictionaryWriter.Write((ConvertTo-Json -InputObject $contentTemplates[$index] -Compress -Depth 20))
+            }
+            $dictionaryWriter.Write(']}')
         }
         finally {
             if ($dictionaryWriter) { $dictionaryWriter.Dispose() }
             elseif ($dictionaryGzipStream) { $dictionaryGzipStream.Dispose() }
             elseif ($dictionaryFileStream) { $dictionaryFileStream.Dispose() }
         }
+        $deviceProfiles.Clear()
+        $contentTemplates.Clear()
         [void]$filesToPublish.Add([PSCustomObject]@{
             StagePath = $dictionaryPath
             TargetPath = Get-VulnContentDictionaryPath -BasePath $BasePath
