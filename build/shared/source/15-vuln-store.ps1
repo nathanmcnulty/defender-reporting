@@ -84,6 +84,132 @@ function Test-VulnCurrentFile {
     return $rowCount
 }
 
+function Get-VulnRowStreamFingerprint {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$RowSource,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Label
+    )
+
+    $hash = [System.Security.Cryptography.IncrementalHash]::CreateHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $rowCount = 0
+
+    try {
+        & $RowSource | ForEach-Object {
+            $row = $_
+            if ($null -ne $row) {
+                $id = [string](Get-VulnPropertyValue -InputObject $row -Name 'Id')
+                if ([string]::IsNullOrWhiteSpace($id)) {
+                    throw "$Label contains a row without Id."
+                }
+
+                $rowJson = Convert-VulnObjectToCompactJson -InputObject $row -Depth 20
+                $rowBytes = [System.Text.Encoding]::UTF8.GetBytes($rowJson)
+                $hash.AppendData($rowBytes)
+                $hash.AppendData([byte[]]@(0x0a))
+                $rowCount++
+            }
+        }
+
+        $hashBytes = $hash.GetHashAndReset()
+        return [PSCustomObject]@{
+            RowCount = $rowCount
+            Sha256 = ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+        }
+    }
+    finally {
+        $hash.Dispose()
+    }
+}
+
+function Test-VulnHistoryRowSidecarMatch {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HistoryPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RowsPath
+    )
+
+    if (-not (Test-Path -LiteralPath $RowsPath -PathType Leaf)) {
+        throw "History rows sidecar '$RowsPath' is missing."
+    }
+
+    $historyFingerprint = Get-VulnRowStreamFingerprint -Label "History file '$HistoryPath'" -RowSource {
+        Read-VulnHistoryRowsFromPath -Path $HistoryPath
+    }
+    $sidecarFingerprint = Get-VulnRowStreamFingerprint -Label "History rows sidecar '$RowsPath'" -RowSource {
+        Read-VulnNdjsonRecordsFromPath -Path $RowsPath
+    }
+
+    if ($historyFingerprint.RowCount -ne $sidecarFingerprint.RowCount) {
+        throw "History rows sidecar '$RowsPath' row count '$($sidecarFingerprint.RowCount)' does not match history file '$HistoryPath' row count '$($historyFingerprint.RowCount)'."
+    }
+
+    if ($historyFingerprint.Sha256 -ne $sidecarFingerprint.Sha256) {
+        throw "History rows sidecar '$RowsPath' content does not match history file '$HistoryPath'."
+    }
+
+    return [int]$sidecarFingerprint.RowCount
+}
+
+function Get-VulnHistoryLayoutState {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo]$HistoryFile
+    )
+
+    $periodKey = Get-VulnHistoryPeriodKeyFromFileName -Name $HistoryFile.Name
+    $isQuarterly = (-not [string]::IsNullOrWhiteSpace($periodKey)) -and ($periodKey -match '^\d{4}Q[1-4]$')
+    $rowsPath = if ($isQuarterly) { Get-VulnHistoryRowsPath -BasePath $BasePath -PeriodKey $periodKey } else { $null }
+    $historyFileValid = $false
+    $rowsSidecarValid = $false
+    $rowCount = 0
+    $validationMessage = $null
+
+    if ($isQuarterly) {
+        try {
+            [void](Test-VulnHistoryFileLightweight -Path $HistoryFile.FullName)
+            $historyFileValid = $true
+        }
+        catch {
+            $validationMessage = $_.Exception.Message
+        }
+
+        if ($historyFileValid) {
+            try {
+                $rowCount = Test-VulnHistoryRowSidecarMatch -HistoryPath $HistoryFile.FullName -RowsPath $rowsPath
+                $rowsSidecarValid = $true
+            }
+            catch {
+                $validationMessage = $_.Exception.Message
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        PeriodKey = $periodKey
+        IsQuarterly = $isQuarterly
+        HistoryFileValid = $historyFileValid
+        RowsPath = $rowsPath
+        RowsSidecarValid = $rowsSidecarValid
+        RowCount = [int]$rowCount
+        RequiresRepair = ((-not $isQuarterly) -or (-not $historyFileValid) -or (-not $rowsSidecarValid))
+        ValidationMessage = $validationMessage
+    }
+}
+
 function Test-VulnHistoryFile {
     [CmdletBinding()]
     param(
@@ -92,18 +218,24 @@ function Test-VulnHistoryFile {
     )
 
     $document = Read-VulnHistoryDocument -Path $Path
-    $hasYear = $null -ne $document.PSObject.Properties['year']
-    $hasPeriod = $null -ne $document.PSObject.Properties['period']
-    $hasQuarter = $null -ne $document.PSObject.Properties['quarter']
+    $hasYear = Test-VulnPropertyPresence -InputObject $document -Name 'year'
+    $hasPeriod = Test-VulnPropertyPresence -InputObject $document -Name 'period'
+    $hasQuarter = Test-VulnPropertyPresence -InputObject $document -Name 'quarter'
     if ((-not $hasYear) -or (($hasPeriod -or $hasQuarter) -and -not ($hasPeriod -and $hasQuarter))) {
         throw "History file '$Path' is missing required partition metadata."
     }
-    if ($null -eq $document.PSObject.Properties['snapshots']) {
+    if (-not (Test-VulnPropertyPresence -InputObject $document -Name 'snapshots')) {
         throw "History file '$Path' is missing 'snapshots'."
     }
 
+    $snapshotItems = [System.Collections.Generic.List[object]]::new()
+    foreach ($snapshot in (Get-VulnPropertyValue -InputObject $document -Name 'snapshots')) {
+        if ($null -eq $snapshot) { continue }
+        $snapshotItems.Add($snapshot)
+    }
+
     $snapshotDates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
-    foreach ($snapshot in @($document.snapshots)) {
+    foreach ($snapshot in $snapshotItems) {
         if ($null -eq $snapshot) { continue }
         $date = [string](Get-VulnPropertyValue -InputObject $snapshot -Name 'date')
         if ([string]::IsNullOrWhiteSpace($date)) {
@@ -112,7 +244,13 @@ function Test-VulnHistoryFile {
         if (-not $snapshotDates.Add($date)) {
             throw "History file '$Path' contains duplicate snapshot date '$date'."
         }
-        foreach ($entry in @($snapshot.closed)) {
+
+        $closedEntryItems = [System.Collections.Generic.List[object]]::new()
+        foreach ($entry in (Get-VulnPropertyValue -InputObject $snapshot -Name 'closed')) {
+            if ($null -eq $entry) { continue }
+            $closedEntryItems.Add($entry)
+        }
+        foreach ($entry in $closedEntryItems) {
             if ($null -eq $entry) { continue }
             $reason = [string](Get-VulnPropertyValue -InputObject $entry -Name 'reason')
             if ($reason -notin @('removed', 'changed')) {
@@ -137,7 +275,7 @@ function Test-VulnHistoryFile {
         }
     }
 
-    return @($document.snapshots).Count
+    return $snapshotItems.Count
 }
 
 function Test-VulnHistoryFileLightweight {
