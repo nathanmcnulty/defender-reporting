@@ -69,6 +69,36 @@ function Get-TestVulnRow {
     }
 }
 
+function Get-TestQuarterlyHistoryDocument {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PeriodKey,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$Snapshots
+    )
+
+    $latestDate = $null
+    foreach ($snapshot in @($Snapshots)) {
+        if ($null -eq $snapshot) { continue }
+        $snapshotDate = [string](Get-VulnPropertyValue -InputObject $snapshot -Name 'date')
+        if ([string]::IsNullOrWhiteSpace($snapshotDate)) { continue }
+
+        if ([string]::IsNullOrWhiteSpace($latestDate) -or ([datetime]$snapshotDate -gt [datetime]$latestDate)) {
+            $latestDate = $snapshotDate
+        }
+    }
+
+    return [PSCustomObject]@{
+        year = [int]$PeriodKey.Substring(0, 4)
+        period = $PeriodKey
+        quarter = [int]$PeriodKey.Substring($PeriodKey.Length - 1)
+        latestDate = $latestDate
+        snapshots = @($Snapshots)
+    }
+}
+
 function Test-CanonicalLayoutHelper {
     [CmdletBinding()]
     param()
@@ -245,6 +275,221 @@ function Test-BulkSnapshotImportSingleSnapshot {
         Assert-True ($publishResult.CurrentRows -eq 1) 'Expected one current row after importing a single snapshot.'
         Assert-True ($publishResult.HistoryYears -eq 0) 'Expected zero history periods after importing a single snapshot.'
         Assert-True ($storeRows.Count -eq 1) 'Expected single-snapshot import to expose only one current row.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('repair-vuln-layout-skip-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $periodKey = '2026Q1'
+        $historyPath = Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey $periodKey
+        $historyRowsPath = Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey $periodKey
+        $historyDocument = Get-TestQuarterlyHistoryDocument -PeriodKey $periodKey -Snapshots @(
+            [PSCustomObject]@{
+                date = '2026-03-20'
+                closed = @(
+                    [PSCustomObject]@{
+                        reason = 'removed'
+                        row = (Get-TestVulnRow -Id 'canonical-q1' -CveId 'CVE-2026-0100' -SnapshotDate '2026-03-20' -Version '1.0.0')
+                    }
+                )
+            }
+        )
+
+        Write-VulnHistoryDocument -Path $historyPath -HistoryDocument $historyDocument
+        Write-VulnHistoryRowsFile -Path $historyRowsPath -HistoryDocument $historyDocument
+
+        $originalHistoryContent = Read-GzipTextFile -Path $historyPath
+        $originalRowsContent = Read-GzipTextFile -Path $historyRowsPath
+        $requiresRepair = Test-VulnStoreRequiresCanonicalRepair -BasePath $tempRoot
+
+        $repairedPeriods = Repair-VulnHistoryLayout -BasePath $tempRoot
+
+        Assert-True ($requiresRepair -eq $false) 'Expected valid canonical quarterly history layout to avoid repair.'
+        Assert-True ($repairedPeriods -eq 1) 'Expected canonical quarterly history layout to be treated as already repaired.'
+        Assert-True ((Read-GzipTextFile -Path $historyPath) -eq $originalHistoryContent) 'Expected canonical quarterly history file to be left untouched.'
+        Assert-True ((Read-GzipTextFile -Path $historyRowsPath) -eq $originalRowsContent) 'Expected canonical quarterly history rows sidecar to be left untouched.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-VulnStoreRequiresCanonicalRepairDetectsMalformedQuarterlyHistory {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('repair-vuln-layout-malformed-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $periodKey = '2026Q1'
+        $historyPath = Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey $periodKey
+        $historyRowsPath = Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey $periodKey
+
+        Write-GzipTextFile -Path $historyPath -Content 'skip-deserialize-sentinel'
+        Write-NdjsonRecordsFile -Path $historyRowsPath -Records @((Get-TestVulnRow -Id 'malformed-q1' -CveId 'CVE-2026-0109' -SnapshotDate '2026-03-20' -Version '1.0.9'))
+
+        Assert-True ((Test-VulnStoreRequiresCanonicalRepair -BasePath $tempRoot) -eq $true) 'Expected malformed quarterly history content to require repair.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-RepairVulnHistoryLayoutRebuildsCanonicalQuarterlyRowSidecar {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('repair-vuln-layout-sidecar-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $periodKey = '2026Q1'
+        $historyPath = Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey $periodKey
+        $historyRowsPath = Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey $periodKey
+        $expectedRow = Get-TestVulnRow -Id 'canonical-row-001' -CveId 'CVE-2026-0110' -SnapshotDate '2026-03-20' -Version '1.1.0'
+        $historyDocument = Get-TestQuarterlyHistoryDocument -PeriodKey $periodKey -Snapshots @(
+            [PSCustomObject]@{
+                date = '2026-03-20'
+                closed = @(
+                    [PSCustomObject]@{
+                        reason = 'changed'
+                        row = $expectedRow
+                        replacementId = 'canonical-row-001'
+                    }
+                )
+            }
+        )
+
+        Write-VulnHistoryDocument -Path $historyPath -HistoryDocument $historyDocument
+        Write-NdjsonRecordsFile -Path $historyRowsPath -Records @((Get-TestVulnRow -Id 'canonical-row-stale' -CveId 'CVE-2026-0999' -SnapshotDate '2026-03-20' -Version '9.9.9'))
+
+        Assert-True ((Test-VulnStoreRequiresCanonicalRepair -BasePath $tempRoot) -eq $true) 'Expected mismatched quarterly rows sidecar to require repair.'
+
+        $repairedPeriods = Repair-VulnHistoryLayout -BasePath $tempRoot
+        $repairedRows = @(Read-VulnNdjsonRecordsFromPath -Path $historyRowsPath)
+
+        Assert-True ($repairedPeriods -eq 1) 'Expected canonical quarterly rows sidecar repair to preserve one quarterly period.'
+        Assert-True ($repairedRows.Count -eq 1) 'Expected repaired quarterly rows sidecar to contain one row.'
+        Assert-True ([string](Get-VulnPropertyValue -InputObject $repairedRows[0] -Name 'Id') -eq 'canonical-row-001') 'Expected repaired quarterly rows sidecar to be rebuilt from the history document.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-RepairVulnHistoryLayoutRepairsLegacyYearlyStore {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('repair-vuln-layout-legacy-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $legacyHistoryPath = Join-Path $tempRoot 'VulnHistory_2026.json.gz'
+        $legacyDocument = [PSCustomObject]@{
+            year = 2026
+            latestDate = '2026-04-02'
+            snapshots = @(
+                [PSCustomObject]@{
+                    date = '2026-01-02'
+                    closed = @(
+                        [PSCustomObject]@{
+                            reason = 'removed'
+                            row = (Get-TestVulnRow -Id 'legacy-q1' -CveId 'CVE-2026-0101' -SnapshotDate '2026-01-02' -Version '1.0.0')
+                        }
+                    )
+                },
+                [PSCustomObject]@{
+                    date = '2026-04-02'
+                    closed = @(
+                        [PSCustomObject]@{
+                            reason = 'changed'
+                            row = (Get-TestVulnRow -Id 'legacy-q2' -CveId 'CVE-2026-0102' -SnapshotDate '2026-04-02' -Version '2.0.0')
+                            replacementId = 'legacy-q2'
+                        }
+                    )
+                }
+            )
+        }
+
+        Write-VulnHistoryDocument -Path $legacyHistoryPath -HistoryDocument $legacyDocument
+
+        $repairedPeriods = Repair-VulnHistoryLayout -BasePath $tempRoot
+
+        Assert-True ($repairedPeriods -eq 2) 'Expected yearly legacy history to split into two quarterly periods.'
+        Assert-True ((Test-Path -LiteralPath (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -PathType Leaf)) 'Expected repaired Q1 history file to exist.'
+        Assert-True ((Test-Path -LiteralPath (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q2') -PathType Leaf)) 'Expected repaired Q2 history file to exist.'
+        Assert-True ((Test-Path -LiteralPath (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -PathType Leaf)) 'Expected repaired Q1 history rows file to exist.'
+        Assert-True ((Test-Path -LiteralPath (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q2') -PathType Leaf)) 'Expected repaired Q2 history rows file to exist.'
+        Assert-True (-not (Test-Path -LiteralPath $legacyHistoryPath -PathType Leaf)) 'Expected legacy yearly history file to be removed after repair.'
+
+        $q1Rows = @(Read-VulnNdjsonRecordsFromPath -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1'))
+        $q2Rows = @(Read-VulnNdjsonRecordsFromPath -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q2'))
+        Assert-True ($q1Rows.Count -eq 1) 'Expected repaired Q1 history to retain one closed row.'
+        Assert-True ($q2Rows.Count -eq 1) 'Expected repaired Q2 history to retain one closed row.'
+        Assert-True ([string](Get-VulnPropertyValue -InputObject $q1Rows[0] -Name 'Id') -eq 'legacy-q1') 'Expected repaired Q1 history row Id to be preserved.'
+        Assert-True ([string](Get-VulnPropertyValue -InputObject $q2Rows[0] -Name 'Id') -eq 'legacy-q2') 'Expected repaired Q2 history row Id to be preserved.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-VulnHistoryFileValidatesQuarterlyHistoryDocument {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('history-file-validator-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $periodKey = '2026Q1'
+        $historyPath = Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey $periodKey
+        $historyDocument = Get-TestQuarterlyHistoryDocument -PeriodKey $periodKey -Snapshots @(
+            [PSCustomObject]@{
+                date = '2026-01-15'
+                closed = @(
+                    [PSCustomObject]@{
+                        reason = 'removed'
+                        row = (Get-TestVulnRow -Id 'validator-q1-a' -CveId 'CVE-2026-0120' -SnapshotDate '2026-01-15' -Version '1.2.0')
+                    }
+                )
+            },
+            [PSCustomObject]@{
+                date = '2026-03-20'
+                closed = @(
+                    [PSCustomObject]@{
+                        reason = 'changed'
+                        row = (Get-TestVulnRow -Id 'validator-q1-b' -CveId 'CVE-2026-0121' -SnapshotDate '2026-03-20' -Version '1.2.1')
+                        replacementId = 'validator-q1-b'
+                    }
+                )
+            }
+        )
+
+        Write-VulnHistoryDocument -Path $historyPath -HistoryDocument $historyDocument
+
+        Assert-True ((Test-VulnHistoryFile -Path $historyPath) -eq 2) 'Expected deep quarterly history validation to accept JObject-backed history documents.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -555,6 +800,115 @@ function Test-WriteCombinedPayloadGzipPreservesColumnPayload {
     }
 }
 
+function Test-ValidationHelperPayloadCanonicalization {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('validation-helper-payload-formats-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $rowsOutputPath = Join-Path $tempRoot 'rows-normalized.json'
+    $rowsPayloadPath = Join-Path $tempRoot 'rows-payload.json.gz'
+    $columnsOutputPath = Join-Path $tempRoot 'columns-normalized.json'
+    $columnPath = Join-Path $tempRoot 'columns'
+    $columnsPayloadPath = Join-Path $tempRoot 'columns-payload.json.gz'
+
+    try {
+        . (Join-Path $repoRoot 'build\Import-ValidationHelpers.ps1')
+
+        $currentRow = Get-TestVulnRow -Id 'validation-format-001' -CveId 'CVE-2026-0311' -SnapshotDate '2026-03-20' -Version '3.0.0'
+        $historyRow = Get-TestVulnRow -Id 'validation-format-002' -CveId 'CVE-2026-0312' -SnapshotDate '2026-03-18' -Version '3.1.0'
+        $historyRow.DeviceId = 'device-002'
+        $historyRow.DeviceName = 'device02.contoso.com'
+        $historyRow.MachineTags = @('Pilot', 'Prod')
+        $historyRow.DiskPaths = @('C:\Program Files\Legacy Agent\agent-alt.exe')
+        $historyRow.RegistryPaths = @('HKLM\Software\Contoso\LegacyAgentAlt')
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        [void](New-Item -Path (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -ItemType File -Force)
+        Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
+
+        $rowsResult = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $rowsOutputPath -PayloadOutputPath $rowsPayloadPath -Machines @{} -AdvancedHuntingData @{}
+        $columnsResult = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $columnsOutputPath -VulnColumnDirectoryPath $columnPath -Machines @{} -AdvancedHuntingData @{}
+        Write-CombinedPayloadGzip -Lookups $columnsResult.Lookups -VulnColumnPaths $columnsResult.VulnColumnPaths -OutputPath $columnsPayloadPath
+
+        $rowFormatSignatures = @(Read-PayloadCanonicalSignatureStream -PayloadPath $rowsPayloadPath | Sort-Object)
+        $columnFormatSignatures = @(Read-PayloadCanonicalSignatureStream -PayloadPath $columnsPayloadPath | Sort-Object)
+
+        Assert-True ($rowsResult.VulnCount -eq 2) 'Expected rows-v1 payload fixture to contain two vulnerability rows.'
+        Assert-True ($columnsResult.VulnCount -eq 2) 'Expected columns-v1 payload fixture to contain two vulnerability rows.'
+        Assert-True ($rowFormatSignatures.Count -eq $columnFormatSignatures.Count) 'Expected validation helper canonicalization to return the same number of rows for rows-v1 and columns-v1 payloads.'
+        Assert-True (@(Compare-Object -ReferenceObject $rowFormatSignatures -DifferenceObject $columnFormatSignatures).Count -eq 0) 'Expected validation helper canonicalization to treat rows-v1 and columns-v1 payloads as semantically equivalent.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('streaming-dashboard-source-parity-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+    $vulnOutputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $htmlPath = Join-Path $tempRoot 'dashboard.html'
+
+    try {
+        . (Join-Path $repoRoot 'build\Import-ValidationHelpers.ps1')
+
+        $currentRow = Get-TestVulnRow -Id 'streaming-audit-001' -CveId 'CVE-2026-0321' -SnapshotDate '2026-03-20' -Version '4.0.0'
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+
+        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $vulnOutputPath -PayloadOutputPath $payloadPath -Machines @{} -AdvancedHuntingData @{}
+        $payloadCacheEntry = Publish-NormalizedPayloadCache -BasePath $tempRoot -PayloadPath $normalizedResult.PayloadPath -VulnCount $normalizedResult.VulnCount -DeviceCount $normalizedResult.Lookups.devices.Count -CveCount $normalizedResult.Lookups.cves.Count -Quality $normalizedResult.Quality
+
+        $dashboardConfigJson = ([ordered]@{ payloadUrl = 'payload.json.gz' } | ConvertTo-Json -Compress)
+        $dashboardHtml = @(
+            '<!DOCTYPE html>'
+            '<html lang="en">'
+            '<head><meta charset="utf-8"><title>Streaming Audit Fixture</title></head>'
+            '<body>'
+            '<script id="dataFormat" type="application/json">external-compressed</script>'
+            ('<script id="dashboardConfig" type="application/json">' + $dashboardConfigJson + '</script>')
+            '</body>'
+            '</html>'
+        ) -join [Environment]::NewLine
+        [System.IO.File]::WriteAllText($htmlPath, $dashboardHtml, [System.Text.UTF8Encoding]::new($false))
+
+        $mutatedRow = Get-TestVulnRow -Id 'streaming-audit-002' -CveId 'CVE-2026-0322' -SnapshotDate '2026-03-21' -Version '4.1.0'
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow, $mutatedRow)
+
+        $contentStoreFiles = @(
+            Get-VulnContentDictionaryPath -BasePath $tempRoot
+            Get-VulnCurrentRefsPath -BasePath $tempRoot
+            Get-VulnHistoryRefsPath -BasePath $tempRoot -PeriodKey '2026Q1'
+        )
+        foreach ($contentStoreFile in $contentStoreFiles) {
+            if (-not [string]::IsNullOrWhiteSpace($contentStoreFile) -and (Test-Path -LiteralPath $contentStoreFile -PathType Leaf)) {
+                Remove-Item -LiteralPath $contentStoreFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        $audit = Get-StreamingDashboardAuditResult -ResolvedHtmlPath $htmlPath -ResolvedExportsPath $tempRoot -PayloadCacheEntry $payloadCacheEntry
+
+        Assert-True ($audit.PayloadParity.Match -eq $true) 'Expected dashboard payload bytes to remain equal to the cached normalized payload.'
+        Assert-True ($audit.SemanticParity.PayloadByteParityMatch -eq $true) 'Expected streaming audit diagnostics to record dashboard payload byte parity.'
+        Assert-True ($audit.RowComparison.Match -eq $false) 'Expected streaming semantic parity to fail when the source exports diverge from the dashboard payload.'
+        Assert-True ($audit.RowComparison.MissingCount -eq 1) 'Expected the extra source row to be reported as missing from the dashboard payload.'
+        Assert-True ([string]$audit.SemanticParity.ComparisonPayloadSource -eq 'cached-payload') 'Expected source streaming audit to reuse the cached payload when byte parity proves dashboard equivalence.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-DashboardValidationUsesStableFallbackDeviceProfile {
     [CmdletBinding()]
     param()
@@ -579,7 +933,7 @@ function Test-DashboardValidationUsesStableFallbackDeviceProfile {
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'AdvancedHunting_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
 
-        & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
+        & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
 
         $audit = Get-Content -Path $auditPath -Raw | ConvertFrom-Json -Depth 100
         Assert-True ($audit.RowComparison.Match -eq $true) 'Expected dashboard validation to reuse the stable fallback device profile for machine-less rows.'
@@ -682,7 +1036,7 @@ function Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff {
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), ($machines | ConvertTo-Json -Compress -Depth 20), [System.Text.UTF8Encoding]::new($false))
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'AdvancedHunting_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
 
-        & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
+        & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
 
         $audit = Get-Content -Path $auditPath -Raw | ConvertFrom-Json -Depth 100
         Assert-True ([string]$audit.OpenStateAudit.LatestObservedDate -eq '2026-03-10') 'Expected latest observed date to follow the most recent machine heartbeat.'
@@ -719,7 +1073,7 @@ function Test-DashboardValidationPreservesNoneSeverityData {
             Remove-Item -LiteralPath $cachePath -Recurse -Force -ErrorAction SilentlyContinue
         }
 
-        & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
+        & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
 
         $audit = Get-Content -Path $auditPath -Raw | ConvertFrom-Json -Depth 100
         Assert-True ($audit.RowComparison.Match -eq $true) 'Expected dashboard validation to preserve rows with VulnerabilitySeverityLevel=None.'
@@ -755,7 +1109,7 @@ function Test-DashboardSplitAssetsGenerationAndValidation {
             Remove-Item -LiteralPath $cachePath -Recurse -Force -ErrorAction SilentlyContinue
         }
 
-        & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -SplitAssets -Validate -ValidationOutputPath $auditPath | Out-Null
+        & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -SplitAssets -Validate -ValidationOutputPath $auditPath | Out-Null
 
         Assert-True ((Test-Path -LiteralPath $outputPath -PathType Leaf)) 'Expected split-assets generation to write the dashboard HTML.'
         Assert-True ((Test-Path -LiteralPath $assetsPath -PathType Container)) 'Expected split-assets generation to create the sibling asset directory.'
@@ -775,7 +1129,7 @@ function Test-DashboardSplitAssetsGenerationAndValidation {
         Assert-True ($audit.RowComparison.MissingCount -eq 0) 'Expected no missing rows in split-assets dashboard validation.'
         Assert-True ($audit.RowComparison.ExtraCount -eq 0) 'Expected no extra rows in split-assets dashboard validation.'
 
-        & pwsh -NoLogo -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ValidateOnly -ValidationOutputPath $validateOnlyAuditPath | Out-Null
+        & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ValidateOnly -ValidationOutputPath $validateOnlyAuditPath | Out-Null
 
         $validateOnlyAudit = Get-Content -LiteralPath $validateOnlyAuditPath -Raw | ConvertFrom-Json -Depth 100
         Assert-True ($validateOnlyAudit.RowComparison.Match -eq $true) 'Expected ValidateOnly to read and validate the external split-assets payload.'
@@ -920,6 +1274,16 @@ Test-BulkSnapshotImportSmoke
 Write-Output '  Bulk snapshot import smoke checks passed.'
 Test-BulkSnapshotImportSingleSnapshot
 Write-Output '  Single-snapshot vulnerability import checks passed.'
+Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore
+Write-Output '  Canonical quarterly history repair skip checks passed.'
+Test-VulnStoreRequiresCanonicalRepairDetectsMalformedQuarterlyHistory
+Write-Output '  Canonical quarterly history gate checks passed.'
+Test-RepairVulnHistoryLayoutRebuildsCanonicalQuarterlyRowSidecar
+Write-Output '  Canonical quarterly rows-sidecar repair checks passed.'
+Test-RepairVulnHistoryLayoutRepairsLegacyYearlyStore
+Write-Output '  Legacy yearly history repair checks passed.'
+Test-VulnHistoryFileValidatesQuarterlyHistoryDocument
+Write-Output '  Quarterly history validation checks passed.'
 Test-VulnCanonicalSignatureStability
 Write-Output '  Canonical vulnerability signature checks passed.'
 Test-MergeVulnObservedWindowRows
@@ -936,6 +1300,10 @@ Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
 Write-Output '  Advanced Hunting device-user normalization checks passed.'
 Test-WriteCombinedPayloadGzipPreservesColumnPayload
 Write-Output '  Combined payload writer column-path checks passed.'
+Test-ValidationHelperPayloadCanonicalization
+Write-Output '  Validation helper payload-format checks passed.'
+Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity
+Write-Output '  Streaming dashboard source-parity checks passed.'
 Test-DashboardValidationUsesStableFallbackDeviceProfile
 Write-Output '  Dashboard validation fallback device profile checks passed.'
 Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff

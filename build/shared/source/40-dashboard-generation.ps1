@@ -2127,7 +2127,7 @@ function Write-MergedVulnContentStoreRefs {
 
         [Parameter(Mandatory = $false)]
         [ValidateRange(4, 256)]
-        [int]$PartitionCount = 32
+        [int]$PartitionCount = 128
     )
 
     # Collect ref file paths
@@ -4825,7 +4825,7 @@ function Write-MergedVulnObservedWindowRows {
 
         [Parameter(Mandatory = $false)]
         [ValidateRange(4, 256)]
-        [int]$PartitionCount = 32
+        [int]$PartitionCount = 128
     )
 
     # Disk-partitioned merge: scatter rows to temp partition files by identity
