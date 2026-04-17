@@ -222,9 +222,14 @@ const REPORT_IDS = [
     'devices-by-remediation',
     'remediations-by-device'
 ];
+const REMEDIATION_SCOPE_REPORT_IDS = ['devices-by-remediation', 'remediations-by-device'];
+const REMEDIATION_REPORT_MODE_RANGE = 'range';
+const REMEDIATION_REPORT_MODE_SNAPSHOT = 'snapshot';
+const MAX_VISIBLE_DEVICE_REMEDIATIONS = 10;
 
 let applyFiltersTimer = null;
 let activeReportId = 'active-vulnerabilities';
+let remediationReportMode = REMEDIATION_REPORT_MODE_SNAPSHOT;
 const initializedReports = new Set();
 const dirtyReports = new Set(REPORT_IDS);
 
@@ -567,6 +572,8 @@ function createEmptyAggregateCache() {
         activeRowsAsOfDateKey: null,
         activeRowsForCurrentSelection: null,
         activeRowsForCurrentSelectionKey: null,
+        remediationReportRows: null,
+        remediationReportRowsKey: null,
         selectionSeverityCounts: null,
         selectionSeverityCountsKey: null,
         provenRemediationRows: null,
@@ -680,6 +687,85 @@ function getCurrentReportId() {
     return selector ? selector.value : activeReportId;
 }
 
+function isRemediationScopeReport(reportId = activeReportId) {
+    return REMEDIATION_SCOPE_REPORT_IDS.includes(reportId);
+}
+
+function getRemediationReportModeSummaryText(state = filterState) {
+    const snapshotDate = formatDateYMD(getPointInTimeReferenceDate(state)) || 'the latest open snapshot';
+
+    if (!hasSelectedDateWindow(state)) {
+        return `No date range is selected, so this setting has no effect and the reports show the latest open snapshot on ${snapshotDate}.`;
+    }
+
+    if (remediationReportMode === REMEDIATION_REPORT_MODE_SNAPSHOT) {
+        return `Showing only vulnerabilities still open on ${snapshotDate}. Resolved items from earlier in the range are excluded.`;
+    }
+
+    const rangeStart = formatDateYMD(state.startDate) || snapshotDate;
+    const rangeEnd = formatDateYMD(state.endDate) || snapshotDate;
+    return `Including vulnerabilities observed from ${rangeStart} through ${rangeEnd}, even if they were resolved before ${snapshotDate}.`;
+}
+
+function updateRemediationReportModeUi(reportId = activeReportId) {
+    const toolbar = document.getElementById('remediationReportToolbar');
+    if (!toolbar) {
+        return;
+    }
+
+    const shouldShow = isRemediationScopeReport(reportId);
+    toolbar.hidden = !shouldShow;
+
+    const rangeButton = document.getElementById('remediationModeRangeButton');
+    const snapshotButton = document.getElementById('remediationModeSnapshotButton');
+    const summary = document.getElementById('remediationModeSummary');
+    const isRange = remediationReportMode === REMEDIATION_REPORT_MODE_RANGE;
+
+    if (rangeButton) {
+        rangeButton.classList.toggle('is-active', isRange);
+        rangeButton.setAttribute('aria-pressed', isRange ? 'true' : 'false');
+    }
+
+    if (snapshotButton) {
+        snapshotButton.classList.toggle('is-active', !isRange);
+        snapshotButton.setAttribute('aria-pressed', isRange ? 'false' : 'true');
+    }
+
+    if (summary) {
+        summary.textContent = shouldShow ? getRemediationReportModeSummaryText() : '';
+    }
+}
+
+function setRemediationReportMode(mode) {
+    const nextMode = mode === REMEDIATION_REPORT_MODE_SNAPSHOT
+        ? REMEDIATION_REPORT_MODE_SNAPSHOT
+        : REMEDIATION_REPORT_MODE_RANGE;
+
+    if (remediationReportMode === nextMode) {
+        updateRemediationReportModeUi();
+        return;
+    }
+
+    remediationReportMode = nextMode;
+    invalidateAggregateCache();
+    dirtyReports.add('devices-by-remediation');
+    dirtyReports.add('remediations-by-device');
+    updateRemediationReportModeUi();
+
+    if (isRemediationScopeReport(activeReportId)) {
+        renderActiveReport(true);
+    }
+}
+
+function handleRemediationReportModeChange(event) {
+    const button = event.currentTarget;
+    if (!button) {
+        return;
+    }
+
+    setRemediationReportMode(button.dataset.remediationReportMode);
+}
+
 function buildFilterStateKey(state) {
     return [
         state.datePreset,
@@ -780,8 +866,13 @@ function clearTooltipCaches() {
     for (const key of Object.keys(severityTooltipData)) {
         delete severityTooltipData[key];
     }
+    cveTooltipIdCounter = 0;
     severityBadgeIdCounter = 0;
 
+    hideGlobalTooltip();
+}
+
+function hideGlobalTooltip() {
     const tooltip = document.getElementById('cve-global-tooltip');
     if (tooltip) {
         tooltip.style.display = 'none';
@@ -1048,7 +1139,8 @@ self.onmessage = async function(e) {
             rawVulns.ua[index],
             rawVulns.u[index],
             rawVulns.dp[index],
-            rawVulns.rp[index]
+            rawVulns.rp[index],
+            rawVulns.iv ? rawVulns.iv[index] : -1
         ];
     }
     function normalizeDateYMD(value) {
@@ -1091,6 +1183,7 @@ self.onmessage = async function(e) {
         var vendorName = getLookupValue(lookups.vendors, software.v);
         var softwareName = software.n;
         var updateObj = v[7] >= 0 ? lookups.updates[v[7]] : null;
+        var inventory = (v.length > 10 && v[10] >= 0 && lookups.inventory) ? getLookupValue(lookups.inventory, v[10]) : null;
         var updateName = updateObj ? (updateObj.n || updateObj) : null;
         var updateId = updateObj ? updateObj.id : null;
         var updateUrl = updateObj ? updateObj.url : null;
@@ -1142,10 +1235,22 @@ self.onmessage = async function(e) {
             VulnerabilityDescription: cve.desc || null,
             EpssScore: cve.ep != null ? cve.ep : null,
             AffectedSoftware: affSoftware,
+            IsExploitAvailable: cve.ea == null ? null : cve.ea === true,
+            NvdLastModifiedDate: normalizeDateYMD(cve.nlm) || null,
+            NvdBaseScore: cve.nbs != null ? cve.nbs : null,
+            NvdBaseSeverity: cve.nsv || null,
+            NvdVector: cve.nvec || null,
+            NvdKevDate: normalizeDateYMD(cve.nkev) || null,
+            NvdActionDue: normalizeDateYMD(cve.ndu) || null,
+            NvdRequiredAction: cve.nact || null,
+            NvdWeaknesses: cve.nw && cve.nw.length > 0 ? cve.nw.slice() : null,
             SoftwareVendor: vendorName,
             SoftwareName: softwareName,
             SoftwareVersion: version,
             RecommendationReference: software.r,
+            ProductCodeCpe: inventory ? (inventory.cpe || null) : null,
+            EndOfSupportStatus: inventory ? (inventory.eos || null) : null,
+            EndOfSupportDate: inventory ? (normalizeDateYMD(inventory.eod) || null) : null,
             _firstSeenDate: firstSeen,
             _lastSeenDate: lastSeen,
             FirstSeenTimestamp: firstSeen,
@@ -1447,13 +1552,14 @@ function getRawVulnRecord(index) {
         rawVulns.ua[index],
         rawVulns.u[index],
         rawVulns.dp[index],
-        rawVulns.rp[index]
+        rawVulns.rp[index],
+        rawVulns.iv ? rawVulns.iv[index] : -1
     ];
 }
 
 /**
  * Denormalize a single vulnerability record from compact array format
- * @param {Array} v - Compact vulnerability record [devIdx, cveIdx, swIdx, version, firstSeen, lastSeen, updateAvail, updIdx, diskPaths, regPaths]
+ * @param {Array} v - Compact vulnerability record [devIdx, cveIdx, swIdx, version, firstSeen, lastSeen, updateAvail, updIdx, diskPaths, regPaths, inventoryIdx]
  * @param {number} index - Index in the array
  * @returns {Object} Expanded vulnerability object
  */
@@ -1476,6 +1582,7 @@ function denormalizeAllVulns() {
     const fCol = isColumnar ? rawVulns.f : null;
     const lCol = isColumnar ? rawVulns.l : null;
     const uCol = isColumnar ? rawVulns.u : null;
+    const ivCol = isColumnar ? rawVulns.iv : null;
 
     // Cache lookup arrays locally
     const lkDevices = lookups.devices;
@@ -1492,6 +1599,7 @@ function denormalizeAllVulns() {
     const lkExploitLevels = lookups.exploitLevels;
     const lkBatchTitles = lookups.batchTitles;
     const lkAffSoftware = lookups.affSoftware;
+    const lkInventory = lookups.inventory || [];
 
     // Pre-format all date strings once (lkDates typically has ~365 entries)
     const preFormattedDates = new Array(lkDates ? lkDates.length : 0);
@@ -1541,6 +1649,14 @@ function denormalizeAllVulns() {
     for (let ci = 0; ci < lkCves.length; ci++) {
         const cve = lkCves[ci];
         cve._pdFmt = cve.pd ? (formatDateYMD(cve.pd) || null) : null;
+        cve._isExploitAvailable = cve.ea == null ? null : cve.ea === true;
+        const nvdLastModified = cve.nlm ? formatDateYMD(cve.nlm) : '-';
+        cve._nvdLastModifiedFmt = nvdLastModified === '-' ? null : nvdLastModified;
+        const nvdKevDate = cve.nkev ? formatDateYMD(cve.nkev) : '-';
+        cve._nvdKevFmt = nvdKevDate === '-' ? null : nvdKevDate;
+        const nvdActionDue = cve.ndu ? formatDateYMD(cve.ndu) : '-';
+        cve._nvdActionDueFmt = nvdActionDue === '-' ? null : nvdActionDue;
+        cve._nvdWeaknesses = cve.nw && cve.nw.length > 0 ? cve.nw : null;
         const cveAs = cve.as;
         if (cveAs && cveAs.length > 0) {
             cve._affSw = new Array(cveAs.length);
@@ -1548,6 +1664,13 @@ function denormalizeAllVulns() {
         } else {
             cve._affSw = null;
         }
+    }
+
+    for (let ii = 0; ii < lkInventory.length; ii++) {
+        const inventory = lkInventory[ii];
+        if (!inventory) continue;
+        const eod = inventory.eod ? formatDateYMD(inventory.eod) : '-';
+        inventory._endOfSupportDateFmt = eod === '-' ? null : eod;
     }
 
     // Pre-compute per-(software, update) remediation key is no longer needed
@@ -1580,19 +1703,20 @@ function denormalizeAllVulns() {
     let _maxLatestActivity = '';
 
     for (let i = 0; i < rawCount; i++) {
-        let devIdx, cveIdx, swIdx, verIdx, fsIdx, lsIdx, updIdx;
+        let devIdx, cveIdx, swIdx, verIdx, fsIdx, lsIdx, updIdx, invIdx;
         if (isColumnar) {
             devIdx = dCol[i]; cveIdx = cCol[i]; swIdx = sCol[i]; verIdx = vCol[i];
-            fsIdx = fCol[i]; lsIdx = lCol[i]; updIdx = uCol[i];
+            fsIdx = fCol[i]; lsIdx = lCol[i]; updIdx = uCol[i]; invIdx = ivCol ? ivCol[i] : -1;
         } else {
             const row = rawVulns[i];
             devIdx = row[0]; cveIdx = row[1]; swIdx = row[2]; verIdx = row[3];
-            fsIdx = row[4]; lsIdx = row[5]; updIdx = row[7];
+            fsIdx = row[4]; lsIdx = row[5]; updIdx = row[7]; invIdx = row.length > 10 ? row[10] : -1;
         }
 
         const device = lkDevices[devIdx];
         const cve = lkCves[cveIdx];
         const software = lkSoftware[swIdx];
+        const inventory = invIdx >= 0 && invIdx < lkInventory.length ? lkInventory[invIdx] : null;
 
         const vendorName = software.v >= 0 && software.v < lkVendors.length ? lkVendors[software.v] : null;
         const updateObj = updIdx >= 0 ? lkUpdates[updIdx] : null;
@@ -1641,9 +1765,21 @@ function denormalizeAllVulns() {
             ExploitabilityLevel: cve.ex >= 0 ? lkExploitLevels[cve.ex] : null,
             PublishedDate: cve._pdFmt,
             EpssScore: cve.ep != null ? cve.ep : null,
+            IsExploitAvailable: cve._isExploitAvailable,
+            NvdLastModifiedDate: cve._nvdLastModifiedFmt,
+            NvdBaseScore: cve.nbs != null ? cve.nbs : null,
+            NvdBaseSeverity: cve.nsv || null,
+            NvdVector: cve.nvec || null,
+            NvdKevDate: cve._nvdKevFmt,
+            NvdActionDue: cve._nvdActionDueFmt,
+            NvdRequiredAction: cve.nact || null,
+            NvdWeaknesses: cve._nvdWeaknesses,
             SoftwareVendor: vendorName,
             SoftwareName: software.n,
             SoftwareVersion: verIdx >= 0 ? lkVersions[verIdx] : null,
+            ProductCodeCpe: inventory ? (inventory.cpe || null) : null,
+            EndOfSupportStatus: inventory ? (inventory.eos || null) : null,
+            EndOfSupportDate: inventory ? (inventory._endOfSupportDateFmt || null) : null,
             _firstSeenDate: firstSeen,
             _lastSeenDate: lastSeen,
             RecommendedSecurityUpdate: updateName,
@@ -1881,6 +2017,7 @@ async function init() {
     setupInfiniteScroll();
     activeReportId = getCurrentReportId();
     setDateRange('1w');
+    updateRemediationReportModeUi(activeReportId);
     scheduleApplyFilters(true);
     clearDashboardStatus();
     console.timeEnd('[perf] init total');
@@ -2061,6 +2198,7 @@ function handleReportChange() {
         activeSection.classList.add('active');
     }
 
+    updateRemediationReportModeUi(selectedReport);
     renderReport(selectedReport);
 }
 
@@ -2864,6 +3002,9 @@ function handleSortButtonClick(event) {
 function attachEventListeners() {
     document.getElementById('reportSelector').addEventListener('change', handleReportChange);
     document.getElementById('exportPdfButton').addEventListener('click', exportToPDF);
+    document.querySelectorAll('.report-mode-button').forEach(button => {
+        button.addEventListener('click', handleRemediationReportModeChange);
+    });
     document.getElementById('clearAllFiltersButton')?.addEventListener('click', handleClearAllFilters);
     document.querySelectorAll('.filter-pill').forEach(button => {
         button.addEventListener('click', handleFilterPillClick);
@@ -3357,6 +3498,7 @@ function applyFilters() {
         updateDeviceSearchSummary([]);
         updateFilterSummary(filterState);
         updateStats();
+        updateRemediationReportModeUi(activeReportId);
         markAllReportsDirty();
         renderActiveReport(true);
         return;
@@ -3410,6 +3552,7 @@ function applyFilters() {
     cache.selectionSeverityCountsKey = currentSelectionKey;
     cache.selectionSeverityCounts = selectionSeverityCounts;
     updateStats();
+    updateRemediationReportModeUi(activeReportId);
     markAllReportsDirty();
     requestAnimationFrame(() => {
         renderActiveReport(true);
@@ -3556,6 +3699,21 @@ function getActiveRowsForCurrentSelection() {
         ? filteredData
         : getPointInTimeActiveRows();
     return cache.activeRowsForCurrentSelection;
+}
+
+function getRemediationReportRows() {
+    const cache = getAggregateCache();
+    const cacheKey = `${getCurrentSelectionCacheKey()}|${remediationReportMode}`;
+
+    if (cache.remediationReportRowsKey === cacheKey && cache.remediationReportRows) {
+        return cache.remediationReportRows;
+    }
+
+    cache.remediationReportRowsKey = cacheKey;
+    cache.remediationReportRows = (remediationReportMode === REMEDIATION_REPORT_MODE_RANGE && hasSelectedDateWindow())
+        ? filteredData
+        : getPointInTimeActiveRows();
+    return cache.remediationReportRows;
 }
 
 function getProvenRemediationRows() {
@@ -4046,10 +4204,16 @@ function normalizeRemediationText(value) {
     return text;
 }
 
-function normalizeKbId(value) {
+function normalizeKbId(value, allowNumeric = true) {
     const text = normalizeRemediationText(value);
     if (!text) return '';
-    return text.toUpperCase().startsWith('KB') ? text.toUpperCase() : 'KB' + text;
+
+    const explicitKbMatch = text.match(/\bKB\d+\b/i);
+    if (explicitKbMatch) {
+        return explicitKbMatch[0].toUpperCase();
+    }
+
+    return allowNumeric && /^\d+$/.test(text) ? 'KB' + text : '';
 }
 
 function isNumericRemediationReference(value) {
@@ -4060,69 +4224,559 @@ function isCveRemediationReference(value) {
     return /^CVE-\d{4}-\d+$/i.test(value);
 }
 
+function isUrlLikeText(value) {
+    return /^https?:\/\//i.test(normalizeRemediationText(value));
+}
+
+function escapeRegExp(value) {
+    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isOpaqueRemediationReference(value) {
+    const text = normalizeRemediationText(value);
+    return text.includes('_-_');
+}
+
+function getFriendlyRecommendationReference(value) {
+    const text = normalizeRemediationText(value);
+    if (!text || isOpaqueRemediationReference(text)) {
+        return '';
+    }
+
+    return text;
+}
+
+function extractScopedRemediationReference(updateName, scopeLabels) {
+    const text = normalizeRemediationText(updateName);
+    if (!text || !scopeLabels || scopeLabels.length === 0) {
+        return null;
+    }
+
+    const labels = Array.from(new Set(scopeLabels
+        .map(label => normalizeRemediationText(label))
+        .filter(Boolean)));
+
+    for (let i = 0; i < labels.length; i++) {
+        const scopeLabel = labels[i];
+        const pattern = new RegExp(`^${escapeRegExp(scopeLabel)}\\s*[-:]\\s*(.+)$`, 'i');
+        const match = pattern.exec(text);
+        if (!match) continue;
+
+        const reference = normalizeRemediationText(match[1]);
+        if (!reference) continue;
+
+        if (isNumericRemediationReference(reference)) {
+            return {
+                scopeLabel: scopeLabel,
+                reference: reference,
+                title: `${scopeLabel} patch ${reference}`
+            };
+        }
+
+        if (isCveRemediationReference(reference)) {
+            return {
+                scopeLabel: scopeLabel,
+                reference: reference,
+                title: `${scopeLabel} advisory ${reference}`
+            };
+        }
+    }
+
+    return null;
+}
+
+function getRemediationDisplayRank(descriptor) {
+    if (!descriptor) return 0;
+    if (descriptor.advisoryTitle) return 4;
+    if (descriptor.scopedUpdateReference) return 3;
+    if (descriptor.updateName && !isNumericRemediationReference(descriptor.updateName) && !isCveRemediationReference(descriptor.updateName)) {
+        return 3;
+    }
+    if (descriptor.friendlyRecommendationReference) return 2;
+    if (descriptor.kbId || descriptor.updateName || descriptor.recommendationReference) return 1;
+    return 0;
+}
+
+function shouldPreferRemediationDescriptor(candidate, current) {
+    if (!current) return true;
+
+    const candidateRank = candidate.displayRank || 0;
+    const currentRank = current.displayRank || 0;
+    if (candidateRank !== currentRank) {
+        return candidateRank > currentRank;
+    }
+
+    if (!!candidate.updateUrl !== !!current.updateUrl) {
+        return !!candidate.updateUrl;
+    }
+
+    return (candidate.title || '').length > (current.title || '').length;
+}
+
+function getRemediationDescriptorObservationKey(descriptor) {
+    return normalizeRemediationText(descriptor?.title)
+        || normalizeRemediationText(descriptor?.familyTitle)
+        || 'Not Specified';
+}
+
+function observeRemediationDescriptor(target, descriptor) {
+    if (!target || !descriptor) {
+        return;
+    }
+
+    if (!(target.descriptorObservationMap instanceof Map)) {
+        target.descriptorObservationMap = new Map();
+    }
+
+    const observationKey = getRemediationDescriptorObservationKey(descriptor);
+    const existing = target.descriptorObservationMap.get(observationKey);
+
+    if (!existing) {
+        target.descriptorObservationMap.set(observationKey, {
+            descriptor: descriptor,
+            count: 1
+        });
+        return;
+    }
+
+    existing.count++;
+    if (shouldPreferRemediationDescriptor(descriptor, existing.descriptor)) {
+        existing.descriptor = descriptor;
+    }
+}
+
+function getDominantRemediationDescriptor(target) {
+    if (!target) {
+        return null;
+    }
+
+    let dominantDescriptor = target.remediationDescriptor || null;
+    let dominantCount = -1;
+    const observations = target.descriptorObservationMap instanceof Map
+        ? Array.from(target.descriptorObservationMap.values())
+        : [];
+
+    observations.forEach(observation => {
+        if (!observation || !observation.descriptor) {
+            return;
+        }
+
+        if (observation.count > dominantCount) {
+            dominantDescriptor = observation.descriptor;
+            dominantCount = observation.count;
+            return;
+        }
+
+        if (observation.count === dominantCount && shouldPreferRemediationDescriptor(observation.descriptor, dominantDescriptor)) {
+            dominantDescriptor = observation.descriptor;
+        }
+    });
+
+    return dominantDescriptor;
+}
+
+function mergeDescriptorObservationMaps(targetMap, sourceMap) {
+    if (!(targetMap instanceof Map) || !(sourceMap instanceof Map)) {
+        return;
+    }
+
+    sourceMap.forEach((observation, key) => {
+        if (!observation || !observation.descriptor) {
+            return;
+        }
+
+        const existing = targetMap.get(key);
+        if (!existing) {
+            targetMap.set(key, {
+                descriptor: observation.descriptor,
+                count: observation.count || 0
+            });
+            return;
+        }
+
+        existing.count += observation.count || 0;
+        if (shouldPreferRemediationDescriptor(observation.descriptor, existing.descriptor)) {
+            existing.descriptor = observation.descriptor;
+        }
+    });
+}
+
+function mergeRemediationUpdateEntryMaps(targetMap, sourceMap) {
+    if (!(targetMap instanceof Map) || !(sourceMap instanceof Map)) {
+        return;
+    }
+
+    sourceMap.forEach((entry, key) => {
+        if (!entry) {
+            return;
+        }
+
+        const existing = targetMap.get(key);
+        if (!existing) {
+            targetMap.set(key, {
+                referenceText: entry.referenceText,
+                referenceUrl: entry.referenceUrl || ''
+            });
+            return;
+        }
+
+        if (!existing.referenceUrl && entry.referenceUrl) {
+            existing.referenceUrl = entry.referenceUrl;
+        }
+    });
+}
+
+function getRemediationAdvisoryFamilyMergeKey(target, fallbackKey = '') {
+    if (!target) {
+        return fallbackKey;
+    }
+
+    const descriptor = getDominantRemediationDescriptor(target) || target.remediationDescriptor;
+    const recommendationReference = normalizeRemediationText(descriptor?.recommendationReference);
+    const advisoryTitle = normalizeRemediationText(descriptor?.advisoryTitle);
+    const updateName = normalizeRemediationText(descriptor?.updateName);
+    if (!recommendationReference || !advisoryTitle || !updateName) {
+        return fallbackKey;
+    }
+
+    if (!isCveRemediationReference(updateName) && !isNumericRemediationReference(updateName)) {
+        return fallbackKey;
+    }
+
+    const datePart = normalizeRemediationText(target?.date);
+    const mergeKey = `${recommendationReference}|${advisoryTitle}`;
+    return datePart ? `${datePart}|${mergeKey}` : mergeKey;
+}
+
+function mergeRemediationObjectBuckets(bucketObject, mergeBucket) {
+    const mergedBuckets = {};
+
+    Object.entries(bucketObject || {}).forEach(([key, bucket]) => {
+        const mergeKey = getRemediationAdvisoryFamilyMergeKey(bucket, key);
+        if (!mergedBuckets[mergeKey]) {
+            mergedBuckets[mergeKey] = bucket;
+            return;
+        }
+
+        mergeBucket(mergedBuckets[mergeKey], bucket);
+    });
+
+    return mergedBuckets;
+}
+
+function mergeRemediationMapBuckets(bucketMap, mergeBucket) {
+    const mergedBuckets = new Map();
+
+    Array.from((bucketMap || new Map()).entries()).forEach(([key, bucket]) => {
+        const mergeKey = getRemediationAdvisoryFamilyMergeKey(bucket, key);
+        if (!mergedBuckets.has(mergeKey)) {
+            mergedBuckets.set(mergeKey, bucket);
+            return;
+        }
+
+        mergeBucket(mergedBuckets.get(mergeKey), bucket);
+    });
+
+    return mergedBuckets;
+}
+
+function mergeRemediationDetailMaps(targetMap, sourceMap) {
+    if (!(targetMap instanceof Map) || !(sourceMap instanceof Map)) {
+        return;
+    }
+
+    sourceMap.forEach((detail, key) => {
+        if (!detail) {
+            return;
+        }
+
+        const existing = targetMap.get(key);
+        if (!existing) {
+            targetMap.set(key, detail);
+            return;
+        }
+
+        if (detail.firstSeenTimestamp || existing.firstSeenTimestamp) {
+            existing.firstSeenTimestamp = getEarliestYmdDate([existing.firstSeenTimestamp, detail.firstSeenTimestamp]);
+        }
+
+        if (detail.lastSeenTimestamp || existing.lastSeenTimestamp) {
+            existing.lastSeenTimestamp = getMostRecentYmdDate([existing.lastSeenTimestamp, detail.lastSeenTimestamp]);
+        }
+
+        if (detail.versions instanceof Set) {
+            if (!(existing.versions instanceof Set)) {
+                existing.versions = new Set();
+            }
+
+            detail.versions.forEach(version => existing.versions.add(version));
+        }
+
+        [
+            'cveBatchUrl',
+            'publishedDate',
+            'description',
+            'affectedSoftware',
+            'severityLevel',
+            'cvssScore',
+            'epssScore',
+            'exploitabilityLevel',
+            'softwareVendor',
+            'softwareName'
+        ].forEach(property => {
+            if ((existing[property] === undefined || existing[property] === null || existing[property] === '')
+                && detail[property] !== undefined) {
+                existing[property] = detail[property];
+            }
+        });
+    });
+}
+
+function mergeActiveRemediationBuckets(target, source) {
+    mergeDescriptorObservationMaps(target.descriptorObservationMap, source.descriptorObservationMap);
+    mergeRemediationUpdateEntryMaps(target.updateEntryMap, source.updateEntryMap);
+    source.devices.forEach(device => target.devices.add(device));
+    source.vulnerabilities.forEach(vulnerability => target.vulnerabilities.add(vulnerability));
+    source.exploits.forEach(exploit => target.exploits.add(exploit));
+    source.kits.forEach(kit => target.kits.add(kit));
+    target.details.push(...source.details);
+    if (shouldPreferRemediationDescriptor(source.remediationDescriptor, target.remediationDescriptor)) {
+        target.remediationDescriptor = source.remediationDescriptor;
+    }
+}
+
+function mergeRemediationDetailsBuckets(target, source) {
+    mergeDescriptorObservationMaps(target.descriptorObservationMap, source.descriptorObservationMap);
+    mergeRemediationUpdateEntryMaps(target.updateEntryMap, source.updateEntryMap);
+    source.devices.forEach(device => target.devices.add(device));
+    source.vulnerabilities.forEach(vulnerability => target.vulnerabilities.add(vulnerability));
+    target.details.push(...source.details);
+    if (shouldPreferRemediationDescriptor(source.remediationDescriptor, target.remediationDescriptor)) {
+        target.remediationDescriptor = source.remediationDescriptor;
+    }
+}
+
+function mergeImpactRemediationBuckets(target, source) {
+    mergeDescriptorObservationMaps(target.descriptorObservationMap, source.descriptorObservationMap);
+    mergeRemediationUpdateEntryMaps(target.updateEntryMap, source.updateEntryMap);
+    source.devices.forEach(device => target.devices.add(device));
+    target.vulnerabilities.push(...source.vulnerabilities);
+    if (shouldPreferRemediationDescriptor(source.remediationDescriptor, target.remediationDescriptor)) {
+        target.remediationDescriptor = source.remediationDescriptor;
+    }
+}
+
+function mergeDevicesByRemediationBuckets(target, source) {
+    mergeDescriptorObservationMaps(target.descriptorObservationMap, source.descriptorObservationMap);
+    mergeRemediationUpdateEntryMaps(target.updateEntryMap, source.updateEntryMap);
+    source.osPlatforms.forEach(platform => target.osPlatforms.add(platform));
+    source.devices.forEach((device, key) => {
+        if (!target.devices.has(key)) {
+            target.devices.set(key, device);
+        }
+    });
+    source.cves.forEach(cveId => target.cves.add(cveId));
+    mergeRemediationDetailMaps(target.cveDetails, source.cveDetails);
+    if (shouldPreferRemediationDescriptor(source.remediationDescriptor, target.remediationDescriptor)) {
+        target.remediationDescriptor = source.remediationDescriptor;
+    }
+}
+
+function mergeDeviceRemediationBuckets(target, source) {
+    mergeDescriptorObservationMaps(target.descriptorObservationMap, source.descriptorObservationMap);
+    mergeRemediationUpdateEntryMaps(target.updateEntryMap, source.updateEntryMap);
+    source.cves.forEach(cveId => target.cves.add(cveId));
+    mergeRemediationDetailMaps(target.cveDetails, source.cveDetails);
+    target.publishedDates.push(...source.publishedDates);
+    if (shouldPreferRemediationDescriptor(source.remediationDescriptor, target.remediationDescriptor)) {
+        target.remediationDescriptor = source.remediationDescriptor;
+    }
+}
+
+function getMatchingRemediationUrlFallback(updateName, updateId, advisoryUrl) {
+    const normalizedUrl = normalizeRemediationText(advisoryUrl);
+    if (!normalizedUrl) {
+        return '';
+    }
+
+    const lowerUrl = normalizedUrl.toLowerCase();
+    const tokens = Array.from(new Set([
+        normalizeKbId(updateId),
+        normalizeRemediationText(updateId),
+        normalizeRemediationText(updateName)
+    ].filter(Boolean).map(token => token.toLowerCase())));
+
+    if (tokens.length === 0) {
+        return '';
+    }
+
+    return tokens.some(token => lowerUrl.includes(token) || lowerUrl.includes(encodeURIComponent(token)))
+        ? normalizedUrl
+        : '';
+}
+
+function getCompactRemediationTitle(descriptor) {
+    if (!descriptor) return 'Not Specified';
+
+    if (descriptor.advisoryTitle) {
+        return descriptor.familyTitle;
+    }
+
+    if (descriptor.scopedUpdateReference) {
+        return descriptor.familyTitle;
+    }
+
+    if (descriptor.kbId) {
+        return descriptor.familyTitle;
+    }
+
+    if (descriptor.updateName && !isOpaqueRemediationReference(descriptor.updateName)) {
+        return descriptor.familyTitle;
+    }
+
+    if (descriptor.friendlyRecommendationReference) {
+        return descriptor.familyTitle;
+    }
+
+    return descriptor.title;
+}
+
+function getRemediationFamilyKey(recommendationReference, advisoryTitle, updateName, kbId, friendlyRecommendationReference, scopeLabel) {
+    const familyIdentity = updateName
+        || advisoryTitle
+        || kbId
+        || friendlyRecommendationReference
+        || recommendationReference
+        || scopeLabel
+        || 'Not Specified';
+
+    if (recommendationReference && familyIdentity && familyIdentity !== recommendationReference) {
+        return `${recommendationReference}|${familyIdentity}`;
+    }
+
+    return familyIdentity;
+}
+
 function buildRemediationDescriptor(v) {
     materializeRow(v);
 
+    const rawVendor = normalizeRemediationText(v.SoftwareVendor);
+    const rawSoftware = normalizeRemediationText(v.SoftwareName);
     const advisoryTitle = normalizeRemediationText(v.CveBatchTitle);
     const updateName = normalizeRemediationText(v.RecommendedSecurityUpdate);
     const updateId = normalizeRemediationText(v.RecommendedSecurityUpdateId);
-    const kbId = normalizeKbId(updateId);
-    const updateUrl = normalizeRemediationText(v.RecommendedSecurityUpdateUrl);
+    const kbId = normalizeKbId(updateId) || normalizeKbId(updateName, false) || normalizeKbId(v.RecommendedSecurityUpdateUrl, false);
+    const updateUrl = normalizeRemediationText(v.RecommendedSecurityUpdateUrl)
+        || getMatchingRemediationUrlFallback(updateName, updateId, v.CveBatchUrl);
     const osPlatform = normalizeRemediationText(v.OSPlatform) || 'Unknown';
     const recommendationReference = normalizeRemediationText(v.RecommendationReference);
-    const vendorPart = formatSoftwarePart(v.SoftwareVendor);
-    const productPart = formatSoftwarePart(v.SoftwareName);
+    const vendorPart = formatSoftwarePart(rawVendor);
+    const productPart = formatSoftwarePart(rawSoftware);
     const productLabel = formatSoftwareName(v.SoftwareVendor, v.SoftwareName);
     const scopeLabel = productPart || productLabel || vendorPart || 'Unknown';
+    const friendlyRecommendationReference = getFriendlyRecommendationReference(recommendationReference);
+    const combinedProductLabel = [vendorPart, productPart].filter(Boolean).join(' ');
+    const scopedUpdateReference = extractScopedRemediationReference(updateName, [combinedProductLabel, productLabel, scopeLabel, vendorPart]);
     const scopeKey = recommendationReference
-        || [normalizeRemediationText(v.SoftwareVendor), normalizeRemediationText(v.SoftwareName)].filter(Boolean).join('|')
+        || [rawVendor, rawSoftware].filter(Boolean).join('|')
         || scopeLabel;
-    const familyTitle = advisoryTitle || updateName || kbId || recommendationReference || 'Not Specified';
+    const familyKey = getRemediationFamilyKey(
+        recommendationReference,
+        advisoryTitle,
+        updateName,
+        kbId,
+        friendlyRecommendationReference,
+        scopeLabel
+    );
+    const familyTitle = advisoryTitle
+        || friendlyRecommendationReference
+        || (scopedUpdateReference ? scopedUpdateReference.reference : '')
+        || updateName
+        || kbId
+        || recommendationReference
+        || 'Not Specified';
 
     let title = familyTitle;
     if (scopeLabel !== 'Unknown') {
+        const lowerScopeLabel = scopeLabel.toLowerCase();
+        const lowerProductLabel = productLabel.toLowerCase();
         if (advisoryTitle) {
-            title = advisoryTitle.toLowerCase().includes(scopeLabel.toLowerCase())
+            title = advisoryTitle.toLowerCase().includes(lowerScopeLabel)
+                || (productLabel && advisoryTitle.toLowerCase().includes(lowerProductLabel))
                 ? advisoryTitle
                 : `${scopeLabel}: ${advisoryTitle}`;
+        } else if (scopedUpdateReference) {
+            title = scopedUpdateReference.title;
         } else if (updateName) {
             if (isNumericRemediationReference(updateName)) {
                 title = `${scopeLabel} patch ${updateName}`;
             } else if (isCveRemediationReference(updateName)) {
                 title = `${scopeLabel} advisory ${updateName}`;
+            } else if (updateName.toLowerCase().includes(lowerScopeLabel)
+                || (productLabel && updateName.toLowerCase().includes(lowerProductLabel))) {
+                title = updateName;
             } else {
                 title = `${scopeLabel}: ${updateName}`;
             }
         } else if (kbId) {
             title = `${scopeLabel} patch ${kbId}`;
-        } else if (recommendationReference && recommendationReference !== scopeLabel) {
-            title = `${scopeLabel}: ${recommendationReference}`;
+        } else if (friendlyRecommendationReference && friendlyRecommendationReference !== scopeLabel) {
+            title = friendlyRecommendationReference.toLowerCase().includes(lowerScopeLabel)
+                || (productLabel && friendlyRecommendationReference.toLowerCase().includes(lowerProductLabel))
+                ? friendlyRecommendationReference
+                : `${scopeLabel}: ${friendlyRecommendationReference}`;
         } else {
             title = scopeLabel;
         }
     }
 
     let patchReference = '';
-    if (updateName && updateName !== advisoryTitle) {
-        patchReference = updateName;
-    } else if (kbId && kbId !== advisoryTitle) {
+    if (kbId && !remediationTitleIncludesReference(title, kbId) && !remediationTitleIncludesReference(familyTitle, kbId)) {
         patchReference = kbId;
-    } else if (recommendationReference && recommendationReference !== familyTitle) {
-        patchReference = recommendationReference;
+    } else if (scopedUpdateReference) {
+        patchReference = scopedUpdateReference.reference !== familyTitle ? scopedUpdateReference.reference : '';
+    } else if (updateName && updateName !== familyTitle && !isUrlLikeText(updateName)) {
+        patchReference = updateName;
     }
 
-    return {
-        key: `${scopeKey}|${familyTitle}|${osPlatform}`,
+    const descriptor = {
+        key: `${scopeKey}|${familyKey}`,
         title: title,
+        familyKey: familyKey,
         familyTitle: familyTitle,
         productLabel: productLabel,
+        vendorLabel: vendorPart,
+        softwareLabel: productPart,
+        rawVendor: rawVendor,
+        rawSoftware: rawSoftware,
         scopeLabel: scopeLabel,
         patchReference: patchReference,
         updateName: updateName || 'Unknown',
         updateId: updateId,
         updateUrl: updateUrl,
-        osPlatform: osPlatform
+        osPlatform: osPlatform,
+        advisoryTitle: advisoryTitle,
+        kbId: kbId,
+        recommendationReference: recommendationReference,
+        friendlyRecommendationReference: friendlyRecommendationReference,
+        scopedUpdateReference: scopedUpdateReference
     };
+
+    descriptor.displayRank = getRemediationDisplayRank(descriptor);
+
+    return descriptor;
+}
+
+function buildRemediationTitleHtml(text, url) {
+    if (!text) {
+        return '-';
+    }
+
+    if (url) {
+        return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
+    }
+
+    return escapeHtml(text);
 }
 
 function buildRemediationReferenceHtml(referenceText, referenceUrl) {
@@ -4130,9 +4784,148 @@ function buildRemediationReferenceHtml(referenceText, referenceUrl) {
         return '-';
     }
 
+    return buildRemediationUpdateBadgeHtml(referenceText, referenceUrl);
+}
+
+function getRemediationUpdateReferenceText(remediation) {
+    if (!remediation) {
+        return '';
+    }
+
+    if (remediation.kbId) {
+        return remediation.kbId;
+    }
+
+    if (remediation.patchReference) {
+        return remediation.patchReference;
+    }
+
+    if (remediation.updateName && remediation.updateName !== 'Unknown' && !isUrlLikeText(remediation.updateName)) {
+        return remediation.updateName;
+    }
+
+    if (remediation.updateUrl || isUrlLikeText(remediation.updateName)) {
+        return 'Update Details';
+    }
+
+    return '';
+}
+
+function addRemediationUpdateEntry(updateEntryMap, remediation) {
+    if (!(updateEntryMap instanceof Map) || !remediation) {
+        return;
+    }
+
+    let referenceText = normalizeRemediationText(getRemediationUpdateReferenceText(remediation));
+    let referenceUrl = normalizeRemediationText(remediation.updateUrl);
+
+    if (!referenceUrl && isUrlLikeText(remediation.updateName)) {
+        referenceUrl = normalizeRemediationText(remediation.updateName);
+    }
+
+    if (!referenceUrl && /^KB\d+$/i.test(referenceText)) {
+        referenceUrl = `https://catalog.update.microsoft.com/v7/site/Search.aspx?q=${encodeURIComponent(referenceText.toUpperCase())}`;
+    }
+
+    if (!referenceText && referenceUrl) {
+        referenceText = 'Update Details';
+    }
+
+    if (!referenceText && !referenceUrl) {
+        return;
+    }
+
+    const entryKey = referenceText || referenceUrl;
+    const existing = updateEntryMap.get(entryKey);
+
+    if (!existing) {
+        updateEntryMap.set(entryKey, {
+            referenceText: referenceText || 'Update Details',
+            referenceUrl: referenceUrl || ''
+        });
+        return;
+    }
+
+    if (!existing.referenceUrl && referenceUrl) {
+        existing.referenceUrl = referenceUrl;
+    }
+}
+
+function finalizeRemediationUpdateEntries(updateEntryMap) {
+    return Array.from((updateEntryMap || new Map()).values())
+        .filter(entry => entry && entry.referenceText)
+        .sort((a, b) => {
+            const referenceCompare = a.referenceText.localeCompare(
+                b.referenceText,
+                undefined,
+                { numeric: true, sensitivity: 'base' }
+            );
+
+            if (referenceCompare !== 0) {
+                return referenceCompare;
+            }
+
+            return (a.referenceUrl || '').localeCompare(
+                b.referenceUrl || '',
+                undefined,
+                { numeric: true, sensitivity: 'base' }
+            );
+        });
+}
+
+function summarizeRemediationUpdateEntries(updateEntries) {
+    return summarizeRemediationReferences(
+        new Set((updateEntries || []).map(entry => entry.referenceText).filter(Boolean))
+    );
+}
+
+function getSingleRemediationUpdateUrlFromEntries(updateEntries) {
+    const entries = (updateEntries || []).filter(entry => entry && entry.referenceText);
+
+    if (entries.length !== 1) {
+        return '';
+    }
+
+    return entries[0].referenceUrl || '';
+}
+
+function remediationTitleIncludesReference(title, referenceText) {
+    if (!title || !referenceText) {
+        return false;
+    }
+
+    const normalizedTitle = normalizeRemediationText(title).toLowerCase();
+    const normalizedReference = normalizeRemediationText(referenceText).toLowerCase();
+
+    return normalizedTitle === normalizedReference
+        || normalizedTitle.endsWith(normalizedReference)
+        || normalizedTitle.endsWith(`: ${normalizedReference}`)
+        || normalizedTitle.endsWith(` patch ${normalizedReference}`)
+        || normalizedTitle.endsWith(` advisory ${normalizedReference}`)
+        || normalizedTitle.includes(`(${normalizedReference})`);
+}
+
+function getRemediationTitleWithReferenceSuffix(title, updateEntries) {
+    const entries = (updateEntries || []).filter(entry => entry && /^KB\d+$/i.test(entry.referenceText || ''));
+
+    if (entries.length !== 1) {
+        return title;
+    }
+
+    const kbId = entries[0].referenceText;
+    if (remediationTitleIncludesReference(title, kbId)) {
+        return title;
+    }
+
+    return `${title} (${kbId})`;
+}
+
+function buildRemediationUpdateBadgeHtml(referenceText, referenceUrl, prefix = '') {
+    const badgeText = prefix ? `${prefix}${referenceText}` : referenceText;
+
     if (referenceUrl) {
-        return `<a href="${escapeHtml(referenceUrl)}" target="_blank" rel="noopener noreferrer" class="remediation-update-badge">
-                 <span>${escapeHtml(referenceText)}</span>
+        return `<a href="${escapeHtml(referenceUrl)}" target="_blank" rel="noopener noreferrer" class="stat-badge remediation-update-badge">
+                 <span>${escapeHtml(badgeText)}</span>
                  <svg class="link-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
                      <polyline points="15 3 21 3 21 9"></polyline>
@@ -4141,7 +4934,262 @@ function buildRemediationReferenceHtml(referenceText, referenceUrl) {
                </a>`;
     }
 
-    return escapeHtml(referenceText);
+    return `<span class="stat-badge">${escapeHtml(badgeText)}</span>`;
+}
+
+function buildRemediationUpdateBadgesHtml(updateEntries, prefix = '', containerClass = 'remediation-update-entry-list') {
+    const entries = (updateEntries || []).filter(entry => entry && entry.referenceText);
+
+    if (entries.length === 0) {
+        return '';
+    }
+
+    return `<div class="${escapeHtml(containerClass)}">${entries.map(entry => buildRemediationUpdateBadgeHtml(entry.referenceText, entry.referenceUrl, prefix)).join('')}</div>`;
+}
+
+function buildRemediationUpdateCellHtml(updateEntries, fallbackText = '', fallbackUrl = '') {
+    const entries = (updateEntries || []).filter(entry => entry && entry.referenceText);
+
+    if (entries.length === 0) {
+        return fallbackText
+            ? buildRemediationReferenceHtml(fallbackText, fallbackUrl)
+            : '-';
+    }
+
+    if (entries.length === 1) {
+        return buildRemediationReferenceHtml(entries[0].referenceText, entries[0].referenceUrl);
+    }
+
+    return buildRemediationUpdateBadgesHtml(entries);
+}
+
+function buildRemediationCellHtml(title, titleUrl, updateEntries) {
+    const entries = (updateEntries || []).filter(entry => entry && entry.referenceText);
+    const titleHtml = buildRemediationTitleHtml(title, '');
+
+    if (entries.length === 0) {
+        return titleHtml;
+    }
+
+    return `<div class="remediation-title-with-updates"><div>${titleHtml}</div>${buildRemediationUpdateBadgesHtml(entries, 'Patch: ')}</div>`;
+}
+
+function buildRemediationTitleCellHtml(title, titleUrl = '') {
+    return buildRemediationTitleHtml(title, titleUrl);
+}
+
+function stripLeadingRemediationPrefix(title, prefix) {
+    const text = normalizeRemediationText(title);
+    const normalizedPrefix = normalizeRemediationText(prefix);
+
+    if (!text || !normalizedPrefix) {
+        return text;
+    }
+
+    const scopedPattern = new RegExp(`^${escapeRegExp(normalizedPrefix)}\\s*[:\\-]\\s*`, 'i');
+    if (scopedPattern.test(text)) {
+        return normalizeRemediationText(text.replace(scopedPattern, ''));
+    }
+
+    const wordPattern = new RegExp(`^${escapeRegExp(normalizedPrefix)}\\s+`, 'i');
+    if (wordPattern.test(text)) {
+        return normalizeRemediationText(text.replace(wordPattern, ''));
+    }
+
+    return text;
+}
+
+function getRemediationTitlePrefixCandidates(descriptor) {
+    if (!descriptor) {
+        return [];
+    }
+
+    return Array.from(new Set([
+        descriptor.scopeLabel,
+        descriptor.productLabel,
+        descriptor.softwareLabel,
+        descriptor.vendorLabel,
+        descriptor.rawSoftware,
+        descriptor.rawVendor
+    ].map(value => normalizeRemediationText(value)).filter(Boolean)));
+}
+
+function stripLeadingRemediationPrefixes(title, prefixes) {
+    let cleanedTitle = normalizeRemediationText(title);
+    if (!cleanedTitle) {
+        return cleanedTitle;
+    }
+
+    (prefixes || []).forEach(prefix => {
+        cleanedTitle = stripLeadingRemediationPrefix(cleanedTitle, prefix) || cleanedTitle;
+    });
+
+    return cleanedTitle;
+}
+
+function getScopedRemediationDisplayTitle(descriptor) {
+    if (!descriptor) {
+        return 'Not Specified';
+    }
+
+    const title = normalizeRemediationText(descriptor.title) || 'Not Specified';
+    const prefixCandidates = getRemediationTitlePrefixCandidates(descriptor);
+    const vendorLabel = normalizeRemediationText(descriptor.vendorLabel);
+    const softwareLabel = normalizeRemediationText(descriptor.softwareLabel);
+    const scopeLabel = normalizeRemediationText(descriptor.scopeLabel);
+    const advisoryTitle = normalizeRemediationText(descriptor.advisoryTitle);
+    if (!vendorLabel || !title.includes(':')) {
+        if (advisoryTitle
+            && title === advisoryTitle
+            && (!softwareLabel || softwareLabel === vendorLabel || scopeLabel === vendorLabel)) {
+            return title;
+        }
+
+        return stripLeadingRemediationPrefixes(title, prefixCandidates) || title;
+    }
+
+    const separatorIndex = title.indexOf(':');
+    const scopePrefix = title.slice(0, separatorIndex).trim();
+    const scopedTitle = title.slice(separatorIndex + 1).trim();
+    const withoutVendor = stripLeadingRemediationPrefixes(scopedTitle, prefixCandidates);
+
+    return withoutVendor ? `${scopePrefix}: ${withoutVendor}` : title;
+}
+
+function getActiveRemediationTableTitle(descriptor) {
+    if (!descriptor) {
+        return 'Not Specified';
+    }
+
+    const baseTitle = normalizeRemediationText(getCompactRemediationTitle(descriptor))
+        || normalizeRemediationText(descriptor.familyTitle)
+        || normalizeRemediationText(descriptor.title)
+        || 'Not Specified';
+    const cleanedTitle = stripLeadingRemediationPrefixes(baseTitle, getRemediationTitlePrefixCandidates(descriptor));
+
+    return cleanedTitle || baseTitle;
+}
+
+function buildSeparatedRemediationUpdateDisplay(title, descriptor, updateEntries) {
+    const normalizedTitle = normalizeRemediationText(title);
+    const entries = (updateEntries || []).filter(entry => entry && entry.referenceText);
+
+    if (entries.length === 0) {
+        const fallbackText = normalizeRemediationText(getRemediationUpdateReferenceText(descriptor));
+        const fallbackUrl = normalizeRemediationText(descriptor?.updateUrl);
+
+        if (!fallbackText) {
+            return {
+                value: '',
+                html: '-'
+            };
+        }
+
+        if (!fallbackUrl && remediationTitleIncludesReference(normalizedTitle, fallbackText)) {
+            return {
+                value: '',
+                html: '-'
+            };
+        }
+
+        return {
+            value: fallbackText,
+            html: buildRemediationReferenceHtml(fallbackText, fallbackUrl)
+        };
+    }
+
+    if (entries.length === 1) {
+        const [entry] = entries;
+
+        if (!entry.referenceUrl && remediationTitleIncludesReference(normalizedTitle, entry.referenceText)) {
+            return {
+                value: '',
+                html: '-'
+            };
+        }
+
+        return {
+            value: entry.referenceText,
+            html: buildRemediationReferenceHtml(entry.referenceText, entry.referenceUrl)
+        };
+    }
+
+    return {
+        value: summarizeRemediationUpdateEntries(entries),
+        html: buildRemediationUpdateBadgesHtml(entries)
+    };
+}
+
+function buildRemediationModalUpdateLinksHtml(updateEntries) {
+    const badgesHtml = buildRemediationUpdateBadgesHtml(updateEntries, 'Patch: ');
+
+    if (!badgesHtml) {
+        return '';
+    }
+
+    return `<div class="modal-update-link-row"><strong>Update Details:</strong>${badgesHtml}</div>`;
+}
+
+function buildRemediationUpdateEntriesFromDetails(details) {
+    const updateEntryMap = new Map();
+
+    (details || []).forEach(detail => {
+        addRemediationUpdateEntry(updateEntryMap, buildRemediationDescriptor(detail));
+    });
+
+    return finalizeRemediationUpdateEntries(updateEntryMap);
+}
+
+function summarizeRemediationReferences(referenceSet) {
+    const values = Array.from(referenceSet || [])
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
+    if (values.length === 0) {
+        return '';
+    }
+
+    if (values.length === 1) {
+        return values[0];
+    }
+
+    if (values.length === 2) {
+        return `${values[0]}, ${values[1]}`;
+    }
+
+    return `${values[0]} +${values.length - 1} more`;
+}
+
+function summarizeRemediationPlatforms(platformSet) {
+    const values = Array.from(platformSet || [])
+        .map(value => normalizeRemediationText(value))
+        .filter(value => value && value !== 'Unknown')
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+
+    if (values.length === 0) {
+        return '';
+    }
+
+    if (values.length === 1) {
+        return values[0];
+    }
+
+    if (values.length === 2) {
+        return `${values[0]}, ${values[1]}`;
+    }
+
+    return `${values[0]}, ${values[1]} +${values.length - 2} more`;
+}
+
+function getSingleRemediationUpdateUrl(urlSet, referenceSet) {
+    const urls = Array.from(urlSet || []).filter(Boolean);
+    const references = Array.from(referenceSet || []).filter(Boolean);
+
+    if (urls.length !== 1 || references.length !== 1) {
+        return '';
+    }
+
+    return urls[0];
 }
 
 /**
@@ -4152,11 +5200,14 @@ function buildRemediationReferenceHtml(referenceText, referenceUrl) {
  * @returns {string} HTML string for the remediation cell
  */
 function buildRemediationHtml(v) {
-    const text = buildRemediationString(v);
-    if (v.RecommendedSecurityUpdateUrl) {
-        return `<a href="${escapeHtml(v.RecommendedSecurityUpdateUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
-    }
-    return escapeHtml(text);
+    const remediation = buildRemediationDescriptor(v);
+    const updateEntryMap = new Map();
+    addRemediationUpdateEntry(updateEntryMap, remediation);
+    return buildRemediationCellHtml(
+        remediation.title,
+        remediation.updateUrl,
+        finalizeRemediationUpdateEntries(updateEntryMap)
+    );
 }
 
 // =============================================================================
@@ -4377,17 +5428,21 @@ function getRemediationTableData() {
 
     for (let i = 0, len = activeRows.length; i < len; i++) {
         const v = activeRows[i];
-        const remediation = v._remediationString || buildRemediationString(v);
+        const remediation = buildRemediationDescriptor(v);
+        const compactRemediation = getCompactRemediationTitle(remediation);
         const vendor = formatPart(v.SoftwareVendor);
         const software = formatPart(v.SoftwareName);
-        const key = `${vendor}|${software}|${remediation}`;
+        const key = `${vendor}|${software}|${remediation.key}`;
 
         if (!remediationMap[key]) {
             remediationMap[key] = {
                 vendor: vendor,
                 software: software,
-                remediation: remediation,
-                remediationHtml: buildRemediationHtml(v),
+                remediationDescriptor: remediation,
+                descriptorObservationMap: new Map(),
+                remediation: compactRemediation,
+                modalTitle: remediation.title,
+                updateEntryMap: new Map(),
                 devices: new Set(),
                 vulnerabilities: new Set(),
                 exploits: new Set(),
@@ -4398,6 +5453,8 @@ function getRemediationTableData() {
         }
 
         const entry = remediationMap[key];
+        observeRemediationDescriptor(entry, remediation);
+        addRemediationUpdateEntry(entry.updateEntryMap, remediation);
         entry.devices.add(v.DeviceId || v.DeviceName);
         entry.vulnerabilities.add(v.CveId);
 
@@ -4412,7 +5469,23 @@ function getRemediationTableData() {
         entry.details.push(v);
     }
 
-    cache.remediationTableData = Object.values(remediationMap)
+    const mergedRemediationMap = mergeRemediationObjectBuckets(remediationMap, mergeActiveRemediationBuckets);
+
+    cache.remediationTableData = Object.values(mergedRemediationMap)
+        .map(data => {
+            data.remediationDescriptor = getDominantRemediationDescriptor(data) || data.remediationDescriptor;
+            data.updateEntries = finalizeRemediationUpdateEntries(data.updateEntryMap);
+            data.updateUrl = getSingleRemediationUpdateUrlFromEntries(data.updateEntries) || data.remediationDescriptor.updateUrl;
+            data.remediation = getActiveRemediationTableTitle(data.remediationDescriptor);
+            data.modalTitle = getRemediationTitleWithReferenceSuffix(getScopedRemediationDisplayTitle(data.remediationDescriptor), data.updateEntries);
+            data.remediationHtml = buildRemediationTitleCellHtml(data.remediation);
+            const updateDisplay = buildSeparatedRemediationUpdateDisplay(data.remediation, data.remediationDescriptor, data.updateEntries);
+            data.updateValue = updateDisplay.value;
+            data.updateHtml = updateDisplay.html;
+            delete data.descriptorObservationMap;
+            delete data.updateEntryMap;
+            return data;
+        })
         .sort((a, b) => b.vulnerabilities.size - a.vulnerabilities.size);
 
     return cache.remediationTableData;
@@ -4427,14 +5500,16 @@ function getRemediationDetailsData() {
 
     remediationRows.forEach(v => {
         const lastSeenDate = v._remediationDate;
-        const remediation = v._remediationString || buildRemediationString(v);
-        const key = `${lastSeenDate}|${remediation}`;
+        const remediation = buildRemediationDescriptor(v);
+        const key = `${lastSeenDate}|${remediation.key}`;
 
         if (!remediationByDate[key]) {
             remediationByDate[key] = {
                 date: lastSeenDate,
-                remediation: remediation,
-                remediationHtml: buildRemediationHtml(v),
+                remediationDescriptor: remediation,
+                descriptorObservationMap: new Map(),
+                remediation: remediation.title,
+                updateEntryMap: new Map(),
                 devices: new Set(),
                 vulnerabilities: new Set(),
                 details: [],
@@ -4442,12 +5517,29 @@ function getRemediationDetailsData() {
             };
         }
 
+        observeRemediationDescriptor(remediationByDate[key], remediation);
+        addRemediationUpdateEntry(remediationByDate[key].updateEntryMap, remediation);
         remediationByDate[key].devices.add(getDeviceIdentityKey(v));
         remediationByDate[key].vulnerabilities.add(v.CveId);
         remediationByDate[key].details.push(v);
     });
 
-    cache.remediationDetailsData = Object.values(remediationByDate)
+    const mergedRemediationByDate = mergeRemediationObjectBuckets(remediationByDate, mergeRemediationDetailsBuckets);
+
+    cache.remediationDetailsData = Object.values(mergedRemediationByDate)
+        .map(data => {
+            data.remediationDescriptor = getDominantRemediationDescriptor(data) || data.remediationDescriptor;
+            data.updateEntries = finalizeRemediationUpdateEntries(data.updateEntryMap);
+            data.updateUrl = getSingleRemediationUpdateUrlFromEntries(data.updateEntries) || data.remediationDescriptor.updateUrl;
+            data.remediation = getScopedRemediationDisplayTitle(data.remediationDescriptor);
+            data.remediationHtml = buildRemediationTitleCellHtml(data.remediation);
+            const updateDisplay = buildSeparatedRemediationUpdateDisplay(data.remediation, data.remediationDescriptor, data.updateEntries);
+            data.updateValue = updateDisplay.value;
+            data.updateHtml = updateDisplay.html;
+            delete data.descriptorObservationMap;
+            delete data.updateEntryMap;
+            return data;
+        })
         .sort((a, b) => b.date.localeCompare(a.date));
 
     return cache.remediationDetailsData;
@@ -4537,27 +5629,48 @@ function getImpactAnalysisData() {
     const remediationMap = {};
     const activeRows = getActiveRowsForCurrentSelection();
     activeRows.forEach(v => {
-        const remediation = v._remediationString || buildRemediationString(v);
+        const remediation = buildRemediationDescriptor(v);
+        const key = remediation.key;
 
-        if (!remediationMap[remediation]) {
-            remediationMap[remediation] = {
-                remediationHtml: buildRemediationHtml(v),
+        if (!remediationMap[key]) {
+            remediationMap[key] = {
+                remediationDescriptor: remediation,
+                descriptorObservationMap: new Map(),
+                name: remediation.title,
+                updateEntryMap: new Map(),
                 devices: new Set(),
                 vulnerabilities: []
             };
         }
 
-        remediationMap[remediation].devices.add(getDeviceIdentityKey(v));
-        remediationMap[remediation].vulnerabilities.push(v);
+        observeRemediationDescriptor(remediationMap[key], remediation);
+        addRemediationUpdateEntry(remediationMap[key].updateEntryMap, remediation);
+        remediationMap[key].devices.add(getDeviceIdentityKey(v));
+        remediationMap[key].vulnerabilities.push(v);
     });
 
-    const top25 = Object.entries(remediationMap)
-        .map(([name, data]) => ({
-            name: name,
-            nameHtml: data.remediationHtml,
+    const mergedRemediationMap = mergeRemediationObjectBuckets(remediationMap, mergeImpactRemediationBuckets);
+
+    const top25 = Object.values(mergedRemediationMap)
+        .map(data => ({
+            remediationDescriptor: getDominantRemediationDescriptor(data) || data.remediationDescriptor,
+            updateEntries: finalizeRemediationUpdateEntries(data.updateEntryMap),
             impact: data.devices.size * new Set(data.vulnerabilities.map(v => v.CveId)).size,
             vulnerabilities: data.vulnerabilities
         }))
+        .map(data => {
+            const name = getScopedRemediationDisplayTitle(data.remediationDescriptor);
+            const updateDisplay = buildSeparatedRemediationUpdateDisplay(name, data.remediationDescriptor, data.updateEntries);
+            return {
+                name: name,
+                nameHtml: buildRemediationTitleCellHtml(name),
+                updateEntries: data.updateEntries,
+                updateValue: updateDisplay.value,
+                updateHtml: updateDisplay.html,
+                impact: data.impact,
+                vulnerabilities: data.vulnerabilities
+            };
+        })
         .sort((a, b) => b.impact - a.impact)
         .slice(0, 25);
 
@@ -4588,6 +5701,8 @@ function getImpactAnalysisTableData() {
             rank: index + 1,
             name: item.name,
             nameHtml: item.nameHtml || escapeHtml(item.name),
+            updateValue: item.updateValue || '',
+            updateHtml: item.updateHtml || '-',
             devices: devices.size,
             cveIds: cveIds.size,
             impact: item.impact,
@@ -4677,6 +5792,7 @@ function createRemediationRow(rem, index) {
         <td>${rem.vendor}</td>
         <td>${rem.software}</td>
         <td>${rem.remediationHtml}</td>
+        <td class="update-details-column">${rem.updateHtml}</td>
         <td>${rem.devices.size}</td>
         <td>${rem.vulnerabilities.size}</td>
         <td>${rem.exploits.size}</td>
@@ -4742,10 +5858,11 @@ function sortTable(columnIndex) {
             case 0: aValue = a.vendor; bValue = b.vendor; break;
             case 1: aValue = a.software; bValue = b.software; break;
             case 2: aValue = a.remediation; bValue = b.remediation; break;
-            case 3: aValue = a.devices.size; bValue = b.devices.size; break;
-            case 4: aValue = a.vulnerabilities.size; bValue = b.vulnerabilities.size; break;
-            case 5: aValue = a.exploits.size; bValue = b.exploits.size; break;
-            case 6: aValue = a.kits.size; bValue = b.kits.size; break;
+            case 3: aValue = a.updateValue || ''; bValue = b.updateValue || ''; break;
+            case 4: aValue = a.devices.size; bValue = b.devices.size; break;
+            case 5: aValue = a.vulnerabilities.size; bValue = b.vulnerabilities.size; break;
+            case 6: aValue = a.exploits.size; bValue = b.exploits.size; break;
+            case 7: aValue = a.kits.size; bValue = b.kits.size; break;
         }
 
         if (aValue < bValue) return ascending ? -1 : 1;
@@ -4975,6 +6092,7 @@ function createRemediationDetailsRow(data, index) {
     row.innerHTML = `
         <td>${data.date}</td>
         <td>${data.remediationHtml}</td>
+        <td class="update-details-column">${data.updateHtml}</td>
         <td>${data.devices.size}</td>
         <td>${data.vulnerabilities.size}</td>
         <td>${total}</td>
@@ -5038,9 +6156,10 @@ function sortRemediationDetailsTable(columnIndex) {
         switch(columnIndex) {
             case 0: aValue = a.date; bValue = b.date; break;
             case 1: aValue = a.remediation; bValue = b.remediation; break;
-            case 2: aValue = a.devices.size; bValue = b.devices.size; break;
-            case 3: aValue = a.vulnerabilities.size; bValue = b.vulnerabilities.size; break;
-            case 4: aValue = a.devices.size * a.vulnerabilities.size; bValue = b.devices.size * b.vulnerabilities.size; break;
+            case 2: aValue = a.updateValue || ''; bValue = b.updateValue || ''; break;
+            case 3: aValue = a.devices.size; bValue = b.devices.size; break;
+            case 4: aValue = a.vulnerabilities.size; bValue = b.vulnerabilities.size; break;
+            case 5: aValue = a.devices.size * a.vulnerabilities.size; bValue = b.devices.size * b.vulnerabilities.size; break;
         }
 
         if (aValue < bValue) return ascending ? -1 : 1;
@@ -5417,7 +6536,7 @@ function renderImpactAnalysisTable() {
     impactAnalysisAllData = getImpactAnalysisTableData().slice();
     if (!impactAnalysisAllData || impactAnalysisAllData.length === 0) {
         const row = tbody.insertRow();
-        row.innerHTML = '<td colspan="5">No data available</td>';
+        row.innerHTML = '<td colspan="6">No data available</td>';
         updateImpactAnalysisScrollInfo();
         return;
     }
@@ -5437,7 +6556,7 @@ function renderImpactAnalysisTablePage() {
     
     if (impactAnalysisAllData.length === 0) {
         const row = tbody.insertRow();
-        row.innerHTML = '<td colspan="5">No data available</td>';
+        row.innerHTML = '<td colspan="6">No data available</td>';
         updateImpactAnalysisScrollInfo();
         return;
     }
@@ -5463,6 +6582,7 @@ function createImpactAnalysisRow(item, index) {
     row.innerHTML = `
         <td>${item.rank}</td>
         <td>${item.nameHtml}</td>
+        <td class="update-details-column">${item.updateHtml}</td>
         <td>${item.devices}</td>
         <td>${item.cveIds}</td>
         <td>${item.impact}</td>
@@ -5526,9 +6646,10 @@ function sortImpactAnalysisTable(columnIndex) {
         switch(columnIndex) {
             case 0: aValue = a.rank; bValue = b.rank; break;
             case 1: aValue = a.name; bValue = b.name; break;
-            case 2: aValue = a.devices; bValue = b.devices; break;
-            case 3: aValue = a.cveIds; bValue = b.cveIds; break;
-            case 4: aValue = a.impact; bValue = b.impact; break;
+            case 2: aValue = a.updateValue || ''; bValue = b.updateValue || ''; break;
+            case 3: aValue = a.devices; bValue = b.devices; break;
+            case 4: aValue = a.cveIds; bValue = b.cveIds; break;
+            case 5: aValue = a.impact; bValue = b.impact; break;
         }
 
         if (aValue < bValue) return ascending ? -1 : 1;
@@ -5623,6 +6744,8 @@ function generateCveTooltipContent(cveDetail) {
 // Global CVE tooltip data store
 const cveTooltipData = {};
 
+let cveTooltipIdCounter = 0;
+
 // Global severity badge tooltip data store
 const severityTooltipData = {};
 
@@ -5637,7 +6760,7 @@ function renderDevicesByRemediationTable() {
     const cache = getAggregateCache();
     if (!cache.devicesByRemediationData) {
         const remediationByKey = {};
-        const activeRows = getActiveRowsForCurrentSelection();
+        const activeRows = getRemediationReportRows();
 
         activeRows.forEach(v => {
             materializeRow(v);
@@ -5646,20 +6769,27 @@ function renderDevicesByRemediationTable() {
 
             if (!remediationByKey[key]) {
                 remediationByKey[key] = {
+                    remediationDescriptor: remediation,
+                    descriptorObservationMap: new Map(),
                     title: remediation.title,
                     familyTitle: remediation.familyTitle,
                     productLabel: remediation.productLabel,
-                    patchReference: remediation.patchReference,
                     updateName: remediation.updateName,
                     updateId: remediation.updateId,
-                    updateUrl: remediation.updateUrl,
-                    osPlatform: remediation.osPlatform,
+                    osPlatforms: new Set(),
+                    updateEntryMap: new Map(),
                     devices: new Map(),
                     cves: new Set(),
                     severities: { Critical: 0, High: 0, Medium: 0, Low: 0 },
                     cveDetails: new Map()
                 };
             }
+
+            if (remediation.osPlatform && remediation.osPlatform !== 'Unknown') {
+                remediationByKey[key].osPlatforms.add(remediation.osPlatform);
+            }
+
+            observeRemediationDescriptor(remediationByKey[key], remediation);
 
             const deviceKey = getDeviceIdentityKey(v);
             if (!remediationByKey[key].devices.has(deviceKey)) {
@@ -5701,24 +6831,31 @@ function renderDevicesByRemediationTable() {
                 cveDetails.versions.add(v.SoftwareVersion);
             }
 
-            if (!remediationByKey[key].patchReference && remediation.patchReference) {
-                remediationByKey[key].patchReference = remediation.patchReference;
-            }
-
-            if (!remediationByKey[key].updateUrl && remediation.updateUrl) {
-                remediationByKey[key].updateUrl = remediation.updateUrl;
-            }
+            addRemediationUpdateEntry(remediationByKey[key].updateEntryMap, remediation);
         });
 
-        Object.values(remediationByKey).forEach(data => {
+        const mergedRemediationByKey = mergeRemediationObjectBuckets(remediationByKey, mergeDevicesByRemediationBuckets);
+
+        Object.values(mergedRemediationByKey).forEach(data => {
             data.cveDetails.forEach(cveDetail => {
                 if (data.severities.hasOwnProperty(cveDetail.severityLevel)) {
                     data.severities[cveDetail.severityLevel]++;
                 }
             });
+
+            data.remediationDescriptor = getDominantRemediationDescriptor(data) || data.remediationDescriptor;
+            data.updateEntries = finalizeRemediationUpdateEntries(data.updateEntryMap);
+            data.patchReference = summarizeRemediationUpdateEntries(data.updateEntries);
+            data.updateUrl = getSingleRemediationUpdateUrlFromEntries(data.updateEntries) || data.remediationDescriptor.updateUrl;
+            data.title = getScopedRemediationDisplayTitle(data.remediationDescriptor);
+            data.familyTitle = data.remediationDescriptor.familyTitle;
+            data.productLabel = data.remediationDescriptor.productLabel;
+            data.updateName = data.remediationDescriptor.updateName;
+            data.updateId = data.remediationDescriptor.updateId;
+            data.osPlatform = summarizeRemediationPlatforms(data.osPlatforms);
         });
 
-        cache.devicesByRemediationData = Object.entries(remediationByKey).map(([key, data]) => ({
+        cache.devicesByRemediationData = Object.entries(mergedRemediationByKey).map(([key, data]) => ({
             key: key,
             title: data.title,
             familyTitle: data.familyTitle,
@@ -5727,6 +6864,7 @@ function renderDevicesByRemediationTable() {
             updateName: data.updateName,
             updateId: data.updateId,
             updateUrl: data.updateUrl,
+            updateEntries: data.updateEntries,
             osPlatform: data.osPlatform,
             devices: data.devices,
             deviceCount: data.devices.size,
@@ -5903,7 +7041,6 @@ function appendDevicesByRemediationCard(container, data, index) {
     
     // Extract CVE details
     let mostRecentDate = null;
-    const affectedSoftwareSet = new Set();
     const cveList = [];
     
     if (data.cveDetails && data.cveDetails.size > 0) {
@@ -5914,11 +7051,6 @@ function appendDevicesByRemediationCard(container, data, index) {
                 if (normalized && normalized !== '-' && (!mostRecentDate || normalized > mostRecentDate)) {
                     mostRecentDate = normalized;
                 }
-            }
-            
-            // Collect unique affected software
-            if (details.affectedSoftware && Array.isArray(details.affectedSoftware)) {
-                details.affectedSoftware.forEach(sw => affectedSoftwareSet.add(sw));
             }
             
             // Collect CVE details for badge display
@@ -5943,7 +7075,7 @@ function appendDevicesByRemediationCard(container, data, index) {
     }
     
     // Build CVE details section
-    const detailBadges = [`<span class="stat-badge">Rank: ${index}</span>`];
+    const detailBadges = [];
 
     if (data.osPlatform && data.osPlatform !== 'Unknown') {
         detailBadges.push(`<span class="stat-badge">Platform: ${escapeHtml(data.osPlatform)}</span>`);
@@ -5953,25 +7085,13 @@ function appendDevicesByRemediationCard(container, data, index) {
         detailBadges.push(`<span class="stat-badge">Published: ${mostRecentDate}</span>`);
     }
 
-    if (data.patchReference && !data.title.endsWith(`: ${data.patchReference}`) && data.title !== data.patchReference) {
-        if (data.updateUrl) {
-            detailBadges.push(`<a href="${data.updateUrl}" target="_blank" rel="noopener noreferrer" class="stat-badge remediation-update-badge">
-                <span>Patch: ${escapeHtml(data.patchReference)}</span>
-                <svg class="link-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                    <polyline points="15 3 21 3 21 9"></polyline>
-                    <line x1="10" y1="14" x2="21" y2="3"></line>
-                </svg>
-            </a>`);
-        } else {
-            detailBadges.push(`<span class="stat-badge">Patch: ${escapeHtml(data.patchReference)}</span>`);
-        }
-    }
+    (data.updateEntries || []).filter(entry => entry && entry.referenceText).forEach(entry => {
+        detailBadges.push(buildRemediationUpdateBadgeHtml(entry.referenceText, entry.referenceUrl, 'Patch: '));
+    });
 
-    let cveDetailsHtml = '';
-    if (detailBadges.length > 0) {
-        cveDetailsHtml = `<div class="cve-details">${detailBadges.join('')}</div>`;
-    }
+    const cveDetailsHtml = detailBadges.length > 0
+        ? `<div class="cve-details remediation-card-summary">${detailBadges.join('')}</div>`
+        : '';
     
     // Create severity summary with tooltips showing CVE IDs per severity
     const cveBySeverity = { Critical: [], High: [], Medium: [], Low: [] };
@@ -6017,7 +7137,7 @@ function appendDevicesByRemediationCard(container, data, index) {
             const displayId = formatCveDisplayId(cve.id);
             
             // Store tooltip content in global data store
-            const tooltipId = `cve-${cve.id}`;
+            const tooltipId = `cve-${++cveTooltipIdCounter}`;
             cveTooltipData[tooltipId] = generateCveTooltipContent(cve);
             
             const badgeHtml = cve.url 
@@ -6058,18 +7178,20 @@ function appendDevicesByRemediationCard(container, data, index) {
     
     card.innerHTML = `
         <div class="remediation-card-header">
-            <h3>${headerText}</h3>
-            ${cveDetailsHtml}
-        </div>
-        ${cveBadgesSection}
-        <div class="devices-header-row">
-            <h4>Vulnerable Devices</h4>
+            <div class="remediation-card-title-block">
+                <h3>${headerText}</h3>
+                ${cveDetailsHtml}
+            </div>
             <div class="remediation-stats">
                 <div class="stat-badges">
                     <span class="stat-badge">Devices: ${data.deviceCount}</span>
                     <span class="stat-badge">CVEs: ${data.cveCount}</span>
                 </div>
             </div>
+        </div>
+        ${cveBadgesSection}
+        <div class="devices-header-row">
+            <h4>Vulnerable Devices</h4>
         </div>
         <div class="devices-table-container">
             <table class="devices-table">
@@ -6144,6 +7266,60 @@ function calculateRemediationScore(severities) {
     return (severities.Critical * 1000) + (severities.High * 100) + (severities.Medium * 10) + severities.Low;
 }
 
+function getSortedDeviceRemediations(remediationMap) {
+    return Array.from(remediationMap.values()).sort((a, b) => {
+        const scoreDelta = b.score - a.score;
+        if (scoreDelta !== 0) {
+            return scoreDelta;
+        }
+
+        const cveDelta = b.cves.size - a.cves.size;
+        if (cveDelta !== 0) {
+            return cveDelta;
+        }
+
+        return String(a.title || '').localeCompare(String(b.title || ''));
+    });
+}
+
+function splitDeviceRemediationsForDisplay(sortedRemediations, maxVisible = MAX_VISIBLE_DEVICE_REMEDIATIONS) {
+    const safeMaxVisible = Math.max(1, maxVisible);
+    return {
+        visible: sortedRemediations.slice(0, safeMaxVisible),
+        overflow: sortedRemediations.slice(safeMaxVisible)
+    };
+}
+
+function buildRemediationsByDeviceRowHtml(remediations) {
+    return remediations.map(rem => {
+        const remediationName = rem.title;
+        const referenceText = rem.patchReference || (rem.updateName !== 'Unknown' ? rem.updateName : '');
+        const updateCell = buildRemediationUpdateCellHtml(rem.updateEntries, referenceText, rem.updateUrl);
+
+        const severityBadges = ['Critical', 'High', 'Medium', 'Low']
+            .filter(sev => rem.severities[sev] > 0)
+            .map(sev => {
+                const tooltipId = `severity-${severityBadgeIdCounter++}`;
+                severityTooltipData[tooltipId] = generateSeverityTooltipContent(rem.cvesBySeverity[sev]);
+                return `<span class="severity-badge ${sev.toLowerCase()}" data-tooltip-id="${tooltipId}">${sev}: ${rem.severities[sev]}</span>`;
+            })
+            .join(' ');
+
+        const cveCount = rem.cves.size;
+        const publishedDate = rem.mostRecentDate || '';
+
+        return `
+            <tr>
+                <td>${escapeHtml(remediationName)}</td>
+                <td class="update-details-column">${updateCell}</td>
+                <td>${severityBadges}</td>
+                <td>${cveCount}</td>
+                <td>${publishedDate}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
 /**
  * Render the remediations by device table
  */
@@ -6153,7 +7329,7 @@ function renderRemediationsByDeviceTable() {
     if (!cache.remediationsByDeviceData) {
         const deviceByKey = {};
         const deviceCveDetails = {};
-        const activeRows = getActiveRowsForCurrentSelection();
+        const activeRows = getRemediationReportRows();
 
         activeRows.forEach(v => {
             materializeRow(v);
@@ -6178,14 +7354,15 @@ function renderRemediationsByDeviceTable() {
 
             if (!deviceByKey[deviceId].remediations.has(remKey)) {
                 deviceByKey[deviceId].remediations.set(remKey, {
+                    remediationDescriptor: remediation,
+                    descriptorObservationMap: new Map(),
                     title: remediation.title,
                     familyTitle: remediation.familyTitle,
                     productLabel: remediation.productLabel,
-                    patchReference: remediation.patchReference,
                     updateName: remediation.updateName,
                     updateId: remediation.updateId,
-                    updateUrl: remediation.updateUrl,
                     osPlatform: remediation.osPlatform,
+                    updateEntryMap: new Map(),
                     cves: new Set(),
                     cveDetails: new Map(),
                     severities: { Critical: 0, High: 0, Medium: 0, Low: 0 },
@@ -6194,12 +7371,8 @@ function renderRemediationsByDeviceTable() {
             }
 
             const rem = deviceByKey[deviceId].remediations.get(remKey);
-            if (!rem.patchReference && remediation.patchReference) {
-                rem.patchReference = remediation.patchReference;
-            }
-            if (!rem.updateUrl && remediation.updateUrl) {
-                rem.updateUrl = remediation.updateUrl;
-            }
+            observeRemediationDescriptor(rem, remediation);
+            addRemediationUpdateEntry(rem.updateEntryMap, remediation);
             rem.cves.add(v.CveId);
 
             if (!rem.cveDetails.has(v.CveId)) {
@@ -6231,6 +7404,8 @@ function renderRemediationsByDeviceTable() {
                 }
             });
 
+            device.remediations = mergeRemediationMapBuckets(device.remediations, mergeDeviceRemediationBuckets);
+
             device.remediations.forEach(rem => {
                 rem.cvesBySeverity = { Critical: [], High: [], Medium: [], Low: [] };
                 rem.cveDetails.forEach((cveDetail, cveId) => {
@@ -6240,7 +7415,16 @@ function renderRemediationsByDeviceTable() {
                     }
                 });
 
+                rem.remediationDescriptor = getDominantRemediationDescriptor(rem) || rem.remediationDescriptor;
                 rem.mostRecentDate = getMostRecentYmdDate(rem.publishedDates);
+                rem.updateEntries = finalizeRemediationUpdateEntries(rem.updateEntryMap);
+                rem.patchReference = summarizeRemediationUpdateEntries(rem.updateEntries);
+                rem.updateUrl = getSingleRemediationUpdateUrlFromEntries(rem.updateEntries) || rem.remediationDescriptor.updateUrl;
+                rem.title = getScopedRemediationDisplayTitle(rem.remediationDescriptor);
+                rem.familyTitle = rem.remediationDescriptor.familyTitle;
+                rem.productLabel = rem.remediationDescriptor.productLabel;
+                rem.updateName = rem.remediationDescriptor.updateName;
+                rem.updateId = rem.remediationDescriptor.updateId;
                 rem.score = calculateRemediationScore(rem.severities);
             });
         });
@@ -6328,41 +7512,36 @@ function appendRemediationsByDeviceCard(container, data, index) {
         })
         .join(' ');
     
-    // Convert remediations map to array and sort by score (highest first)
-    const sortedRemediations = Array.from(data.remediations.values()).sort((a, b) => b.score - a.score);
-    
-    // Build remediation table rows
-    const remediationRows = sortedRemediations.map(rem => {
-        const remediationName = rem.title;
-        const referenceText = rem.patchReference || (rem.updateName !== 'Unknown' ? rem.updateName : '');
-        const updateCell = buildRemediationReferenceHtml(referenceText, rem.updateUrl);
-        
-        // Column 3: Severities with tooltips
-        const severityBadges = ['Critical', 'High', 'Medium', 'Low']
-            .filter(sev => rem.severities[sev] > 0)
-            .map(sev => {
-                const tooltipId = `severity-${severityBadgeIdCounter++}`;
-                severityTooltipData[tooltipId] = generateSeverityTooltipContent(rem.cvesBySeverity[sev]);
-                return `<span class="severity-badge ${sev.toLowerCase()}" data-tooltip-id="${tooltipId}">${sev}: ${rem.severities[sev]}</span>`;
-            })
-            .join(' ');
-        
-        // Column 4: CVE count
-        const cveCount = rem.cves.size;
-        
-        // Column 5: Published date
-        const publishedDate = rem.mostRecentDate || '';
-        
-        return `
-            <tr>
-                <td>${escapeHtml(remediationName)}</td>
-                <td>${updateCell}</td>
-                <td>${severityBadges}</td>
-                <td>${cveCount}</td>
-                <td>${publishedDate}</td>
-            </tr>
-        `;
-    }).join('');
+    const sortedRemediations = getSortedDeviceRemediations(data.remediations);
+    const remediationDisplay = splitDeviceRemediationsForDisplay(sortedRemediations);
+    const remediationRows = buildRemediationsByDeviceRowHtml(remediationDisplay.visible);
+    const overflowRows = buildRemediationsByDeviceRowHtml(remediationDisplay.overflow);
+    const remediationHeading = remediationDisplay.overflow.length > 0 ? 'Top Remediations' : 'Remediations Needed';
+    const densityNote = remediationDisplay.overflow.length > 0
+        ? `<div class="remediation-density-note">Showing the top ${remediationDisplay.visible.length} remediations first, ranked by severity score. Expand to review the remaining ${remediationDisplay.overflow.length}.</div>`
+        : '';
+    const overflowSection = remediationDisplay.overflow.length > 0
+        ? `
+        <details class="remediation-overflow">
+            <summary>Show remaining ${remediationDisplay.overflow.length} remediations</summary>
+            <div class="devices-table-container remediation-overflow-table">
+                <table class="devices-table">
+                    <thead>
+                        <tr>
+                            <th>Remediation</th>
+                            <th class="update-details-column">Update Details</th>
+                            <th>Severities</th>
+                            <th>CVEs</th>
+                            <th>Published</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${overflowRows}
+                    </tbody>
+                </table>
+            </div>
+        </details>`
+        : '';
     
     card.innerHTML = `
         <div class="remediation-card-header">
@@ -6376,7 +7555,7 @@ function appendRemediationsByDeviceCard(container, data, index) {
             </div>
         </div>
         <div class="devices-header-row">
-            <h4>Remediations Needed</h4>
+            <h4>${remediationHeading}</h4>
             <div class="remediation-stats">
                 <div class="stat-badges">
                     <span class="stat-badge">Remediations: ${data.remediationCount}</span>
@@ -6384,12 +7563,13 @@ function appendRemediationsByDeviceCard(container, data, index) {
                 </div>
             </div>
         </div>
+        ${densityNote}
         <div class="devices-table-container">
             <table class="devices-table">
                 <thead>
                     <tr>
                         <th>Remediation</th>
-                        <th>Patch Ref</th>
+                        <th class="update-details-column">Update Details</th>
                         <th>Severities</th>
                         <th>CVEs</th>
                         <th>Published</th>
@@ -6400,6 +7580,7 @@ function appendRemediationsByDeviceCard(container, data, index) {
                 </tbody>
             </table>
         </div>
+        ${overflowSection}
     `;
     
     container.appendChild(card);
@@ -6926,14 +8107,17 @@ function showDetails(remediationData) {
     const modalTitle = document.getElementById('modalTitle');
     const modalBody = document.getElementById('modalBody');
     const details = remediationData.details;
-    const remediation = remediationData.vendor + ' ' + remediationData.software + ' - ' + remediationData.remediation;
+    const remediation = remediationData.modalTitle
+        || remediationData.remediation
+        || [remediationData.vendor, remediationData.software].filter(Boolean).join(' ')
+        || 'Remediation Details';
 
     modalTitle.textContent = remediation;
     modalBody.innerHTML = '<p class="loading">Loading details...</p>';
     lastFocusedElementBeforeModal = (typeof HTMLElement !== 'undefined' && document.activeElement instanceof HTMLElement) ? document.activeElement : null;
     modal.classList.add('active');
     modal.setAttribute('aria-hidden', 'false');
-    clearTooltipCaches();
+    hideGlobalTooltip();
     focusModalCloseButton();
 
     if (!document.getElementById('cve-global-tooltip')) {
@@ -6945,20 +8129,18 @@ function showDetails(remediationData) {
         const modalCache = remediationData._modalCache || buildModalGroupCache(details);
         remediationData._modalCache = modalCache;
         const { groups, includeEvidenceColumn, totalDevices, totalCves } = modalCache;
+        const updateEntries = remediationData.updateEntries && remediationData.updateEntries.length > 0
+            ? remediationData.updateEntries
+            : buildRemediationUpdateEntriesFromDetails(details);
 
         const parts = [];
         const vtRowData = {};
 
         parts.push('<h3>Affected Devices and Vulnerabilities</h3>');
 
-        // Add update link above the table (right-aligned) if URL is available
-        const updateUrl = details.find(d => d.RecommendedSecurityUpdateUrl);
-        if (updateUrl) {
-            const updateText = buildRemediationString(updateUrl);
-            parts.push('<div class="modal-update-link-row">');
-            parts.push('<strong>Update Details:</strong><br>');
-            parts.push('<a class="modal-update-link" href="' + escapeHtml(updateUrl.RecommendedSecurityUpdateUrl) + '" target="_blank" rel="noopener noreferrer">&#x1F517; ' + escapeHtml(updateText) + '</a>');
-            parts.push('</div>');
+        const updateLinksHtml = buildRemediationModalUpdateLinksHtml(updateEntries);
+        if (updateLinksHtml) {
+            parts.push(updateLinksHtml);
         }
 
         parts.push('<p class="modal-summary-text">' +
@@ -7012,7 +8194,7 @@ function showRemediationDetails(data) {
     lastFocusedElementBeforeModal = (typeof HTMLElement !== 'undefined' && document.activeElement instanceof HTMLElement) ? document.activeElement : null;
     modal.classList.add('active');
     modal.setAttribute('aria-hidden', 'false');
-    clearTooltipCaches();
+    hideGlobalTooltip();
     focusModalCloseButton();
 
     if (!document.getElementById('cve-global-tooltip')) {
@@ -7024,6 +8206,9 @@ function showRemediationDetails(data) {
         data._modalCache = modalCache;
         const { groups, includeEvidenceColumn } = modalCache;
         const vtRowData = {};
+        const updateEntries = data.updateEntries && data.updateEntries.length > 0
+            ? data.updateEntries
+            : buildRemediationUpdateEntriesFromDetails(data.details);
 
         const parts = [];
         parts.push('<h3>Summary</h3>',
@@ -7031,7 +8216,14 @@ function showRemediationDetails(data) {
             '<td><strong>Date:</strong> ', escapeHtml(data.date), '</td>',
             '<td><strong>Assets Remediated:</strong> ', String(data.devices.size), '</td>',
             '<td><strong>Vulnerabilities Remediated:</strong> ', String(data.vulnerabilities.size), '</td>',
-            '</tr></table></div><br>',
+            '</tr></table></div>');
+
+        const updateLinksHtml = buildRemediationModalUpdateLinksHtml(updateEntries);
+        if (updateLinksHtml) {
+            parts.push(updateLinksHtml);
+        }
+
+        parts.push('<br>',
             '<h3>Devices Patched</h3>');
 
         for (let gi = 0; gi < groups.length; gi++) {
@@ -7095,8 +8287,17 @@ function showImpactAnalysisDetails(item) {
         }
         deviceMap[deviceKey].cves.add(v.CveId);
     });
+
+    const updateLinksHtml = buildRemediationModalUpdateLinksHtml(
+        item.updateEntries && item.updateEntries.length > 0
+            ? item.updateEntries
+            : buildRemediationUpdateEntriesFromDetails(item.vulnerabilities)
+    );
     
     let html = '<h3>Affected Devices</h3>';
+    if (updateLinksHtml) {
+        html = updateLinksHtml + html;
+    }
     html += '<div class="modal-table-container"><table class="detail-table"><thead><tr>';
     html += '<th>Device Name</th><th>Device ID</th><th>CVE Count</th><th>CVE IDs</th>';
     html += '</tr></thead><tbody>';
@@ -7131,7 +8332,7 @@ function showImpactAnalysisDetails(item) {
 function closeModal() {
     activeVirtualTables.forEach(vt => vt.destroy());
     activeVirtualTables = [];
-    clearTooltipCaches();
+    hideGlobalTooltip();
     const modal = document.getElementById('detailModal');
     modal.classList.remove('active');
     modal.setAttribute('aria-hidden', 'true');
@@ -7427,13 +8628,13 @@ async function exportCardBasedReportToPdf(selectedReport, reportName) {
         const cveList = Array.from(cveBadges).map(badge => badge.textContent.trim());
         
         // Extract table
-        const table = card.querySelector('.devices-table');
+        const tables = card.querySelectorAll('.devices-table');
         let tableBody = [];
         let tableHeaders = [];
         let tableWidths = [];
         
-        if (table) {
-            const headerCells = table.querySelectorAll('thead th');
+        if (tables.length > 0) {
+            const headerCells = tables[0].querySelectorAll('thead th');
             tableHeaders = Array.from(headerCells).map(th => ({
                 text: th.textContent.trim(),
                 fontSize: 9,
@@ -7450,24 +8651,26 @@ async function exportCardBasedReportToPdf(selectedReport, reportName) {
                 tableWidths = ['*', 140, 200, 50, 80];
             }
             
-            const rows = table.querySelectorAll('tbody tr');
-            rows.forEach(row => {
-                const cells = row.querySelectorAll('td');
-                const rowData = [];
-                cells.forEach(cell => {
-                    // For severity cells, extract just text, not HTML
-                    const severityBadges = cell.querySelectorAll('.severity-badge');
-                    let cellText;
-                    if (severityBadges.length > 0) {
-                        cellText = Array.from(severityBadges).map(b => b.textContent.trim()).join(', ');
-                    } else {
-                        cellText = cell.textContent.trim();
+            tables.forEach(table => {
+                const rows = table.querySelectorAll('tbody tr');
+                rows.forEach(row => {
+                    const cells = row.querySelectorAll('td');
+                    const rowData = [];
+                    cells.forEach(cell => {
+                        // For severity cells, extract just text, not HTML
+                        const severityBadges = cell.querySelectorAll('.severity-badge');
+                        let cellText;
+                        if (severityBadges.length > 0) {
+                            cellText = Array.from(severityBadges).map(b => b.textContent.trim()).join(', ');
+                        } else {
+                            cellText = cell.textContent.trim();
+                        }
+                        rowData.push({ text: cellText, fontSize: 9 });
+                    });
+                    if (rowData.length > 0) {
+                        tableBody.push(rowData);
                     }
-                    rowData.push({ text: cellText, fontSize: 9 });
                 });
-                if (rowData.length > 0) {
-                    tableBody.push(rowData);
-                }
             });
         }
         
@@ -7701,19 +8904,19 @@ async function exportTableBasedReportToPdf(selectedReport, reportName) {
     
     if (tableBody.length > 0) {
         let columnWidths;
-        if (tableHeaders.length === 7) {
-            columnWidths = [60, 70, '*', 40, 40, 40, 30];
-        } else if (tableHeaders.length === 5) {
-            // Differentiate between Remediation Activity and Impact Analysis reports
-            if (selectedReport === 'impact-analysis') {
-                // Impact Analysis: Rank, Remediation, Devices, CVE IDs, Impact Score
-                columnWidths = [36, '*', 40, 40, 66];
-            } else {
-                // Remediation Activity: Date, Remediation, Assets Remediated, Vulnerabilities Remediated, Total Vulnerabilities Remediated
-                columnWidths = [55, '*', 60, 69, 69];
-            }
-        } else {
-            columnWidths = Array(tableHeaders.length).fill('*');
+        switch (selectedReport) {
+            case 'active-vulnerabilities':
+                columnWidths = [60, 70, '*', 92, 40, 40, 40, 30];
+                break;
+            case 'remediation-activity':
+                columnWidths = [55, '*', 92, 60, 69, 69];
+                break;
+            case 'impact-analysis':
+                columnWidths = [36, '*', 92, 40, 40, 66];
+                break;
+            default:
+                columnWidths = Array(tableHeaders.length).fill('*');
+                break;
         }
         
         docDefinition.content.push({

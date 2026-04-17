@@ -1274,7 +1274,16 @@ foreach ($periodKey in @($historyRefsWriters.Keys | Sort-Object)) {
 }
 
 $filteredAdvancedHunting = if ($advancedHuntingCveIds.Count -gt 0) {
-    @($sourceAdvancedHuntingRecords | Where-Object { $advancedHuntingCveIds.Contains([string]$_.CveId) })
+    @(
+        $sourceAdvancedHuntingRecords | Where-Object {
+            if ((Get-AdvancedHuntingRecordType -Record $_) -ne 'Cve') {
+                return $false
+            }
+
+            $cveId = [string]$_.PSObject.Properties['CveId']?.Value
+            return (-not [string]::IsNullOrWhiteSpace($cveId) -and $advancedHuntingCveIds.Contains($cveId))
+        }
+    )
 }
 else {
     @($sourceAdvancedHuntingRecords)

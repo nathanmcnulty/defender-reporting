@@ -122,6 +122,28 @@ function Reset-LastExitCode {
     Set-Variable -Name LASTEXITCODE -Scope Global -Value 0
 }
 
+function Invoke-DashboardJavaScriptValidation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Paths
+    )
+
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if ($null -eq $nodeCommand) {
+        throw 'Node.js is required to run dashboard JavaScript regression tests.'
+    }
+
+    foreach ($path in $Paths) {
+        Write-Output ("  Running $(Split-Path -Path $path -Leaf)...")
+        Reset-LastExitCode
+        & $nodeCommand.Source $path
+        if (Test-LastExitCodeFailed) {
+            throw "Dashboard JavaScript regression failed: '$path'"
+        }
+    }
+}
+
 Write-Output 'Building shared helpers...'
 Reset-LastExitCode
 & (Join-Path $buildRoot 'Build-SharedHelpers.ps1')
@@ -166,6 +188,14 @@ if ($analyzerResults) {
 
 Write-Output 'Running shared-helper regression tests...'
 & (Join-Path $repoRoot 'tests\Run-SharedHelperRegression.ps1')
+
+Write-Output 'Running dashboard JavaScript regression tests...'
+$dashboardAssertionPaths = @(
+    Get-ChildItem -Path (Join-Path $repoRoot 'tests') -Filter 'Assert-Dashboard*.js' -File -ErrorAction Stop |
+        Sort-Object FullName |
+        Select-Object -ExpandProperty FullName
+)
+Invoke-DashboardJavaScriptValidation -Paths $dashboardAssertionPaths
 
 if (-not $SkipDashboardFixtureValidation) {
     $fixturePath = Join-Path $repoRoot 'tests\fixtures\legacy-migration'

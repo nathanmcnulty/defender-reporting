@@ -57,7 +57,15 @@ param(
     [switch]$Validate,
 
     [Parameter(Mandatory = $false)]
-    [string]$DashboardOutputPath
+    [string]$DashboardOutputPath,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(15, 3600)]
+    [int]$ValidationHeartbeatSeconds = 60,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 64)]
+    [int]$ValidationPartitionCompareParallelism = 1
 )
 
 Set-StrictMode -Version Latest
@@ -81,6 +89,95 @@ function Get-StreamingCount {
     }
 
     return $count
+}
+
+function Write-StressValidationReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ReportPath,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$StartedOn,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Preset,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SyntheticPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DashboardOutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [double]$ElapsedSeconds,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MachineCount,
+
+        [Parameter(Mandatory = $true)]
+        [int]$CurrentRowCount,
+
+        [Parameter(Mandatory = $true)]
+        [int]$HistoryRowCount,
+
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $Manifest,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('success', 'failure')]
+        [string]$Status,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [int]$DashboardExitCode,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $FailureRecord
+    )
+
+    $resolvedDashboardOutputPath = [System.IO.Path]::GetFullPath($DashboardOutputPath)
+    $dashboardExists = Test-Path -LiteralPath $DashboardOutputPath -PathType Leaf
+    $dashboardBytes = if ($dashboardExists) { (Get-Item -LiteralPath $DashboardOutputPath).Length } else { $null }
+
+    $report = [PSCustomObject]@{
+        preset = $Preset
+        status = $Status
+        startedOn = $StartedOn.ToString('o')
+        completedOn = (Get-Date).ToString('o')
+        syntheticPath = $SyntheticPath
+        dashboardOutputPath = $resolvedDashboardOutputPath
+        elapsedSeconds = [math]::Round($ElapsedSeconds, 2)
+        machineCount = $MachineCount
+        currentRowCount = $CurrentRowCount
+        historyRowCount = $HistoryRowCount
+        totalVulnRows = ($CurrentRowCount + $HistoryRowCount)
+        dashboardExists = $dashboardExists
+        dashboardBytes = $dashboardBytes
+        dashboardExitCode = $DashboardExitCode
+        manifest = $Manifest
+        validation = [PSCustomObject]@{
+            validate = $Validate.IsPresent
+            heartbeatSeconds = $ValidationHeartbeatSeconds
+            partitionCompareParallelism = $ValidationPartitionCompareParallelism
+            skipObservedWindowMerge = $skipObservedWindowMerge
+        }
+        error = if ($null -ne $FailureRecord) {
+            [PSCustomObject]@{
+                message = $FailureRecord.Exception.Message
+                type = $FailureRecord.Exception.GetType().FullName
+                fullyQualifiedErrorId = $FailureRecord.FullyQualifiedErrorId
+                scriptStackTrace = $FailureRecord.ScriptStackTrace
+            }
+        }
+        else {
+            $null
+        }
+    }
+
+    $report | ConvertTo-Json -Depth 20 | Set-Content -Path $ReportPath -Encoding utf8
 }
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
@@ -157,6 +254,8 @@ $generateArgs = @{
     DirectoryPath = $resolvedSyntheticPath
     OutputPath = $dashboardOutput
     ExportMachineData = $false
+    ValidationHeartbeatSeconds = $ValidationHeartbeatSeconds
+    ValidationPartitionCompareParallelism = $ValidationPartitionCompareParallelism
 }
 if ($skipObservedWindowMerge) {
     $generateArgs.SkipObservedWindowMerge = $true
@@ -165,28 +264,59 @@ if ($Validate) {
     $generateArgs.Validate = $true
 }
 
-Write-Output ''
-Write-Output 'Running dashboard generation against the synthetic exports...'
-$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-& $dashboardScript @generateArgs
-$stopwatch.Stop()
-
-$dashboardItem = Get-Item -LiteralPath $dashboardOutput
-$report = [PSCustomObject]@{
-    preset = $Preset
-    syntheticPath = $resolvedSyntheticPath
-    dashboardOutputPath = [System.IO.Path]::GetFullPath($dashboardOutput)
-    elapsedSeconds = [math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
-    machineCount = $machineCount
-    currentRowCount = $currentRowCount
-    historyRowCount = $historyRowCount
-    totalVulnRows = ($currentRowCount + $historyRowCount)
-    dashboardBytes = $dashboardItem.Length
-    manifest = $manifest
+$reportPath = Join-Path $resolvedSyntheticPath 'stress-validation-report.json'
+if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
+    Remove-Item -LiteralPath $reportPath -Force
 }
 
-$reportPath = Join-Path $resolvedSyntheticPath 'stress-validation-report.json'
-$report | ConvertTo-Json -Depth 20 | Set-Content -Path $reportPath -Encoding utf8
+if (Test-Path -LiteralPath $dashboardOutput -PathType Leaf) {
+    Remove-Item -LiteralPath $dashboardOutput -Force
+}
+
+Write-Output ''
+Write-Output 'Running dashboard generation against the synthetic exports...'
+$startedOn = Get-Date
+$stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$status = 'success'
+$dashboardExitCode = $null
+$failureRecord = $null
+try {
+    $global:LASTEXITCODE = 0
+    & $dashboardScript @generateArgs
+
+    $dashboardExitCode = [int]$global:LASTEXITCODE
+    if ($dashboardExitCode -ne 0) {
+        throw "Dashboard generation failed with exit code $dashboardExitCode."
+    }
+
+    if (-not (Test-Path -LiteralPath $dashboardOutput -PathType Leaf)) {
+        throw "Dashboard output '$dashboardOutput' was not created."
+    }
+}
+catch {
+    $status = 'failure'
+    $failureRecord = $_
+    throw
+}
+finally {
+    $stopwatch.Stop()
+    Write-StressValidationReport `
+        -ReportPath $reportPath `
+        -StartedOn $startedOn `
+        -Preset $Preset `
+        -SyntheticPath $resolvedSyntheticPath `
+        -DashboardOutputPath $dashboardOutput `
+        -ElapsedSeconds $stopwatch.Elapsed.TotalSeconds `
+        -MachineCount $machineCount `
+        -CurrentRowCount $currentRowCount `
+        -HistoryRowCount $historyRowCount `
+        -Manifest $manifest `
+        -Status $status `
+        -DashboardExitCode $dashboardExitCode `
+        -FailureRecord $failureRecord
+}
+
+$dashboardItem = Get-Item -LiteralPath $dashboardOutput
 
 Write-Output ''
 Write-Output 'Stress validation completed.'

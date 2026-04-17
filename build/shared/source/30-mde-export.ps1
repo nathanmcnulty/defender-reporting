@@ -100,6 +100,31 @@ function Invoke-MdeAdvancedHuntingStoreRefresh {
         return @($response.Results)
     }
 
+    function Set-AdvancedHuntingResultRecordType {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only annotates in-memory Advanced Hunting query results with a record-type marker.')]
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $true)]
+            [object[]]$Records,
+
+            [Parameter(Mandatory = $true)]
+            [string]$RecordType
+        )
+
+        foreach ($record in @($Records)) {
+            if ($null -eq $record) {
+                continue
+            }
+
+            if ($record.PSObject.Properties['RecordType']) {
+                $record.RecordType = $RecordType
+            }
+            else {
+                Add-Member -InputObject $record -NotePropertyName RecordType -NotePropertyValue $RecordType -Force
+            }
+        }
+    }
+
     $cveQuery = @"
 let RelevantCves =
     DeviceTvmSoftwareVulnerabilities
@@ -109,14 +134,15 @@ RelevantCves
 | join kind=leftouter (
     DeviceTvmSoftwareVulnerabilitiesKB
     | where isnotempty(CveId)
-    | project CveId, PublishedDate, VulnerabilityDescription, EpssScore, AffectedSoftware, LastModifiedTime
+    | project CveId, PublishedDate, VulnerabilityDescription, EpssScore, AffectedSoftware, IsExploitAvailable, LastModifiedTime
 ) on CveId
-| summarize arg_max(LastModifiedTime, PublishedDate, VulnerabilityDescription, EpssScore, AffectedSoftware) by CveId
+| summarize arg_max(LastModifiedTime, PublishedDate, VulnerabilityDescription, EpssScore, AffectedSoftware, IsExploitAvailable) by CveId
 | project CveId,
     PublishedDate = format_datetime(PublishedDate, 'yyyy-MM-dd'),
     VulnerabilityDescription,
     EpssScore,
     AffectedSoftware,
+    IsExploitAvailable,
     LastModifiedTime
 "@
 
@@ -129,10 +155,36 @@ DeviceInfo
 | project DeviceId, LoggedOnUsers, LastModifiedTime = Timestamp
 "@
 
+    $inventoryQuery = @"
+let RelevantSoftware =
+    DeviceTvmSoftwareVulnerabilities
+    | where isnotempty(DeviceId) and isnotempty(SoftwareName)
+    | summarize by DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion;
+RelevantSoftware
+| join kind=leftouter (
+    DeviceTvmSoftwareInventory
+    | where isnotempty(DeviceId) and isnotempty(SoftwareName)
+    | project DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion, ProductCodeCpe, EndOfSupportStatus, EndOfSupportDate
+) on DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion
+| summarize ProductCodeCpe = take_any(ProductCodeCpe), EndOfSupportStatus = take_any(EndOfSupportStatus), EndOfSupportDate = take_any(EndOfSupportDate) by DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion
+| project DeviceId,
+    SoftwareVendor,
+    SoftwareName,
+    SoftwareVersion,
+    ProductCodeCpe,
+    EndOfSupportStatus,
+    EndOfSupportDate = format_datetime(EndOfSupportDate, 'yyyy-MM-dd')
+"@
+
     $cveResults = @(Invoke-MdeAdvancedHuntingQuery -RequestHeaders $Headers -RequestUrl $QueryUrl -Query $cveQuery -Label 'cve-enrichment')
     $deviceUserResults = @(Invoke-MdeAdvancedHuntingQuery -RequestHeaders $Headers -RequestUrl $QueryUrl -Query $deviceUsersQuery -Label 'device-users')
+    $inventoryResults = @(Invoke-MdeAdvancedHuntingQuery -RequestHeaders $Headers -RequestUrl $QueryUrl -Query $inventoryQuery -Label 'software-inventory')
 
-    if ($cveResults.Count -eq 0 -and $deviceUserResults.Count -eq 0) {
+    Set-AdvancedHuntingResultRecordType -Records $cveResults -RecordType 'Cve'
+    Set-AdvancedHuntingResultRecordType -Records $deviceUserResults -RecordType 'DeviceUsers'
+    Set-AdvancedHuntingResultRecordType -Records $inventoryResults -RecordType 'Inventory'
+
+    if ($cveResults.Count -eq 0 -and $deviceUserResults.Count -eq 0 -and $inventoryResults.Count -eq 0) {
         return [PSCustomObject]@{
             Success = $false
             RecordCount = 0
@@ -148,7 +200,8 @@ DeviceInfo
 
         foreach ($existingKey in @($store.CurrentRecords.Keys)) {
             $existingRecord = $store.CurrentRecords[$existingKey]
-            if ((Get-AdvancedHuntingRecordType -Record $existingRecord) -eq 'DeviceUsers') {
+            $recordType = Get-AdvancedHuntingRecordType -Record $existingRecord
+            if ($recordType -eq 'DeviceUsers' -or $recordType -eq 'Inventory') {
                 [void]$store.CurrentRecords.Remove($existingKey)
             }
         }
@@ -161,6 +214,13 @@ DeviceInfo
         }
 
         foreach ($result in $deviceUserResults) {
+            $storeKey = Get-AdvancedHuntingStoreKey -Record $result
+            if ($storeKey) {
+                $store.CurrentRecords[$storeKey] = $result
+            }
+        }
+
+        foreach ($result in $inventoryResults) {
             $storeKey = Get-AdvancedHuntingStoreKey -Record $result
             if ($storeKey) {
                 $store.CurrentRecords[$storeKey] = $result
@@ -182,7 +242,7 @@ DeviceInfo
 
             return [PSCustomObject]@{
                 Success = $true
-                RecordCount = ($cveResults.Count + $deviceUserResults.Count)
+                RecordCount = ($cveResults.Count + $deviceUserResults.Count + $inventoryResults.Count)
                 OutputFile = $store.CurrentPath
                 MigratedLegacy = $store.MigratedLegacy
             }

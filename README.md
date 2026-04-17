@@ -69,6 +69,27 @@ Recommended convention: keep `VulnerabilityDashboard.html` as the direct-open ar
     -ValidateOnly
 ```
 
+5. Split normalization, packaging, and validation when you want reusable payload artifacts or cheaper repeat validation.
+
+```powershell
+# Materialize a reusable normalized payload plus manifest
+.\Generate-VulnerabilityDashboard.ps1 `
+    -DirectoryPath .\exports `
+    -ExportMachineData $false `
+    -NormalizeOnly `
+    -NormalizedPayloadOutputPath .\.local\payload\dashboard-payload.json.gz
+
+# Build the HTML later from that normalized payload without re-normalizing exports
+.\Generate-VulnerabilityDashboard.ps1 `
+    -DirectoryPath .\exports `
+    -ExportMachineData $false `
+    -PackageOnly `
+    -NormalizedPayloadInputPath .\.local\payload\dashboard-payload.json.gz `
+    -OutputPath .\VulnerabilityDashboard.html
+```
+
+`-PackageOnly` writes a sibling validation sidecar next to the HTML. After one successful full large-dataset semantic validation, later `-ValidateOnly` runs can reuse a versioned attestation when the dashboard still embeds the exact same normalized payload bytes. Use `-ForceFullValidation` when you explicitly want to bypass that fast-path and replay the full semantic audit.
+
 For managed identity auth, Azure provisioning, and GitHub workflow setup, use the linked docs below.
 
 ## Dashboard packaging modes
@@ -147,6 +168,7 @@ flowchart TD
 - Run `./build/Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` when you want the local command that mirrors the live GitHub Actions export and dashboard generation path.
 - Run `./build/Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName <name> -FunctionAppName <name>` when you want the repo-owned manual validation path that rebuilds locally, redeploys Azure Automation and Function App, and executes both live Azure validation flows.
 - Run `./build/Build-AzureReleasePackage.ps1` when you want the exact local packaging path used by the release workflow.
+- Run `./Invoke-NvdCveExport.ps1` to build or refresh the optional `NvdCve_Current.json.gz` enrichment cache consumed by dashboard generation; see `docs/nvd-enrichment.md` for usage details.
 - Legacy `VulnExport_<group>_<date>.json(.gz)` compatibility remains temporary through `2026-07-01`.
 - Sample PDF outputs are committed under `reports/`.
 - `.dashboard-cache/` directories are derived local caches and are intentionally ignored by git.

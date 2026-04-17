@@ -23,6 +23,7 @@ $Script:MachineCurrentFileName = 'Machines_Current.json.gz'
 $Script:MachineHistoryFileName = 'Machines_History.json.gz'
 $Script:MachineHistoryQuarterlyFileNamePattern = 'Machines_History_{0}.json.gz'
 $Script:AdvancedHuntingCurrentFileName = 'AdvancedHunting_Current.json.gz'
+$Script:NvdCveCurrentFileName = 'NvdCve_Current.json.gz'
 $Script:LegacyVulnMigrationRemovalDate = '2026-07-01'
 $Script:VulnDiskPartitionCount = 128
 
@@ -88,6 +89,229 @@ function Invoke-FullGarbageCollection {
     [System.GC]::Collect()
 }
 
+function Test-IsAzureHostedEnvironment {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+
+    foreach ($environmentVariableName in @(
+        'WEBSITE_INSTANCE_ID'
+        'FUNCTIONS_WORKER_RUNTIME'
+        'FUNCTIONS_EXTENSION_VERSION'
+        'AUTOMATION_ASSET_ACCOUNTID'
+        'AZUREPS_HOST_ENVIRONMENT'
+    )) {
+        $environmentValue = [System.Environment]::GetEnvironmentVariable($environmentVariableName)
+        if (-not [string]::IsNullOrWhiteSpace([string]$environmentValue)) {
+            return $true
+        }
+    }
+
+    $psPrivateMetadataVariable = Get-Variable -Name PSPrivateMetadata -Scope Global -ErrorAction SilentlyContinue
+    if ($null -ne $psPrivateMetadataVariable) {
+        $psPrivateMetadata = $psPrivateMetadataVariable.Value
+        $jobId = if ($null -ne $psPrivateMetadata) { [string]$psPrivateMetadata.PSObject.Properties['JobId']?.Value } else { '' }
+        if (-not [string]::IsNullOrWhiteSpace($jobId)) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Resolve-RunspaceThrottleLimit {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 64)]
+        [int]$RequestedThrottleLimit = 1,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ActivityName = 'runspace workload',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$DisableInAzure
+    )
+
+    if ($RequestedThrottleLimit -le 1) {
+        return 1
+    }
+
+    if ($DisableInAzure -and (Test-IsAzureHostedEnvironment)) {
+        Write-Information ("  {0}: forcing single-threaded execution in Azure-hosted environment." -f $ActivityName) -InformationAction Continue
+        return 1
+    }
+
+    $processorCount = [Math]::Max(1, [System.Environment]::ProcessorCount)
+    $effectiveThrottleLimit = [Math]::Min($RequestedThrottleLimit, $processorCount)
+    if ($effectiveThrottleLimit -ne $RequestedThrottleLimit) {
+        Write-Information ("  {0}: capping throttle from {1} to {2} based on local processor count." -f $ActivityName, $RequestedThrottleLimit, $effectiveThrottleLimit) -InformationAction Continue
+    }
+
+    return [int]$effectiveThrottleLimit
+}
+
+function New-ProgressMarkerState {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only creates an in-memory progress tracking object.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ActivityName,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 1000000)]
+        [int]$ProgressInterval = 250000,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(15, 3600)]
+        [int]$HeartbeatIntervalSeconds = 60,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 1000000)]
+        [int]$CheckInterval = 10000
+    )
+
+    return [PSCustomObject]@{
+        ActivityName = $ActivityName
+        ProgressInterval = $ProgressInterval
+        HeartbeatIntervalSeconds = $HeartbeatIntervalSeconds
+        CheckInterval = [Math]::Max(1, [Math]::Min($ProgressInterval, $CheckInterval))
+        Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        LastHeartbeatSecond = -1
+    }
+}
+
+function Write-ProgressMarker {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $State,
+
+        [Parameter(Mandatory = $true)]
+        [long]$Count,
+
+        [Parameter(Mandatory = $false)]
+        [string]$UnitLabel = 'item(s)'
+    )
+
+    if ($null -eq $State -or $Count -le 0) {
+        return
+    }
+
+    $markerType = 'progress'
+    $shouldWrite = (($Count % [long]$State.ProgressInterval) -eq 0)
+    if (-not $shouldWrite -and (($Count % [long]$State.CheckInterval) -eq 0)) {
+        $elapsedWholeSeconds = [Math]::Floor($State.Stopwatch.Elapsed.TotalSeconds)
+        if (($State.LastHeartbeatSecond + [int]$State.HeartbeatIntervalSeconds) -le $elapsedWholeSeconds) {
+            $shouldWrite = $true
+            $markerType = 'heartbeat'
+        }
+    }
+
+    if (-not $shouldWrite) {
+        return
+    }
+
+    $elapsedSeconds = [Math]::Max(0.001, $State.Stopwatch.Elapsed.TotalSeconds)
+    $rate = [Math]::Round(($Count / $elapsedSeconds), 0)
+    $markerSuffix = if ($markerType -eq 'heartbeat') { ' [heartbeat]' } else { '' }
+    Write-Information ("  {0}: {1:N0} {2} processed in {3:N1}s ({4:N0}/s){5}" -f $State.ActivityName, $Count, $UnitLabel, [Math]::Round($elapsedSeconds, 1), $rate, $markerSuffix) -InformationAction Continue
+    $State.LastHeartbeatSecond = [Math]::Floor($State.Stopwatch.Elapsed.TotalSeconds)
+}
+
+function Invoke-BoundedRunspacePool {
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 64)]
+        [int]$ThrottleLimit = 1,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ActivityName = 'runspace workload',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$DisableInAzure,
+
+        [Parameter(Mandatory = $false)]
+        [object[]]$ArgumentList = @()
+    )
+
+    $inputItems = @($InputObject)
+    if ($inputItems.Count -eq 0) {
+        return @()
+    }
+
+    $effectiveThrottleLimit = Resolve-RunspaceThrottleLimit -RequestedThrottleLimit $ThrottleLimit -ActivityName $ActivityName -DisableInAzure:$DisableInAzure
+    if ($effectiveThrottleLimit -le 1 -or $inputItems.Count -eq 1) {
+        $serialResults = [System.Collections.Generic.List[object]]::new()
+        foreach ($inputItem in $inputItems) {
+            $invocationResult = & $ScriptBlock $inputItem @ArgumentList
+            foreach ($result in @($invocationResult)) {
+                if ($null -ne $result) {
+                    $serialResults.Add($result)
+                }
+            }
+        }
+
+        return @($serialResults)
+    }
+
+    Write-Information ("  {0}: using runspace pool x{1} for {2} work item(s)." -f $ActivityName, $effectiveThrottleLimit, $inputItems.Count) -InformationAction Continue
+
+    $initialSessionState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault2()
+    $runspacePool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $effectiveThrottleLimit, $initialSessionState, $Host)
+    $runspacePool.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+    $runspacePool.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $runspacePool.Open()
+
+    $pendingInvocations = [System.Collections.Generic.List[object]]::new()
+    try {
+        foreach ($inputItem in $inputItems) {
+            $powershell = [System.Management.Automation.PowerShell]::Create()
+            $powershell.RunspacePool = $runspacePool
+            $null = $powershell.AddScript($ScriptBlock.ToString(), $true).AddArgument($inputItem)
+            foreach ($argument in @($ArgumentList)) {
+                $null = $powershell.AddArgument($argument)
+            }
+
+            $pendingInvocations.Add([PSCustomObject]@{
+                    PowerShell = $powershell
+                    AsyncResult = $powershell.BeginInvoke()
+                })
+        }
+
+        $parallelResults = [System.Collections.Generic.List[object]]::new()
+        foreach ($pendingInvocation in $pendingInvocations) {
+            try {
+                $invocationResult = $pendingInvocation.PowerShell.EndInvoke($pendingInvocation.AsyncResult)
+                foreach ($result in @($invocationResult)) {
+                    if ($null -ne $result) {
+                        $parallelResults.Add($result)
+                    }
+                }
+            }
+            finally {
+                $pendingInvocation.PowerShell.Dispose()
+            }
+        }
+
+        return @($parallelResults)
+    }
+    finally {
+        $runspacePool.Close()
+        $runspacePool.Dispose()
+    }
+}
+
 function Invoke-RestMethodWithRetry {
     [CmdletBinding()]
     param(
@@ -113,7 +337,11 @@ function Invoke-RestMethodWithRetry {
         [int]$InitialDelayMs = 1000,
 
         [Parameter(Mandatory = $false)]
-        [double]$BackoffMultiplier = 2.0
+        [double]$BackoffMultiplier = 2.0,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 3600)]
+        [int]$TimeoutSec
     )
 
     $attempt = 0
@@ -126,6 +354,7 @@ function Invoke-RestMethodWithRetry {
             if ($Headers) { $restParams['Headers'] = $Headers }
             if ($Body) { $restParams['Body'] = $Body }
             if ($ContentType) { $restParams['ContentType'] = $ContentType }
+            if ($PSBoundParameters.ContainsKey('TimeoutSec')) { $restParams['TimeoutSec'] = $TimeoutSec }
 
             return Invoke-RestMethod @restParams
         }
@@ -1003,7 +1232,8 @@ function Test-IsCanonicalExportStoreFileName {
         $Script:VulnContentDictionaryFileName,
         $Script:VulnCurrentRefsFileName,
         $Script:MachineCurrentFileName,
-        $Script:AdvancedHuntingCurrentFileName
+        $Script:AdvancedHuntingCurrentFileName,
+        $Script:NvdCveCurrentFileName
     )) {
         return $true
     }

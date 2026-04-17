@@ -695,6 +695,103 @@ function Test-ConvertToNormalizedDataWritesDirectPayload {
     }
 }
 
+function Test-ConvertToNormalizedDataPreservesOptionalNvdFallback {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-optional-nvd-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+
+    try {
+        $ahPreferredRow = Get-TestVulnRow -Id 'optional-nvd-001' -CveId 'CVE-2026-0131' -SnapshotDate '2026-03-20' -Version '1.0.0'
+        $nvdFallbackRow = Get-TestVulnRow -Id 'optional-nvd-002' -CveId 'CVE-2026-0132' -SnapshotDate '2026-03-20' -Version '1.1.0'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($ahPreferredRow, $nvdFallbackRow)
+        Write-NdjsonRecordsFile -Path (Get-AdvancedHuntingCurrentPath -BasePath $tempRoot) -Records @(
+            [PSCustomObject]@{
+                CveId = 'CVE-2026-0131'
+                PublishedDate = '2026-03-19'
+                VulnerabilityDescription = 'Advanced Hunting description wins.'
+                EpssScore = 0.73
+                AffectedSoftware = @(
+                    'contoso:legacy_agent'
+                    'microsoft:windows_11'
+                )
+            }
+        )
+
+        $nvdDocument = [PSCustomObject]@{
+            records = @(
+                [PSCustomObject]@{
+                    CveId = 'CVE-2026-0131'
+                    PublishedDate = '2026-03-10'
+                    LastModifiedDate = '2026-03-22'
+                    VulnerabilityDescription = 'NVD description should remain fallback only.'
+                    BaseScore = 9.8
+                    BaseSeverity = 'Critical'
+                    Vector = 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H'
+                    CisaExploitAdd = '2026-03-23'
+                    CisaActionDue = '2026-04-01'
+                    CisaRequiredAction = 'Patch now.'
+                    Weaknesses = @('CWE-79')
+                }
+                [PSCustomObject]@{
+                    CveId = 'CVE-2026-0132'
+                    PublishedDate = '2026-02-11'
+                    LastModifiedDate = '2026-03-25'
+                    VulnerabilityDescription = 'NVD description fills missing Advanced Hunting data.'
+                    BaseScore = 7.5
+                    BaseSeverity = 'High'
+                    Vector = 'CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N'
+                    CisaExploitAdd = '2026-03-26'
+                    CisaActionDue = '2026-04-05'
+                    CisaRequiredAction = 'Prioritize patching.'
+                    Weaknesses = @('CWE-416', 'CWE-787')
+                }
+            )
+        }
+        Write-GzipTextFile -Path (Get-NvdCveCurrentPath -BasePath $tempRoot) -Content ($nvdDocument | ConvertTo-Json -Compress -Depth 20)
+
+        $result = ConvertTo-NormalizedData `
+            -DataPath $tempRoot `
+            -VulnOutputPath $outputPath `
+            -PayloadOutputPath $payloadPath `
+            -Machines @{} `
+            -AdvancedHuntingData (Read-AdvancedHuntingData -Path $tempRoot) `
+            -NvdCveData (Read-NvdCveData -Path $tempRoot)
+
+        $payload = Read-GzipTextFile -Path $payloadPath | ConvertFrom-Json -Depth 100
+        $ahPreferred = @($payload.lookups.cves | Where-Object { $_.id -eq 'CVE-2026-0131' })[0]
+        $nvdFallback = @($payload.lookups.cves | Where-Object { $_.id -eq 'CVE-2026-0132' })[0]
+        $ahAffectedSoftware = @($ahPreferred.as | ForEach-Object { [string]$payload.lookups.affSoftware[[int]$_] } | Sort-Object)
+        $nvdWeaknesses = @($nvdFallback.nw | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+
+        Assert-True ($result.VulnCount -eq 2) 'Expected optional NVD regression test to normalize both CVEs.'
+        Assert-True ([string]$ahPreferred.pd -eq '2026-03-19') 'Expected Advanced Hunting PublishedDate to win when present.'
+        Assert-True ([string]$ahPreferred.desc -eq 'Advanced Hunting description wins.') 'Expected Advanced Hunting description to win when present.'
+        Assert-True ([math]::Abs(([double]$ahPreferred.ep) - 0.73) -lt 0.00001) 'Expected Advanced Hunting EPSS score to be preserved.'
+        Assert-True ($ahAffectedSoftware.Count -eq 1) 'Expected Advanced Hunting affected software to stay filtered to dataset vendors.'
+        Assert-True ($ahAffectedSoftware[0] -eq 'contoso:legacy_agent') 'Expected filtered affected software to preserve the matching vendor entry.'
+        Assert-True ([string]$ahPreferred.nlm -eq '2026-03-22') 'Expected NVD last-modified metadata to be preserved alongside Advanced Hunting fields.'
+        Assert-True ([double]$ahPreferred.nbs -eq 9.8) 'Expected NVD base score to be preserved.'
+        Assert-True ([string]$ahPreferred.nsv -eq 'Critical') 'Expected NVD base severity to be preserved.'
+
+        Assert-True ([string]$nvdFallback.pd -eq '2026-02-11') 'Expected NVD PublishedDate to backfill when Advanced Hunting data is missing.'
+        Assert-True ([string]$nvdFallback.desc -eq 'NVD description fills missing Advanced Hunting data.') 'Expected NVD description to backfill when Advanced Hunting data is missing.'
+        Assert-True ($null -eq $nvdFallback.ep) 'Expected EPSS score to stay empty when Advanced Hunting does not provide it.'
+        Assert-True ($null -eq $nvdFallback.as) 'Expected affected software to stay empty when Advanced Hunting does not provide it.'
+        Assert-True ([string]$nvdFallback.nact -eq 'Prioritize patching.') 'Expected NVD-required action to be preserved.'
+        Assert-True ($nvdWeaknesses.Count -eq 2) 'Expected NVD weaknesses to be preserved as an array.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap {
     [CmdletBinding()]
     param()
@@ -1296,6 +1393,8 @@ Test-ConvertToNormalizedDataWritesExpectedRowCount
 Write-Output '  Normalized vuln row-count checks passed.'
 Test-ConvertToNormalizedDataWritesDirectPayload
 Write-Output '  Direct payload normalization checks passed.'
+Test-ConvertToNormalizedDataPreservesOptionalNvdFallback
+Write-Output '  Optional NVD fallback normalization checks passed.'
 Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
 Write-Output '  Advanced Hunting device-user normalization checks passed.'
 Test-WriteCombinedPayloadGzipPreservesColumnPayload

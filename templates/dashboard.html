@@ -108,15 +108,16 @@ __CSS_BLOCK__
                             <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="0">Vendor</button></th>
                             <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="1">Software</button></th>
                             <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="2">Remediation</button></th>
-                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="3">Assets</button></th>
-                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="4">Vulnerabilities</button></th>
-                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="5">Exploits</button></th>
-                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="6">Kits</button></th>
+                            <th scope="col" class="update-details-column" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="3">Update Details</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="4">Assets</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="5">Vulnerabilities</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="6">Exploits</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation" data-column-index="7">Kits</button></th>
                         </tr>
                     </thead>
                     <tbody id="remediationTableBody">
                         <tr>
-                            <td colspan="7" class="loading">Loading data...</td>
+                            <td colspan="8" class="loading">Loading data...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -140,14 +141,15 @@ __CSS_BLOCK__
                         <tr>
                             <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="0">Date</button></th>
                             <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="1">Remediation</button></th>
-                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="2">Assets Remediated</button></th>
-                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="3">Vulnerabilities Remediated</button></th>
-                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="4">Total Vulnerabilities Remediated</button></th>
+                            <th scope="col" class="update-details-column" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="2">Update Details</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="3">Assets Remediated</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="4">Vulnerabilities Remediated</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="remediation-details" data-column-index="5">Total Vulnerabilities Remediated</button></th>
                         </tr>
                     </thead>
                     <tbody id="remediationDetailsTableBody">
                         <tr>
-                            <td colspan="5" class="loading">Loading data...</td>
+                            <td colspan="6" class="loading">Loading data...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -171,14 +173,15 @@ __CSS_BLOCK__
                         <tr>
                             <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="0">Rank</button></th>
                             <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="1">Remediation</button></th>
-                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="2">Devices</button></th>
-                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="3">CVE IDs</button></th>
-                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="4">Impact Score</button></th>
+                            <th scope="col" class="update-details-column" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="2">Update Details</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="3">Devices</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="4">CVE IDs</button></th>
+                            <th scope="col" aria-sort="none"><button type="button" class="sort-button" data-sort-table="impact-analysis" data-column-index="5">Impact Score</button></th>
                         </tr>
                     </thead>
                     <tbody id="impactAnalysisTableBody">
                         <tr>
-                            <td colspan="5" class="loading">Loading data...</td>
+                            <td colspan="6" class="loading">Loading data...</td>
                         </tr>
                     </tbody>
                 </table>
@@ -208,10 +211,22 @@ __CSS_BLOCK__
             </div>
         </div>
 
-        <details class="data-quality-footer pdf-exclude" aria-label="Data quality diagnostics">
-            <summary>Data Quality Diagnostics</summary>
+        <div class="dashboard-footer-row pdf-exclude">
+            <details class="data-quality-footer" aria-label="Data quality diagnostics">
+                <summary>Data Quality Diagnostics</summary>
 __DATA_QUALITY_SECTION__
-        </details>
+            </details>
+            <div id="remediationReportToolbar" class="report-mode-toolbar" hidden>
+                <div class="report-mode-group" role="group" aria-labelledby="remediationModeLabel">
+                    <span id="remediationModeLabel" class="report-mode-label">Include resolved vulnerabilities</span>
+                    <div class="report-mode-buttons">
+                        <button id="remediationModeRangeButton" type="button" class="report-mode-button" data-remediation-report-mode="range" aria-pressed="false">Yes</button>
+                        <button id="remediationModeSnapshotButton" type="button" class="report-mode-button is-active" data-remediation-report-mode="snapshot" aria-pressed="true">No</button>
+                    </div>
+                </div>
+                <div id="remediationModeSummary" class="report-mode-summary" aria-live="polite"></div>
+            </div>
+        </div>
     </div>
 
     </main>
