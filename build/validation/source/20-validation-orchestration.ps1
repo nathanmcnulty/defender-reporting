@@ -11,7 +11,29 @@ function Get-DashboardValidationFailure {
         $failures.Add("Dashboard row comparison failed. Missing=$($Audit.RowComparison.MissingCount) Extra=$($Audit.RowComparison.ExtraCount)")
     }
 
-    if (($Audit.EnrichmentAudit.PublishedDateMismatchCount + $Audit.EnrichmentAudit.DescriptionMismatchCount + $Audit.EnrichmentAudit.EpssMismatchCount + $Audit.EnrichmentAudit.AffectedSoftwareMismatchCount) -gt 0) {
+    $enrichmentMismatchCount = 0
+    foreach ($propertyName in @(
+        'PublishedDateMismatchCount',
+        'DescriptionMismatchCount',
+        'EpssMismatchCount',
+        'AffectedSoftwareMismatchCount',
+        'ExploitAvailableMismatchCount',
+        'NvdLastModifiedMismatchCount',
+        'NvdBaseScoreMismatchCount',
+        'NvdBaseSeverityMismatchCount',
+        'NvdVectorMismatchCount',
+        'NvdKevMismatchCount',
+        'NvdActionDueMismatchCount',
+        'NvdRequiredActionMismatchCount',
+        'NvdWeaknessMismatchCount'
+    )) {
+        $property = $Audit.EnrichmentAudit.PSObject.Properties[$propertyName]
+        if ($null -ne $property) {
+            $enrichmentMismatchCount += [int]$property.Value
+        }
+    }
+
+    if ($enrichmentMismatchCount -gt 0) {
         $failures.Add('Dashboard enrichment fields do not match the source data.')
     }
 
