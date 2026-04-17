@@ -5986,17 +5986,20 @@ RelevantSoftware
 | join kind=leftouter (
     DeviceTvmSoftwareInventory
     | where isnotempty(DeviceId) and isnotempty(SoftwareName)
-    | project DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion, ProductCodeCpe, EndOfSupportStatus, EndOfSupportDate, Timestamp
+    | project DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion, ProductCodeCpe, EndOfSupportStatus, EndOfSupportDate
+    | extend InventorySignalCount =
+        iff(isnotempty(ProductCodeCpe), 1, 0) +
+        iff(isnotempty(EndOfSupportStatus), 1, 0) +
+        iff(isnotempty(EndOfSupportDate), 1, 0)
 ) on DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion
-| summarize arg_max(Timestamp, ProductCodeCpe, EndOfSupportStatus, EndOfSupportDate) by DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion
+| summarize arg_max(InventorySignalCount, ProductCodeCpe, EndOfSupportStatus, EndOfSupportDate) by DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion
 | project DeviceId,
     SoftwareVendor,
     SoftwareName,
     SoftwareVersion,
     ProductCodeCpe,
     EndOfSupportStatus,
-    EndOfSupportDate = format_datetime(EndOfSupportDate, 'yyyy-MM-dd'),
-    LastModifiedTime = Timestamp
+    EndOfSupportDate = format_datetime(EndOfSupportDate, 'yyyy-MM-dd')
 "@
 
     $cveResults = @(Invoke-MdeAdvancedHuntingQuery -RequestHeaders $Headers -RequestUrl $QueryUrl -Query $cveQuery -Label 'cve-enrichment')

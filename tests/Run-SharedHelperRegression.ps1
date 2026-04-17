@@ -944,6 +944,47 @@ function Test-ValidationHelperPayloadCanonicalization {
     }
 }
 
+function Test-DashboardValidationFailureExtendedEnrichmentGate {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+
+    . (Join-Path $repoRoot 'build\Import-ValidationHelpers.ps1')
+
+    $audit = [PSCustomObject]@{
+        RowComparison = [PSCustomObject]@{
+            Match = $true
+            MissingCount = 0
+            ExtraCount = 0
+        }
+        EnrichmentAudit = [PSCustomObject]@{
+            PublishedDateMismatchCount = 0
+            DescriptionMismatchCount = 0
+            EpssMismatchCount = 0
+            AffectedSoftwareMismatchCount = 0
+            ExploitAvailableMismatchCount = 1
+            NvdLastModifiedMismatchCount = 0
+            NvdBaseScoreMismatchCount = 1
+            NvdBaseSeverityMismatchCount = 0
+            NvdVectorMismatchCount = 0
+            NvdKevMismatchCount = 0
+            NvdActionDueMismatchCount = 0
+            NvdRequiredActionMismatchCount = 0
+            NvdWeaknessMismatchCount = 0
+        }
+        ReportComparisons = @()
+        LegacyMigrationAudit = [PSCustomObject]@{
+            Enabled = $false
+        }
+    }
+
+    $failures = @(Get-DashboardValidationFailure -Audit $audit)
+
+    Assert-True ($failures.Count -eq 1) 'Expected extended enrichment mismatch counters to add exactly one validation failure.'
+    Assert-True ($failures[0] -eq 'Dashboard enrichment fields do not match the source data.') 'Expected extended enrichment mismatch counters to use the standard enrichment failure message.'
+}
+
 function Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity {
     [CmdletBinding()]
     param()
@@ -1401,6 +1442,8 @@ Test-WriteCombinedPayloadGzipPreservesColumnPayload
 Write-Output '  Combined payload writer column-path checks passed.'
 Test-ValidationHelperPayloadCanonicalization
 Write-Output '  Validation helper payload-format checks passed.'
+Test-DashboardValidationFailureExtendedEnrichmentGate
+Write-Output '  Validation helper failure-gate checks passed.'
 Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity
 Write-Output '  Streaming dashboard source-parity checks passed.'
 Test-DashboardValidationUsesStableFallbackDeviceProfile

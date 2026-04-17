@@ -165,8 +165,12 @@ RelevantSoftware
     DeviceTvmSoftwareInventory
     | where isnotempty(DeviceId) and isnotempty(SoftwareName)
     | project DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion, ProductCodeCpe, EndOfSupportStatus, EndOfSupportDate
+    | extend InventorySignalCount =
+        iff(isnotempty(ProductCodeCpe), 1, 0) +
+        iff(isnotempty(EndOfSupportStatus), 1, 0) +
+        iff(isnotempty(EndOfSupportDate), 1, 0)
 ) on DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion
-| summarize ProductCodeCpe = take_any(ProductCodeCpe), EndOfSupportStatus = take_any(EndOfSupportStatus), EndOfSupportDate = take_any(EndOfSupportDate) by DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion
+| summarize arg_max(InventorySignalCount, ProductCodeCpe, EndOfSupportStatus, EndOfSupportDate) by DeviceId, SoftwareVendor, SoftwareName, SoftwareVersion
 | project DeviceId,
     SoftwareVendor,
     SoftwareName,
