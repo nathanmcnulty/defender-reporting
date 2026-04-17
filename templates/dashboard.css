@@ -488,10 +488,19 @@ h1 {
 }
 
 /* Data Quality Summary */
-.data-quality-footer {
+.dashboard-footer-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--spacing-lg);
     margin-top: var(--spacing-xl);
-    border-top: 1px solid var(--color-border-light);
     padding-top: var(--spacing-lg);
+    border-top: 1px solid var(--color-border-light);
+}
+
+.data-quality-footer {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 .data-quality-footer summary {
@@ -793,6 +802,7 @@ h1 {
 .report-selector-container {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 10px;
 }
 
@@ -848,6 +858,69 @@ h1 {
 .export-pdf-btn:disabled {
     background: var(--color-border);
     cursor: not-allowed;
+}
+
+.report-mode-toolbar {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: var(--spacing-sm);
+    margin-left: auto;
+    padding: 0;
+    min-width: 0;
+}
+
+.report-mode-group {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-md);
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.report-mode-label {
+    font-weight: 600;
+    color: var(--color-text);
+    font-size: var(--font-size-sm);
+}
+
+.report-mode-buttons {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    padding: 4px;
+    border-radius: 999px;
+    background: rgba(0, 120, 212, 0.08);
+}
+
+.report-mode-button {
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--color-text-secondary);
+    cursor: pointer;
+    font-size: var(--font-size-sm);
+    font-weight: 600;
+    padding: 8px 12px;
+    transition: background var(--transition-fast), color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.report-mode-button:hover {
+    color: var(--color-primary-dark);
+}
+
+.report-mode-button.is-active {
+    background: var(--color-surface);
+    color: var(--color-primary-dark);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+.report-mode-summary {
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+    text-align: right;
+    max-width: 420px;
 }
 
 /* Report Sections */
@@ -1073,17 +1146,25 @@ tbody tr:hover {
 .remediation-card-header {
     display: flex;
     justify-content: space-between;
-    align-items: center;
-    margin-bottom: var(--spacing-sm);
+    align-items: flex-start;
+    gap: var(--spacing-lg);
+    margin-bottom: var(--spacing-md);
     padding-bottom: var(--spacing-sm);
     border-bottom: 2px solid var(--color-border);
+}
+
+.remediation-card-title-block {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    min-width: 0;
 }
 
 .remediation-card-header h3 {
     margin: 0;
     color: var(--color-primary);
     font-size: var(--font-size-lg);
-    flex: 1;
 }
 
 .remediation-stats {
@@ -1109,6 +1190,21 @@ tbody tr:hover {
     font-weight: 600;
     white-space: nowrap;
     line-height: var(--badge-line-height);
+}
+
+.remediation-title-with-updates {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--spacing-xs);
+}
+
+.remediation-update-entry-list {
+    display: flex;
+    flex-wrap: wrap;
+    flex-direction: row;
+    gap: var(--spacing-xs);
+    align-items: center;
 }
 
 .remediation-link {
@@ -1141,11 +1237,18 @@ tbody tr:hover {
 
 .cve-details {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-start;
     align-items: center;
+    flex-wrap: wrap;
     gap: var(--spacing-md);
     padding: var(--spacing-md);
     margin: var(--spacing-md) 0;
+}
+
+.remediation-card-summary {
+    padding: 0;
+    margin: 0;
+    gap: var(--spacing-sm);
 }
 
 .cve-details .stat-badge {
@@ -1353,9 +1456,9 @@ tbody tr:hover {
 
 .devices-header-row {
     display: flex;
-    justify-content: space-between;
+    justify-content: flex-start;
     align-items: center;
-    margin: var(--spacing-lg) 0 var(--spacing-md) 0;
+    margin: var(--spacing-md) 0 var(--spacing-md) 0;
     padding-bottom: var(--spacing-sm);
     border-bottom: 1px solid var(--color-border-light);
 }
@@ -1386,6 +1489,17 @@ tbody tr:hover {
     background: var(--color-surface-alt);
 }
 
+@media (max-width: 960px) {
+    .remediation-card-header {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .remediation-stats {
+        justify-content: flex-start;
+    }
+}
+
 .devices-table thead {
     background: var(--color-primary);
     color: var(--color-surface);
@@ -1403,6 +1517,20 @@ tbody tr:hover {
 .devices-table td {
     padding: var(--spacing-md);
     border-bottom: 1px solid var(--color-border-light);
+    vertical-align: top;
+}
+
+.update-details-column {
+    min-width: 15rem;
+    width: 15rem;
+}
+
+td.update-details-column .remediation-update-entry-list {
+    display: inline-flex;
+    align-items: flex-start;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    width: max-content;
 }
 
 .devices-table tbody tr:last-child td {
@@ -1415,6 +1543,50 @@ tbody tr:hover {
 
 .devices-table tbody tr:hover {
     background: var(--color-surface-alt);
+}
+
+.remediation-density-note {
+    margin: 0 0 var(--spacing-md) 0;
+    color: var(--color-text-secondary);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+}
+
+.remediation-overflow {
+    margin-top: var(--spacing-md);
+    border: 1px solid var(--color-border-light);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-alt);
+    overflow: hidden;
+}
+
+.remediation-overflow summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--color-primary-dark);
+    list-style: none;
+    padding: var(--spacing-md) var(--spacing-lg);
+}
+
+.remediation-overflow summary::-webkit-details-marker {
+    display: none;
+}
+
+.remediation-overflow summary::before {
+    content: '+';
+    display: inline-block;
+    margin-right: var(--spacing-sm);
+}
+
+.remediation-overflow[open] summary::before {
+    content: '-';
+}
+
+.remediation-overflow-table {
+    margin: 0;
+    border: 0;
+    border-top: 1px solid var(--color-border-light);
+    border-radius: 0;
 }
 
 /* Expandable Row Styles for Remediations by Device Report */
@@ -1496,6 +1668,11 @@ tbody tr:hover {
 .modal-update-link-row {
     text-align: right;
     margin-bottom: var(--spacing-sm);
+}
+
+.modal-update-link-row .remediation-update-entry-list {
+    justify-content: flex-end;
+    margin-top: var(--spacing-xs);
 }
 
 .modal-update-link {
@@ -1801,6 +1978,32 @@ tbody tr:hover {
 
     .report-selector-container {
         width: 100%;
+    }
+
+    .dashboard-footer-row,
+    .report-mode-toolbar,
+    .report-mode-group {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .report-mode-toolbar {
+        margin-left: 0;
+    }
+
+    .report-mode-summary {
+        max-width: none;
+        text-align: left;
+    }
+
+    .report-mode-buttons {
+        width: 100%;
+        justify-content: stretch;
+    }
+
+    .report-mode-button {
+        flex: 1;
+        text-align: center;
     }
 
     .report-selector-container select {

@@ -226,6 +226,17 @@ function Get-AdvancedHuntingCurrentPath {
     return Join-Path -Path $BasePath -ChildPath $Script:AdvancedHuntingCurrentFileName
 }
 
+function Get-NvdCveCurrentPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    return Join-Path -Path $BasePath -ChildPath $Script:NvdCveCurrentFileName
+}
+
 function Get-LegacyCanonicalPath {
     [CmdletBinding()]
     [OutputType([string])]
@@ -803,6 +814,39 @@ function Get-AdvancedHuntingLastModifiedKey {
     return $FallbackDate
 }
 
+function Get-AdvancedHuntingInventoryMatchKey {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$DeviceId,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$SoftwareVendor,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$SoftwareName,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$SoftwareVersion
+    )
+
+    if ([string]::IsNullOrWhiteSpace($DeviceId) -or [string]::IsNullOrWhiteSpace($SoftwareName)) {
+        return $null
+    }
+
+    return @(
+        [string]$DeviceId
+        [string]($SoftwareVendor ?? '')
+        [string]$SoftwareName
+        [string]($SoftwareVersion ?? '')
+    ) -join '|'
+}
+
 function Get-AdvancedHuntingRecordType {
     [CmdletBinding()]
     [OutputType([string])]
@@ -810,6 +854,13 @@ function Get-AdvancedHuntingRecordType {
         [Parameter(Mandatory = $true)]
         [psobject]$Record
     )
+
+    $explicitRecordType = [string]$Record.PSObject.Properties['RecordType']?.Value
+    switch ($explicitRecordType) {
+        'Cve' { return 'Cve' }
+        'DeviceUsers' { return 'DeviceUsers' }
+        'Inventory' { return 'Inventory' }
+    }
 
     $cveId = [string]$Record.PSObject.Properties['CveId']?.Value
     if (-not [string]::IsNullOrWhiteSpace($cveId)) {
@@ -819,6 +870,18 @@ function Get-AdvancedHuntingRecordType {
     $deviceId = [string]$Record.PSObject.Properties['DeviceId']?.Value
     if (-not [string]::IsNullOrWhiteSpace($deviceId) -and $null -ne $Record.PSObject.Properties['LoggedOnUsers']) {
         return 'DeviceUsers'
+    }
+
+    if (
+        -not [string]::IsNullOrWhiteSpace($deviceId) -and
+        -not [string]::IsNullOrWhiteSpace([string]$Record.PSObject.Properties['SoftwareName']?.Value) -and
+        (
+            -not [string]::IsNullOrWhiteSpace([string]$Record.PSObject.Properties['ProductCodeCpe']?.Value) -or
+            -not [string]::IsNullOrWhiteSpace([string]$Record.PSObject.Properties['EndOfSupportStatus']?.Value) -or
+            -not [string]::IsNullOrWhiteSpace([string]$Record.PSObject.Properties['EndOfSupportDate']?.Value)
+        )
+    ) {
+        return 'Inventory'
     }
 
     return $null
@@ -844,6 +907,16 @@ function Get-AdvancedHuntingStoreKey {
             $deviceId = [string]$Record.PSObject.Properties['DeviceId']?.Value
             if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
                 return ('DeviceUsers|' + $deviceId)
+            }
+        }
+        'Inventory' {
+            $inventoryKey = Get-AdvancedHuntingInventoryMatchKey `
+                -DeviceId ([string]$Record.PSObject.Properties['DeviceId']?.Value) `
+                -SoftwareVendor ([string]$Record.PSObject.Properties['SoftwareVendor']?.Value) `
+                -SoftwareName ([string]$Record.PSObject.Properties['SoftwareName']?.Value) `
+                -SoftwareVersion ([string]$Record.PSObject.Properties['SoftwareVersion']?.Value)
+            if (-not [string]::IsNullOrWhiteSpace($inventoryKey)) {
+                return ('Inventory|' + $inventoryKey)
             }
         }
     }

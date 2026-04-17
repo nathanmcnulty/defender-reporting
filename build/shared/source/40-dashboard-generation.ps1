@@ -418,7 +418,7 @@ function Open-CompactVulnColumnWriterSet {
     $null = New-Item -Path $DirectoryPath -ItemType Directory -Force
     $paths = [ordered]@{}
     $writers = @{}
-    foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp')) {
+    foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp', 'iv')) {
         $columnPath = Join-Path $DirectoryPath ($columnName + '.json')
         $streamWriter = [System.IO.StreamWriter]::new($columnPath, $false, [System.Text.UTF8Encoding]::new($false))
         $streamWriter.Write('[')
@@ -431,9 +431,9 @@ function Open-CompactVulnColumnWriterSet {
         }
     }
 
-    $columnOrder = @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp')
-    $columnStates = [object[]]::new(10)
-    for ($i = 0; $i -lt 10; $i++) {
+    $columnOrder = @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp', 'iv')
+    $columnStates = [object[]]::new(11)
+    for ($i = 0; $i -lt 11; $i++) {
         $columnStates[$i] = $writers[$columnOrder[$i]]
     }
 
@@ -456,7 +456,7 @@ function Write-CompactVulnRecordColumnSet {
     }
 
     $states = $WriterSet.ColumnStates
-    for ($i = 0; $i -lt 10; $i++) {
+    for ($i = 0; $i -lt 11; $i++) {
         $col = $states[$i]
         $val = $Record[$i]
         $buf = $col.Buffer
@@ -795,8 +795,8 @@ function ConvertTo-VulnColumnFileSet {
                 throw "Expected compact vulnerability row array in '$VulnsPath', found '$($jsonReader.TokenType)'."
             }
 
-            $rowValues = New-Object object[] 10
-            for ($fieldIndex = 0; $fieldIndex -lt 10; $fieldIndex++) {
+            $rowValues = New-Object object[] 11
+            for ($fieldIndex = 0; $fieldIndex -lt 11; $fieldIndex++) {
                 if (-not $jsonReader.Read()) {
                     throw "Unexpected end of vulnerability payload '$VulnsPath'."
                 }
@@ -818,6 +818,7 @@ function ConvertTo-VulnColumnFileSet {
             Write-CompactColumnFileValue -WriterState $ColumnWriters.u -Value $rowValues[7]
             Write-CompactColumnFileValue -WriterState $ColumnWriters.dp -Value $rowValues[8]
             Write-CompactColumnFileValue -WriterState $ColumnWriters.rp -Value $rowValues[9]
+            Write-CompactColumnFileValue -WriterState $ColumnWriters.iv -Value $rowValues[10]
         }
     }
     finally {
@@ -909,6 +910,7 @@ function Write-CombinedPayloadLookupsValue {
             'affSoftware',
             'batchTitles',
             'devices',
+            'inventory',
             'software',
             'cves',
             'noTagsIdx'
@@ -1231,7 +1233,7 @@ function Write-CombinedPayloadGzip {
         if ($VulnColumnPaths) {
             $activeColumnPaths = $VulnColumnPaths
             $jsonWriter.WriteStartObject()
-            foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp')) {
+            foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp', 'iv')) {
                 $jsonWriter.WritePropertyName($columnName)
                 $columnReader = [System.IO.StreamReader]::new([string]$activeColumnPaths[$columnName], [System.Text.Encoding]::UTF8)
                 $columnJsonReader = [Newtonsoft.Json.JsonTextReader]::new($columnReader)
@@ -1655,6 +1657,36 @@ function Read-AdvancedHuntingData {
         return ($parts -join "`n")
     }
 
+    function ConvertTo-AdvancedHuntingNullableBoolean {
+        [CmdletBinding()]
+        [OutputType([Nullable[bool]])]
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $Value
+        )
+
+        if ($null -eq $Value) {
+            return $null
+        }
+
+        if ($Value -is [bool]) {
+            return $Value
+        }
+
+        $text = [string]$Value
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return $null
+        }
+
+        switch -Regex ($text.Trim().ToLowerInvariant()) {
+            '^(true|1|yes)$' { return $true }
+            '^(false|0|no)$' { return $false }
+        }
+
+        return $null
+    }
+
     return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
         Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
 
@@ -1701,6 +1733,7 @@ function Read-AdvancedHuntingData {
                             VulnerabilityDescription = ConvertTo-AdvancedHuntingDescriptionValue -Value $rawDescription
                             EpssScore = $record.PSObject.Properties['EpssScore']?.Value
                             AffectedSoftware = if ($affectedSoftware.Count -gt 0) { @($affectedSoftware) } else { $null }
+                            IsExploitAvailable = ConvertTo-AdvancedHuntingNullableBoolean -Value $record.PSObject.Properties['IsExploitAvailable']?.Value
                         }
                     }
                 }
@@ -1719,6 +1752,94 @@ function Read-AdvancedHuntingData {
 
         Write-Information "  Loaded enrichment data for $($ahData.Count) unique CVEs" -InformationAction Continue
         return $ahData
+    }
+}
+
+function Read-AdvancedHuntingInventoryData {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
+
+        Write-Information "Reading Advanced Hunting software inventory data from $Path..." -InformationAction Continue
+
+        $inventoryData = @{}
+        $parseErrors = 0
+        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
+        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
+
+        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
+            $currentPath = $legacyCurrentPath
+        }
+
+        if (Test-Path -Path $currentPath) {
+            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
+            $sourceFiles = @(Get-Item -Path $currentPath)
+        }
+        else {
+            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
+                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
+                Sort-Object Name -Descending)
+
+            if ($sourceFiles.Count -eq 0) {
+                Write-Information '  No Advanced Hunting software inventory data files found.' -InformationAction Continue
+                return @{}
+            }
+
+            Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
+        }
+
+        foreach ($file in $sourceFiles) {
+            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
+            foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
+                try {
+                    if ((Get-AdvancedHuntingRecordType -Record $record) -ne 'Inventory') {
+                        continue
+                    }
+
+                    $inventoryKey = Get-AdvancedHuntingInventoryMatchKey `
+                        -DeviceId ([string]$record.PSObject.Properties['DeviceId']?.Value) `
+                        -SoftwareVendor ([string]$record.PSObject.Properties['SoftwareVendor']?.Value) `
+                        -SoftwareName ([string]$record.PSObject.Properties['SoftwareName']?.Value) `
+                        -SoftwareVersion ([string]$record.PSObject.Properties['SoftwareVersion']?.Value)
+                    if ([string]::IsNullOrWhiteSpace($inventoryKey) -or $inventoryData.ContainsKey($inventoryKey)) {
+                        continue
+                    }
+
+                    $productCodeCpe = [string]$record.PSObject.Properties['ProductCodeCpe']?.Value
+                    $endOfSupportStatus = [string]$record.PSObject.Properties['EndOfSupportStatus']?.Value
+                    $endOfSupportDate = Convert-ToYmdDate -DateValue $record.PSObject.Properties['EndOfSupportDate']?.Value
+
+                    if ([string]::IsNullOrWhiteSpace($productCodeCpe) -and [string]::IsNullOrWhiteSpace($endOfSupportStatus) -and [string]::IsNullOrWhiteSpace($endOfSupportDate)) {
+                        continue
+                    }
+
+                    $inventoryData[$inventoryKey] = @{
+                        ProductCodeCpe = if ([string]::IsNullOrWhiteSpace($productCodeCpe)) { $null } else { $productCodeCpe }
+                        EndOfSupportStatus = if ([string]::IsNullOrWhiteSpace($endOfSupportStatus)) { $null } else { $endOfSupportStatus }
+                        EndOfSupportDate = $endOfSupportDate
+                    }
+                }
+                catch {
+                    $parseErrors++
+                    if ($parseErrors -le 5) {
+                        Write-Warning "Failed to process Advanced Hunting inventory record in $($file.Name): $_"
+                    }
+                }
+            }
+        }
+
+        if ($parseErrors -gt 0) {
+            Write-Warning "Total parse errors: $parseErrors"
+        }
+
+        Write-Information "  Loaded software inventory data for $($inventoryData.Count) device/software tuple(s)" -InformationAction Continue
+        return $inventoryData
     }
 }
 
@@ -1910,6 +2031,120 @@ function Read-AdvancedHuntingDeviceUserMap {
 
         Write-Information "  Loaded logged-on user data for $($deviceUsers.Count) device(s)" -InformationAction Continue
         return $deviceUsers
+    }
+}
+
+function Read-NvdCveData {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    function ConvertTo-NvdStringArray {
+        [CmdletBinding()]
+        [OutputType([string[]])]
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $Value
+        )
+
+        if ($null -eq $Value) {
+            return @()
+        }
+
+        $values = [System.Collections.Generic.List[string]]::new()
+        if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+            foreach ($item in $Value) {
+                if ($null -eq $item) { continue }
+                $text = [string]$item
+                if (-not [string]::IsNullOrWhiteSpace($text)) {
+                    $values.Add($text)
+                }
+            }
+        }
+        else {
+            $text = [string]$Value
+            if (-not [string]::IsNullOrWhiteSpace($text)) {
+                $values.Add($text)
+            }
+        }
+
+        return [string[]]$values.ToArray()
+    }
+
+    function ConvertTo-NvdDescriptionValue {
+        [CmdletBinding()]
+        [OutputType([string])]
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $Value
+        )
+
+        $parts = @(ConvertTo-NvdStringArray -Value $Value)
+        if ($parts.Count -eq 0) {
+            return $null
+        }
+
+        return ($parts -join "`n")
+    }
+
+    return Invoke-WithStoreLock -BasePath $Path -StoreName 'nvdcve' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $Path -StoreName 'nvdcve'
+
+        $currentPath = Get-NvdCveCurrentPath -BasePath $Path
+        if (-not (Test-Path -LiteralPath $currentPath -PathType Leaf)) {
+            Write-Information "No NVD CVE cache found at $currentPath. NVD enrichment will be skipped." -InformationAction Continue
+            return @{}
+        }
+
+        Write-Information "Reading NVD CVE data from $currentPath..." -InformationAction Continue
+
+        $rawJson = Read-GzipTextFile -Path $currentPath
+        if ([string]::IsNullOrWhiteSpace($rawJson)) {
+            return @{}
+        }
+
+        try {
+            $document = $rawJson | ConvertFrom-Json -Depth 100
+        }
+        catch {
+            Write-Warning "Failed to parse NVD CVE cache '$currentPath': $_"
+            return @{}
+        }
+
+        $records = if ($document.PSObject.Properties['records']) { @($document.records) } else { @($document) }
+        $nvdData = @{}
+        foreach ($record in $records) {
+            if ($null -eq $record) {
+                continue
+            }
+
+            $cveId = [string]$record.PSObject.Properties['CveId']?.Value
+            if ([string]::IsNullOrWhiteSpace($cveId)) {
+                continue
+            }
+
+            $weaknesses = @(ConvertTo-NvdStringArray -Value $record.PSObject.Properties['Weaknesses']?.Value)
+            $nvdData[$cveId] = @{
+                PublishedDate = Convert-ToYmdDate -DateValue $record.PSObject.Properties['PublishedDate']?.Value
+                LastModifiedDate = Convert-ToYmdDate -DateValue $record.PSObject.Properties['LastModifiedDate']?.Value
+                VulnerabilityDescription = ConvertTo-NvdDescriptionValue -Value $record.PSObject.Properties['VulnerabilityDescription']?.Value
+                BaseScore = $record.PSObject.Properties['BaseScore']?.Value
+                BaseSeverity = [string]$record.PSObject.Properties['BaseSeverity']?.Value
+                Vector = [string]$record.PSObject.Properties['Vector']?.Value
+                CisaExploitAdd = Convert-ToYmdDate -DateValue $record.PSObject.Properties['CisaExploitAdd']?.Value
+                CisaActionDue = Convert-ToYmdDate -DateValue $record.PSObject.Properties['CisaActionDue']?.Value
+                CisaRequiredAction = [string]$record.PSObject.Properties['CisaRequiredAction']?.Value
+                Weaknesses = if ($weaknesses.Count -gt 0) { @($weaknesses) } else { $null }
+            }
+        }
+
+        Write-Information "  Loaded NVD enrichment data for $($nvdData.Count) CVE(s)" -InformationAction Continue
+        return $nvdData
     }
 }
 
@@ -2421,6 +2656,22 @@ function Get-AdvancedHuntingFingerprintSourceFileSet {
     return [System.IO.FileInfo[]]$files.ToArray()
 }
 
+function Get-NvdCveFingerprintSourceFileSet {
+    [CmdletBinding()]
+    [OutputType([System.IO.FileInfo[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $currentPath = Get-NvdCveCurrentPath -BasePath $BasePath
+    if (-not (Test-Path -LiteralPath $currentPath -PathType Leaf)) {
+        return @()
+    }
+
+    return [System.IO.FileInfo[]]@((Get-Item -LiteralPath $currentPath))
+}
+
 function Get-VulnerabilityPayloadFingerprintSourceFileSet {
     [CmdletBinding()]
     [OutputType([System.IO.FileInfo[]])]
@@ -2502,13 +2753,16 @@ function Get-DashboardPayloadCacheFingerprint {
     foreach ($file in @(Get-AdvancedHuntingFingerprintSourceFileSet -BasePath $BasePath)) {
         if ($null -ne $file) { $files.Add($file) }
     }
+    foreach ($file in @(Get-NvdCveFingerprintSourceFileSet -BasePath $BasePath)) {
+        if ($null -ne $file) { $files.Add($file) }
+    }
 
     if ($files.Count -eq 0) {
         return $null
     }
 
     $builder = [System.Text.StringBuilder]::new()
-    [void]$builder.AppendLine('dashboard-payload-cache-v4')
+    [void]$builder.AppendLine('dashboard-payload-cache-v5')
     [void]$builder.AppendLine(('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true)))
     foreach ($file in @($files | Sort-Object FullName -Unique)) {
         $hash = Get-FileSha256Hex -Path $file.FullName
@@ -2557,6 +2811,204 @@ function Get-NormalizedPayloadCacheManifestPath {
 
     $cacheDirectory = Get-DashboardCacheDirectory -BasePath $BasePath -ChildPath 'payloads' -Create:$Create
     return Join-Path $cacheDirectory ("payload-{0}.json" -f $Fingerprint)
+}
+
+function Get-NormalizedPayloadSiblingManifestPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PayloadPath
+    )
+
+    $resolvedPayloadPath = [System.IO.Path]::GetFullPath($PayloadPath)
+    if ($resolvedPayloadPath.EndsWith('.json.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+        return ($resolvedPayloadPath.Substring(0, $resolvedPayloadPath.Length - '.gz'.Length))
+    }
+
+    return ($resolvedPayloadPath + '.json')
+}
+
+function Read-NormalizedPayloadManifest {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -Depth 30)
+}
+
+function Write-NormalizedPayloadManifest {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        $Manifest
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $directoryPath = Split-Path -Path $resolvedPath -Parent
+    if (-not [string]::IsNullOrWhiteSpace($directoryPath) -and -not (Test-Path -LiteralPath $directoryPath -PathType Container)) {
+        [void](New-Item -Path $directoryPath -ItemType Directory -Force)
+    }
+
+    $tempPath = Join-Path $directoryPath ('.tmp-' + [System.Guid]::NewGuid().ToString('N') + '.json')
+    [System.IO.File]::WriteAllText($tempPath, ($Manifest | ConvertTo-Json -Compress -Depth 30), [System.Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $tempPath -Destination $resolvedPath -Force
+    return $resolvedPath
+}
+
+function Get-DashboardSemanticValidationLogicVersion {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    return 'streaming-large-dataset-v2'
+}
+
+function Set-NormalizedPayloadSemanticValidationAttestation {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only rewrites a local cache manifest during scripted validation flow.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ManifestPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedFingerprint,
+
+        [Parameter(Mandatory = $true)]
+        $Attestation
+    )
+
+    $manifest = Read-NormalizedPayloadManifest -Path $ManifestPath
+    if ($null -eq $manifest) {
+        return $null
+    }
+
+    if ([string]$manifest.Fingerprint -ne $ExpectedFingerprint) {
+        return $null
+    }
+
+    $manifestRecord = [ordered]@{}
+    foreach ($property in $manifest.PSObject.Properties) {
+        $manifestRecord[$property.Name] = $property.Value
+    }
+
+    $manifestRecord.SemanticValidationAttestation = $Attestation
+    Write-NormalizedPayloadManifest -Path $ManifestPath -Manifest $manifestRecord | Out-Null
+    return ([pscustomobject]$manifestRecord)
+}
+
+function Get-DashboardValidationSidecarPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HtmlPath
+    )
+
+    return ([System.IO.Path]::GetFullPath($HtmlPath) + '.validation.json')
+}
+
+function Read-DashboardValidationSidecar {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HtmlPath
+    )
+
+    $sidecarPath = Get-DashboardValidationSidecarPath -HtmlPath $HtmlPath
+    if (-not (Test-Path -LiteralPath $sidecarPath -PathType Leaf)) {
+        return $null
+    }
+
+    return (Get-Content -LiteralPath $sidecarPath -Raw | ConvertFrom-Json -Depth 30)
+}
+
+function Write-DashboardValidationSidecar {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HtmlPath,
+
+        [Parameter(Mandatory = $true)]
+        $PayloadManifest,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DashboardPayloadSha256,
+
+        [Parameter(Mandatory = $true)]
+        [int]$DashboardPayloadRowCount
+    )
+
+    $resolvedHtmlPath = [System.IO.Path]::GetFullPath($HtmlPath)
+    $sidecarPath = Get-DashboardValidationSidecarPath -HtmlPath $resolvedHtmlPath
+    $payloadSha256 = if ($PayloadManifest.PSObject.Properties['PayloadSha256'] -and -not [string]::IsNullOrWhiteSpace([string]$PayloadManifest.PayloadSha256)) {
+        [string]$PayloadManifest.PayloadSha256
+    }
+    else {
+        $null
+    }
+
+    $sidecar = [ordered]@{
+        Version = 'dashboard-validation-sidecar-v1'
+        HtmlPath = $resolvedHtmlPath
+        GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
+        SourceFingerprint = [string]$PayloadManifest.Fingerprint
+        PayloadSha256 = $payloadSha256
+        PayloadRowCount = [int]$PayloadManifest.VulnCount
+        DeviceCount = [int]$PayloadManifest.DeviceCount
+        CveCount = [int]$PayloadManifest.CveCount
+        Quality = $PayloadManifest.Quality
+        SkipObservedWindowMerge = [bool]($PayloadManifest.PSObject.Properties['SkipObservedWindowMerge'] -and $PayloadManifest.SkipObservedWindowMerge)
+        DashboardPayloadSha256 = $DashboardPayloadSha256
+        DashboardPayloadRowCount = $DashboardPayloadRowCount
+        DashboardPayloadMatchesNormalizedPayload = (($DashboardPayloadSha256 -eq $payloadSha256) -and ($DashboardPayloadRowCount -eq [int]$PayloadManifest.VulnCount))
+        SemanticValidationAttestation = if ($PayloadManifest.PSObject.Properties['SemanticValidationAttestation']) { $PayloadManifest.SemanticValidationAttestation } else { $null }
+    }
+
+    Write-NormalizedPayloadManifest -Path $sidecarPath -Manifest $sidecar | Out-Null
+    return $sidecarPath
+}
+
+function Set-DashboardValidationSidecarSemanticAttestation {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only rewrites a local validation sidecar during scripted validation flow.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HtmlPath,
+
+        [Parameter(Mandatory = $true)]
+        $Attestation
+    )
+
+    $sidecarPath = Get-DashboardValidationSidecarPath -HtmlPath $HtmlPath
+    $sidecar = Read-DashboardValidationSidecar -HtmlPath $HtmlPath
+    if ($null -eq $sidecar) {
+        return $null
+    }
+
+    $sidecarRecord = [ordered]@{}
+    foreach ($property in $sidecar.PSObject.Properties) {
+        $sidecarRecord[$property.Name] = $property.Value
+    }
+
+    $sidecarRecord.SemanticValidationAttestation = $Attestation
+    Write-NormalizedPayloadManifest -Path $sidecarPath -Manifest $sidecarRecord | Out-Null
+    return ([pscustomobject]$sidecarRecord)
 }
 
 function Clear-StaleNormalizedPayloadCache {
@@ -2660,22 +3112,24 @@ function Publish-NormalizedPayloadCache {
     $cachePayloadPath = Get-NormalizedPayloadCachePath -BasePath $BasePath -Fingerprint $fingerprint -Create
     $cacheManifestPath = Get-NormalizedPayloadCacheManifestPath -BasePath $BasePath -Fingerprint $fingerprint -Create
     $tempPayloadPath = Join-Path (Split-Path -Parent $cachePayloadPath) ('.tmp-' + [System.Guid]::NewGuid().ToString('N') + '.json.gz')
-    $tempManifestPath = Join-Path (Split-Path -Parent $cacheManifestPath) ('.tmp-' + [System.Guid]::NewGuid().ToString('N') + '.json')
+    $payloadSha256 = Get-FileSha256Hex -Path $PayloadPath
 
     Copy-Item -LiteralPath $PayloadPath -Destination $tempPayloadPath -Force
     $manifest = [ordered]@{
-        Version = 'dashboard-payload-cache-v4'
+        Version = 'dashboard-payload-cache-v6'
         Fingerprint = $fingerprint
         GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
+        PayloadSha256 = $payloadSha256
         VulnCount = $VulnCount
         DeviceCount = $DeviceCount
         CveCount = $CveCount
         Quality = $Quality
+        SkipObservedWindowMerge = ($SkipObservedWindowMerge -eq $true)
+        SemanticValidationAttestation = $null
     }
-    [System.IO.File]::WriteAllText($tempManifestPath, ($manifest | ConvertTo-Json -Compress -Depth 20), [System.Text.UTF8Encoding]::new($false))
+    Write-NormalizedPayloadManifest -Path $cacheManifestPath -Manifest $manifest | Out-Null
 
     Move-Item -LiteralPath $tempPayloadPath -Destination $cachePayloadPath -Force
-    Move-Item -LiteralPath $tempManifestPath -Destination $cacheManifestPath -Force
     Clear-StaleNormalizedPayloadCache -BasePath $BasePath -KeepPaths @($cachePayloadPath, $cacheManifestPath)
 
     return [PSCustomObject]@{
@@ -2759,6 +3213,7 @@ function Get-NormalizationContext {
             affSoftware = [System.Collections.Generic.List[string]]::new()
             batchTitles = [System.Collections.Generic.List[string]]::new()
             devices = [System.Collections.Generic.List[PSObject]]::new()
+            inventory = [System.Collections.Generic.List[PSObject]]::new()
             software = [System.Collections.Generic.List[PSObject]]::new()
             cves = [System.Collections.Generic.List[PSObject]]::new()
         }
@@ -2778,11 +3233,14 @@ function Get-NormalizationContext {
             regPaths = Get-CaseSensitiveIndexMap
             affSoftware = Get-CaseSensitiveIndexMap
             batchTitles = Get-CaseSensitiveIndexMap
+            inventory = Get-CaseSensitiveIndexMap
         }
         DateValueCache = @{}
         Machines = @{}
         AdvancedHuntingData = @{}
         AdvancedHuntingDeviceUsers = @{}
+        AdvancedHuntingInventoryData = @{}
+        NvdCveData = @{}
         HasNoTags = $false
     }
 }
@@ -3134,20 +3592,35 @@ function Add-NormalizedCve {
 
     if (-not $cveIndex.ContainsKey($cveKey)) {
         $ahData = $Context.AdvancedHuntingData[[string]$CveId]
+        $nvdData = $Context.NvdCveData[[string]$CveId]
         $publishedDate = $null
         $vulnDescription = $null
         $epssScore = $null
+        $isExploitAvailable = $null
         $affSoftwareIndices = $null
         if ($ahData) {
             $publishedDate = $ahData.PublishedDate
             $vulnDescription = $ahData.VulnerabilityDescription
             $epssScore = $ahData.EpssScore
+            if ($ahData.ContainsKey('IsExploitAvailable')) {
+                $isExploitAvailable = $ahData.IsExploitAvailable
+            }
             if ($ahData.AffectedSoftware -and @($ahData.AffectedSoftware).Count -gt 0) {
                 $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
                 foreach ($sw in @($ahData.AffectedSoftware)) {
                     $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
                     if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
                 }
+            }
+        }
+
+        if ($nvdData) {
+            if ([string]::IsNullOrWhiteSpace([string]$publishedDate)) {
+                $publishedDate = $nvdData.PublishedDate
+            }
+
+            if ([string]::IsNullOrWhiteSpace([string]$vulnDescription)) {
+                $vulnDescription = $nvdData.VulnerabilityDescription
             }
         }
 
@@ -3165,6 +3638,15 @@ function Add-NormalizedCve {
             desc = $vulnDescription
             ep = $epssScore
             as = $affSoftwareIndices
+            ea = $isExploitAvailable
+            nlm = if ($nvdData) { $nvdData.LastModifiedDate } else { $null }
+            nbs = if ($nvdData) { $nvdData.BaseScore } else { $null }
+            nsv = if ($nvdData) { $nvdData.BaseSeverity } else { $null }
+            nvec = if ($nvdData) { $nvdData.Vector } else { $null }
+            nkev = if ($nvdData) { $nvdData.CisaExploitAdd } else { $null }
+            ndu = if ($nvdData) { $nvdData.CisaActionDue } else { $null }
+            nact = if ($nvdData) { $nvdData.CisaRequiredAction } else { $null }
+            nw = if ($nvdData -and $nvdData.Weaknesses) { @($nvdData.Weaknesses) } else { $null }
         })
     }
 
@@ -3204,6 +3686,71 @@ function Resolve-NormalizedLookupIndexList {
     }
 
     return ,([int[]]$indices.ToArray())
+}
+
+function Resolve-NormalizedInventoryLookup {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$DeviceId,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$SoftwareVendor,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$SoftwareName,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$SoftwareVersion,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Context
+    )
+
+    $inventoryKey = Get-AdvancedHuntingInventoryMatchKey `
+        -DeviceId ([string]$DeviceId) `
+        -SoftwareVendor ([string]($SoftwareVendor ?? '')) `
+        -SoftwareName ([string]($SoftwareName ?? '')) `
+        -SoftwareVersion ([string]($SoftwareVersion ?? ''))
+    if ([string]::IsNullOrWhiteSpace($inventoryKey)) {
+        return -1
+    }
+
+    $inventoryRecord = $Context.AdvancedHuntingInventoryData[$inventoryKey]
+    if ($null -eq $inventoryRecord) {
+        return -1
+    }
+
+    $productCodeCpe = [string]$inventoryRecord.ProductCodeCpe
+    $endOfSupportStatus = [string]$inventoryRecord.EndOfSupportStatus
+    $endOfSupportDate = [string]$inventoryRecord.EndOfSupportDate
+    if ([string]::IsNullOrWhiteSpace($productCodeCpe) -and [string]::IsNullOrWhiteSpace($endOfSupportStatus) -and [string]::IsNullOrWhiteSpace($endOfSupportDate)) {
+        return -1
+    }
+
+    $lookups = $Context.Lookups
+    $inventoryIndex = $Context.Indexes.inventory
+    $lookupKey = @(
+        [string]($productCodeCpe ?? '')
+        [string]($endOfSupportStatus ?? '')
+        [string]($endOfSupportDate ?? '')
+    ) -join '|'
+
+    if (-not $inventoryIndex.ContainsKey($lookupKey)) {
+        $inventoryIndex[$lookupKey] = $lookups.inventory.Count
+        $lookups.inventory.Add([PSCustomObject]@{
+            cpe = if ([string]::IsNullOrWhiteSpace($productCodeCpe)) { $null } else { $productCodeCpe }
+            eos = if ([string]::IsNullOrWhiteSpace($endOfSupportStatus)) { $null } else { $endOfSupportStatus }
+            eod = if ([string]::IsNullOrWhiteSpace($endOfSupportDate)) { $null } else { $endOfSupportDate }
+        })
+    }
+
+    return [int]$inventoryIndex[$lookupKey]
 }
 
 function Resolve-NormalizedSeenWindowIndexSet {
@@ -3452,6 +3999,32 @@ function Get-NormalizedRecordLookup {
         [pscustomobject]$Context
     )
 
+    $contentLookup = Resolve-NormalizedContentLookup `
+        -SoftwareVendor ($SoftwareVendor ?? '') `
+        -SoftwareName ($SoftwareName ?? '') `
+        -RecommendationReference ($RecommendationReference ?? '') `
+        -CveId $CveId `
+        -CvssScore $CvssScore `
+        -SeverityLevel $SeverityLevel `
+        -ExploitabilityLevel $ExploitabilityLevel `
+        -CveUrl $CveUrl `
+        -CveBatchTitle $CveBatchTitle `
+        -RecommendedSecurityUpdate $RecommendedSecurityUpdate `
+        -RecommendedSecurityUpdateId $RecommendedSecurityUpdateId `
+        -RecommendedSecurityUpdateUrl $RecommendedSecurityUpdateUrl `
+        -SoftwareVersion $SoftwareVersion `
+        -DiskPaths @($DiskPaths) `
+        -RegistryPaths @($RegistryPaths) `
+        -SecurityUpdateAvailable $SecurityUpdateAvailable `
+        -Context $Context
+
+    Add-Member -InputObject $contentLookup -NotePropertyName inv -NotePropertyValue (Resolve-NormalizedInventoryLookup `
+        -DeviceId $DeviceId `
+        -SoftwareVendor $SoftwareVendor `
+        -SoftwareName $SoftwareName `
+        -SoftwareVersion $SoftwareVersion `
+        -Context $Context) -Force
+
     return [PSCustomObject]@{
         DeviceIndex = Add-NormalizedDevice `
             -DeviceId ([string]$DeviceId) `
@@ -3462,24 +4035,7 @@ function Get-NormalizedRecordLookup {
             -MachineTags $MachineTags `
             -Context $Context
 
-        ContentLookup = Resolve-NormalizedContentLookup `
-            -SoftwareVendor ($SoftwareVendor ?? '') `
-            -SoftwareName ($SoftwareName ?? '') `
-            -RecommendationReference ($RecommendationReference ?? '') `
-            -CveId $CveId `
-            -CvssScore $CvssScore `
-            -SeverityLevel $SeverityLevel `
-            -ExploitabilityLevel $ExploitabilityLevel `
-            -CveUrl $CveUrl `
-            -CveBatchTitle $CveBatchTitle `
-            -RecommendedSecurityUpdate $RecommendedSecurityUpdate `
-            -RecommendedSecurityUpdateId $RecommendedSecurityUpdateId `
-            -RecommendedSecurityUpdateUrl $RecommendedSecurityUpdateUrl `
-            -SoftwareVersion $SoftwareVersion `
-            -DiskPaths @($DiskPaths) `
-            -RegistryPaths @($RegistryPaths) `
-            -SecurityUpdateAvailable $SecurityUpdateAvailable `
-            -Context $Context
+        ContentLookup = $contentLookup
     }
 }
 
@@ -3723,6 +4279,7 @@ function Set-NormalizedCompactRecordValues {
     $Record[7] = $ContentLookup.upd
     $Record[8] = $ContentLookup.dp
     $Record[9] = $ContentLookup.rp
+    $Record[10] = $ContentLookup.inv
     return $Record
 }
 
@@ -3782,6 +4339,12 @@ function Invoke-ContentStoreNormalization {
         [hashtable]$AdvancedHuntingDeviceUsers = @{},
 
         [Parameter(Mandatory = $false)]
+        [hashtable]$AdvancedHuntingInventoryData = @{},
+
+        [Parameter(Mandatory = $false)]
+        [hashtable]$NvdCveData = @{},
+
+        [Parameter(Mandatory = $false)]
         [string[]]$MergedRefPaths,
 
         [Parameter(Mandatory = $false)]
@@ -3795,6 +4358,8 @@ function Invoke-ContentStoreNormalization {
     $Context.Machines = $Machines
     $Context.AdvancedHuntingData = $AdvancedHuntingData
     $Context.AdvancedHuntingDeviceUsers = $AdvancedHuntingDeviceUsers
+    $Context.AdvancedHuntingInventoryData = $AdvancedHuntingInventoryData
+    $Context.NvdCveData = $NvdCveData
     $Context.HasNoTags = $false
 
     $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $DataPath
@@ -3854,7 +4419,7 @@ function Invoke-ContentStoreNormalization {
 
     try {
         $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
-        $compactRecord = [object[]]::new(10)
+        $compactRecord = [object[]]::new(11)
         $columnStates = if ($writerState.Mode -eq 'column') { $writerState.ColumnWriterSet.ColumnStates } else { $null }
         $jsonWriter = if ($writerState.Mode -eq 'column') { $null } else { $writerState.JsonWriter }
 
@@ -3972,6 +4537,8 @@ function Invoke-ContentStoreNormalization {
                             if (-not $lastSeen) { $lastSeen = '' }
 
                             $contentLookup = $contentLookupCache[$contentTemplateIndexValue]
+                            $contentTemplate = $contentTemplates[$contentTemplateIndexValue]
+                            $deviceProfile = $deviceProfiles[$deviceProfileIndexValue]
                             $compactRecord[0] = $deviceLookupIndices[$deviceProfileIndexValue]
                             $compactRecord[1] = $contentLookup.cve
                             $compactRecord[2] = $contentLookup.sw
@@ -3982,9 +4549,15 @@ function Invoke-ContentStoreNormalization {
                             $compactRecord[7] = $contentLookup.upd
                             $compactRecord[8] = $contentLookup.dp
                             $compactRecord[9] = $contentLookup.rp
+                            $compactRecord[10] = Resolve-NormalizedInventoryLookup `
+                                -DeviceId ([string]$deviceProfile.id) `
+                                -SoftwareVendor ([string]$contentTemplate.sv) `
+                                -SoftwareName ([string]$contentTemplate.sn) `
+                                -SoftwareVersion ([string]$contentTemplate.ver) `
+                                -Context $Context
 
                             if ($columnStates) {
-                                for ($columnIndex = 0; $columnIndex -lt 10; $columnIndex++) {
+                                for ($columnIndex = 0; $columnIndex -lt 11; $columnIndex++) {
                                     $columnState = $columnStates[$columnIndex]
                                     $columnValue = $compactRecord[$columnIndex]
                                     $buffer = $columnState.Buffer
@@ -4110,6 +4683,8 @@ function Invoke-ContentStoreNormalization {
                                     if (-not $lastSeen) { $lastSeen = '' }
 
                                     $contentLookup = $contentLookupCache[$ctv]
+                                    $contentTemplate = $contentTemplates[$ctv]
+                                    $deviceProfile = $deviceProfiles[$dpv]
                                     $compactRecord[0] = $deviceLookupIndices[$dpv]
                                     $compactRecord[1] = $contentLookup.cve
                                     $compactRecord[2] = $contentLookup.sw
@@ -4120,9 +4695,15 @@ function Invoke-ContentStoreNormalization {
                                     $compactRecord[7] = $contentLookup.upd
                                     $compactRecord[8] = $contentLookup.dp
                                     $compactRecord[9] = $contentLookup.rp
+                                    $compactRecord[10] = Resolve-NormalizedInventoryLookup `
+                                        -DeviceId ([string]$deviceProfile.id) `
+                                        -SoftwareVendor ([string]$contentTemplate.sv) `
+                                        -SoftwareName ([string]$contentTemplate.sn) `
+                                        -SoftwareVersion ([string]$contentTemplate.ver) `
+                                        -Context $Context
 
                                     if ($columnStates) {
-                                        for ($columnIndex = 0; $columnIndex -lt 10; $columnIndex++) {
+                                        for ($columnIndex = 0; $columnIndex -lt 11; $columnIndex++) {
                                             $columnState = $columnStates[$columnIndex]
                                             $columnValue = $compactRecord[$columnIndex]
                                             $buffer = $columnState.Buffer
@@ -4239,19 +4820,27 @@ function Invoke-RawStoreNormalization {
         [hashtable]$AdvancedHuntingDeviceUsers = @{},
 
         [Parameter(Mandatory = $false)]
+        [hashtable]$AdvancedHuntingInventoryData = @{},
+
+        [Parameter(Mandatory = $false)]
+        [hashtable]$NvdCveData = @{},
+
+        [Parameter(Mandatory = $false)]
         [string]$PayloadOutputPath
     )
 
     $Context.Machines = $Machines
     $Context.AdvancedHuntingData = $AdvancedHuntingData
     $Context.AdvancedHuntingDeviceUsers = $AdvancedHuntingDeviceUsers
+    $Context.AdvancedHuntingInventoryData = $AdvancedHuntingInventoryData
+    $Context.NvdCveData = $NvdCveData
     $Context.HasNoTags = $false
 
     $processedCountRef = [ref]0
     $firstLastSwappedCountRef = [ref]0
     $writerState = $null
     $writerCloseResult = $null
-    $compactRecord = [object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    $compactRecord = [object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1)
 
     try {
         $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
@@ -5044,6 +5633,12 @@ function ConvertTo-NormalizedData {
         [hashtable]$AdvancedHuntingDeviceUsers = @{},
 
         [Parameter(Mandatory = $false)]
+        [hashtable]$AdvancedHuntingInventoryData = @{},
+
+        [Parameter(Mandatory = $false)]
+        [hashtable]$NvdCveData = @{},
+
+        [Parameter(Mandatory = $false)]
         [switch]$SkipObservedWindowMerge,
 
         [Parameter(Mandatory = $false)]
@@ -5051,11 +5646,13 @@ function ConvertTo-NormalizedData {
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
-    Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s)" -f $Machines.Count, $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count) -InformationAction Continue
+    Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s), {3} inventory tuple(s), {4} NVD CVE(s)" -f $Machines.Count, $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count, $AdvancedHuntingInventoryData.Count, $NvdCveData.Count) -InformationAction Continue
     $context = Get-NormalizationContext
     $context.Machines = $Machines
     $context.AdvancedHuntingData = $AdvancedHuntingData
     $context.AdvancedHuntingDeviceUsers = $AdvancedHuntingDeviceUsers
+    $context.AdvancedHuntingInventoryData = $AdvancedHuntingInventoryData
+    $context.NvdCveData = $NvdCveData
     $lookups = $context.Lookups
     $tagIndex = $context.Indexes.tags
 
@@ -5093,7 +5690,7 @@ function ConvertTo-NormalizedData {
         else {
             Write-Information '  Content-store detected; using fast path (no merge).' -InformationAction Continue
         }
-        $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -MergedRefPaths $mergedRefPaths -PayloadOutputPath $PayloadOutputPath
+        $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -MergedRefPaths $mergedRefPaths -PayloadOutputPath $PayloadOutputPath
         $processedCount = [int]$rawNormalizationResult.ProcessedCount
         $firstLastSwappedCount = [int]$rawNormalizationResult.FirstLastSwappedCount
         $hasNoTags = ($rawNormalizationResult.HasNoTags -eq $true)
@@ -5106,7 +5703,7 @@ function ConvertTo-NormalizedData {
     }
     elseif ($effectiveSkipObservedWindowMerge -and $storeExists) {
         Write-Information '  Raw store detected; using raw store normalization fast path.' -InformationAction Continue
-        $rawNormalizationResult = Invoke-RawStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -PayloadOutputPath $PayloadOutputPath
+        $rawNormalizationResult = Invoke-RawStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -PayloadOutputPath $PayloadOutputPath
         $processedCount = [int]$rawNormalizationResult.ProcessedCount
         $firstLastSwappedCount = [int]$rawNormalizationResult.FirstLastSwappedCount
         $hasNoTags = ($rawNormalizationResult.HasNoTags -eq $true)
@@ -5120,7 +5717,7 @@ function ConvertTo-NormalizedData {
     else {
         try {
             $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
-            $compactRecord = [object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            $compactRecord = [object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1)
 
             # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
             # collecting all source rows into memory at once.
@@ -5204,6 +5801,7 @@ function ConvertTo-NormalizedData {
             affSoftware = $lookups.affSoftware
             batchTitles = $lookups.batchTitles
             devices = $lookups.devices
+            inventory = $lookups.inventory
             software = $lookups.software
             cves = $lookups.cves
             noTagsIdx = $noTagsIdx
