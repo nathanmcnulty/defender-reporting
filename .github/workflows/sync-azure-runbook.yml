@@ -10,7 +10,10 @@ on:
       - main
     paths:
       - 'build/Build-SharedHelpers.ps1'
-      - 'build/shared/source/**'
+      - 'build/manifests/shared-helpers.json'
+      - 'build/private/ArtifactManifestTools.ps1'
+      - 'build/private/AzureArtifactBuildTools.ps1'
+      - 'src/powershell/Shared/**'
       - 'build/azure/Build-Runbook.ps1'
       - 'build/azure/runbook-source.ps1'
       - '.github/workflows/sync-azure-runbook.yml'

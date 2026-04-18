@@ -1,6 +1,15 @@
 ﻿[CmdletBinding()]
 param()
 
+$__repoRoot = Split-Path -Path $PSScriptRoot -Parent
+$__sharedImportPath = Join-Path $__repoRoot 'build\Import-SharedHelpers.ps1'
+
+if (-not (Test-Path -LiteralPath $__sharedImportPath -PathType Leaf)) {
+    throw "Shared helper import script not found at '$__sharedImportPath'."
+}
+
+. $__sharedImportPath
+
 $__generatedHelperPath = & {
     param(
         [Parameter(Mandatory = $true)]
@@ -34,7 +43,9 @@ $__generatedHelperPath = & {
     }
 
     return $artifactManifest.OutputPath
-} (Split-Path -Path $PSScriptRoot -Parent)
+} $__repoRoot
 
 . $__generatedHelperPath
+Remove-Variable -Name __repoRoot -ErrorAction Ignore
+Remove-Variable -Name __sharedImportPath -ErrorAction Ignore
 Remove-Variable -Name __generatedHelperPath -ErrorAction Ignore
