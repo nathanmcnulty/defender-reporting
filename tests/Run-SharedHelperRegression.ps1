@@ -944,6 +944,88 @@ function Test-ValidationHelperPayloadCanonicalization {
     }
 }
 
+function Test-ValidationHelperImportLoadsSharedDependencies {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $pwshCommand = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue
+    if ($null -eq $pwshCommand) {
+        throw 'pwsh is required to run validation helper import regression checks.'
+    }
+
+    $smokeScript = @'
+$ErrorActionPreference = 'Stop'
+
+. '__REPO_ROOT__\build\Import-ValidationHelpers.ps1'
+
+$row = [PSCustomObject]@{
+    DeviceId = 'device-standalone-001'
+    DeviceName = 'device01.contoso.com'
+    RbacGroupName = 'Prod'
+    OSPlatform = 'Windows11'
+    OSVersion = '23H2'
+    MachineTags = @('Pilot')
+    MachineInfo = [PSCustomObject]@{
+        ip = '10.0.0.5'
+        eip = '52.160.0.5'
+        hs = 'Active'
+        rs = 'Medium'
+        el = 'Low'
+        dv = 'Standard'
+        mb = 'Intune'
+        aad = $true
+        ls = '2026-03-20'
+        fs = '2026-03-01'
+    }
+    CveId = 'CVE-2026-0401'
+    CvssScore = '7.5'
+    VulnerabilitySeverityLevel = 'High'
+    ExploitabilityLevel = 'ExploitIsPublic'
+    CveBatchUrl = 'https://example.invalid/CVE-2026-0401'
+    CveBatchTitle = 'Windows cumulative update'
+    PublishedDate = '2026-03-02'
+    VulnerabilityDescription = 'Standalone validation helper import smoke test'
+    EpssScore = '0.81'
+    AffectedSoftware = @('microsoft:windows')
+    IsExploitAvailable = $true
+    NvdLastModifiedDate = '2026-03-18'
+    NvdBaseScore = '8.0'
+    NvdBaseSeverity = 'HIGH'
+    NvdVector = 'AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H'
+    NvdKevDate = '2026-03-19'
+    NvdActionDue = '2026-04-01'
+    NvdRequiredAction = 'Patch immediately'
+    NvdWeaknesses = @('CWE-79')
+    SoftwareVendor = 'microsoft'
+    SoftwareName = 'windows'
+    SoftwareVersion = '10.0.26100.1'
+    RecommendationReference = 'Windows Security Update'
+    ProductCodeCpe = 'cpe:/o:microsoft:windows_11'
+    EndOfSupportStatus = 'supported'
+    EndOfSupportDate = '2027-10-01'
+    FirstSeenTimestamp = '2026-03-03'
+    LastSeenTimestamp = '2026-03-20'
+    SecurityUpdateAvailable = $true
+    RecommendedSecurityUpdate = 'March 2026 cumulative update'
+    RecommendedSecurityUpdateId = 'KB6000001'
+    RecommendedSecurityUpdateUrl = 'https://example.invalid/kb6000001'
+    DiskPaths = @('C:\Windows\System32\kernel32.dll')
+    RegistryPaths = @('HKLM\Software\Microsoft\Windows')
+}
+
+$signature = Get-CanonicalValidationRowSignature -Row $row
+if ([string]::IsNullOrWhiteSpace($signature)) {
+    throw 'Standalone validation helper import smoke returned an empty signature.'
+}
+'@.Replace('__REPO_ROOT__', $repoRoot.Replace("'", "''"))
+
+    & $pwshCommand.Source -NoProfile -Command $smokeScript
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Standalone validation helper import smoke failed.'
+    }
+}
+
 function Test-DashboardValidationFailureExtendedEnrichmentGate {
     [CmdletBinding()]
     param()
@@ -1442,6 +1524,8 @@ Test-WriteCombinedPayloadGzipPreservesColumnPayload
 Write-Output '  Combined payload writer column-path checks passed.'
 Test-ValidationHelperPayloadCanonicalization
 Write-Output '  Validation helper payload-format checks passed.'
+Test-ValidationHelperImportLoadsSharedDependencies
+Write-Output '  Validation helper standalone import checks passed.'
 Test-DashboardValidationFailureExtendedEnrichmentGate
 Write-Output '  Validation helper failure-gate checks passed.'
 Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity

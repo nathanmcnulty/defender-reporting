@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 
 $buildRoot = $PSScriptRoot
 $repoRoot = Split-Path -Path $buildRoot -Parent
+$azureProvisioningSourcePath = Join-Path $repoRoot 'src\powershell\Provisioning\Azure\AzureProvisioning.ps1'
 
 if (-not $PSBoundParameters.ContainsKey('OutputPath')) {
     $defaultName = 'Azure-' + ([datetime]::UtcNow).ToString('yyMMdd') + '.zip'
@@ -29,6 +30,7 @@ $requiredLeafPaths = @(
     Join-Path $repoRoot 'Setup-AzureResources.ps1'
     Join-Path $repoRoot 'azure\Invoke-DashboardPipeline.ps1'
     Join-Path $repoRoot 'azure\function-app\ExportAndGenerate\run.ps1'
+    $azureProvisioningSourcePath
 )
 
 foreach ($path in $requiredLeafPaths) {
@@ -58,6 +60,11 @@ try {
     Copy-Item -Path (Join-Path $repoRoot 'Setup-AzureResources.ps1') -Destination $stagingRoot -Force
     Copy-Item -Path (Join-Path $repoRoot 'templates') -Destination $stagingRoot -Recurse -Force
     Copy-Item -Path (Join-Path $repoRoot 'azure') -Destination $stagingRoot -Recurse -Force
+
+    $stagedProvisioningHelperPath = Join-Path $stagingRoot 'azure\AzureProvisioning.ps1'
+    Copy-Item -Path $azureProvisioningSourcePath -Destination $stagedProvisioningHelperPath -Force
+    Assert-BuildPath -Path $stagedProvisioningHelperPath -PathType Leaf
+
     Compress-Archive -Path (Join-Path $stagingRoot '*') -DestinationPath $OutputPath -Force
 }
 finally {

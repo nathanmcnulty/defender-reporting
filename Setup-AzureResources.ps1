@@ -348,7 +348,21 @@ $Script:ProvisioningTags = @{
     workload = 'defender-reporting'
 }
 
-. (Join-Path -Path $PSScriptRoot -ChildPath 'src\powershell\Provisioning\Azure\AzureProvisioning.ps1')
+$provisioningHelperCandidates = @(
+    (Join-Path -Path $PSScriptRoot -ChildPath 'src\powershell\Provisioning\Azure\AzureProvisioning.ps1')
+    (Join-Path -Path $PSScriptRoot -ChildPath 'azure\AzureProvisioning.ps1')
+    (Join-Path -Path $PSScriptRoot -ChildPath 'AzureProvisioning.ps1')
+)
+
+$provisioningHelperPath = $provisioningHelperCandidates |
+    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+    Select-Object -First 1
+
+if (-not $provisioningHelperPath) {
+    throw "Required provisioning helper script 'AzureProvisioning.ps1' was not found. Expected one of: $($provisioningHelperCandidates -join ', ')"
+}
+
+. $provisioningHelperPath
 
 # =============================================================================
 # MAIN SCRIPT
