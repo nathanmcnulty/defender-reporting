@@ -4429,6 +4429,68 @@ function Publish-VulnStoreExistingCanonicalState {
     }
 }
 
+function Publish-VulnerabilityHistoryStore {
+    <#
+    .SYNOPSIS
+        Converts downloaded vulnerability snapshots into the canonical gzip store.
+
+    .DESCRIPTION
+        The MDE bulk export arrives as dated snapshot files, so this function upgrades them
+        immediately into VulnExport_current.json.gz plus quarterly VulnHistory_YYYYQn.json.gz /
+        VulnHistoryRows_YYYYQn.json.gz files and removes the temporary raw snapshot files after
+        successful publication.
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$DownloadedFiles
+    )
+
+    $legacyFiles = if ($null -ne $DownloadedFiles -and $DownloadedFiles.Count -gt 0) {
+        @(
+            $DownloadedFiles |
+                ForEach-Object {
+                    if (Test-Path -Path $_ -PathType Leaf) {
+                        Get-Item -LiteralPath $_
+                    }
+                } |
+                Where-Object { $null -ne $_ -and (Test-IsLegacyVulnSnapshotFileName -Name $_.Name) } |
+                Sort-Object Name
+        )
+    }
+    else {
+        @(Get-ChildItem -Path $OutputPath -File | Where-Object { Test-IsLegacyVulnSnapshotFileName -Name $_.Name } | Sort-Object Name)
+    }
+
+    if ($legacyFiles.Count -eq 0) {
+        if (Test-VulnStoreExistence -BasePath $OutputPath) {
+            return [PSCustomObject]@{
+                DownloadedFiles = 0
+                CurrentRows = @(
+                    Read-NormalizedVulnStoreRow -BasePath $OutputPath | Where-Object {
+                        (Get-VulnPropertyValue -InputObject $_ -Name 'FirstSeenTimestamp') -and
+                        (Get-VulnPropertyValue -InputObject $_ -Name 'LastSeenTimestamp')
+                    }
+                ).Count
+                HistoryYears = @(Get-ChildItem -Path $OutputPath -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue).Count
+                LatestSnapshotDate = Get-VulnStoreLatestSnapshotDate -BasePath $OutputPath
+                MigratedLegacy = $false
+                RemovedLegacyFiles = $false
+            }
+        }
+
+        throw 'No vulnerability export files were downloaded and no canonical vulnerability store exists.'
+    }
+
+    $publishResult = Publish-VulnStoreFromBulkSnapshot -BasePath $OutputPath -SnapshotFilePaths $legacyFiles.FullName -RemoveSnapshotFiles
+    Write-Host "  Canonical vulnerability store updated: $($publishResult.CurrentRows) current row(s), $($publishResult.HistoryYears) history period file(s)" -ForegroundColor Green
+    return $publishResult
+}
+
 function Get-VulnSnapshotFilesBySnapshotDate {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -5823,6 +5885,128 @@ function Initialize-AdvancedHuntingStore {
 
 # Shared MDE export helpers used by local export, generator refresh, and the Azure runbook.
 
+function Get-MdeAccessToken {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$AccessToken,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$TenantId,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$AppId,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $AppSecret,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ResourceAppIdUri = 'https://api.securitycenter.microsoft.com',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$UseEnvironmentFallback,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$UseAzureCliFallback,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WriteStatus
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($AccessToken)) {
+        if ($WriteStatus) {
+            Write-Host 'Using provided Microsoft Defender for Endpoint access token' -ForegroundColor Cyan
+        }
+
+        return $AccessToken.Trim()
+    }
+
+    $resolvedTenantId = $TenantId
+    $resolvedAppId = $AppId
+    $resolvedSecret = $AppSecret
+
+    if ($UseEnvironmentFallback) {
+        $environmentAccessToken = $env:DEFENDER_ACCESS_TOKEN
+        if (-not [string]::IsNullOrWhiteSpace($environmentAccessToken)) {
+            return $environmentAccessToken.Trim()
+        }
+
+        if ([string]::IsNullOrWhiteSpace($resolvedTenantId)) {
+            $resolvedTenantId = $env:DEFENDER_TENANT_ID
+        }
+        if ([string]::IsNullOrWhiteSpace($resolvedAppId)) {
+            $resolvedAppId = $env:DEFENDER_APP_ID
+        }
+        if ($null -eq $resolvedSecret -or [string]::IsNullOrWhiteSpace([string]$resolvedSecret)) {
+            $resolvedSecret = $env:DEFENDER_APP_SECRET
+        }
+    }
+
+    $resolvedSecretText = ''
+    if ($resolvedSecret -is [System.Security.SecureString]) {
+        $resolvedSecretText = [System.Net.NetworkCredential]::new('', [System.Security.SecureString]$resolvedSecret).Password
+    }
+    elseif ($null -ne $resolvedSecret) {
+        $resolvedSecretText = [string]$resolvedSecret
+    }
+
+    if (
+        -not [string]::IsNullOrWhiteSpace($resolvedTenantId) -and
+        -not [string]::IsNullOrWhiteSpace($resolvedAppId) -and
+        -not [string]::IsNullOrWhiteSpace($resolvedSecretText)
+    ) {
+        if ($WriteStatus) {
+            Write-Host 'Authenticating to Microsoft Defender for Endpoint...' -ForegroundColor Cyan
+        }
+
+        $oAuthUri = "https://login.microsoftonline.com/$resolvedTenantId/oauth2/token"
+        $authBody = [ordered]@{
+            resource = $ResourceAppIdUri
+            client_id = $resolvedAppId
+            client_secret = $resolvedSecretText
+            grant_type = 'client_credentials'
+        }
+
+        try {
+            $response = Invoke-RestMethod -Method Post -Uri $oAuthUri -Body $authBody -ErrorAction Stop
+            if ($WriteStatus) {
+                Write-Host '  Authentication successful' -ForegroundColor Green
+            }
+
+            return [string]$response.access_token
+        }
+        catch {
+            throw "Failed to authenticate to Microsoft Defender for Endpoint: $_"
+        }
+    }
+
+    if ($UseAzureCliFallback) {
+        $azCommand = Get-Command -Name 'az' -CommandType Application -ErrorAction SilentlyContinue
+        if ($null -ne $azCommand) {
+            try {
+                $azAccessToken = [string](& $azCommand.Source 'account' 'get-access-token' '--resource' $ResourceAppIdUri '--query' 'accessToken' '-o' 'tsv')
+                if (-not [string]::IsNullOrWhiteSpace($azAccessToken)) {
+                    return $azAccessToken.Trim()
+                }
+            }
+            catch {
+                Write-Verbose "Azure CLI token acquisition failed: $_"
+            }
+        }
+    }
+
+    if ($UseEnvironmentFallback -or $UseAzureCliFallback) {
+        throw "No Defender API token source available. Provide -AccessToken, set DEFENDER_ACCESS_TOKEN, set DEFENDER_TENANT_ID/DEFENDER_APP_ID/DEFENDER_APP_SECRET, or sign in with 'az login'."
+    }
+
+    throw 'No Defender API token source available. Provide -AccessToken or -TenantId/-AppId/-AppSecret.'
+}
+
 function Get-MdeHeaderCollection {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -5880,6 +6064,29 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
         ExportFileCount = $exportFiles.Count
         DownloadedFiles = @($downloadedFiles)
     }
+}
+
+function Export-MdeBulkVulnerabilityData {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Headers,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExportUrl
+    )
+
+    Write-Host 'Exporting vulnerability data from MDE API...' -ForegroundColor Cyan
+    $result = Invoke-MdeBulkVulnerabilitySnapshotDownload -Headers $Headers -OutputPath $OutputPath -ExportUrl $ExportUrl
+    foreach ($downloadedFile in $result.DownloadedFiles) {
+        Write-Host "  Downloading $(Split-Path -Leaf $downloadedFile)" -ForegroundColor Gray
+    }
+
+    return @($result.DownloadedFiles)
 }
 
 function Invoke-MdeAdvancedHuntingStoreRefresh {
@@ -6081,6 +6288,37 @@ RelevantSoftware
     }
 }
 
+function Export-MdeAdvancedHuntingData {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Headers,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$QueryUrl
+    )
+
+    Write-Host 'Exporting Advanced Hunting data...' -ForegroundColor Cyan
+    Write-Host '  Running Advanced Hunting query...' -ForegroundColor Gray
+    $result = Invoke-MdeAdvancedHuntingStoreRefresh -Headers $Headers -OutputPath $OutputPath -QueryUrl $QueryUrl
+
+    if ($result.Success) {
+        Write-Host "  Retrieved $($result.RecordCount) records from Advanced Hunting" -ForegroundColor Green
+        if ($result.MigratedLegacy) {
+            Write-Host '  Migrated legacy Advanced Hunting snapshots to current cache' -ForegroundColor Green
+        }
+        Write-Host "  Saved to: $($result.OutputFile)" -ForegroundColor Green
+        return $result
+    }
+
+    Write-Warning 'Advanced Hunting query returned no results'
+    return $result
+}
+
 function Get-MdeMachineSnapshotMap {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -6272,6 +6510,44 @@ function Invoke-MdeMachineStoreRefresh {
             MigratedLegacy = $publishResult.MigratedLegacy
         }
     }
+}
+
+function Export-MdeMachineData {
+    [CmdletBinding(DefaultParameterSetName = 'Headers')]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'Headers')]
+        [hashtable]$Headers,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'AccessToken')]
+        [string]$AccessToken,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$BaseApiUrl = 'https://api.securitycenter.microsoft.com'
+    )
+
+    $resolvedHeaders = if ($PSCmdlet.ParameterSetName -eq 'AccessToken') {
+        Get-MdeHeaderCollection -AccessToken $AccessToken
+    }
+    else {
+        $Headers
+    }
+
+    Write-Host 'Exporting machine data from Defender API...' -ForegroundColor Cyan
+    $result = Invoke-MdeMachineStoreRefresh -Headers $resolvedHeaders -OutputPath $OutputPath -BaseApiUrl $BaseApiUrl
+
+    Write-Host "  Retrieved $($result.MachineCount) machines" -ForegroundColor Green
+    Write-Host "  Machine state changes captured: $($result.ChangeCount)" -ForegroundColor Green
+    if ($result.MigratedLegacy) {
+        Write-Host '  Migrated legacy machine snapshots to current/history store' -ForegroundColor Green
+    }
+    $outputFiles = @($result.OutputFiles | ForEach-Object { Split-Path -Leaf $_ })
+    Write-Host "  Saved to $($outputFiles -join ', ')" -ForegroundColor Green
+
+    return $result
 }
 
 # Shared enrichment and source-row projection helpers used by dashboard generation
