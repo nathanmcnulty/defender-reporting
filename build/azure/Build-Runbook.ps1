@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Assembles build/azure/runbook-source.ps1 with the canonical shared helper block
-    from build/shared/source/*.ps1 via build/Build-SharedHelpers.ps1 and writes the public,
+    from the manifest-driven shared helper source tree via build/Build-SharedHelpers.ps1 and writes the public,
     copy/paste-ready azure/Invoke-DashboardPipeline.ps1 artifact.
 
 .EXAMPLE

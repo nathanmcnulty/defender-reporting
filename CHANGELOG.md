@@ -9,7 +9,7 @@ All notable changes to this project will be documented in this file.
 #### Added
 - Synthetic live-export generation for shifting a synthetic dataset forward to a target latest date.
 - Current-only benchmark capture for the local runbook and Function App validation path.
-- Streaming large-dataset dashboard audit helpers sourced from `build/validation/source/` and emitted into `build/generated/validation-helpers.ps1`.
+- Streaming large-dataset dashboard audit helpers sourced from the validation helper source tree and emitted into `build/generated/validation-helpers.ps1`.
 - Documented performance baselines for the recorded `20K` replay and shifted live synthetic datasets.
 
 #### Changed

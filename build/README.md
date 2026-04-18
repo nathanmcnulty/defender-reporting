@@ -4,9 +4,11 @@ This directory contains maintainer-facing build, validation, import, and packagi
 
 ## Structure
 
-- `shared/source/`: canonical shared helper source fragments
-- `validation/source/`: canonical validation helper source fragments
+- `manifests/`: explicit build manifests that define artifact inputs and ordering
+- `private/`: shared build-system helper functions used by builders and import wrappers
 - `generated/`: derived helper outputs rebuilt on demand
+- `../src/powershell/Shared/`: canonical shared helper source organized by domain
+- `../src/powershell/Validation/`: canonical validation helper source organized by domain
 - `azure/`: Azure-specific build sources and build entrypoints
 - `Build-*.ps1`: top-level build scripts for generated helper files and release packaging
 - `Import-*.ps1`: dot-sourcing wrappers that rebuild generated helper files when needed
@@ -44,6 +46,16 @@ The repository root keeps the scripts that new users are most likely to need dir
 - `Generate-VulnerabilityDashboard.ps1`
 - `Setup-AzureResources.ps1`
 - `Setup-GitHubActionServicePrincipal.ps1`
+
+## Artifact manifests
+
+The generated helper bundles are no longer assembled by scanning a flat source folder and sorting by filename. Instead, each artifact has an explicit manifest under `build/manifests/` that defines:
+
+- the source roots owned by the artifact
+- the ordered list of source files to concatenate
+- the output path for the generated artifact
+
+This makes dependency order explicit, lets the regression preflight catch orphaned source files, and makes the source tree easier for agents to navigate by domain instead of by numeric filename prefixes.
 
 ## Staged dashboard workflow
 
