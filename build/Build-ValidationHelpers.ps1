@@ -6,39 +6,16 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$sourceRoot = Join-Path -Path $PSScriptRoot -ChildPath 'validation\source'
-$outputPath = Join-Path -Path $PSScriptRoot -ChildPath 'generated\validation-helpers.ps1'
+$buildRoot = $PSScriptRoot
+$repoRoot = Split-Path -Path $buildRoot -Parent
+$manifestToolsPath = Join-Path -Path $buildRoot -ChildPath 'private\ArtifactManifestTools.ps1'
+$manifestPath = Join-Path -Path $buildRoot -ChildPath 'manifests\validation-helpers.json'
 
-if (-not (Test-Path -Path $sourceRoot -PathType Container)) {
-    throw "Validation helper source directory not found: $sourceRoot"
+if (-not (Test-Path -LiteralPath $manifestToolsPath -PathType Leaf)) {
+    throw "Artifact manifest helper script not found: $manifestToolsPath"
 }
 
-$sourceFiles = @(
-    Get-ChildItem -Path $sourceRoot -Filter '*.ps1' -File -ErrorAction Stop |
-        Sort-Object Name
-)
+. $manifestToolsPath
 
-if ($sourceFiles.Count -eq 0) {
-    throw "No validation helper source files found under '$sourceRoot'."
-}
-
-$outputDirectory = Split-Path -Path $outputPath -Parent
-if (-not (Test-Path -Path $outputDirectory -PathType Container)) {
-    New-Item -Path $outputDirectory -ItemType Directory -Force | Out-Null
-}
-
-$combined = [System.Text.StringBuilder]::new()
-for ($index = 0; $index -lt $sourceFiles.Count; $index++) {
-    $content = Get-Content -Path $sourceFiles[$index].FullName -Raw
-    [void]$combined.Append($content.TrimEnd())
-    if ($index -lt ($sourceFiles.Count - 1)) {
-        [void]$combined.AppendLine()
-        [void]$combined.AppendLine()
-    }
-    else {
-        [void]$combined.AppendLine()
-    }
-}
-
-[System.IO.File]::WriteAllText($outputPath, $combined.ToString(), [System.Text.UTF8Encoding]::new($true))
-Write-Host "Generated validation helpers: $outputPath" -ForegroundColor Green
+$artifactManifest = Build-PowerShellArtifactFromManifest -ManifestPath $manifestPath -RepoRoot $repoRoot
+Write-Host "Generated validation helpers: $($artifactManifest.OutputPath)" -ForegroundColor Green

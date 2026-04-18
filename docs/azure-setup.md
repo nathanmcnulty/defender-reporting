@@ -214,7 +214,7 @@ Both the Automation runbook and Function App derive from the same source file. `
 
 To change the pipeline logic:
 
-1. Edit `build/shared/source/*.ps1`
+1. Edit `src/powershell/Shared/**/*.ps1`
 2. Edit `build/azure/runbook-source.ps1`
 3. Rebuild with:
 
@@ -226,7 +226,7 @@ To change the pipeline logic:
 .\build\azure\Build-FunctionApp.ps1
 ```
 
-The Function App build transforms `runbook-source.ps1` into a timer-triggered function, replacing Automation Account variables with environment variable lookups and inlining shared helpers from `build/shared/source/`.
+The Function App build transforms `runbook-source.ps1` into a timer-triggered function, replacing Automation Account variables with environment variable lookups and inlining the manifest-driven shared helper bundle generated from `src/powershell/Shared/`.
 
 ## Related docs
 

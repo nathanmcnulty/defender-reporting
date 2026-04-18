@@ -11,11 +11,22 @@ $ErrorActionPreference = 'Stop'
 
 $buildRoot = $PSScriptRoot
 $repoRoot = Split-Path -Path $buildRoot -Parent
+$manifestToolsPath = Join-Path $buildRoot 'private\ArtifactManifestTools.ps1'
 $settingsPath = Join-Path $buildRoot 'PSScriptAnalyzerSettings.psd1'
+$artifactManifestPaths = @(
+    Join-Path $buildRoot 'manifests\shared-helpers.json'
+    Join-Path $buildRoot 'manifests\validation-helpers.json'
+)
 $generatedParseOnlyPaths = @(
     Join-Path $repoRoot 'azure\Invoke-DashboardPipeline.ps1'
     Join-Path $repoRoot 'azure\function-app\ExportAndGenerate\run.ps1'
 )
+
+if (-not (Test-Path -LiteralPath $manifestToolsPath -PathType Leaf)) {
+    throw "Artifact manifest helper script not found: '$manifestToolsPath'"
+}
+
+. $manifestToolsPath
 
 function Test-IsExcludedRepoScriptPath {
     [CmdletBinding()]
@@ -122,6 +133,18 @@ function Reset-LastExitCode {
     Set-Variable -Name LASTEXITCODE -Scope Global -Value 0
 }
 
+function Invoke-ArtifactManifestValidation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$ManifestPaths
+    )
+
+    foreach ($manifestPath in $ManifestPaths) {
+        [void](Test-PowerShellArtifactManifestCoverage -ManifestPath $manifestPath -RepoRoot $repoRoot)
+    }
+}
+
 function Invoke-DashboardJavaScriptValidation {
     [CmdletBinding()]
     param(
@@ -143,6 +166,9 @@ function Invoke-DashboardJavaScriptValidation {
         }
     }
 }
+
+Write-Output 'Validating build manifests...'
+Invoke-ArtifactManifestValidation -ManifestPaths $artifactManifestPaths
 
 Write-Output 'Building shared helpers...'
 Reset-LastExitCode

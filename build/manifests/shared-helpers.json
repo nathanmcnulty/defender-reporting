@@ -1,0 +1,16 @@
+﻿{
+  "artifactName": "shared-helpers",
+  "description": "Canonical shared helper bundle used by local scripts and generated Azure artifacts.",
+  "outputPath": "build/generated/shared-helpers.ps1",
+  "sourceRoots": [
+    "src/powershell/Shared"
+  ],
+  "sourceFiles": [
+    "src/powershell/Shared/Core/Core.ps1",
+    "src/powershell/Shared/Stores/VulnerabilityStore.ps1",
+    "src/powershell/Shared/Stores/VulnerabilitySnapshotImport.ps1",
+    "src/powershell/Shared/Stores/MachineStore.ps1",
+    "src/powershell/Shared/DefenderApi/MdeExport.ps1",
+    "src/powershell/Shared/Dashboard/DashboardGeneration.ps1"
+  ]
+}

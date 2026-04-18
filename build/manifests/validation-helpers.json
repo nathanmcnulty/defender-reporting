@@ -1,0 +1,12 @@
+﻿{
+  "artifactName": "validation-helpers",
+  "description": "Canonical validation helper bundle used by dashboard validation and regression tests.",
+  "outputPath": "build/generated/validation-helpers.ps1",
+  "sourceRoots": [
+    "src/powershell/Validation"
+  ],
+  "sourceFiles": [
+    "src/powershell/Validation/Audit/LargeDatasetAudit.ps1",
+    "src/powershell/Validation/Orchestration/ValidationOrchestration.ps1"
+  ]
+}

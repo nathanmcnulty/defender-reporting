@@ -71,7 +71,7 @@ Key behavior:
 
 Trigger sources:
 
-- Pushes that touch `build/azure/runbook-source.ps1`, `build/shared/source/`, or the runbook build scripts
+- Pushes that touch `build/azure/runbook-source.ps1`, `src/powershell/Shared/`, `build/manifests/`, or the runbook build scripts
 - Manual run
 
 Key behavior:
