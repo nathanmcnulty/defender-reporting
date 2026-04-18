@@ -952,6 +952,32 @@ function Get-DashboardPayloadGzipSha256 {
     return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
 }
 
+function Get-NormalizedAuditDecimalString {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return ''
+    }
+
+    $raw = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return ''
+    }
+
+    [decimal]$decimalValue = 0
+    if ([decimal]::TryParse($raw, [ref]$decimalValue)) {
+        return $decimalValue.ToString('0.#####', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+
+    return $raw.Trim()
+}
+
 function ConvertTo-VulnColumnFileSet {
     [CmdletBinding()]
     param(
