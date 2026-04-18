@@ -949,8 +949,9 @@ function Test-ValidationHelperStandaloneImport {
     param()
 
     $repoRoot = Split-Path -Path $PSScriptRoot -Parent
-    $pwshCommand = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue
-    if ($null -eq $pwshCommand) {
+    $pwshPath = Get-Command pwsh -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty Source
+    if ([string]::IsNullOrWhiteSpace($pwshPath)) {
         throw 'pwsh is required to run validation helper import regression checks.'
     }
 
@@ -1020,7 +1021,7 @@ if ([string]::IsNullOrWhiteSpace($signature)) {
 }
 '@.Replace('__REPO_ROOT__', $repoRoot.Replace("'", "''"))
 
-    & $pwshCommand.Source -NoProfile -Command $smokeScript
+    & $pwshPath -NoProfile -Command $smokeScript
     if ($LASTEXITCODE -ne 0) {
         throw 'Standalone validation helper import smoke failed.'
     }
