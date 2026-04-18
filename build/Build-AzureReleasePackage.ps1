@@ -6,6 +6,8 @@ param(
     [string]$OutputPath
 )
 
+. (Join-Path -Path $PSScriptRoot -ChildPath 'private\AzureArtifactBuildTools.ps1')
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -15,35 +17,6 @@ $repoRoot = Split-Path -Path $buildRoot -Parent
 if (-not $PSBoundParameters.ContainsKey('OutputPath')) {
     $defaultName = 'Azure-' + ([datetime]::UtcNow).ToString('yyMMdd') + '.zip'
     $OutputPath = Join-Path $repoRoot ('.local\local-reports\azure-release-package\' + $defaultName)
-}
-
-function Initialize-ParentDirectory {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    $parentPath = Split-Path -Path $Path -Parent
-    if (-not [string]::IsNullOrWhiteSpace($parentPath) -and -not (Test-Path -LiteralPath $parentPath -PathType Container)) {
-        New-Item -Path $parentPath -ItemType Directory -Force | Out-Null
-    }
-}
-
-function Assert-RequiredPath {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('Leaf', 'Container')]
-        [string]$PathType
-    )
-
-    if (-not (Test-Path -LiteralPath $Path -PathType $PathType)) {
-        throw "Required path not found: $Path"
-    }
 }
 
 Write-Output 'Building Azure runbook artifact...'
@@ -59,7 +32,7 @@ $requiredLeafPaths = @(
 )
 
 foreach ($path in $requiredLeafPaths) {
-    Assert-RequiredPath -Path $path -PathType Leaf
+    Assert-BuildPath -Path $path -PathType Leaf
 }
 
 $requiredContainerPaths = @(
@@ -69,7 +42,7 @@ $requiredContainerPaths = @(
 )
 
 foreach ($path in $requiredContainerPaths) {
-    Assert-RequiredPath -Path $path -PathType Container
+    Assert-BuildPath -Path $path -PathType Container
 }
 
 Initialize-ParentDirectory -Path $OutputPath

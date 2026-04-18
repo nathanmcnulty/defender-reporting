@@ -17,6 +17,7 @@ This repository now treats generated helper bundles as build artifacts, not as t
 - `src/powershell/Shared/DefenderApi`: Microsoft Defender API export and refresh workflows.
 - `src/powershell/Shared/Enrichment`: Advanced Hunting and NVD readers plus shared enrichment/source-row projection helpers.
 - `src/powershell/Shared/Dashboard`: normalization, payload generation, HTML assembly, and dashboard-side support.
+- `src/powershell/Provisioning/Azure`: Azure provisioning entrypoint support, including ARM/Graph request helpers and polling utilities.
 - `src/powershell/Validation/Audit`: regression and semantic validation helpers.
 - `src/powershell/Validation/Orchestration`: dashboard validation entrypoints and failure shaping.
 
@@ -33,10 +34,8 @@ This repository now treats generated helper bundles as build artifacts, not as t
 3. Rebuild with `./build/Build-SharedHelpers.ps1` or `./build/Build-ValidationHelpers.ps1` as needed.
 4. Run `./build/Invoke-RegressionValidation.ps1` before merge.
 
-## Next decomposition targets
+## Remaining decomposition watchlist
 
-The current overhaul only moved the helper bundles onto explicit domains and manifests. The next likely candidates for further decomposition are:
+The current overhaul has moved helper ownership out of the large top-level entry scripts and into explicit source-first domains. The remaining follow-up work is narrower and currently centered on:
 
-- Azure provisioning and packaging entrypoints
-- remaining large top-level scripts that still embed workflow-specific functions
 - further dashboard payload/cache decomposition if the shared dashboard domain needs smaller ownership boundaries
