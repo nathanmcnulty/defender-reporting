@@ -7013,6 +7013,69 @@ function Read-NvdCveData {
 
 # Shared generator/runbook helpers used for dashboard normalization and HTML assembly.
 
+function Get-DashboardTemplateContent {
+    <#
+    .SYNOPSIS
+        Reads dashboard template files from the templates directory.
+
+    .DESCRIPTION
+        Reads the HTML, CSS, and JavaScript template files and returns their content.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$TemplatesPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DefaultRootPath
+    )
+
+    $templatesDirectory = if (-not [string]::IsNullOrWhiteSpace($TemplatesPath)) {
+        $TemplatesPath
+    }
+    else {
+        Join-Path -Path $DefaultRootPath -ChildPath 'templates'
+    }
+
+    $templates = @{
+        Html = $null
+        Css = $null
+        Js = $null
+    }
+
+    $htmlPath = Join-Path -Path $templatesDirectory -ChildPath 'dashboard.html'
+    $cssPath = Join-Path -Path $templatesDirectory -ChildPath 'dashboard.css'
+    $jsPath = Join-Path -Path $templatesDirectory -ChildPath 'dashboard.js'
+
+    if (Test-Path -Path $htmlPath) {
+        Write-Host '  Loading HTML template...' -ForegroundColor Gray
+        $templates.Html = Get-Content -Path $htmlPath -Raw
+    }
+    else {
+        throw "Template file not found: $htmlPath"
+    }
+
+    if (Test-Path -Path $cssPath) {
+        Write-Host '  Loading CSS template...' -ForegroundColor Gray
+        $templates.Css = Get-Content -Path $cssPath -Raw
+    }
+    else {
+        throw "Template file not found: $cssPath"
+    }
+
+    if (Test-Path -Path $jsPath) {
+        Write-Host '  Loading JavaScript template...' -ForegroundColor Gray
+        $templates.Js = Get-Content -Path $jsPath -Raw
+    }
+    else {
+        throw "Template file not found: $jsPath"
+    }
+
+    return $templates
+}
+
 function Save-JSLibraryFile {
     [CmdletBinding()]
     [OutputType([string])]
