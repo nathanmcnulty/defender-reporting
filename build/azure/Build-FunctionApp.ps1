@@ -24,47 +24,22 @@ param(
     [switch]$SkipModuleStaging
 )
 
+. (Join-Path -Path (Split-Path -Path $PSScriptRoot -Parent) -ChildPath 'private\AzureArtifactBuildTools.ps1')
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$buildRoot = Split-Path -Path $PSScriptRoot -Parent
-$repoRoot = Split-Path -Path $buildRoot -Parent
-$buildSharedHelpersPath = Join-Path -Path $buildRoot -ChildPath 'Build-SharedHelpers.ps1'
-$sharedHelpersPath = Join-Path -Path $buildRoot -ChildPath 'generated\shared-helpers.ps1'
-$runbookSourcePath = Join-Path -Path $PSScriptRoot -ChildPath 'runbook-source.ps1'
-$functionAppRoot = Join-Path -Path $repoRoot -ChildPath 'azure\function-app'
-$outputPath = Join-Path -Path $functionAppRoot -ChildPath 'ExportAndGenerate' | Join-Path -ChildPath 'run.ps1'
-$modulesRoot = Join-Path -Path $functionAppRoot -ChildPath 'Modules'
-
-# -------------------------------------------------------------------------
-# Validation
-# -------------------------------------------------------------------------
-
-if (-not (Test-Path -Path $buildSharedHelpersPath -PathType Leaf)) {
-    throw "Shared helper build script not found: $buildSharedHelpersPath"
-}
-
-if (-not (Test-Path -Path $runbookSourcePath -PathType Leaf)) {
-    throw "Runbook source file not found: $runbookSourcePath"
-}
-
-# -------------------------------------------------------------------------
-# Build shared helpers
-# -------------------------------------------------------------------------
-
-& $buildSharedHelpersPath
-
-if (-not (Test-Path -Path $sharedHelpersPath -PathType Leaf)) {
-    throw "Shared helper file not found after build: $sharedHelpersPath"
-}
-
-# -------------------------------------------------------------------------
-# Read sources
-# -------------------------------------------------------------------------
-
-$runbookSource = Get-Content -Path $runbookSourcePath -Raw
-$sharedHelpers = Get-Content -Path $sharedHelpersPath -Raw
-$lineEnding = if ($runbookSource.Contains("`r`n")) { "`r`n" } else { "`n" }
+$buildContext = Get-AzureArtifactBuildContext -BuildScriptRoot $PSScriptRoot
+$outputPath = Join-Path -Path $buildContext.FunctionAppRoot -ChildPath 'ExportAndGenerate' | Join-Path -ChildPath 'run.ps1'
+$modulesRoot = Join-Path -Path $buildContext.FunctionAppRoot -ChildPath 'Modules'
+$marker = @'
+# =============================================================================
+# SHARED HELPERS INSERTED BY build/azure/Build-Runbook.ps1
+# =============================================================================
+'@
+$assemblyInput = Get-AzureSharedAssemblyInput -BuildContext $buildContext -Marker $marker
+$runbookSource = $assemblyInput.RunbookSource
+$lineEnding = $assemblyInput.LineEnding
 
 # -------------------------------------------------------------------------
 # Replace header (comment block + param block + preference settings)
@@ -238,26 +213,11 @@ $assembled = $assembled.Substring(0, $startIdx) + $functionAppConfig + $assemble
 # Inline shared helpers at the marker
 # -------------------------------------------------------------------------
 
-$marker = @'
-# =============================================================================
-# SHARED HELPERS INSERTED BY build/azure/Build-Runbook.ps1
-# =============================================================================
-'@
-
-$normalizedMarker = $marker -replace "`r?`n", $lineEnding
-$sharedHelpersText = if ($sharedHelpers -is [System.Array]) {
-    @($sharedHelpers) -join $lineEnding
-}
-else {
-    [string]$sharedHelpers
-}
-$normalizedSharedHelpers = ($sharedHelpersText -replace "`r?`n", $lineEnding).TrimEnd()
-
-if (-not $assembled.Contains($normalizedMarker)) {
+if (-not $assembled.Contains($assemblyInput.NormalizedMarker)) {
     throw 'Source is missing the shared helper marker.'
 }
 
-$assembled = $assembled.Replace($normalizedMarker, $normalizedSharedHelpers + $lineEnding + $lineEnding)
+$assembled = $assembled.Replace($assemblyInput.NormalizedMarker, $assemblyInput.NormalizedSharedHelpers + $lineEnding + $lineEnding)
 
 # -------------------------------------------------------------------------
 # Stage bundled PowerShell modules for Flex Consumption
@@ -290,12 +250,7 @@ if (-not $SkipModuleStaging) {
 # Write output
 # -------------------------------------------------------------------------
 
-$outputDir = Split-Path -Path $outputPath -Parent
-if (-not (Test-Path -Path $outputDir)) {
-    New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
-}
-
-[System.IO.File]::WriteAllText($outputPath, $assembled, [System.Text.UTF8Encoding]::new($true))
+Write-Utf8BomFile -Path $outputPath -Content $assembled
 
 Write-Output "Generated function app entry point: $outputPath"
 Write-Output $stagedModuleSummary

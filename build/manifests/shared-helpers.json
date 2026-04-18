@@ -13,6 +13,7 @@
     "src/powershell/Shared/DefenderApi/MdeExport.ps1",
     "src/powershell/Shared/Enrichment/EnrichmentProjection.ps1",
     "src/powershell/Shared/Enrichment/EnrichmentReaders.ps1",
+    "src/powershell/Shared/Enrichment/NvdExport.ps1",
     "src/powershell/Shared/Dashboard/DashboardGeneration.ps1"
   ]
 }
