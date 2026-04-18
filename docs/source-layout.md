@@ -15,6 +15,7 @@ This repository now treats generated helper bundles as build artifacts, not as t
 - `src/powershell/Shared/Core`: shared primitives, store utilities, cache helpers, and serialization helpers.
 - `src/powershell/Shared/Stores`: canonical storage readers, migration helpers, and snapshot import/publish logic.
 - `src/powershell/Shared/DefenderApi`: Microsoft Defender API export and refresh workflows.
+- `src/powershell/Shared/Enrichment`: Advanced Hunting and NVD readers plus shared enrichment/source-row projection helpers.
 - `src/powershell/Shared/Dashboard`: normalization, payload generation, HTML assembly, and dashboard-side support.
 - `src/powershell/Validation/Audit`: regression and semantic validation helpers.
 - `src/powershell/Validation/Orchestration`: dashboard validation entrypoints and failure shaping.
@@ -36,6 +37,6 @@ This repository now treats generated helper bundles as build artifacts, not as t
 
 The current overhaul only moved the helper bundles onto explicit domains and manifests. The next likely candidates for further decomposition are:
 
-- enrichment-specific normalization helpers
 - Azure provisioning and packaging entrypoints
 - remaining large top-level scripts that still embed workflow-specific functions
+- further dashboard payload/cache decomposition if the shared dashboard domain needs smaller ownership boundaries
