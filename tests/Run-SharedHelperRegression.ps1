@@ -944,7 +944,7 @@ function Test-ValidationHelperPayloadCanonicalization {
     }
 }
 
-function Test-ValidationHelperImportLoadsSharedDependencies {
+function Test-ValidationHelperStandaloneImport {
     [CmdletBinding()]
     param()
 
@@ -1524,7 +1524,7 @@ Test-WriteCombinedPayloadGzipPreservesColumnPayload
 Write-Output '  Combined payload writer column-path checks passed.'
 Test-ValidationHelperPayloadCanonicalization
 Write-Output '  Validation helper payload-format checks passed.'
-Test-ValidationHelperImportLoadsSharedDependencies
+Test-ValidationHelperStandaloneImport
 Write-Output '  Validation helper standalone import checks passed.'
 Test-DashboardValidationFailureExtendedEnrichmentGate
 Write-Output '  Validation helper failure-gate checks passed.'
