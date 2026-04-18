@@ -6,44 +6,18 @@ param(
     [string]$OutputPath
 )
 
+. (Join-Path -Path $PSScriptRoot -ChildPath 'private\AzureArtifactBuildTools.ps1')
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $buildRoot = $PSScriptRoot
 $repoRoot = Split-Path -Path $buildRoot -Parent
+$azureProvisioningSourcePath = Join-Path $repoRoot 'src\powershell\Provisioning\Azure\AzureProvisioning.ps1'
 
 if (-not $PSBoundParameters.ContainsKey('OutputPath')) {
     $defaultName = 'Azure-' + ([datetime]::UtcNow).ToString('yyMMdd') + '.zip'
     $OutputPath = Join-Path $repoRoot ('.local\local-reports\azure-release-package\' + $defaultName)
-}
-
-function Initialize-ParentDirectory {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    $parentPath = Split-Path -Path $Path -Parent
-    if (-not [string]::IsNullOrWhiteSpace($parentPath) -and -not (Test-Path -LiteralPath $parentPath -PathType Container)) {
-        New-Item -Path $parentPath -ItemType Directory -Force | Out-Null
-    }
-}
-
-function Assert-RequiredPath {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateSet('Leaf', 'Container')]
-        [string]$PathType
-    )
-
-    if (-not (Test-Path -LiteralPath $Path -PathType $PathType)) {
-        throw "Required path not found: $Path"
-    }
 }
 
 Write-Output 'Building Azure runbook artifact...'
@@ -56,10 +30,11 @@ $requiredLeafPaths = @(
     Join-Path $repoRoot 'Setup-AzureResources.ps1'
     Join-Path $repoRoot 'azure\Invoke-DashboardPipeline.ps1'
     Join-Path $repoRoot 'azure\function-app\ExportAndGenerate\run.ps1'
+    $azureProvisioningSourcePath
 )
 
 foreach ($path in $requiredLeafPaths) {
-    Assert-RequiredPath -Path $path -PathType Leaf
+    Assert-BuildPath -Path $path -PathType Leaf
 }
 
 $requiredContainerPaths = @(
@@ -69,7 +44,7 @@ $requiredContainerPaths = @(
 )
 
 foreach ($path in $requiredContainerPaths) {
-    Assert-RequiredPath -Path $path -PathType Container
+    Assert-BuildPath -Path $path -PathType Container
 }
 
 Initialize-ParentDirectory -Path $OutputPath
@@ -85,6 +60,11 @@ try {
     Copy-Item -Path (Join-Path $repoRoot 'Setup-AzureResources.ps1') -Destination $stagingRoot -Force
     Copy-Item -Path (Join-Path $repoRoot 'templates') -Destination $stagingRoot -Recurse -Force
     Copy-Item -Path (Join-Path $repoRoot 'azure') -Destination $stagingRoot -Recurse -Force
+
+    $stagedProvisioningHelperPath = Join-Path $stagingRoot 'azure\AzureProvisioning.ps1'
+    Copy-Item -Path $azureProvisioningSourcePath -Destination $stagedProvisioningHelperPath -Force
+    Assert-BuildPath -Path $stagedProvisioningHelperPath -PathType Leaf
+
     Compress-Archive -Path (Join-Path $stagingRoot '*') -DestinationPath $OutputPath -Force
 }
 finally {

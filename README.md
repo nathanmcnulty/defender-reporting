@@ -117,6 +117,7 @@ For local testing of the split-assets build, use a local HTTP server instead of 
 | [Azure setup](docs/azure-setup.md) | API permissions, authentication options, Azure Automation provisioning, and Container App publishing |
 | [Build guide](build/README.md) | Maintainer-facing build, validation, and packaging entrypoints |
 | [GitHub Actions setup](docs/github-actions-setup.md) | OIDC service principal setup, required repository secrets, and branch protection guidance |
+| [Source layout](docs/source-layout.md) | Domain-based PowerShell source tree, artifact manifests, and maintainer workflow |
 | [Workflow notes](docs/workflows.md) | What each workflow does and when to use it |
 | [Changelog](CHANGELOG.md) | Release-style summary of notable changes |
 
@@ -163,7 +164,7 @@ flowchart TD
 - Build sources and build scripts now live under `build/`.
 - `build/generated/shared-helpers.ps1`, `build/generated/validation-helpers.ps1`, and `azure/function-app/ExportAndGenerate/run.ps1` are generated on demand and ignored by git.
 - `azure/Invoke-DashboardPipeline.ps1` is generated from the `build/` sources and can be refreshed locally or by CI.
-- Edit `build/shared/source/*.ps1`, `build/validation/source/*.ps1`, and `build/azure/runbook-source.ps1`; rebuild generated deployment artifacts with `./build/azure/Build-Runbook.ps1`, `./build/azure/Build-FunctionApp.ps1`, `./build/Build-SharedHelpers.ps1`, or `./build/Build-ValidationHelpers.ps1` only when you need the materialized outputs.
+- Edit `src/powershell/Shared/**/*.ps1`, `src/powershell/Validation/**/*.ps1`, and `build/azure/runbook-source.ps1`; the generated helper bundles are driven by `build/manifests/*.json`, so update the relevant manifest when you add or reorder source files.
 - Run `./build/Invoke-RegressionValidation.ps1` for the deterministic local and PR-aligned preflight path.
 - Run `./build/Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` when you want the local command that mirrors the live GitHub Actions export and dashboard generation path.
 - Run `./build/Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName <name> -FunctionAppName <name>` when you want the repo-owned manual validation path that rebuilds locally, redeploys Azure Automation and Function App, and executes both live Azure validation flows.

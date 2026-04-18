@@ -1,5 +1,68 @@
 ﻿# Shared generator/runbook helpers used for dashboard normalization and HTML assembly.
 
+function Get-DashboardTemplateContent {
+    <#
+    .SYNOPSIS
+        Reads dashboard template files from the templates directory.
+
+    .DESCRIPTION
+        Reads the HTML, CSS, and JavaScript template files and returns their content.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$TemplatesPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DefaultRootPath
+    )
+
+    $templatesDirectory = if (-not [string]::IsNullOrWhiteSpace($TemplatesPath)) {
+        $TemplatesPath
+    }
+    else {
+        Join-Path -Path $DefaultRootPath -ChildPath 'templates'
+    }
+
+    $templates = @{
+        Html = $null
+        Css = $null
+        Js = $null
+    }
+
+    $htmlPath = Join-Path -Path $templatesDirectory -ChildPath 'dashboard.html'
+    $cssPath = Join-Path -Path $templatesDirectory -ChildPath 'dashboard.css'
+    $jsPath = Join-Path -Path $templatesDirectory -ChildPath 'dashboard.js'
+
+    if (Test-Path -Path $htmlPath) {
+        Write-Host '  Loading HTML template...' -ForegroundColor Gray
+        $templates.Html = Get-Content -Path $htmlPath -Raw
+    }
+    else {
+        throw "Template file not found: $htmlPath"
+    }
+
+    if (Test-Path -Path $cssPath) {
+        Write-Host '  Loading CSS template...' -ForegroundColor Gray
+        $templates.Css = Get-Content -Path $cssPath -Raw
+    }
+    else {
+        throw "Template file not found: $cssPath"
+    }
+
+    if (Test-Path -Path $jsPath) {
+        Write-Host '  Loading JavaScript template...' -ForegroundColor Gray
+        $templates.Js = Get-Content -Path $jsPath -Raw
+    }
+    else {
+        throw "Template file not found: $jsPath"
+    }
+
+    return $templates
+}
+
 function Save-JSLibraryFile {
     [CmdletBinding()]
     [OutputType([string])]
@@ -763,6 +826,219 @@ function Get-CompressedPayloadVulnCount {
         elseif ($gzip) { $gzip.Dispose() }
         elseif ($fileStream) { $fileStream.Dispose() }
     }
+}
+
+function Get-DashboardHtmlScriptContent {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Html,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptId
+    )
+
+    $pattern = '<script\s+id="' + [regex]::Escape($ScriptId) + '"[^>]*>(?<content>.*?)</script>'
+    $match = [regex]::Match(
+        $Html,
+        $pattern,
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Singleline
+    )
+
+    if (-not $match.Success) {
+        return ''
+    }
+
+    return $match.Groups['content'].Value.Trim()
+}
+
+function Get-DashboardEmbeddedPayloadTempPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HtmlPath
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($HtmlPath)
+    $content = [System.IO.File]::ReadAllText($resolvedPath, [System.Text.Encoding]::UTF8)
+    $dataFormat = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dataFormat'
+
+    if ($dataFormat -eq 'external-compressed') {
+        $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dashboardConfig'
+        if ([string]::IsNullOrWhiteSpace($dashboardConfigJson)) {
+            throw "Unable to locate dashboardConfig metadata in '$HtmlPath'."
+        }
+
+        $dashboardConfig = $dashboardConfigJson | ConvertFrom-Json -Depth 20
+        $payloadUrl = [string]$dashboardConfig.payloadUrl
+        if ([string]::IsNullOrWhiteSpace($payloadUrl)) {
+            throw "dashboardConfig in '$HtmlPath' does not define payloadUrl."
+        }
+
+        $htmlDirectory = Split-Path -Path $resolvedPath -Parent
+        $payloadRelativePath = $payloadUrl.Replace('/', '\')
+        return [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+    }
+
+    $startMarker = '<script id="vulnsData" type="application/json">'
+    $endMarker = '</script>'
+    $startIndex = $content.IndexOf($startMarker)
+    if ($startIndex -lt 0) {
+        throw "Unable to locate embedded vulnerability payload in '$HtmlPath'."
+    }
+
+    $payloadStart = $startIndex + $startMarker.Length
+    $payloadEnd = $content.IndexOf($endMarker, $payloadStart)
+    if ($payloadEnd -lt 0) {
+        throw "Unable to locate payload terminator in '$HtmlPath'."
+    }
+
+    $base64 = ($content.Substring($payloadStart, $payloadEnd - $payloadStart) -replace '\s+', '')
+    $bytes = [Convert]::FromBase64String($base64)
+    $tempPayloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-embedded-payload-' + [guid]::NewGuid().ToString('N') + '.json.gz')
+    [System.IO.File]::WriteAllBytes($tempPayloadPath, $bytes)
+    return $tempPayloadPath
+}
+
+function Get-EmbeddedDashboardPayloadVulnCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $resolvedPath = Resolve-Path -LiteralPath $Path -ErrorAction Stop
+    $content = Get-Content -LiteralPath $resolvedPath -Raw
+    $dataFormat = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dataFormat'
+    if ($dataFormat -eq 'external-compressed') {
+        $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dashboardConfig'
+        if ([string]::IsNullOrWhiteSpace($dashboardConfigJson)) {
+            throw "Unable to locate dashboardConfig metadata in '$Path'."
+        }
+
+        $dashboardConfig = $dashboardConfigJson | ConvertFrom-Json -Depth 20
+        $payloadUrl = [string]$dashboardConfig.payloadUrl
+        if ([string]::IsNullOrWhiteSpace($payloadUrl)) {
+            throw "dashboardConfig in '$Path' does not define payloadUrl."
+        }
+
+        $htmlDirectory = Split-Path -Path $resolvedPath -Parent
+        $payloadRelativePath = $payloadUrl.Replace('/', '\')
+        $payloadPath = [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+        return (Get-CompressedPayloadVulnCount -Path $payloadPath)
+    }
+
+    $startMarker = '<script id="vulnsData" type="application/json">'
+    $endMarker = '</script>'
+    $startIndex = $content.IndexOf($startMarker)
+    if ($startIndex -lt 0) {
+        throw "Unable to locate embedded vulnerability payload in '$Path'."
+    }
+
+    $payloadStart = $startIndex + $startMarker.Length
+    $payloadEnd = $content.IndexOf($endMarker, $payloadStart)
+    if ($payloadEnd -lt 0) {
+        throw "Unable to locate payload terminator in '$Path'."
+    }
+
+    $base64 = ($content.Substring($payloadStart, $payloadEnd - $payloadStart) -replace '\s+', '')
+    $bytes = [Convert]::FromBase64String($base64)
+    $stream = $null
+    $gzip = $null
+    $reader = $null
+    $jsonReader = $null
+
+    try {
+        $stream = [System.IO.MemoryStream]::new($bytes)
+        $gzip = [System.IO.Compression.GZipStream]::new($stream, [System.IO.Compression.CompressionMode]::Decompress)
+        $reader = [System.IO.StreamReader]::new($gzip, [System.Text.Encoding]::UTF8)
+        $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
+        return (Get-PayloadVulnCountFromJsonReader -Reader $jsonReader -Path $Path)
+    }
+    finally {
+        if ($jsonReader) { $jsonReader.Close() }
+        elseif ($reader) { $reader.Dispose() }
+        elseif ($gzip) { $gzip.Dispose() }
+        elseif ($stream) { $stream.Dispose() }
+    }
+}
+
+function Get-DashboardPayloadGzipSha256 {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $content = [System.IO.File]::ReadAllText($resolvedPath, [System.Text.Encoding]::UTF8)
+    $dataFormat = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dataFormat'
+
+    if ($dataFormat -eq 'external-compressed') {
+        $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dashboardConfig'
+        if ([string]::IsNullOrWhiteSpace($dashboardConfigJson)) {
+            throw "Unable to locate dashboardConfig metadata in '$Path'."
+        }
+
+        $dashboardConfig = $dashboardConfigJson | ConvertFrom-Json -Depth 20
+        $payloadUrl = [string]$dashboardConfig.payloadUrl
+        if ([string]::IsNullOrWhiteSpace($payloadUrl)) {
+            throw "dashboardConfig in '$Path' does not define payloadUrl."
+        }
+
+        $htmlDirectory = Split-Path -Path $resolvedPath -Parent
+        $payloadRelativePath = $payloadUrl.Replace('/', '\')
+        $payloadPath = [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+        return (Get-FileSha256Hex -Path $payloadPath)
+    }
+
+    $startMarker = '<script id="vulnsData" type="application/json">'
+    $endMarker = '</script>'
+    $startIndex = $content.IndexOf($startMarker)
+    if ($startIndex -lt 0) {
+        throw "Unable to locate embedded vulnerability payload in '$Path'."
+    }
+
+    $payloadStart = $startIndex + $startMarker.Length
+    $payloadEnd = $content.IndexOf($endMarker, $payloadStart)
+    if ($payloadEnd -lt 0) {
+        throw "Unable to locate payload terminator in '$Path'."
+    }
+
+    $base64 = ($content.Substring($payloadStart, $payloadEnd - $payloadStart) -replace '\s+', '')
+    $bytes = [Convert]::FromBase64String($base64)
+    $hashBytes = [System.Security.Cryptography.SHA256]::HashData($bytes)
+    return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+}
+
+function Get-NormalizedAuditDecimalString {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return ''
+    }
+
+    $raw = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return ''
+    }
+
+    [decimal]$decimalValue = 0
+    if ([decimal]::TryParse($raw, [ref]$decimalValue)) {
+        return $decimalValue.ToString('0.#####', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+
+    return $raw.Trim()
 }
 
 function ConvertTo-VulnColumnFileSet {
@@ -1591,563 +1867,6 @@ function Read-MachineData {
     }
 }
 
-function Read-AdvancedHuntingData {
-    [CmdletBinding()]
-    [OutputType([hashtable])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    function ConvertTo-AdvancedHuntingStringArray {
-        [CmdletBinding()]
-        [OutputType([string[]])]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            $Value
-        )
-
-        if ($null -eq $Value) {
-            return @()
-        }
-
-        $values = [System.Collections.Generic.List[string]]::new()
-        if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
-            foreach ($item in $Value) {
-                if ($null -eq $item) { continue }
-                $text = [string]$item
-                if (-not [string]::IsNullOrWhiteSpace($text)) {
-                    $values.Add($text)
-                }
-            }
-        }
-        else {
-            $text = [string]$Value
-            if (-not [string]::IsNullOrWhiteSpace($text)) {
-                $values.Add($text)
-            }
-        }
-
-        return [string[]]$values.ToArray()
-    }
-
-    function ConvertTo-AdvancedHuntingDescriptionValue {
-        [CmdletBinding()]
-        [OutputType([string])]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            $Value
-        )
-
-        if ($null -eq $Value) {
-            return $null
-        }
-
-        if ($Value -is [string]) {
-            return $Value
-        }
-
-        $parts = @(ConvertTo-AdvancedHuntingStringArray -Value $Value)
-        if ($parts.Count -eq 0) {
-            return $null
-        }
-
-        return ($parts -join "`n")
-    }
-
-    function ConvertTo-AdvancedHuntingNullableBoolean {
-        [CmdletBinding()]
-        [OutputType([Nullable[bool]])]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            $Value
-        )
-
-        if ($null -eq $Value) {
-            return $null
-        }
-
-        if ($Value -is [bool]) {
-            return $Value
-        }
-
-        $text = [string]$Value
-        if ([string]::IsNullOrWhiteSpace($text)) {
-            return $null
-        }
-
-        switch -Regex ($text.Trim().ToLowerInvariant()) {
-            '^(true|1|yes)$' { return $true }
-            '^(false|0|no)$' { return $false }
-        }
-
-        return $null
-    }
-
-    return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
-        Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
-
-        Write-Information "Reading Advanced Hunting data from $Path..." -InformationAction Continue
-
-        $ahData = @{}
-        $parseErrors = 0
-        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
-        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
-
-        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
-            $currentPath = $legacyCurrentPath
-        }
-
-        if (Test-Path -Path $currentPath) {
-            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
-            $sourceFiles = @(Get-Item -Path $currentPath)
-        }
-        else {
-            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
-                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
-                Sort-Object Name -Descending)
-
-            if ($sourceFiles.Count -eq 0) {
-                Write-Warning 'No Advanced Hunting data files found. CVE enrichment will be skipped.'
-                return @{}
-            }
-
-            Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
-        }
-
-        foreach ($file in $sourceFiles) {
-            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
-            foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
-                try {
-                    $cveId = [string]$record.PSObject.Properties['CveId']?.Value
-                    if (-not [string]::IsNullOrWhiteSpace($cveId) -and -not $ahData.ContainsKey($cveId)) {
-                        $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
-                        $rawDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
-                        $rawAffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
-                        $affectedSoftware = @(ConvertTo-AdvancedHuntingStringArray -Value $rawAffectedSoftware)
-                        $ahData[$cveId] = @{
-                            PublishedDate = Convert-ToYmdDate -DateValue $pdRaw
-                            VulnerabilityDescription = ConvertTo-AdvancedHuntingDescriptionValue -Value $rawDescription
-                            EpssScore = $record.PSObject.Properties['EpssScore']?.Value
-                            AffectedSoftware = if ($affectedSoftware.Count -gt 0) { @($affectedSoftware) } else { $null }
-                            IsExploitAvailable = ConvertTo-AdvancedHuntingNullableBoolean -Value $record.PSObject.Properties['IsExploitAvailable']?.Value
-                        }
-                    }
-                }
-                catch {
-                    $parseErrors++
-                    if ($parseErrors -le 5) {
-                        Write-Warning "Failed to process Advanced Hunting record in $($file.Name): $_"
-                    }
-                }
-            }
-        }
-
-        if ($parseErrors -gt 0) {
-            Write-Warning "Total parse errors: $parseErrors"
-        }
-
-        Write-Information "  Loaded enrichment data for $($ahData.Count) unique CVEs" -InformationAction Continue
-        return $ahData
-    }
-}
-
-function Read-AdvancedHuntingInventoryData {
-    [CmdletBinding()]
-    [OutputType([hashtable])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
-        Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
-
-        Write-Information "Reading Advanced Hunting software inventory data from $Path..." -InformationAction Continue
-
-        $inventoryData = @{}
-        $parseErrors = 0
-        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
-        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
-
-        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
-            $currentPath = $legacyCurrentPath
-        }
-
-        if (Test-Path -Path $currentPath) {
-            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
-            $sourceFiles = @(Get-Item -Path $currentPath)
-        }
-        else {
-            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
-                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
-                Sort-Object Name -Descending)
-
-            if ($sourceFiles.Count -eq 0) {
-                Write-Information '  No Advanced Hunting software inventory data files found.' -InformationAction Continue
-                return @{}
-            }
-
-            Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
-        }
-
-        foreach ($file in $sourceFiles) {
-            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
-            foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
-                try {
-                    if ((Get-AdvancedHuntingRecordType -Record $record) -ne 'Inventory') {
-                        continue
-                    }
-
-                    $inventoryKey = Get-AdvancedHuntingInventoryMatchKey `
-                        -DeviceId ([string]$record.PSObject.Properties['DeviceId']?.Value) `
-                        -SoftwareVendor ([string]$record.PSObject.Properties['SoftwareVendor']?.Value) `
-                        -SoftwareName ([string]$record.PSObject.Properties['SoftwareName']?.Value) `
-                        -SoftwareVersion ([string]$record.PSObject.Properties['SoftwareVersion']?.Value)
-                    if ([string]::IsNullOrWhiteSpace($inventoryKey) -or $inventoryData.ContainsKey($inventoryKey)) {
-                        continue
-                    }
-
-                    $productCodeCpe = [string]$record.PSObject.Properties['ProductCodeCpe']?.Value
-                    $endOfSupportStatus = [string]$record.PSObject.Properties['EndOfSupportStatus']?.Value
-                    $endOfSupportDate = Convert-ToYmdDate -DateValue $record.PSObject.Properties['EndOfSupportDate']?.Value
-
-                    if ([string]::IsNullOrWhiteSpace($productCodeCpe) -and [string]::IsNullOrWhiteSpace($endOfSupportStatus) -and [string]::IsNullOrWhiteSpace($endOfSupportDate)) {
-                        continue
-                    }
-
-                    $inventoryData[$inventoryKey] = @{
-                        ProductCodeCpe = if ([string]::IsNullOrWhiteSpace($productCodeCpe)) { $null } else { $productCodeCpe }
-                        EndOfSupportStatus = if ([string]::IsNullOrWhiteSpace($endOfSupportStatus)) { $null } else { $endOfSupportStatus }
-                        EndOfSupportDate = $endOfSupportDate
-                    }
-                }
-                catch {
-                    $parseErrors++
-                    if ($parseErrors -le 5) {
-                        Write-Warning "Failed to process Advanced Hunting inventory record in $($file.Name): $_"
-                    }
-                }
-            }
-        }
-
-        if ($parseErrors -gt 0) {
-            Write-Warning "Total parse errors: $parseErrors"
-        }
-
-        Write-Information "  Loaded software inventory data for $($inventoryData.Count) device/software tuple(s)" -InformationAction Continue
-        return $inventoryData
-    }
-}
-
-function Read-AdvancedHuntingDeviceUserMap {
-    [CmdletBinding()]
-    [OutputType([hashtable])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    function Add-AdvancedHuntingLoggedOnUserValue {
-        [CmdletBinding()]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            $Value,
-
-            [Parameter(Mandatory = $true)]
-            [AllowEmptyCollection()]
-            [System.Collections.Generic.List[string]]$Values,
-
-            [Parameter(Mandatory = $true)]
-            [AllowEmptyCollection()]
-            [System.Collections.Generic.HashSet[string]]$Seen
-        )
-
-        if ($null -eq $Value) {
-            return
-        }
-
-        if ($Value -is [string]) {
-            $text = $Value.Trim()
-            if ([string]::IsNullOrWhiteSpace($text)) {
-                return
-            }
-
-            if ((($text.StartsWith('[') -and $text.EndsWith(']')) -or ($text.StartsWith('{') -and $text.EndsWith('}')))) {
-                try {
-                    $parsedValue = $text | ConvertFrom-Json -Depth 20
-                    Add-AdvancedHuntingLoggedOnUserValue -Value $parsedValue -Values $Values -Seen $Seen
-                    return
-                }
-                catch {
-                    Write-Verbose ("Falling back to raw LoggedOnUsers text after JSON parse failed: {0}" -f $_.Exception.Message)
-                }
-            }
-
-            if ($Seen.Add($text)) {
-                $Values.Add($text)
-            }
-            return
-        }
-
-        if ($Value -is [pscustomobject] -or $Value -is [System.Collections.IDictionary]) {
-            $propertyBag = $Value.PSObject.Properties
-            $upn = [string]$propertyBag['UserPrincipalName']?.Value
-            $domainName = [string]$propertyBag['DomainName']?.Value
-            $accountName = [string]$propertyBag['AccountName']?.Value
-            $userName = [string]$propertyBag['UserName']?.Value
-            $displayName = [string]$propertyBag['Name']?.Value
-
-            $resolvedName = $null
-            if (-not [string]::IsNullOrWhiteSpace($upn)) {
-                $resolvedName = $upn.Trim()
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace($accountName)) {
-                $resolvedName = if (-not [string]::IsNullOrWhiteSpace($domainName)) {
-                    $domainName.Trim() + '\' + $accountName.Trim()
-                }
-                else {
-                    $accountName.Trim()
-                }
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace($userName)) {
-                $resolvedName = if (-not [string]::IsNullOrWhiteSpace($domainName)) {
-                    $domainName.Trim() + '\' + $userName.Trim()
-                }
-                else {
-                    $userName.Trim()
-                }
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace($displayName)) {
-                $resolvedName = $displayName.Trim()
-            }
-
-            if (-not [string]::IsNullOrWhiteSpace($resolvedName)) {
-                if ($Seen.Add($resolvedName)) {
-                    $Values.Add($resolvedName)
-                }
-                return
-            }
-
-            foreach ($property in $propertyBag) {
-                Add-AdvancedHuntingLoggedOnUserValue -Value $property.Value -Values $Values -Seen $Seen
-            }
-            return
-        }
-
-        if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
-            foreach ($item in $Value) {
-                Add-AdvancedHuntingLoggedOnUserValue -Value $item -Values $Values -Seen $Seen
-            }
-            return
-        }
-
-        $fallbackText = [string]$Value
-        if (-not [string]::IsNullOrWhiteSpace($fallbackText) -and $Seen.Add($fallbackText)) {
-            $Values.Add($fallbackText)
-        }
-    }
-
-    function ConvertTo-AdvancedHuntingLoggedOnUserList {
-        [CmdletBinding()]
-        [OutputType([string[]])]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            $Value
-        )
-
-        $values = [System.Collections.Generic.List[string]]::new()
-        $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        Add-AdvancedHuntingLoggedOnUserValue -Value $Value -Values $values -Seen $seen
-        return [string[]]$values.ToArray()
-    }
-
-    return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
-        Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
-
-        Write-Information "Reading Advanced Hunting device-user data from $Path..." -InformationAction Continue
-
-        $deviceUsers = @{}
-        $parseErrors = 0
-        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
-        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
-
-        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
-            $currentPath = $legacyCurrentPath
-        }
-
-        if (Test-Path -Path $currentPath) {
-            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
-            $sourceFiles = @(Get-Item -Path $currentPath)
-        }
-        else {
-            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
-                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
-                Sort-Object Name -Descending)
-
-            if ($sourceFiles.Count -eq 0) {
-                Write-Information '  No Advanced Hunting device-user data files found.' -InformationAction Continue
-                return @{}
-            }
-
-            Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
-        }
-
-        foreach ($file in $sourceFiles) {
-            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
-            foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
-                try {
-                    if ((Get-AdvancedHuntingRecordType -Record $record) -ne 'DeviceUsers') {
-                        continue
-                    }
-
-                    $deviceId = [string]$record.PSObject.Properties['DeviceId']?.Value
-                    if ([string]::IsNullOrWhiteSpace($deviceId) -or $deviceUsers.ContainsKey($deviceId)) {
-                        continue
-                    }
-
-                    $loggedOnUsers = @(ConvertTo-AdvancedHuntingLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
-                    if ($loggedOnUsers.Count -gt 0) {
-                        $deviceUsers[$deviceId] = @($loggedOnUsers)
-                    }
-                }
-                catch {
-                    $parseErrors++
-                    if ($parseErrors -le 5) {
-                        Write-Warning "Failed to process Advanced Hunting device-user record in $($file.Name): $_"
-                    }
-                }
-            }
-        }
-
-        if ($parseErrors -gt 0) {
-            Write-Warning "Total parse errors: $parseErrors"
-        }
-
-        Write-Information "  Loaded logged-on user data for $($deviceUsers.Count) device(s)" -InformationAction Continue
-        return $deviceUsers
-    }
-}
-
-function Read-NvdCveData {
-    [CmdletBinding()]
-    [OutputType([hashtable])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    function ConvertTo-NvdStringArray {
-        [CmdletBinding()]
-        [OutputType([string[]])]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            $Value
-        )
-
-        if ($null -eq $Value) {
-            return @()
-        }
-
-        $values = [System.Collections.Generic.List[string]]::new()
-        if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
-            foreach ($item in $Value) {
-                if ($null -eq $item) { continue }
-                $text = [string]$item
-                if (-not [string]::IsNullOrWhiteSpace($text)) {
-                    $values.Add($text)
-                }
-            }
-        }
-        else {
-            $text = [string]$Value
-            if (-not [string]::IsNullOrWhiteSpace($text)) {
-                $values.Add($text)
-            }
-        }
-
-        return [string[]]$values.ToArray()
-    }
-
-    function ConvertTo-NvdDescriptionValue {
-        [CmdletBinding()]
-        [OutputType([string])]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            $Value
-        )
-
-        $parts = @(ConvertTo-NvdStringArray -Value $Value)
-        if ($parts.Count -eq 0) {
-            return $null
-        }
-
-        return ($parts -join "`n")
-    }
-
-    return Invoke-WithStoreLock -BasePath $Path -StoreName 'nvdcve' -ScriptBlock {
-        Restore-StoreTransaction -BasePath $Path -StoreName 'nvdcve'
-
-        $currentPath = Get-NvdCveCurrentPath -BasePath $Path
-        if (-not (Test-Path -LiteralPath $currentPath -PathType Leaf)) {
-            Write-Information "No NVD CVE cache found at $currentPath. NVD enrichment will be skipped." -InformationAction Continue
-            return @{}
-        }
-
-        Write-Information "Reading NVD CVE data from $currentPath..." -InformationAction Continue
-
-        $rawJson = Read-GzipTextFile -Path $currentPath
-        if ([string]::IsNullOrWhiteSpace($rawJson)) {
-            return @{}
-        }
-
-        try {
-            $document = $rawJson | ConvertFrom-Json -Depth 100
-        }
-        catch {
-            Write-Warning "Failed to parse NVD CVE cache '$currentPath': $_"
-            return @{}
-        }
-
-        $records = if ($document.PSObject.Properties['records']) { @($document.records) } else { @($document) }
-        $nvdData = @{}
-        foreach ($record in $records) {
-            if ($null -eq $record) {
-                continue
-            }
-
-            $cveId = [string]$record.PSObject.Properties['CveId']?.Value
-            if ([string]::IsNullOrWhiteSpace($cveId)) {
-                continue
-            }
-
-            $weaknesses = @(ConvertTo-NvdStringArray -Value $record.PSObject.Properties['Weaknesses']?.Value)
-            $nvdData[$cveId] = @{
-                PublishedDate = Convert-ToYmdDate -DateValue $record.PSObject.Properties['PublishedDate']?.Value
-                LastModifiedDate = Convert-ToYmdDate -DateValue $record.PSObject.Properties['LastModifiedDate']?.Value
-                VulnerabilityDescription = ConvertTo-NvdDescriptionValue -Value $record.PSObject.Properties['VulnerabilityDescription']?.Value
-                BaseScore = $record.PSObject.Properties['BaseScore']?.Value
-                BaseSeverity = [string]$record.PSObject.Properties['BaseSeverity']?.Value
-                Vector = [string]$record.PSObject.Properties['Vector']?.Value
-                CisaExploitAdd = Convert-ToYmdDate -DateValue $record.PSObject.Properties['CisaExploitAdd']?.Value
-                CisaActionDue = Convert-ToYmdDate -DateValue $record.PSObject.Properties['CisaActionDue']?.Value
-                CisaRequiredAction = [string]$record.PSObject.Properties['CisaRequiredAction']?.Value
-                Weaknesses = if ($weaknesses.Count -gt 0) { @($weaknesses) } else { $null }
-            }
-        }
-
-        Write-Information "  Loaded NVD enrichment data for $($nvdData.Count) CVE(s)" -InformationAction Continue
-        return $nvdData
-    }
-}
-
 function Get-DashboardCacheDirectory {
     [CmdletBinding()]
     [OutputType([string])]
@@ -2827,6 +2546,129 @@ function Get-NormalizedPayloadSiblingManifestPath {
     }
 
     return ($resolvedPayloadPath + '.json')
+}
+
+function Write-CombinedPayloadGzipFallback {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Lookups,
+
+        [Parameter(Mandatory = $true)]
+        [string]$VulnsPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath
+    )
+
+    $payload = [ordered]@{
+        lookups = $Lookups
+        vulnsFormat = 'rows-v1'
+        vulns = (Get-Content -Path $VulnsPath -Raw | ConvertFrom-Json -Depth 20)
+    }
+    $json = $payload | ConvertTo-Json -Compress -Depth 100
+
+    $fileStream = [System.IO.File]::Create($OutputPath)
+    try {
+        $gzip = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionLevel]::Fastest)
+        try {
+            $writer = [System.IO.StreamWriter]::new($gzip, [System.Text.UTF8Encoding]::new($false))
+            try {
+                $writer.Write($json)
+            }
+            finally {
+                $writer.Dispose()
+            }
+        }
+        finally {
+            $gzip.Dispose()
+        }
+    }
+    finally {
+        $fileStream.Dispose()
+    }
+}
+
+function Resolve-NormalizedPayloadManifestPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$PayloadPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$ManifestPath
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
+        return [System.IO.Path]::GetFullPath($ManifestPath)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($PayloadPath)) {
+        return (Get-NormalizedPayloadSiblingManifestPath -PayloadPath $PayloadPath)
+    }
+
+    return $null
+}
+
+function ConvertTo-NormalizedPayloadManifestRecord {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Manifest
+    )
+
+    $record = [ordered]@{}
+    foreach ($property in $Manifest.PSObject.Properties) {
+        $record[$property.Name] = $property.Value
+    }
+
+    return $record
+}
+
+function Export-NormalizedPayloadArtifacts {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper optionally writes both payload and manifest outputs as one operation.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PayloadPath,
+
+        [Parameter(Mandatory = $true)]
+        $PayloadManifest,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$OutputPayloadPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$OutputManifestPath
+    )
+
+    $resolvedOutputPayloadPath = if (-not [string]::IsNullOrWhiteSpace($OutputPayloadPath)) { [System.IO.Path]::GetFullPath($OutputPayloadPath) } else { $null }
+    $resolvedOutputManifestPath = Resolve-NormalizedPayloadManifestPath -PayloadPath $resolvedOutputPayloadPath -ManifestPath $OutputManifestPath
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedOutputPayloadPath)) {
+        $payloadDirectory = Split-Path -Path $resolvedOutputPayloadPath -Parent
+        if (-not [string]::IsNullOrWhiteSpace($payloadDirectory) -and -not (Test-Path -LiteralPath $payloadDirectory -PathType Container)) {
+            [void](New-Item -Path $payloadDirectory -ItemType Directory -Force)
+        }
+
+        Copy-Item -LiteralPath $PayloadPath -Destination $resolvedOutputPayloadPath -Force
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedOutputManifestPath)) {
+        Write-NormalizedPayloadManifest -Path $resolvedOutputManifestPath -Manifest $PayloadManifest | Out-Null
+    }
+
+    return [PSCustomObject]@{
+        PayloadPath = $resolvedOutputPayloadPath
+        ManifestPath = $resolvedOutputManifestPath
+    }
 }
 
 function Read-NormalizedPayloadManifest {
