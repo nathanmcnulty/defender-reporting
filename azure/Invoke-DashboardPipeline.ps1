@@ -9498,6 +9498,129 @@ function Get-NormalizedPayloadSiblingManifestPath {
     return ($resolvedPayloadPath + '.json')
 }
 
+function Write-CombinedPayloadGzipFallback {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Lookups,
+
+        [Parameter(Mandatory = $true)]
+        [string]$VulnsPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath
+    )
+
+    $payload = [ordered]@{
+        lookups = $Lookups
+        vulnsFormat = 'rows-v1'
+        vulns = (Get-Content -Path $VulnsPath -Raw | ConvertFrom-Json -Depth 20)
+    }
+    $json = $payload | ConvertTo-Json -Compress -Depth 100
+
+    $fileStream = [System.IO.File]::Create($OutputPath)
+    try {
+        $gzip = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionLevel]::Fastest)
+        try {
+            $writer = [System.IO.StreamWriter]::new($gzip, [System.Text.UTF8Encoding]::new($false))
+            try {
+                $writer.Write($json)
+            }
+            finally {
+                $writer.Dispose()
+            }
+        }
+        finally {
+            $gzip.Dispose()
+        }
+    }
+    finally {
+        $fileStream.Dispose()
+    }
+}
+
+function Resolve-NormalizedPayloadManifestPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$PayloadPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$ManifestPath
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ManifestPath)) {
+        return [System.IO.Path]::GetFullPath($ManifestPath)
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($PayloadPath)) {
+        return (Get-NormalizedPayloadSiblingManifestPath -PayloadPath $PayloadPath)
+    }
+
+    return $null
+}
+
+function ConvertTo-NormalizedPayloadManifestRecord {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Manifest
+    )
+
+    $record = [ordered]@{}
+    foreach ($property in $Manifest.PSObject.Properties) {
+        $record[$property.Name] = $property.Value
+    }
+
+    return $record
+}
+
+function Export-NormalizedPayloadArtifacts {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper optionally writes both payload and manifest outputs as one operation.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PayloadPath,
+
+        [Parameter(Mandatory = $true)]
+        $PayloadManifest,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$OutputPayloadPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$OutputManifestPath
+    )
+
+    $resolvedOutputPayloadPath = if (-not [string]::IsNullOrWhiteSpace($OutputPayloadPath)) { [System.IO.Path]::GetFullPath($OutputPayloadPath) } else { $null }
+    $resolvedOutputManifestPath = Resolve-NormalizedPayloadManifestPath -PayloadPath $resolvedOutputPayloadPath -ManifestPath $OutputManifestPath
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedOutputPayloadPath)) {
+        $payloadDirectory = Split-Path -Path $resolvedOutputPayloadPath -Parent
+        if (-not [string]::IsNullOrWhiteSpace($payloadDirectory) -and -not (Test-Path -LiteralPath $payloadDirectory -PathType Container)) {
+            [void](New-Item -Path $payloadDirectory -ItemType Directory -Force)
+        }
+
+        Copy-Item -LiteralPath $PayloadPath -Destination $resolvedOutputPayloadPath -Force
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedOutputManifestPath)) {
+        Write-NormalizedPayloadManifest -Path $resolvedOutputManifestPath -Manifest $PayloadManifest | Out-Null
+    }
+
+    return [PSCustomObject]@{
+        PayloadPath = $resolvedOutputPayloadPath
+        ManifestPath = $resolvedOutputManifestPath
+    }
+}
+
 function Read-NormalizedPayloadManifest {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
