@@ -7778,6 +7778,193 @@ function Get-CompressedPayloadVulnCount {
     }
 }
 
+function Get-DashboardHtmlScriptContent {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Html,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptId
+    )
+
+    $pattern = '<script\s+id="' + [regex]::Escape($ScriptId) + '"[^>]*>(?<content>.*?)</script>'
+    $match = [regex]::Match(
+        $Html,
+        $pattern,
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Singleline
+    )
+
+    if (-not $match.Success) {
+        return ''
+    }
+
+    return $match.Groups['content'].Value.Trim()
+}
+
+function Get-DashboardEmbeddedPayloadTempPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HtmlPath
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($HtmlPath)
+    $content = [System.IO.File]::ReadAllText($resolvedPath, [System.Text.Encoding]::UTF8)
+    $dataFormat = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dataFormat'
+
+    if ($dataFormat -eq 'external-compressed') {
+        $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dashboardConfig'
+        if ([string]::IsNullOrWhiteSpace($dashboardConfigJson)) {
+            throw "Unable to locate dashboardConfig metadata in '$HtmlPath'."
+        }
+
+        $dashboardConfig = $dashboardConfigJson | ConvertFrom-Json -Depth 20
+        $payloadUrl = [string]$dashboardConfig.payloadUrl
+        if ([string]::IsNullOrWhiteSpace($payloadUrl)) {
+            throw "dashboardConfig in '$HtmlPath' does not define payloadUrl."
+        }
+
+        $htmlDirectory = Split-Path -Path $resolvedPath -Parent
+        $payloadRelativePath = $payloadUrl.Replace('/', '\')
+        return [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+    }
+
+    $startMarker = '<script id="vulnsData" type="application/json">'
+    $endMarker = '</script>'
+    $startIndex = $content.IndexOf($startMarker)
+    if ($startIndex -lt 0) {
+        throw "Unable to locate embedded vulnerability payload in '$HtmlPath'."
+    }
+
+    $payloadStart = $startIndex + $startMarker.Length
+    $payloadEnd = $content.IndexOf($endMarker, $payloadStart)
+    if ($payloadEnd -lt 0) {
+        throw "Unable to locate payload terminator in '$HtmlPath'."
+    }
+
+    $base64 = ($content.Substring($payloadStart, $payloadEnd - $payloadStart) -replace '\s+', '')
+    $bytes = [Convert]::FromBase64String($base64)
+    $tempPayloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-embedded-payload-' + [guid]::NewGuid().ToString('N') + '.json.gz')
+    [System.IO.File]::WriteAllBytes($tempPayloadPath, $bytes)
+    return $tempPayloadPath
+}
+
+function Get-EmbeddedDashboardPayloadVulnCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $resolvedPath = Resolve-Path -LiteralPath $Path -ErrorAction Stop
+    $content = Get-Content -LiteralPath $resolvedPath -Raw
+    $dataFormat = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dataFormat'
+    if ($dataFormat -eq 'external-compressed') {
+        $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dashboardConfig'
+        if ([string]::IsNullOrWhiteSpace($dashboardConfigJson)) {
+            throw "Unable to locate dashboardConfig metadata in '$Path'."
+        }
+
+        $dashboardConfig = $dashboardConfigJson | ConvertFrom-Json -Depth 20
+        $payloadUrl = [string]$dashboardConfig.payloadUrl
+        if ([string]::IsNullOrWhiteSpace($payloadUrl)) {
+            throw "dashboardConfig in '$Path' does not define payloadUrl."
+        }
+
+        $htmlDirectory = Split-Path -Path $resolvedPath -Parent
+        $payloadRelativePath = $payloadUrl.Replace('/', '\')
+        $payloadPath = [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+        return (Get-CompressedPayloadVulnCount -Path $payloadPath)
+    }
+
+    $startMarker = '<script id="vulnsData" type="application/json">'
+    $endMarker = '</script>'
+    $startIndex = $content.IndexOf($startMarker)
+    if ($startIndex -lt 0) {
+        throw "Unable to locate embedded vulnerability payload in '$Path'."
+    }
+
+    $payloadStart = $startIndex + $startMarker.Length
+    $payloadEnd = $content.IndexOf($endMarker, $payloadStart)
+    if ($payloadEnd -lt 0) {
+        throw "Unable to locate payload terminator in '$Path'."
+    }
+
+    $base64 = ($content.Substring($payloadStart, $payloadEnd - $payloadStart) -replace '\s+', '')
+    $bytes = [Convert]::FromBase64String($base64)
+    $stream = $null
+    $gzip = $null
+    $reader = $null
+    $jsonReader = $null
+
+    try {
+        $stream = [System.IO.MemoryStream]::new($bytes)
+        $gzip = [System.IO.Compression.GZipStream]::new($stream, [System.IO.Compression.CompressionMode]::Decompress)
+        $reader = [System.IO.StreamReader]::new($gzip, [System.Text.Encoding]::UTF8)
+        $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
+        return (Get-PayloadVulnCountFromJsonReader -Reader $jsonReader -Path $Path)
+    }
+    finally {
+        if ($jsonReader) { $jsonReader.Close() }
+        elseif ($reader) { $reader.Dispose() }
+        elseif ($gzip) { $gzip.Dispose() }
+        elseif ($stream) { $stream.Dispose() }
+    }
+}
+
+function Get-DashboardPayloadGzipSha256 {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $content = [System.IO.File]::ReadAllText($resolvedPath, [System.Text.Encoding]::UTF8)
+    $dataFormat = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dataFormat'
+
+    if ($dataFormat -eq 'external-compressed') {
+        $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dashboardConfig'
+        if ([string]::IsNullOrWhiteSpace($dashboardConfigJson)) {
+            throw "Unable to locate dashboardConfig metadata in '$Path'."
+        }
+
+        $dashboardConfig = $dashboardConfigJson | ConvertFrom-Json -Depth 20
+        $payloadUrl = [string]$dashboardConfig.payloadUrl
+        if ([string]::IsNullOrWhiteSpace($payloadUrl)) {
+            throw "dashboardConfig in '$Path' does not define payloadUrl."
+        }
+
+        $htmlDirectory = Split-Path -Path $resolvedPath -Parent
+        $payloadRelativePath = $payloadUrl.Replace('/', '\')
+        $payloadPath = [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+        return (Get-FileSha256Hex -Path $payloadPath)
+    }
+
+    $startMarker = '<script id="vulnsData" type="application/json">'
+    $endMarker = '</script>'
+    $startIndex = $content.IndexOf($startMarker)
+    if ($startIndex -lt 0) {
+        throw "Unable to locate embedded vulnerability payload in '$Path'."
+    }
+
+    $payloadStart = $startIndex + $startMarker.Length
+    $payloadEnd = $content.IndexOf($endMarker, $payloadStart)
+    if ($payloadEnd -lt 0) {
+        throw "Unable to locate payload terminator in '$Path'."
+    }
+
+    $base64 = ($content.Substring($payloadStart, $payloadEnd - $payloadStart) -replace '\s+', '')
+    $bytes = [Convert]::FromBase64String($base64)
+    $hashBytes = [System.Security.Cryptography.SHA256]::HashData($bytes)
+    return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+}
+
 function ConvertTo-VulnColumnFileSet {
     [CmdletBinding()]
     param(
