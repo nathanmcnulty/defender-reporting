@@ -1819,6 +1819,87 @@ function Get-LegacyMigrationRegressionAudit {
     }
 }
 
+function New-DashboardAuditPhaseTimings {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only creates an in-memory phase timing record for audit output.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper returns a structured collection of phase timing values by design.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [hashtable]$Values = @{}
+    )
+
+    $phaseTimings = [ordered]@{
+        MachineLoadElapsedSeconds = $null
+        AdvancedHuntingLoadElapsedSeconds = $null
+        SourceMaterializationElapsedSeconds = $null
+        PayloadLoadElapsedSeconds = $null
+        VendorIndexElapsedSeconds = $null
+        SourceSignatureElapsedSeconds = $null
+        PayloadSignatureElapsedSeconds = $null
+        RowComparisonElapsedSeconds = $null
+        EnrichmentAuditElapsedSeconds = $null
+        ReportComparisonsElapsedSeconds = $null
+        DuplicateIdentityElapsedSeconds = $null
+        OpenStateElapsedSeconds = $null
+        ComparisonElapsedSeconds = $null
+        BaselineAuditElapsedSeconds = $null
+        BaselineCoverageElapsedSeconds = $null
+        LegacyFixtureRegressionElapsedSeconds = $null
+        TotalElapsedSeconds = $null
+    }
+
+    foreach ($key in $Values.Keys) {
+        if ($phaseTimings.Contains($key)) {
+            $phaseTimings[$key] = $Values[$key]
+        }
+    }
+
+    return [PSCustomObject]$phaseTimings
+}
+
+function Write-DashboardAuditPhaseTimingSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $PhaseTimings
+    )
+
+    $phaseLabels = [ordered]@{
+        MachineLoadElapsedSeconds = 'machine load'
+        AdvancedHuntingLoadElapsedSeconds = 'Advanced Hunting load'
+        SourceMaterializationElapsedSeconds = 'source materialization'
+        PayloadLoadElapsedSeconds = 'payload load'
+        VendorIndexElapsedSeconds = 'vendor index'
+        SourceSignatureElapsedSeconds = 'source signatures'
+        PayloadSignatureElapsedSeconds = 'payload signatures'
+        RowComparisonElapsedSeconds = 'row comparison'
+        EnrichmentAuditElapsedSeconds = 'enrichment audit'
+        ReportComparisonsElapsedSeconds = 'report comparisons'
+        DuplicateIdentityElapsedSeconds = 'duplicate identity audit'
+        OpenStateElapsedSeconds = 'open-state audit'
+        ComparisonElapsedSeconds = 'comparison'
+        BaselineAuditElapsedSeconds = 'baseline audit'
+        BaselineCoverageElapsedSeconds = 'baseline coverage'
+        LegacyFixtureRegressionElapsedSeconds = 'legacy fixture regression'
+        TotalElapsedSeconds = 'total'
+    }
+
+    $segments = [System.Collections.Generic.List[string]]::new()
+    foreach ($propertyName in $phaseLabels.Keys) {
+        $property = $PhaseTimings.PSObject.Properties[$propertyName]
+        if ($null -eq $property -or $null -eq $property.Value) {
+            continue
+        }
+
+        $segments.Add(("{0} {1:N2}s" -f $phaseLabels[$propertyName], [double]$property.Value)) | Out-Null
+    }
+
+    if ($segments.Count -gt 0) {
+        Write-Information ("  Audit phase timing summary: {0}" -f ($segments -join '; ')) -InformationAction Continue
+    }
+}
+
 function Get-DashboardAuditResult {
     [CmdletBinding()]
     param(
@@ -1843,7 +1924,7 @@ function Get-DashboardAuditResult {
 
     $skipObservedWindowMerge = (Test-IsSyntheticDataset -BasePath $ResolvedExportsPath)
     $payloadCacheEntry = Get-NormalizedPayloadCacheEntry -BasePath $ResolvedExportsPath -SkipObservedWindowMerge:$skipObservedWindowMerge
-    $largeAuditThreshold = 250000
+    $largeAuditThreshold = 100000
     if (
         -not $payloadCacheEntry -and
         [string]::IsNullOrWhiteSpace($ResolvedBaselineAuditPath) -and
@@ -1904,18 +1985,42 @@ function Get-DashboardAuditResult {
         return (Get-StreamingDashboardAuditResult -ResolvedHtmlPath $ResolvedHtmlPath -ResolvedExportsPath $ResolvedExportsPath -PayloadCacheEntry $payloadCacheEntry)
     }
 
+    $auditStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $machineLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $machines = Read-MachineData -Path $ResolvedExportsPath
+    $machineLoadStopwatch.Stop()
+    $machineLoadElapsedSeconds = [math]::Round($machineLoadStopwatch.Elapsed.TotalSeconds, 2)
+
+    $advancedHuntingLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $advancedHunting = Read-AdvancedHuntingData -Path $ResolvedExportsPath
     $advancedHuntingInventory = Read-AdvancedHuntingInventoryData -Path $ResolvedExportsPath
     $nvdCveData = Read-NvdCveData -Path $ResolvedExportsPath
+    $advancedHuntingLoadStopwatch.Stop()
+    $advancedHuntingLoadElapsedSeconds = [math]::Round($advancedHuntingLoadStopwatch.Elapsed.TotalSeconds, 2)
+
+    $sourceMaterializationStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $sourceResult = Read-SourceRow -ExportsPath $ResolvedExportsPath -Machines $machines -AdvancedHunting $advancedHunting -SkipObservedWindowMerge:$skipObservedWindowMerge -AdvancedHuntingInventory $advancedHuntingInventory -NvdCveData $nvdCveData
+    $sourceMaterializationStopwatch.Stop()
+    $sourceMaterializationElapsedSeconds = [math]::Round($sourceMaterializationStopwatch.Elapsed.TotalSeconds, 2)
+
+    $payloadLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $payload = Read-DashboardPayload -Path $ResolvedHtmlPath
     $dashboardRows = Read-DashboardRow -Payload $payload
+    $payloadLoadStopwatch.Stop()
+    $payloadLoadElapsedSeconds = [math]::Round($payloadLoadStopwatch.Elapsed.TotalSeconds, 2)
     $baselineDashboardHtmlPath = Resolve-BaselineDashboardHtmlPath -RequestedPath $ResolvedBaselineDashboardHtmlPath
 
+    $rowComparisonStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $rowComparison = Compare-RowSet -ExpectedRows $sourceResult.Rows -ActualRows $dashboardRows
-    $enrichmentAudit = Get-EnrichmentAudit -SourceRows $sourceResult.Rows -DashboardRows $dashboardRows
+    $rowComparisonStopwatch.Stop()
+    $rowComparisonElapsedSeconds = [math]::Round($rowComparisonStopwatch.Elapsed.TotalSeconds, 2)
 
+    $enrichmentAuditStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $enrichmentAudit = Get-EnrichmentAudit -SourceRows $sourceResult.Rows -DashboardRows $dashboardRows
+    $enrichmentAuditStopwatch.Stop()
+    $enrichmentAuditElapsedSeconds = [math]::Round($enrichmentAuditStopwatch.Elapsed.TotalSeconds, 2)
+
+    $reportComparisonsStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $reportComparisons = @(
         Compare-ReportOutput -Name 'Stats' -Expected (Get-StatsReport -Rows $sourceResult.Rows) -Actual (Get-StatsReport -Rows $dashboardRows)
         Compare-ReportOutput -Name 'ActiveChart' -Expected @(Get-ActiveChartReport -Rows $sourceResult.Rows) -Actual @(Get-ActiveChartReport -Rows $dashboardRows)
@@ -1926,16 +2031,31 @@ function Get-DashboardAuditResult {
         Compare-ReportOutput -Name 'DevicesByRemediation' -Expected @(Get-DevicesByRemediationReport -Rows $sourceResult.Rows) -Actual @(Get-DevicesByRemediationReport -Rows $dashboardRows)
         Compare-ReportOutput -Name 'RemediationsByDevice' -Expected @(Get-RemediationsByDeviceReport -Rows $sourceResult.Rows) -Actual @(Get-RemediationsByDeviceReport -Rows $dashboardRows)
     )
+    $reportComparisonsStopwatch.Stop()
+    $reportComparisonsElapsedSeconds = [math]::Round($reportComparisonsStopwatch.Elapsed.TotalSeconds, 2)
 
+    $duplicateAuditStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $duplicateAudit = Get-DuplicateIdentityAudit -SourceRows $sourceResult.Rows
+    $duplicateAuditStopwatch.Stop()
+    $duplicateIdentityElapsedSeconds = [math]::Round($duplicateAuditStopwatch.Elapsed.TotalSeconds, 2)
+
+    $openStateAuditStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $openStateAudit = Get-OpenStateAudit -Rows $sourceResult.Rows
+    $openStateAuditStopwatch.Stop()
+    $openStateElapsedSeconds = [math]::Round($openStateAuditStopwatch.Elapsed.TotalSeconds, 2)
+
     $legacyMigrationAudit = Get-LegacyMigrationRegressionAudit
     $qualityMeta = if ($payload.PSObject.Properties['quality'] -and $payload.quality) { $payload.quality } else { $null }
+
+    $baselineAuditElapsedSeconds = $null
+    $baselineCoverageElapsedSeconds = $null
+    $legacyFixtureRegressionElapsedSeconds = $null
 
     $result = [PSCustomObject]@{
         GeneratedOn = (Get-Date).ToString('o')
         HtmlPath = $ResolvedHtmlPath
         ExportsPath = $ResolvedExportsPath
+        AuditMode = 'full-dashboard-audit'
         Source = [PSCustomObject]@{
             RowCount = $sourceResult.Rows.Count
             MissingMachineCount = $sourceResult.MissingMachineCount
@@ -1956,16 +2076,44 @@ function Get-DashboardAuditResult {
     }
 
     if (-not [string]::IsNullOrWhiteSpace($ResolvedBaselineAuditPath)) {
+        $baselineAuditStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $result | Add-Member -NotePropertyName RegressionComparison -NotePropertyValue (Compare-BaselineAudit -CurrentAudit $result -BaselinePath $ResolvedBaselineAuditPath)
+        $baselineAuditStopwatch.Stop()
+        $baselineAuditElapsedSeconds = [math]::Round($baselineAuditStopwatch.Elapsed.TotalSeconds, 2)
     }
 
     if (-not [string]::IsNullOrWhiteSpace($baselineDashboardHtmlPath)) {
+        $baselineCoverageStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $result | Add-Member -NotePropertyName BaselineDashboardCoverage -NotePropertyValue (Compare-BaselineDashboardCoverage -CurrentDashboardRows $dashboardRows -BaselineHtmlPath $baselineDashboardHtmlPath)
+        $baselineCoverageStopwatch.Stop()
+        $baselineCoverageElapsedSeconds = [math]::Round($baselineCoverageStopwatch.Elapsed.TotalSeconds, 2)
     }
 
     if ($RunLegacyFixtureRegression) {
+        $legacyFixtureRegressionStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $result | Add-Member -NotePropertyName LegacyFixtureRegression -NotePropertyValue (Get-LegacyFixtureRegressionAudit -FixturePath $ResolvedLegacyFixturePath)
+        $legacyFixtureRegressionStopwatch.Stop()
+        $legacyFixtureRegressionElapsedSeconds = [math]::Round($legacyFixtureRegressionStopwatch.Elapsed.TotalSeconds, 2)
     }
+
+    $auditStopwatch.Stop()
+    $phaseTimings = New-DashboardAuditPhaseTimings -Values @{
+        MachineLoadElapsedSeconds = $machineLoadElapsedSeconds
+        AdvancedHuntingLoadElapsedSeconds = $advancedHuntingLoadElapsedSeconds
+        SourceMaterializationElapsedSeconds = $sourceMaterializationElapsedSeconds
+        PayloadLoadElapsedSeconds = $payloadLoadElapsedSeconds
+        RowComparisonElapsedSeconds = $rowComparisonElapsedSeconds
+        EnrichmentAuditElapsedSeconds = $enrichmentAuditElapsedSeconds
+        ReportComparisonsElapsedSeconds = $reportComparisonsElapsedSeconds
+        DuplicateIdentityElapsedSeconds = $duplicateIdentityElapsedSeconds
+        OpenStateElapsedSeconds = $openStateElapsedSeconds
+        BaselineAuditElapsedSeconds = $baselineAuditElapsedSeconds
+        BaselineCoverageElapsedSeconds = $baselineCoverageElapsedSeconds
+        LegacyFixtureRegressionElapsedSeconds = $legacyFixtureRegressionElapsedSeconds
+        TotalElapsedSeconds = [math]::Round($auditStopwatch.Elapsed.TotalSeconds, 2)
+    }
+    $result | Add-Member -NotePropertyName PhaseTimings -NotePropertyValue $phaseTimings
+    Write-DashboardAuditPhaseTimingSummary -PhaseTimings $phaseTimings
 
     return $result
 }

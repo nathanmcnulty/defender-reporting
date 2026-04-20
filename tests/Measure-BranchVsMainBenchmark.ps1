@@ -12,6 +12,9 @@ param(
     [string]$DatasetPath = (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'exports-synthetic'),
 
     [Parameter(Mandatory = $false)]
+    [string]$BenchmarkDatasetId,
+
+    [Parameter(Mandatory = $false)]
     [string]$AutomationAccountName = 'aa-defender-reporting',
 
     [Parameter(Mandatory = $false)]
@@ -46,8 +49,8 @@ param(
     [int]$PollIntervalSeconds = 15,
 
     [Parameter(Mandatory = $false)]
-    [ValidateRange(1, 256)]
-    [int]$MinimumAvailableMemoryGB = 8,
+    [ValidateRange(0.5, 256.0)]
+    [double]$MinimumAvailableMemoryGB = 8,
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(1, 2048)]
@@ -62,6 +65,12 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$CurrentOnly,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$LocalOnly,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$IncludePersistentLocalWorkflow,
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipRestoreCurrentDeployment
@@ -79,6 +88,166 @@ $script:FunctionAppName = $FunctionAppName
 $script:FunctionAppResourceGroup = $FunctionAppResourceGroup
 $script:FunctionStorageAccountName = $FunctionStorageAccountName
 $script:PollIntervalSeconds = $PollIntervalSeconds
+
+. (Join-Path $PSScriptRoot 'Import-BenchmarkDatasetCatalog.ps1')
+
+function Get-HeartbeatTimestampText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    return (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+}
+
+function ConvertTo-UtcDateTime {
+    [CmdletBinding()]
+    [OutputType([datetime])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [datetime]) {
+        return ([datetime]$Value).ToUniversalTime()
+    }
+
+    if ($Value -is [datetimeoffset]) {
+        return ([datetimeoffset]$Value).UtcDateTime
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    $parsed = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParse($text, [ref]$parsed)) {
+        return $parsed.UtcDateTime
+    }
+
+    return $null
+}
+
+function Get-ObjectPropertyValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
+function Get-TextWithoutAnsiEscape {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    return ([regex]::Replace($Text, "`e\[[0-9;]*m", ''))
+}
+
+function Get-LocalPhaseSummaryFromLog {
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return @()
+    }
+
+    $phaseByName = [ordered]@{}
+    foreach ($rawLine in Get-Content -Path $Path) {
+        $line = Get-TextWithoutAnsiEscape -Text ([string]$rawLine)
+        if ($line -match '^\s*--- Local Phase: (?<name>.+?) ---\s*$') {
+            $phaseName = [string]$matches.name
+            if (-not $phaseByName.Contains($phaseName)) {
+                $phaseByName[$phaseName] = [ordered]@{
+                    name = $phaseName
+                    status = 'started'
+                    elapsedSeconds = $null
+                }
+            }
+
+            continue
+        }
+
+        if ($line -match '^\s*\[(?<name>.+?)\] Elapsed: (?<seconds>[0-9.,]+)s(?:\s*\((?<status>[^)]+)\))?\s*$') {
+            $phaseName = [string]$matches.name
+            if (-not $phaseByName.Contains($phaseName)) {
+                $phaseByName[$phaseName] = [ordered]@{ name = $phaseName }
+            }
+
+            $phaseEntry = $phaseByName[$phaseName]
+            $phaseEntry.elapsedSeconds = [double](($matches.seconds -replace ',', ''))
+            $phaseEntry.status = if ($matches.status) { [string]$matches.status } else { 'completed' }
+        }
+    }
+
+    return @(
+        foreach ($phaseEntry in $phaseByName.Values) {
+            [PSCustomObject]@{
+                name = [string]$phaseEntry.name
+                status = if ($phaseEntry.Contains('status')) { [string]$phaseEntry.status } else { 'unknown' }
+                elapsedSeconds = if ($phaseEntry.Contains('elapsedSeconds')) { $phaseEntry.elapsedSeconds } else { $null }
+            }
+        }
+    )
+}
+
+function Get-LocalBenchmarkLogSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StdoutPath
+    )
+
+    $phaseSummary = [ordered]@{}
+    foreach ($phase in @(Get-LocalPhaseSummaryFromLog -Path $StdoutPath)) {
+        if ($null -ne $phase.elapsedSeconds) {
+            $phaseSummary[[string]$phase.name] = [double]$phase.elapsedSeconds
+        }
+    }
+
+    $stdoutText = if (Test-Path -LiteralPath $StdoutPath -PathType Leaf) {
+        Get-TextWithoutAnsiEscape -Text (Get-Content -LiteralPath $StdoutPath -Raw)
+    }
+    else {
+        ''
+    }
+
+    return [PSCustomObject]@{
+        phase_elapsed_seconds = [PSCustomObject]$phaseSummary
+        used_cached_payload = ($stdoutText -match 'Reusing cached normalized payload')
+        used_cached_vuln_columns = ($stdoutText -match 'Reusing cached normalized vuln columns')
+        published_cached_vuln_columns = ($stdoutText -match 'Cached normalized vuln columns as')
+    }
+}
 
 function Invoke-AzCli {
     [CmdletBinding()]
@@ -154,6 +323,51 @@ function Invoke-RepoScript {
     }
 }
 
+function Write-BaselineBenchmarkHeartbeat {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BaselineName,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$LocalState,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $RunbookJob,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FunctionStatus,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$FunctionInvokeStartedUtc,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $FunctionExecutionActivity
+    )
+
+    $localElapsedSeconds = [math]::Round($LocalState.stopwatch.Elapsed.TotalSeconds, 2)
+    $localStatus = if ($LocalState.completed) { 'Completed' } else { 'Running' }
+    $localPeakRssGb = [math]::Round(($LocalState.peakRssBytes / 1GB), 3)
+    $runbookStatus = if ($null -ne $RunbookJob -and $RunbookJob.PSObject.Properties['status']) { [string]$RunbookJob.status } else { 'Pending' }
+    $functionElapsedSeconds = [math]::Round((New-TimeSpan -Start $FunctionInvokeStartedUtc -End ([datetime]::UtcNow)).TotalSeconds, 2)
+    $functionExecutionCount = if ($null -ne $FunctionExecutionActivity -and $FunctionExecutionActivity.PSObject.Properties['total_count']) { [int]$FunctionExecutionActivity.total_count } else { 0 }
+
+    $message = "[{0}] {1} heartbeat: local={2} elapsed={3:N0}s peak-rss={4}GB; runbook={5}; function={6} elapsed={7:N0}s exec-count={8}" -f @(
+        (Get-HeartbeatTimestampText)
+        $BaselineName
+        $localStatus
+        $localElapsedSeconds
+        $localPeakRssGb
+        $runbookStatus
+        $FunctionStatus
+        $functionElapsedSeconds
+        $functionExecutionCount
+    )
+    Write-Host $message
+}
+
 function Get-DatasetFiles {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper intentionally returns a collection of dataset files.')]
     [CmdletBinding()]
@@ -175,6 +389,61 @@ function Get-DatasetFiles {
             } |
             Sort-Object -Property Name
     )
+}
+
+function Copy-BenchmarkDataset {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal benchmark helper stages a working dataset directory for repeatable local runs.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceDatasetPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationDatasetPath
+    )
+
+    if (Test-Path -LiteralPath $DestinationDatasetPath) {
+        Remove-Item -LiteralPath $DestinationDatasetPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $null = New-Item -Path $DestinationDatasetPath -ItemType Directory -Force
+    foreach ($datasetFile in Get-DatasetFiles -Path $SourceDatasetPath) {
+        Copy-Item -LiteralPath $datasetFile.FullName -Destination (Join-Path -Path $DestinationDatasetPath -ChildPath $datasetFile.Name) -Force
+    }
+}
+
+function Reset-LocalBenchmarkCache {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal benchmark helper only clears derived dashboard cache content in the staged benchmark dataset.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DatasetPath,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('all', 'payload-only', 'none')]
+        [string]$Mode = 'all'
+    )
+
+    if ($Mode -eq 'none') {
+        return
+    }
+
+    $cachePath = Join-Path -Path $DatasetPath -ChildPath '.dashboard-cache'
+    if (-not (Test-Path -LiteralPath $cachePath -PathType Container)) {
+        return
+    }
+
+    switch ($Mode) {
+        'all' {
+            Remove-Item -LiteralPath $cachePath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        'payload-only' {
+            $payloadPath = Join-Path -Path $cachePath -ChildPath 'payloads'
+            if (Test-Path -LiteralPath $payloadPath -PathType Container) {
+                Remove-Item -LiteralPath $payloadPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 
 function Get-FreeDiskByteCount {
@@ -211,7 +480,7 @@ function Assert-BenchmarkDatasetReady {
         [bool]$AllowLargeDataset,
 
         [Parameter(Mandatory = $true)]
-        [int]$MinimumAvailableMemoryGB,
+        [double]$MinimumAvailableMemoryGB,
 
         [Parameter(Mandatory = $true)]
         [int]$MinimumFreeDiskGB
@@ -298,6 +567,56 @@ function Assert-BenchmarkDatasetReady {
     }
 }
 
+function Get-BenchmarkDatasetResultMetadata {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Metadata is a fixed benchmark sidecar concept in this repository and matches benchmark-dataset.json.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DatasetPath,
+
+        [Parameter(Mandatory = $true)]
+        $Manifest,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$BenchmarkDatasetId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $metadata = Get-BenchmarkDatasetMetadata -DatasetPath $DatasetPath
+    $definition = $null
+
+    if ($null -ne $metadata -and $metadata.PSObject.Properties['id'] -and -not [string]::IsNullOrWhiteSpace([string]$metadata.id)) {
+        $definition = Get-BenchmarkDatasetDefinition -DatasetId ([string]$metadata.id) -RepoRoot $RepoRoot
+    }
+
+    if ($null -eq $definition -and -not [string]::IsNullOrWhiteSpace($BenchmarkDatasetId)) {
+        $definition = Get-BenchmarkDatasetDefinition -DatasetId $BenchmarkDatasetId -RepoRoot $RepoRoot
+    }
+
+    if ($null -eq $definition) {
+        $definition = Find-BenchmarkDatasetDefinitionForManifest -Manifest $Manifest -RepoRoot $RepoRoot
+    }
+
+    if ($null -eq $definition) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        id = [string]$definition.id
+        description = [string]$definition.description
+        preset = [string]$definition.preset
+        seed = [int]$definition.seed
+        target_device_count = [int]$definition.targetDeviceCount
+        target_total_vuln_rows = [int]$definition.targetTotalVulnRows
+        output_path = Resolve-BenchmarkDatasetOutputPath -Definition $definition -RepoRoot $RepoRoot
+        history_tags = @($definition.historyTags)
+    }
+}
+
 function Clear-BlobContainer {
     [CmdletBinding()]
     param(
@@ -372,6 +691,67 @@ function Get-BlobDetail {
 
         throw
     }
+}
+
+function Get-BlobTextContent {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BlobName
+    )
+
+    $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ('blob-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        Invoke-AzCli -Arguments @(
+            'storage', 'blob', 'download',
+            '--account-name', $AccountName,
+            '--container-name', $ContainerName,
+            '--name', $BlobName,
+            '--file', $tempPath,
+            '--auth-mode', 'login',
+            '--overwrite',
+            '--output', 'none'
+        ) | Out-Null
+
+        if (-not (Test-Path -LiteralPath $tempPath -PathType Leaf)) {
+            return $null
+        }
+
+        return (Get-Content -LiteralPath $tempPath -Raw)
+    }
+    catch {
+        if ($_.Exception.Message -match 'BlobNotFound|ResourceNotFound|The specified blob does not exist') {
+            return $null
+        }
+
+        throw
+    }
+    finally {
+        Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-FunctionExecutionStatus {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName
+    )
+
+    $statusContent = Get-BlobTextContent -AccountName $AccountName -ContainerName 'dashboards' -BlobName '_diagnostics/ExportAndGenerate.status.json'
+    if ([string]::IsNullOrWhiteSpace($statusContent)) {
+        return $null
+    }
+
+    return ($statusContent | ConvertFrom-Json -Depth 30)
 }
 
 function Get-BlobLengthBytes {
@@ -655,6 +1035,19 @@ function Set-FunctionAppBenchmarkSettings {
         'INCLUDE_ADVANCED_HUNTING=true',
         'USE_EXISTING_EXPORTS_ONLY=true',
         'PIPELINE_FILE_TRACE_ENABLED=true',
+        '--output', 'none'
+    ) | Out-Null
+}
+
+function Restart-FunctionAppForBenchmark {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal benchmark helper restarts the Function App after changing benchmark-specific settings.')]
+    [CmdletBinding()]
+    param()
+
+    Invoke-AzCli -Arguments @(
+        'functionapp', 'restart',
+        '--name', $FunctionAppName,
+        '--resource-group', $FunctionAppResourceGroup,
         '--output', 'none'
     ) | Out-Null
 }
@@ -1070,23 +1463,32 @@ function Start-LocalBenchmark {
         [string]$BenchmarkDatasetPath,
 
         [Parameter(Mandatory = $true)]
-        [string]$OutputDirectory
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$WorkingDatasetPath,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('all', 'payload-only', 'none')]
+        [string]$CacheResetMode = 'all'
     )
 
-    $localDatasetPath = Join-Path -Path $OutputDirectory -ChildPath ($Name + '.local.dataset')
-    if (Test-Path -LiteralPath $localDatasetPath) {
-        Remove-Item -LiteralPath $localDatasetPath -Recurse -Force -ErrorAction SilentlyContinue
+    $localDatasetPath = if ([string]::IsNullOrWhiteSpace($WorkingDatasetPath)) {
+        Join-Path -Path $OutputDirectory -ChildPath ($Name + '.local.dataset')
+    }
+    else {
+        [System.IO.Path]::GetFullPath($WorkingDatasetPath)
     }
 
-    $null = New-Item -Path $localDatasetPath -ItemType Directory -Force
-    foreach ($datasetFile in Get-DatasetFiles -Path $BenchmarkDatasetPath) {
-        Copy-Item -LiteralPath $datasetFile.FullName -Destination (Join-Path -Path $localDatasetPath -ChildPath $datasetFile.Name) -Force
+    if ([string]::IsNullOrWhiteSpace($WorkingDatasetPath)) {
+        Copy-BenchmarkDataset -SourceDatasetPath $BenchmarkDatasetPath -DestinationDatasetPath $localDatasetPath
+    }
+    elseif (-not (Test-Path -LiteralPath $localDatasetPath -PathType Container)) {
+        throw "Working local benchmark dataset not found: $localDatasetPath"
     }
 
-    $cachePath = Join-Path -Path $localDatasetPath -ChildPath '.dashboard-cache'
-    if (Test-Path -LiteralPath $cachePath) {
-        Remove-Item -LiteralPath $cachePath -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    Reset-LocalBenchmarkCache -DatasetPath $localDatasetPath -Mode $CacheResetMode
 
     if (-not (Test-Path -LiteralPath $OutputDirectory)) {
         $null = New-Item -Path $OutputDirectory -ItemType Directory -Force
@@ -1200,8 +1602,13 @@ function Get-LocalBenchmarkResult {
         [System.Collections.IDictionary]$State,
 
         [Parameter(Mandatory = $true)]
-        [int]$TotalRows
+        [int]$TotalRows,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$KeepDatasetPath
     )
+
+    $logSummary = Get-LocalBenchmarkLogSummary -StdoutPath $State.stdoutPath
 
     $result = [PSCustomObject]@{
         status = if ($State.exitCode -eq 0) { 'Completed' } else { 'Failed' }
@@ -1216,16 +1623,129 @@ function Get-LocalBenchmarkResult {
         sample_count = $State.samples.Count
         dashboard_bytes = if (Test-Path -LiteralPath $State.dashboardPath -PathType Leaf) { (Get-Item -LiteralPath $State.dashboardPath).Length } else { 0 }
         dashboard_mb = if (Test-Path -LiteralPath $State.dashboardPath -PathType Leaf) { [math]::Round(((Get-Item -LiteralPath $State.dashboardPath).Length / 1MB), 2) } else { 0 }
+        phase_elapsed_seconds = $logSummary.phase_elapsed_seconds
+        used_cached_payload = [bool]$logSummary.used_cached_payload
+        used_cached_vuln_columns = [bool]$logSummary.used_cached_vuln_columns
+        published_cached_vuln_columns = [bool]$logSummary.published_cached_vuln_columns
         stdout_path = $State.stdoutPath
         stderr_path = $State.stderrPath
         dashboard_path = $State.dashboardPath
     }
 
-    if ($State.Contains('datasetPath') -and -not [string]::IsNullOrWhiteSpace([string]$State.datasetPath) -and (Test-Path -LiteralPath $State.datasetPath)) {
+    if ((-not $KeepDatasetPath) -and $State.Contains('datasetPath') -and -not [string]::IsNullOrWhiteSpace([string]$State.datasetPath) -and (Test-Path -LiteralPath $State.datasetPath)) {
         Remove-Item -LiteralPath $State.datasetPath -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     return $result
+}
+
+function Wait-LocalBenchmarkCompletion {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$State,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TotalRows,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$KeepDatasetPath
+    )
+
+    while (-not $State.completed) {
+        Update-LocalBenchmark -State $State
+        if (-not $State.completed) {
+            Start-Sleep -Seconds $PollIntervalSeconds
+        }
+    }
+
+    Update-LocalBenchmark -State $State
+    return (Get-LocalBenchmarkResult -State $State -TotalRows $TotalRows -KeepDatasetPath:$KeepDatasetPath)
+}
+
+function Get-PhaseElapsedSecondsValue {
+    [CmdletBinding()]
+    [OutputType([double])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $Result,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PhaseName
+    )
+
+    if ($null -eq $Result -or -not $Result.PSObject.Properties['phase_elapsed_seconds']) {
+        return $null
+    }
+
+    $phaseContainer = $Result.phase_elapsed_seconds
+    if ($null -eq $phaseContainer) {
+        return $null
+    }
+
+    $phaseProperty = $phaseContainer.PSObject.Properties[$PhaseName]
+    if ($null -eq $phaseProperty -or $null -eq $phaseProperty.Value) {
+        return $null
+    }
+
+    return [double]$phaseProperty.Value
+}
+
+function Invoke-LocalPersistentCacheWorkflow {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BaselineName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BenchmarkDatasetPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [int]$TotalRows
+    )
+
+    $workflowDatasetPath = Join-Path -Path $OutputDirectory -ChildPath ($BaselineName + '.persistent.local.dataset')
+    Copy-BenchmarkDataset -SourceDatasetPath $BenchmarkDatasetPath -DestinationDatasetPath $workflowDatasetPath
+
+    try {
+        Write-Host 'Running persistent local cache prime pass...'
+        $primeState = Start-LocalBenchmark -RepoPath $RepoPath -Name ($BaselineName + '.persistent-prime') -BenchmarkDatasetPath $BenchmarkDatasetPath -OutputDirectory $OutputDirectory -WorkingDatasetPath $workflowDatasetPath -CacheResetMode 'all'
+        $primeResult = Wait-LocalBenchmarkCompletion -State $primeState -TotalRows $TotalRows -KeepDatasetPath
+
+        Write-Host 'Running persistent local cache reuse pass after payload-cache eviction...'
+        $reuseState = Start-LocalBenchmark -RepoPath $RepoPath -Name ($BaselineName + '.persistent-reuse') -BenchmarkDatasetPath $BenchmarkDatasetPath -OutputDirectory $OutputDirectory -WorkingDatasetPath $workflowDatasetPath -CacheResetMode 'payload-only'
+        $reuseResult = Wait-LocalBenchmarkCompletion -State $reuseState -TotalRows $TotalRows -KeepDatasetPath
+
+        $primeNormalizeSeconds = Get-PhaseElapsedSecondsValue -Result $primeResult -PhaseName 'Normalize source data'
+        $reuseNormalizeSeconds = Get-PhaseElapsedSecondsValue -Result $reuseResult -PhaseName 'Normalize source data'
+        $primePreparePayloadSeconds = Get-PhaseElapsedSecondsValue -Result $primeResult -PhaseName 'Prepare normalized payload'
+        $reusePreparePayloadSeconds = Get-PhaseElapsedSecondsValue -Result $reuseResult -PhaseName 'Prepare normalized payload'
+
+        return [PSCustomObject]@{
+            dataset_path = $workflowDatasetPath
+            prime = $primeResult
+            reuse_after_payload_eviction = $reuseResult
+            comparison = [PSCustomObject]@{
+                elapsed_seconds_delta = [math]::Round(($reuseResult.elapsed_seconds - $primeResult.elapsed_seconds), 2)
+                normalize_source_data_delta = if ($null -ne $primeNormalizeSeconds -and $null -ne $reuseNormalizeSeconds) { [math]::Round(($reuseNormalizeSeconds - $primeNormalizeSeconds), 2) } else { $null }
+                prepare_normalized_payload_delta = if ($null -ne $primePreparePayloadSeconds -and $null -ne $reusePreparePayloadSeconds) { [math]::Round(($reusePreparePayloadSeconds - $primePreparePayloadSeconds), 2) } else { $null }
+            }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $workflowDatasetPath -PathType Container) {
+            Remove-Item -LiteralPath $workflowDatasetPath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Get-PipelineEventSummary {
@@ -1365,22 +1885,60 @@ function Invoke-BaselineBenchmark {
         [Parameter(Mandatory = $true)]
         [string]$OutputRoot,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
         [string]$FunctionHostName,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
         [string]$FunctionResourceId,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
         [string]$SubscriptionId,
 
         [Parameter(Mandatory = $true)]
-        [int]$TotalRows
+        [int]$TotalRows,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$LocalOnly,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$IncludePersistentLocalWorkflow
     )
 
     Write-Host ''
     Write-Host ('=== {0} ===' -f $BaselineName) -ForegroundColor Cyan
     Write-Host ('Repo: {0}' -f $RepoPath)
+
+    $baselineOutputDirectory = Join-Path -Path $OutputRoot -ChildPath $BaselineName
+    if (-not (Test-Path -LiteralPath $baselineOutputDirectory)) {
+        $null = New-Item -Path $baselineOutputDirectory -ItemType Directory -Force
+    }
+
+    $localPersistentCacheResult = $null
+    if ($IncludePersistentLocalWorkflow) {
+        Write-Host 'Exercising persistent local cache workflow before the cold benchmark run...'
+        $localPersistentCacheResult = Invoke-LocalPersistentCacheWorkflow -BaselineName $BaselineName -RepoPath $RepoPath -BenchmarkDatasetPath $DatasetRoot -OutputDirectory $baselineOutputDirectory -TotalRows $TotalRows
+    }
+
+    if ($LocalOnly) {
+        $localState = Start-LocalBenchmark -RepoPath $RepoPath -Name $BaselineName -BenchmarkDatasetPath $DatasetRoot -OutputDirectory $baselineOutputDirectory
+        $localResult = Wait-LocalBenchmarkCompletion -State $localState -TotalRows $TotalRows
+
+        return [PSCustomObject]@{
+            baseline = $BaselineName
+            repo_path = $RepoPath
+            local = $localResult
+            local_persistent_cache = $localPersistentCacheResult
+            runbook = $null
+            function_app = $null
+            runbook_job_name = $null
+            function_invoked_at_utc = $null
+            runbook_events = @()
+            function_events = @()
+        }
+    }
 
     Write-Host 'Deploying runbook artifact...'
     Build-AndDeploy-Runbook -RepoPath $RepoPath
@@ -1388,6 +1946,8 @@ function Invoke-BaselineBenchmark {
     Build-AndDeploy-FunctionApp -RepoPath $RepoPath
     Write-Host 'Applying Function App benchmark settings...'
     Set-FunctionAppBenchmarkSettings
+    Write-Host 'Restarting Function App to apply benchmark settings...'
+    Restart-FunctionAppForBenchmark
 
     Write-Host 'Uploading templates to both storage accounts...'
     Upload-TemplatesForBaseline -RepoPath $RepoPath -StorageAccountName $RunbookStorageAccountName
@@ -1400,11 +1960,6 @@ function Invoke-BaselineBenchmark {
     Write-Host 'Waiting for Function App host readiness...'
     Wait-FunctionHostReady -HostName $FunctionHostName -MasterKey $effectiveFunctionMasterKey
     Remove-FunctionTraceFiles -HostName $FunctionHostName -MasterKey $effectiveFunctionMasterKey
-
-    $baselineOutputDirectory = Join-Path -Path $OutputRoot -ChildPath $BaselineName
-    if (-not (Test-Path -LiteralPath $baselineOutputDirectory)) {
-        $null = New-Item -Path $baselineOutputDirectory -ItemType Directory -Force
-    }
 
     $localState = Start-LocalBenchmark -RepoPath $RepoPath -Name $BaselineName -BenchmarkDatasetPath $DatasetRoot -OutputDirectory $baselineOutputDirectory
     $runbookState = Start-RunbookBenchmark
@@ -1425,6 +1980,11 @@ function Invoke-BaselineBenchmark {
     $functionEvents = @()
     $functionLastTracePollUtc = [datetime]::MinValue
     $functionTraceCompletedUtc = $null
+    $functionLastStatusPollUtc = [datetime]::MinValue
+    $functionPipelineStatus = $null
+    $functionActiveStartedUtc = $null
+    $functionDashboardCompletedUtc = $null
+    $functionCompletionSource = $null
 
     while (-not ($localState.completed -and $runbookCompleted -and $functionCompleted)) {
         Update-LocalBenchmark -State $localState
@@ -1439,13 +1999,49 @@ function Invoke-BaselineBenchmark {
 
         if (-not $functionCompleted) {
             $nowUtc = [datetime]::UtcNow
-            $functionDashboardBlob = Get-BlobDetail -AccountName $FunctionStorageAccountName -ContainerName 'dashboards' -BlobName 'VulnerabilityDashboard.html'
-            if ($null -ne $functionDashboardBlob) {
-                $lastModifiedUtc = ([datetimeoffset]$functionDashboardBlob.properties.lastModified).UtcDateTime
-                if ($lastModifiedUtc -ge $functionInvokeStartedUtc.AddSeconds(-5)) {
-                    $functionCompletedUtc = $lastModifiedUtc
-                    $functionCompleted = $true
-                    $functionStatus = 'Completed'
+
+            if ($nowUtc -ge $functionLastStatusPollUtc.AddSeconds([math]::Max($PollIntervalSeconds, 15))) {
+                $functionPipelineStatus = Get-FunctionExecutionStatus -AccountName $FunctionStorageAccountName
+                $functionLastStatusPollUtc = $nowUtc
+
+                if ($null -ne $functionPipelineStatus) {
+                    $statusStartedUtc = ConvertTo-UtcDateTime -Value (Get-ObjectPropertyValue -InputObject $functionPipelineStatus -Name 'startedOnUtc')
+                    if ($null -ne $statusStartedUtc) {
+                        $functionActiveStartedUtc = $statusStartedUtc
+                    }
+
+                    $statusCompletedUtc = ConvertTo-UtcDateTime -Value (Get-ObjectPropertyValue -InputObject $functionPipelineStatus -Name 'completedOnUtc')
+                    $statusUpdatedUtc = ConvertTo-UtcDateTime -Value (Get-ObjectPropertyValue -InputObject $functionPipelineStatus -Name 'updatedOnUtc')
+                    switch ([string](Get-ObjectPropertyValue -InputObject $functionPipelineStatus -Name 'status')) {
+                        'succeeded' {
+                            $functionCompletedUtc = if ($null -ne $statusCompletedUtc) { $statusCompletedUtc } else { $statusUpdatedUtc }
+                            if ($null -eq $functionCompletedUtc) {
+                                $functionCompletedUtc = $nowUtc
+                            }
+                            $functionCompleted = $true
+                            $functionStatus = 'Completed'
+                            $functionCompletionSource = 'status-blob'
+                        }
+                        'failed' {
+                            $functionCompletedUtc = if ($null -ne $statusCompletedUtc) { $statusCompletedUtc } else { $statusUpdatedUtc }
+                            if ($null -eq $functionCompletedUtc) {
+                                $functionCompletedUtc = $nowUtc
+                            }
+                            $functionCompleted = $true
+                            $functionStatus = 'Failed'
+                            $functionCompletionSource = 'status-blob'
+                        }
+                    }
+                }
+            }
+
+            if (-not $functionCompleted) {
+                $functionDashboardBlob = Get-BlobDetail -AccountName $FunctionStorageAccountName -ContainerName 'dashboards' -BlobName 'VulnerabilityDashboard.html'
+                if ($null -ne $functionDashboardBlob) {
+                    $lastModifiedUtc = ([datetimeoffset]$functionDashboardBlob.properties.lastModified).UtcDateTime
+                    if ($lastModifiedUtc -ge $functionInvokeStartedUtc.AddSeconds(-5)) {
+                        $functionDashboardCompletedUtc = $lastModifiedUtc
+                    }
                 }
             }
 
@@ -1461,6 +2057,7 @@ function Invoke-BaselineBenchmark {
                     }
                     $functionCompleted = $true
                     $functionStatus = 'Failed'
+                    $functionCompletionSource = 'trace-log'
                 }
                 elseif ($functionTraceTerminalStatus -eq 'Completed') {
                     $functionTraceCompletedUtc = @($functionEvents | Where-Object { [string]$_.message -match 'Pipeline Complete!' } | Sort-Object timestamp_utc | Select-Object -Last 1 | ForEach-Object { $_.timestamp_utc }) | Select-Object -First 1
@@ -1476,13 +2073,26 @@ function Invoke-BaselineBenchmark {
                 $functionCompletedUtc = $functionTraceCompletedUtc
                 $functionCompleted = $true
                 $functionStatus = 'FailedNoDashboard'
+                $functionCompletionSource = 'trace-log'
+            }
+
+            if ((-not $functionCompleted) -and $null -ne $functionDashboardCompletedUtc -and (($null -eq $functionPipelineStatus) -or $nowUtc -ge $functionDashboardCompletedUtc.AddMinutes(2))) {
+                $functionCompletedUtc = $functionDashboardCompletedUtc
+                $functionCompleted = $true
+                $functionStatus = 'Completed'
+                $functionCompletionSource = 'dashboard-blob'
             }
 
             if ((-not $functionCompleted) -and [datetime]::UtcNow -ge $functionDeadlineUtc) {
                 $functionCompletedUtc = [datetime]::UtcNow
                 $functionCompleted = $true
                 $functionStatus = 'TimedOut'
+                $functionCompletionSource = 'timeout'
             }
+        }
+
+        if (-not ($localState.completed -and $runbookCompleted -and $functionCompleted)) {
+            Write-BaselineBenchmarkHeartbeat -BaselineName $BaselineName -LocalState $localState -RunbookJob $runbookJob -FunctionStatus $functionStatus -FunctionInvokeStartedUtc $functionInvokeStartedUtc -FunctionExecutionActivity $functionExecutionActivity
         }
 
         if (-not ($localState.completed -and $runbookCompleted -and $functionCompleted)) {
@@ -1502,11 +2112,46 @@ function Invoke-BaselineBenchmark {
         0
     }
 
-    $functionElapsedSeconds = if ($null -ne $functionCompletedUtc) {
+    $functionEndToEndElapsedSeconds = if ($null -ne $functionCompletedUtc) {
         [math]::Round((New-TimeSpan -Start $functionInvokeStartedUtc -End $functionCompletedUtc).TotalSeconds, 2)
     }
     else {
         0
+    }
+
+    $functionActiveElapsedSeconds = if ($null -ne $functionActiveStartedUtc -and $null -ne $functionCompletedUtc) {
+        [math]::Round([math]::Max((New-TimeSpan -Start $functionActiveStartedUtc -End $functionCompletedUtc).TotalSeconds, 0), 2)
+    }
+    else {
+        $null
+    }
+
+    $functionPickupDelaySeconds = if ($null -ne $functionActiveStartedUtc) {
+        [math]::Round([math]::Max((New-TimeSpan -Start $functionInvokeStartedUtc -End $functionActiveStartedUtc).TotalSeconds, 0), 2)
+    }
+    else {
+        $null
+    }
+
+    $functionTimingBasis = if ($null -ne $functionActiveElapsedSeconds -and $functionActiveElapsedSeconds -gt 0) {
+        'active-execution'
+    }
+    else {
+        'invoke-to-finish-fallback'
+    }
+
+    $functionHeadlineElapsedSeconds = if ($functionTimingBasis -eq 'active-execution') {
+        $functionActiveElapsedSeconds
+    }
+    else {
+        $functionEndToEndElapsedSeconds
+    }
+
+    $functionMetricStartUtc = if ($null -ne $functionActiveStartedUtc) {
+        $functionActiveStartedUtc.AddMinutes(-1)
+    }
+    else {
+        $functionInvokeStartedUtc.AddMinutes(-1)
     }
 
     $functionMetricEndUtc = if ($null -ne $functionCompletedUtc) {
@@ -1516,29 +2161,40 @@ function Invoke-BaselineBenchmark {
         [datetime]::UtcNow
     }
     $functionEvents = @(Get-FunctionTraceEvents -HostName $FunctionHostName -MasterKey $effectiveFunctionMasterKey -NotBeforeUtc $functionInvokeStartedUtc)
-    $functionMetricSummary = Get-FunctionMetricSummary -ResourceId $FunctionResourceId -StartTimeUtc $functionInvokeStartedUtc.AddMinutes(-1) -EndTimeUtc $functionMetricEndUtc
+    $functionMetricSummary = Get-FunctionMetricSummary -ResourceId $FunctionResourceId -StartTimeUtc $functionMetricStartUtc -EndTimeUtc $functionMetricEndUtc
 
     $localResult = Get-LocalBenchmarkResult -State $localState -TotalRows $TotalRows
     $runbookResult = Get-PipelineEventSummary -Events $runbookEvents -TotalElapsedSeconds $runbookElapsedSeconds -DashboardBytes (Get-BlobLengthBytes -AccountName $RunbookStorageAccountName -ContainerName 'dashboards' -BlobName 'VulnerabilityDashboard.html') -TotalRows $TotalRows -TerminalStatus ([string]$runbookJob.status)
     $functionDashboardBytes = Get-BlobLengthBytes -AccountName $FunctionStorageAccountName -ContainerName 'dashboards' -BlobName 'VulnerabilityDashboard.html'
     $functionResult = [PSCustomObject]@{
         status = $functionStatus
-        elapsed_seconds = $functionElapsedSeconds
+        timing_basis = $functionTimingBasis
+        elapsed_seconds = $functionHeadlineElapsedSeconds
+        active_elapsed_seconds = $functionActiveElapsedSeconds
+        end_to_end_elapsed_seconds = $functionEndToEndElapsedSeconds
+        pickup_delay_seconds = $functionPickupDelaySeconds
         peak_working_set_mb = $functionMetricSummary.peak_working_set_mb
         average_working_set_mb = $functionMetricSummary.average_working_set_mb
         peak_cpu_percentage = $functionMetricSummary.peak_cpu_percentage
         execution_units = $functionMetricSummary.execution_units
         execution_count = if ($null -ne $functionExecutionActivity) { $functionExecutionActivity.total_count } else { 0 }
-        rows_per_second = if ($functionElapsedSeconds -gt 0 -and $TotalRows -gt 0) { [math]::Round(($TotalRows / $functionElapsedSeconds), 0) } else { 0 }
+        rows_per_second = if ($functionHeadlineElapsedSeconds -gt 0 -and $TotalRows -gt 0) { [math]::Round(($TotalRows / $functionHeadlineElapsedSeconds), 0) } else { 0 }
+        end_to_end_rows_per_second = if ($functionEndToEndElapsedSeconds -gt 0 -and $TotalRows -gt 0) { [math]::Round(($TotalRows / $functionEndToEndElapsedSeconds), 0) } else { 0 }
         dashboard_bytes = $functionDashboardBytes
         dashboard_mb = [math]::Round(($functionDashboardBytes / 1MB), 2)
+        invoke_started_utc = $functionInvokeStartedUtc
+        active_started_utc = $functionActiveStartedUtc
         completion_utc = $functionCompletedUtc
+        completion_source = $functionCompletionSource
+        status_stage = [string](Get-ObjectPropertyValue -InputObject $functionPipelineStatus -Name 'stage')
+        status_message = [string](Get-ObjectPropertyValue -InputObject $functionPipelineStatus -Name 'message')
     }
 
     return [PSCustomObject]@{
         baseline = $BaselineName
         repo_path = $RepoPath
         local = $localResult
+        local_persistent_cache = $localPersistentCacheResult
         runbook = $runbookResult
         function_app = $functionResult
         runbook_job_name = $runbookState.name
@@ -1613,21 +2269,78 @@ function Get-ComparisonBlock {
             peak_rss_gb_delta = [math]::Round(($Current.local.peak_tree_rss_gb - $Main.local.peak_tree_rss_gb), 3)
             peak_private_gb_delta = [math]::Round(($Current.local.peak_tree_private_gb - $Main.local.peak_tree_private_gb), 3)
         }
-        runbook = [PSCustomObject]@{
-            elapsed_seconds_delta = [math]::Round(($Current.runbook.elapsed_seconds - $Main.runbook.elapsed_seconds), 2)
-            peak_working_set_mb_delta = [math]::Round(($Current.runbook.peak_working_set_mb - $Main.runbook.peak_working_set_mb), 1)
-            peak_gc_heap_mb_delta = [math]::Round(($Current.runbook.peak_gc_heap_mb - $Main.runbook.peak_gc_heap_mb), 1)
+        local_persistent_cache = if ($Current.PSObject.Properties['local_persistent_cache'] -and $Main.PSObject.Properties['local_persistent_cache'] -and $null -ne $Current.local_persistent_cache -and $null -ne $Main.local_persistent_cache) {
+            [PSCustomObject]@{
+                prime_elapsed_seconds_delta = [math]::Round(($Current.local_persistent_cache.prime.elapsed_seconds - $Main.local_persistent_cache.prime.elapsed_seconds), 2)
+                reuse_elapsed_seconds_delta = [math]::Round(($Current.local_persistent_cache.reuse_after_payload_eviction.elapsed_seconds - $Main.local_persistent_cache.reuse_after_payload_eviction.elapsed_seconds), 2)
+                reuse_normalize_phase_delta = if (
+                    $null -ne (Get-PhaseElapsedSecondsValue -Result $Current.local_persistent_cache.reuse_after_payload_eviction -PhaseName 'Normalize source data') -and
+                    $null -ne (Get-PhaseElapsedSecondsValue -Result $Main.local_persistent_cache.reuse_after_payload_eviction -PhaseName 'Normalize source data')
+                ) {
+                    [math]::Round(((Get-PhaseElapsedSecondsValue -Result $Current.local_persistent_cache.reuse_after_payload_eviction -PhaseName 'Normalize source data') - (Get-PhaseElapsedSecondsValue -Result $Main.local_persistent_cache.reuse_after_payload_eviction -PhaseName 'Normalize source data')), 2)
+                }
+                else {
+                    $null
+                }
+            }
         }
-        function_app = [PSCustomObject]@{
-            elapsed_seconds_delta = [math]::Round(($Current.function_app.elapsed_seconds - $Main.function_app.elapsed_seconds), 2)
-            peak_working_set_mb_delta = [math]::Round(($Current.function_app.peak_working_set_mb - $Main.function_app.peak_working_set_mb), 1)
-            execution_units_delta = [math]::Round(($Current.function_app.execution_units - $Main.function_app.execution_units), 2)
+        else {
+            $null
+        }
+        runbook = if ($null -ne $Current.runbook -and $null -ne $Main.runbook) {
+            [PSCustomObject]@{
+                elapsed_seconds_delta = [math]::Round(($Current.runbook.elapsed_seconds - $Main.runbook.elapsed_seconds), 2)
+                peak_working_set_mb_delta = [math]::Round(($Current.runbook.peak_working_set_mb - $Main.runbook.peak_working_set_mb), 1)
+                peak_gc_heap_mb_delta = [math]::Round(($Current.runbook.peak_gc_heap_mb - $Main.runbook.peak_gc_heap_mb), 1)
+            }
+        }
+        else {
+            $null
+        }
+        function_app = if ($null -ne $Current.function_app -and $null -ne $Main.function_app) {
+            [PSCustomObject]@{
+                elapsed_seconds_delta = [math]::Round(($Current.function_app.elapsed_seconds - $Main.function_app.elapsed_seconds), 2)
+                active_elapsed_seconds_delta = if ($null -ne $Current.function_app.active_elapsed_seconds -and $null -ne $Main.function_app.active_elapsed_seconds) {
+                    [math]::Round(($Current.function_app.active_elapsed_seconds - $Main.function_app.active_elapsed_seconds), 2)
+                }
+                else {
+                    $null
+                }
+                end_to_end_elapsed_seconds_delta = if ($null -ne $Current.function_app.end_to_end_elapsed_seconds -and $null -ne $Main.function_app.end_to_end_elapsed_seconds) {
+                    [math]::Round(($Current.function_app.end_to_end_elapsed_seconds - $Main.function_app.end_to_end_elapsed_seconds), 2)
+                }
+                else {
+                    $null
+                }
+                pickup_delay_seconds_delta = if ($null -ne $Current.function_app.pickup_delay_seconds -and $null -ne $Main.function_app.pickup_delay_seconds) {
+                    [math]::Round(($Current.function_app.pickup_delay_seconds - $Main.function_app.pickup_delay_seconds), 2)
+                }
+                else {
+                    $null
+                }
+                peak_working_set_mb_delta = [math]::Round(($Current.function_app.peak_working_set_mb - $Main.function_app.peak_working_set_mb), 1)
+                execution_units_delta = [math]::Round(($Current.function_app.execution_units - $Main.function_app.execution_units), 2)
+            }
+        }
+        else {
+            $null
         }
     }
 }
 
+$repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $resolvedCurrentRepoPath = [System.IO.Path]::GetFullPath($CurrentRepoPath)
-$resolvedDatasetPath = [System.IO.Path]::GetFullPath($DatasetPath)
+$datasetDefinition = if (-not [string]::IsNullOrWhiteSpace($BenchmarkDatasetId)) { Get-BenchmarkDatasetDefinition -DatasetId $BenchmarkDatasetId -RepoRoot $repoRoot } else { $null }
+if (-not [string]::IsNullOrWhiteSpace($BenchmarkDatasetId) -and $null -eq $datasetDefinition) {
+    throw "Benchmark dataset definition '$BenchmarkDatasetId' was not found."
+}
+
+$resolvedDatasetPath = if ($null -ne $datasetDefinition -and -not $PSBoundParameters.ContainsKey('DatasetPath')) {
+    Resolve-BenchmarkDatasetOutputPath -Definition $datasetDefinition -RepoRoot $repoRoot
+}
+else {
+    [System.IO.Path]::GetFullPath($DatasetPath)
+}
 $resolvedResultsOutputPath = [System.IO.Path]::GetFullPath($ResultsOutputPath)
 $outputDirectory = Split-Path -Path $resolvedResultsOutputPath -Parent
 
@@ -1661,54 +2374,80 @@ $datasetPreflight = Assert-BenchmarkDatasetReady `
     -MinimumFreeDiskGB $MinimumFreeDiskGB
 
 $datasetManifest = $datasetPreflight.manifest
+$datasetDefinitionMatch = if ($null -ne $datasetDefinition) { Test-BenchmarkDatasetDefinitionMatch -Definition $datasetDefinition -Manifest $datasetManifest } else { $false }
+if ($null -ne $datasetDefinition -and -not $datasetDefinitionMatch) {
+    throw ("Dataset '{0}' does not match benchmark dataset definition '{1}'." -f $resolvedDatasetPath, $BenchmarkDatasetId)
+}
+
+$datasetDefinitionMetadata = Get-BenchmarkDatasetResultMetadata -DatasetPath $resolvedDatasetPath -Manifest $datasetManifest -BenchmarkDatasetId $BenchmarkDatasetId -RepoRoot $repoRoot
 $totalRows = [int]$datasetPreflight.totalRows
 
 Write-Host ("Dataset preflight passed: {0} rows, {1:N2} GB on disk, {2} GB free memory, {3} GB free disk." -f $totalRows, ($datasetPreflight.datasetBytes / 1GB), $datasetPreflight.availableMemoryGB, $datasetPreflight.freeDiskGB)
 
-$subscription = Invoke-AzCli -Arguments @('account', 'show', '-o', 'json') -ExpectJson
-$functionHostName = Get-FunctionHostName
-$functionResourceId = Get-FunctionResourceId
-$originalFunctionTraceSetting = Get-FunctionTraceSetting
+$subscription = if ($LocalOnly) { $null } else { Invoke-AzCli -Arguments @('account', 'show', '-o', 'json') -ExpectJson }
+$functionHostName = if ($LocalOnly) { $null } else { Get-FunctionHostName }
+$functionResourceId = if ($LocalOnly) { $null } else { Get-FunctionResourceId }
+$originalFunctionTraceSetting = if ($LocalOnly) { $null } else { Get-FunctionTraceSetting }
 
 $currentResult = $null
 $mainResult = $null
 
 try {
-    $functionMasterKey = Get-FunctionMasterKey
-    Wait-FunctionHostReady -HostName $functionHostName -MasterKey $functionMasterKey
+    if (-not $LocalOnly) {
+        $functionMasterKey = Get-FunctionMasterKey
+        Wait-FunctionHostReady -HostName $functionHostName -MasterKey $functionMasterKey
+    }
 
-    $currentResult = @(Invoke-BaselineBenchmark -BaselineName $CurrentBaselineName -RepoPath $resolvedCurrentRepoPath -DatasetRoot $resolvedDatasetPath -OutputRoot $outputDirectory -FunctionHostName $functionHostName -FunctionResourceId $functionResourceId -SubscriptionId ([string]$subscription.id) -TotalRows $totalRows) | Select-Object -Last 1
+    $currentResult = @(Invoke-BaselineBenchmark -BaselineName $CurrentBaselineName -RepoPath $resolvedCurrentRepoPath -DatasetRoot $resolvedDatasetPath -OutputRoot $outputDirectory -FunctionHostName $functionHostName -FunctionResourceId $functionResourceId -SubscriptionId $(if ($LocalOnly) { '' } else { [string]$subscription.id }) -TotalRows $totalRows -LocalOnly:$LocalOnly -IncludePersistentLocalWorkflow:$IncludePersistentLocalWorkflow) | Select-Object -Last 1
     $currentResult | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path -Path $outputDirectory -ChildPath ($CurrentBaselineName + '.result.json')) -Encoding utf8
 
     if (-not $CurrentOnly) {
-        $functionMasterKey = Get-FunctionMasterKey
-        Wait-FunctionHostReady -HostName $functionHostName -MasterKey $functionMasterKey
+        if (-not $LocalOnly) {
+            $functionMasterKey = Get-FunctionMasterKey
+            Wait-FunctionHostReady -HostName $functionHostName -MasterKey $functionMasterKey
+        }
 
-        $mainResult = @(Invoke-BaselineBenchmark -BaselineName $MainBaselineName -RepoPath $resolvedMainRepoPath -DatasetRoot $resolvedDatasetPath -OutputRoot $outputDirectory -FunctionHostName $functionHostName -FunctionResourceId $functionResourceId -SubscriptionId ([string]$subscription.id) -TotalRows $totalRows) | Select-Object -Last 1
+        $mainResult = @(Invoke-BaselineBenchmark -BaselineName $MainBaselineName -RepoPath $resolvedMainRepoPath -DatasetRoot $resolvedDatasetPath -OutputRoot $outputDirectory -FunctionHostName $functionHostName -FunctionResourceId $functionResourceId -SubscriptionId $(if ($LocalOnly) { '' } else { [string]$subscription.id }) -TotalRows $totalRows -LocalOnly:$LocalOnly -IncludePersistentLocalWorkflow:$IncludePersistentLocalWorkflow) | Select-Object -Last 1
         $mainResult | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path -Path $outputDirectory -ChildPath ($MainBaselineName + '.result.json')) -Encoding utf8
     }
 }
 finally {
-    try {
-        if (-not $SkipRestoreCurrentDeployment) {
-            Restore-CurrentAzureDeployment -RepoPath $resolvedCurrentRepoPath
+    if (-not $LocalOnly) {
+        try {
+            if (-not $SkipRestoreCurrentDeployment) {
+                Restore-CurrentAzureDeployment -RepoPath $resolvedCurrentRepoPath
+            }
         }
-    }
-    finally {
-        Restore-FunctionTraceSetting -OriginalValue $originalFunctionTraceSetting
+        finally {
+            Restore-FunctionTraceSetting -OriginalValue $originalFunctionTraceSetting
+        }
     }
 }
 
 $result = [PSCustomObject]@{
+    benchmark_schema_version = 2
     generated_utc = [datetime]::UtcNow.ToString('o')
-    benchmark_mode = if ($CurrentOnly) { 'current-only' } else { 'branch-vs-main' }
-    subscription = [PSCustomObject]@{
-        id = [string]$subscription.id
-        name = [string]$subscription.name
-        tenantId = [string]$subscription.tenantId
+    benchmark_mode = if ($LocalOnly) {
+        if ($CurrentOnly) { 'local-current-only' } else { 'local-branch-vs-main' }
+    }
+    else {
+        if ($CurrentOnly) { 'current-only' } else { 'branch-vs-main' }
+    }
+    local_only = ($LocalOnly -eq $true)
+    persistent_local_workflow = ($IncludePersistentLocalWorkflow -eq $true)
+    subscription = if ($null -ne $subscription) {
+        [PSCustomObject]@{
+            id = [string]$subscription.id
+            name = [string]$subscription.name
+            tenantId = [string]$subscription.tenantId
+        }
+    }
+    else {
+        $null
     }
     dataset = [PSCustomObject]@{
         path = $resolvedDatasetPath
+        definition = $datasetDefinitionMetadata
         files = @(Get-DatasetFiles -Path $resolvedDatasetPath | ForEach-Object { $_.Name })
         manifest = $datasetManifest
         total_rows = $totalRows
@@ -1730,8 +2469,30 @@ $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $resolvedResultsOu
 Write-Host ''
 Write-Host ('Benchmark report: {0}' -f $resolvedResultsOutputPath) -ForegroundColor Green
 if ($null -ne $currentResult) {
-    Write-Host ('{0} local/runbook/function elapsed: {1}s / {2}s / {3}s' -f $CurrentBaselineName, $currentResult.local.elapsed_seconds, $currentResult.runbook.elapsed_seconds, $currentResult.function_app.elapsed_seconds)
+    if ($LocalOnly) {
+        Write-Host ('{0} local elapsed: {1}s' -f $CurrentBaselineName, $currentResult.local.elapsed_seconds)
+    }
+    else {
+        Write-Host ('{0} local/runbook/function elapsed: {1}s / {2}s / {3}s ({4})' -f $CurrentBaselineName, $currentResult.local.elapsed_seconds, $currentResult.runbook.elapsed_seconds, $currentResult.function_app.elapsed_seconds, $currentResult.function_app.timing_basis)
+        if ($null -ne $currentResult.function_app.end_to_end_elapsed_seconds) {
+            Write-Host ('{0} function end-to-end/pickup delay: {1}s / {2}s' -f $CurrentBaselineName, $currentResult.function_app.end_to_end_elapsed_seconds, $currentResult.function_app.pickup_delay_seconds)
+        }
+    }
+    if ($null -ne $currentResult.local_persistent_cache) {
+        Write-Host ('{0} persistent local prime/reuse elapsed: {1}s / {2}s' -f $CurrentBaselineName, $currentResult.local_persistent_cache.prime.elapsed_seconds, $currentResult.local_persistent_cache.reuse_after_payload_eviction.elapsed_seconds)
+    }
 }
 if ($null -ne $mainResult) {
-    Write-Host ('{0} local/runbook/function elapsed: {1}s / {2}s / {3}s' -f $MainBaselineName, $mainResult.local.elapsed_seconds, $mainResult.runbook.elapsed_seconds, $mainResult.function_app.elapsed_seconds)
+    if ($LocalOnly) {
+        Write-Host ('{0} local elapsed: {1}s' -f $MainBaselineName, $mainResult.local.elapsed_seconds)
+    }
+    else {
+        Write-Host ('{0} local/runbook/function elapsed: {1}s / {2}s / {3}s ({4})' -f $MainBaselineName, $mainResult.local.elapsed_seconds, $mainResult.runbook.elapsed_seconds, $mainResult.function_app.elapsed_seconds, $mainResult.function_app.timing_basis)
+        if ($null -ne $mainResult.function_app.end_to_end_elapsed_seconds) {
+            Write-Host ('{0} function end-to-end/pickup delay: {1}s / {2}s' -f $MainBaselineName, $mainResult.function_app.end_to_end_elapsed_seconds, $mainResult.function_app.pickup_delay_seconds)
+        }
+    }
+    if ($null -ne $mainResult.local_persistent_cache) {
+        Write-Host ('{0} persistent local prime/reuse elapsed: {1}s / {2}s' -f $MainBaselineName, $mainResult.local_persistent_cache.prime.elapsed_seconds, $mainResult.local_persistent_cache.reuse_after_payload_eviction.elapsed_seconds)
+    }
 }

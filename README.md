@@ -117,6 +117,8 @@ For local testing of the split-assets build, use a local HTTP server instead of 
 | [Azure setup](docs/azure-setup.md) | API permissions, authentication options, Azure Automation provisioning, and Container App publishing |
 | [Build guide](build/README.md) | Maintainer-facing build, validation, and packaging entrypoints |
 | [GitHub Actions setup](docs/github-actions-setup.md) | OIDC service principal setup, required repository secrets, and branch protection guidance |
+| [Performance baselines](docs/performance-baselines.md) | Merge-tracked durable benchmark ranges and accepted baseline notes |
+| [Performance gate playbook](docs/performance-gate-playbook.md) | Maintainer workflow for hot-phase review, benchmarking cadence, and Azure acceptance |
 | [Source layout](docs/source-layout.md) | Domain-based PowerShell source tree, artifact manifests, and maintainer workflow |
 | [Workflow notes](docs/workflows.md) | What each workflow does and when to use it |
 | [Changelog](CHANGELOG.md) | Release-style summary of notable changes |
@@ -166,6 +168,9 @@ flowchart TD
 - `azure/Invoke-DashboardPipeline.ps1` is generated from the `build/` sources and can be refreshed locally or by CI.
 - Edit `src/powershell/Shared/**/*.ps1`, `src/powershell/Validation/**/*.ps1`, and `build/azure/runbook-source.ps1`; the generated helper bundles are driven by `build/manifests/*.json`, so update the relevant manifest when you add or reorder source files.
 - Run `./build/Invoke-RegressionValidation.ps1` for the deterministic local and PR-aligned preflight path.
+- Run `./tests/Invoke-HotPhaseReview.ps1 -DirectoryPath <dataset>` when you want a local phase-and-memory review before taking changes to the heavier benchmark or Azure paths.
+- Run `./tests/New-BenchmarkDataset.ps1 -DatasetId benchmark-medium-v1` to materialize the standard durable benchmark dataset before recording baseline captures.
+- Run `./tests/Invoke-BenchmarkSeries.ps1 -BenchmarkDatasetId benchmark-medium-v1 -Iterations 3 -IncludePersistentLocalWorkflow` when you want the repeatable multi-run benchmark cadence used for durable baseline refreshes.
 - Run `./build/Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` when you want the local command that mirrors the live GitHub Actions export and dashboard generation path.
 - Run `./build/Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName <name> -FunctionAppName <name>` when you want the repo-owned manual validation path that rebuilds locally, redeploys Azure Automation and Function App, and executes both live Azure validation flows.
 - Run `./build/Build-AzureReleasePackage.ps1` when you want the exact local packaging path used by the release workflow.
@@ -175,3 +180,4 @@ flowchart TD
 - `.dashboard-cache/` directories are derived local caches and are intentionally ignored by git.
 - Manual troubleshooting harnesses live under `tests/manual/` and default to ignored local output paths.
 - Recorded benchmark baselines are summarized in `docs/performance-baselines.md`; raw benchmark JSON stays local-only.
+- The recommended performance review cadence now lives in `docs/performance-gate-playbook.md`.

@@ -29,12 +29,9 @@
     Author: Nathan McNulty
     
     Prerequisites:
-    - Az.Accounts module
-    - Authenticated Azure session (Connect-AzAccount)
+    - Authenticated Azure session via Connect-AzAccount or az login
     - Storage Blob Data Contributor role on the storage account
 #>
-
-#Requires -Modules Az.Accounts
 
 [CmdletBinding()]
 param(
@@ -49,6 +46,72 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function ConvertTo-PlainTextToken {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Security.SecureString]$Token
+    )
+
+    $tokenPointer = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($Token)
+    try {
+        return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($tokenPointer)
+    }
+    finally {
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($tokenPointer)
+    }
+}
+
+function Get-StorageAccessToken {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    $getAzAccessTokenCommand = Get-Command -Name 'Get-AzAccessToken' -ErrorAction SilentlyContinue
+    if ($null -ne $getAzAccessTokenCommand) {
+        $hasAzContext = $true
+        $getAzContextCommand = Get-Command -Name 'Get-AzContext' -ErrorAction SilentlyContinue
+        if ($null -ne $getAzContextCommand) {
+            try {
+                $azContext = Get-AzContext -ErrorAction Stop
+                $hasAzContext = ($null -ne $azContext -and $null -ne $azContext.Account)
+            }
+            catch {
+                $hasAzContext = $false
+            }
+        }
+
+        if ($hasAzContext) {
+            try {
+                $tokenResponse = Get-AzAccessToken -ResourceUrl 'https://storage.azure.com/' -AsSecureString -ErrorAction Stop
+                return ConvertTo-PlainTextToken -Token $tokenResponse.Token
+            }
+            catch {
+                Write-Verbose "Az PowerShell token acquisition failed: $_"
+            }
+        }
+    }
+
+    if ($null -ne (Get-Command -Name 'az' -CommandType Application -ErrorAction SilentlyContinue)) {
+        try {
+            $azAccessToken = (& az 'account' 'get-access-token' '--resource' 'https://storage.azure.com/' '--query' 'accessToken' '-o' 'tsv' 2>&1 | Out-String)
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($azAccessToken)) {
+                return $azAccessToken.Trim()
+            }
+
+            if ($LASTEXITCODE -ne 0 -and -not [string]::IsNullOrWhiteSpace($azAccessToken)) {
+                Write-Verbose ("Azure CLI token acquisition failed: {0}" -f $azAccessToken.Trim())
+            }
+        }
+        catch {
+            Write-Verbose "Azure CLI token acquisition failed: $_"
+        }
+    }
+
+    throw "No Azure Storage token source available. Run Connect-AzAccount or az login, then retry."
+}
 
 # Resolve templates path
 if (-not $TemplatesPath) {
@@ -68,10 +131,7 @@ $templateFiles = @(
 
 # Get bearer token for blob storage
 Write-Host "Authenticating to Azure Storage..." -ForegroundColor Cyan
-$tokenResponse = Get-AzAccessToken -ResourceUrl 'https://storage.azure.com/' -AsSecureString
-$ssPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResponse.Token)
-try { $storageToken = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ssPtr) }
-finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ssPtr) }
+$storageToken = Get-StorageAccessToken
 
 $baseUrl = "https://$StorageAccountName.blob.core.windows.net"
 $blobApiVersion = '2021-12-02'

@@ -897,6 +897,233 @@ function Test-WriteCombinedPayloadGzipPreservesColumnPayload {
     }
 }
 
+function Test-NormalizedVulnColumnCacheRebuildsPayloadWithFreshLookups {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name is intentionally plural because it validates payload rebuild behavior across cached lookup inputs.')]
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-column-cache-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $columnPath = Join-Path $tempRoot 'columns'
+    $originalPayloadPath = Join-Path $tempRoot 'original-payload.json.gz'
+    $reusedPayloadPath = Join-Path $tempRoot 'reused-payload.json.gz'
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'column-cache-001' -CveId 'CVE-2026-0511' -SnapshotDate '2026-03-21' -Version '6.0.0'
+        $historyRow = Get-TestVulnRow -Id 'column-cache-002' -CveId 'CVE-2026-0512' -SnapshotDate '2026-03-19' -Version '6.1.0'
+        $historyRow.DeviceId = 'device-002'
+        $historyRow.DeviceName = 'device02.contoso.com'
+        $historyRow.MachineTags = @('Pilot', 'Prod')
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        [void](New-Item -Path (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -ItemType File -Force)
+        Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
+        Write-NdjsonRecordsFile -Path (Get-AdvancedHuntingCurrentPath -BasePath $tempRoot) -Records @(
+            [PSCustomObject]@{
+                CveId = 'CVE-2026-0511'
+                PublishedDate = '2026-03-20'
+                VulnerabilityDescription = 'Column cache rebuild regression.'
+                EpssScore = 0.31
+                AffectedSoftware = @('contoso:legacy_agent')
+            }
+            [PSCustomObject]@{
+                CveId = 'CVE-2026-0512'
+                PublishedDate = '2026-03-18'
+                VulnerabilityDescription = 'Column cache rebuild regression history row.'
+                EpssScore = 0.22
+                AffectedSoftware = @('contoso:legacy_agent')
+            }
+        )
+
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+
+        $advancedHuntingData = Read-AdvancedHuntingData -Path $tempRoot
+        $advancedHuntingDeviceUsers = Read-AdvancedHuntingDeviceUserMap -Path $tempRoot
+        $advancedHuntingInventoryData = Read-AdvancedHuntingInventoryData -Path $tempRoot
+        $normalizedResult = ConvertTo-NormalizedData `
+            -DataPath $tempRoot `
+            -VulnOutputPath $outputPath `
+            -VulnColumnDirectoryPath $columnPath `
+            -Machines @{} `
+            -AdvancedHuntingData $advancedHuntingData `
+            -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers `
+            -AdvancedHuntingInventoryData $advancedHuntingInventoryData `
+            -SkipObservedWindowMerge
+        Write-CombinedPayloadGzip -Lookups $normalizedResult.Lookups -VulnColumnPaths $normalizedResult.VulnColumnPaths -OutputPath $originalPayloadPath
+
+        $cacheEntry = Publish-NormalizedVulnColumnCache `
+            -BasePath $tempRoot `
+            -VulnColumnPaths $normalizedResult.VulnColumnPaths `
+            -VulnCount $normalizedResult.VulnCount `
+            -Dates @($normalizedResult.Lookups.dates) `
+            -Quality $normalizedResult.Quality `
+            -SkipObservedWindowMerge `
+            -InventoryTupleCount $advancedHuntingInventoryData.Count
+        $restoredCacheEntry = Get-NormalizedVulnColumnCacheEntry -BasePath $tempRoot -SkipObservedWindowMerge
+        $restoredLookups = Restore-ContentStoreNormalizedLookupsFromColumnCache `
+            -DataPath $tempRoot `
+            -Machines @{} `
+            -AdvancedHuntingData $advancedHuntingData `
+            -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers `
+            -AdvancedHuntingInventoryData $advancedHuntingInventoryData `
+            -CachedDates @($restoredCacheEntry.Manifest.Dates)
+        Write-CombinedPayloadGzip -Lookups $restoredLookups.Lookups -VulnColumnPaths $restoredCacheEntry.ColumnPaths -OutputPath $reusedPayloadPath
+
+        $originalPayloadJson = Read-GzipTextFile -Path $originalPayloadPath
+        $reusedPayloadJson = Read-GzipTextFile -Path $reusedPayloadPath
+
+        Assert-True ($null -ne $cacheEntry) 'Expected normalized vuln column cache publish to succeed.'
+        Assert-True ($null -ne $restoredCacheEntry) 'Expected normalized vuln column cache retrieval to succeed.'
+        Assert-True ($advancedHuntingInventoryData.Count -eq 0) 'Expected test fixture to avoid Advanced Hunting inventory tuples so column cache reuse stays valid.'
+        Assert-True ((Get-CompressedPayloadVulnCount -Path $originalPayloadPath) -eq (Get-CompressedPayloadVulnCount -Path $reusedPayloadPath)) 'Expected cached column payload rebuild to preserve vulnerability row count.'
+        Assert-True ($originalPayloadJson -eq $reusedPayloadJson) 'Expected cached normalized vuln columns plus rebuilt lookups to reproduce the same payload JSON.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-NormalizedVulnColumnCacheRefreshesInventoryColumn {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-column-cache-inventory-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $columnPath = Join-Path $tempRoot 'columns'
+    $refreshedColumnPath = Join-Path $tempRoot 'refreshed-columns'
+    $originalPayloadPath = Join-Path $tempRoot 'original-payload.json.gz'
+    $reusedPayloadPath = Join-Path $tempRoot 'reused-payload.json.gz'
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'column-cache-inventory-001' -CveId 'CVE-2026-0611' -SnapshotDate '2026-03-21' -Version '6.0.0'
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+
+        Write-NdjsonRecordsFile -Path (Get-AdvancedHuntingCurrentPath -BasePath $tempRoot) -Records @(
+            [PSCustomObject]@{
+                CveId = 'CVE-2026-0611'
+                PublishedDate = '2026-03-20'
+                VulnerabilityDescription = 'Column cache inventory regression.'
+                EpssScore = 0.31
+                AffectedSoftware = @('contoso:legacy_agent')
+            }
+            [PSCustomObject]@{
+                DeviceId = 'device-001'
+                SoftwareVendor = 'contoso'
+                SoftwareName = 'legacy_agent'
+                SoftwareVersion = '6.0.0'
+                ProductCodeCpe = 'cpe:/a:contoso:legacy_agent:6.0.0'
+                EndOfSupportStatus = 'supported'
+                EndOfSupportDate = '2027-10-01'
+            }
+        )
+
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+
+        $advancedHuntingData = Read-AdvancedHuntingData -Path $tempRoot
+        $advancedHuntingDeviceUsers = Read-AdvancedHuntingDeviceUserMap -Path $tempRoot
+        $advancedHuntingInventoryData = Read-AdvancedHuntingInventoryData -Path $tempRoot
+        $normalizedResult = ConvertTo-NormalizedData `
+            -DataPath $tempRoot `
+            -VulnOutputPath $outputPath `
+            -VulnColumnDirectoryPath $columnPath `
+            -Machines @{} `
+            -AdvancedHuntingData $advancedHuntingData `
+            -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers `
+            -AdvancedHuntingInventoryData $advancedHuntingInventoryData `
+            -SkipObservedWindowMerge
+        Write-CombinedPayloadGzip -Lookups $normalizedResult.Lookups -VulnColumnPaths $normalizedResult.VulnColumnPaths -OutputPath $originalPayloadPath
+
+        $cacheEntry = Publish-NormalizedVulnColumnCache `
+            -BasePath $tempRoot `
+            -VulnColumnPaths $normalizedResult.VulnColumnPaths `
+            -VulnCount $normalizedResult.VulnCount `
+            -Dates @($normalizedResult.Lookups.dates) `
+            -Quality $normalizedResult.Quality `
+            -SkipObservedWindowMerge `
+            -InventoryTupleCount $advancedHuntingInventoryData.Count
+        $restoredCacheEntry = Get-NormalizedVulnColumnCacheEntry -BasePath $tempRoot -SkipObservedWindowMerge
+        $restoredLookups = Restore-ContentStoreNormalizedLookupsFromColumnCache `
+            -DataPath $tempRoot `
+            -Machines @{} `
+            -AdvancedHuntingData $advancedHuntingData `
+            -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers `
+            -AdvancedHuntingInventoryData $advancedHuntingInventoryData `
+            -CachedDates @($restoredCacheEntry.Manifest.Dates)
+        $restoredColumnPaths = Restore-NormalizedVulnColumnPathsFromCache `
+            -CachedColumnPaths $restoredCacheEntry.ColumnPaths `
+            -RestoredLookupsResult $restoredLookups `
+            -OutputDirectoryPath $refreshedColumnPath `
+            -CachedInventoryTupleCount ([int]$restoredCacheEntry.Manifest.InventoryTupleCount)
+        Write-CombinedPayloadGzip -Lookups $restoredLookups.Lookups -VulnColumnPaths $restoredColumnPaths.ColumnPaths -OutputPath $reusedPayloadPath
+
+        $originalPayloadJson = Read-GzipTextFile -Path $originalPayloadPath
+        $reusedPayloadJson = Read-GzipTextFile -Path $reusedPayloadPath
+
+        Assert-True ($null -ne $cacheEntry) 'Expected normalized vuln column cache publish to succeed for an inventory-backed fixture.'
+        Assert-True ($null -ne $restoredCacheEntry) 'Expected normalized vuln column cache retrieval to succeed for an inventory-backed fixture.'
+        Assert-True ($advancedHuntingInventoryData.Count -eq 1) 'Expected the inventory-backed fixture to produce one Advanced Hunting inventory tuple.'
+        Assert-True ($restoredColumnPaths.RefreshedInventoryColumn -eq $true) 'Expected cached inventory column regeneration to run for an inventory-backed fixture.'
+        Assert-True ($restoredLookups.Lookups.inventory.Count -eq $normalizedResult.Lookups.inventory.Count) 'Expected refreshed inventory lookups to preserve the same lookup cardinality as the original normalization.'
+        Assert-True ((Get-CompressedPayloadVulnCount -Path $originalPayloadPath) -eq (Get-CompressedPayloadVulnCount -Path $reusedPayloadPath)) 'Expected refreshed inventory-column payload rebuild to preserve vulnerability row count.'
+        Assert-True ($originalPayloadJson -eq $reusedPayloadJson) 'Expected cached normalized vuln columns plus refreshed inventory column to reproduce the same payload JSON.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-WriteBase64FileContentMatchesReferenceOutput {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('base64-writer-regression-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $filePath = Join-Path $tempRoot 'fixture.bin'
+
+    try {
+        $bytes = [byte[]]::new(8195)
+        for ($index = 0; $index -lt $bytes.Length; $index++) {
+            $bytes[$index] = [byte](($index * 17 + 29) % 256)
+        }
+        [System.IO.File]::WriteAllBytes($filePath, $bytes)
+
+        $singleLineWriter = [System.IO.StringWriter]::new([System.Globalization.CultureInfo]::InvariantCulture)
+        try {
+            Write-Base64FileContent -Writer $singleLineWriter -FilePath $filePath
+            $singleLineActual = $singleLineWriter.ToString()
+        }
+        finally {
+            $singleLineWriter.Dispose()
+        }
+
+        $wrappedWriter = [System.IO.StringWriter]::new([System.Globalization.CultureInfo]::InvariantCulture)
+        try {
+            Write-Base64FileContent -Writer $wrappedWriter -FilePath $filePath -InsertLineBreaks
+            $wrappedActual = $wrappedWriter.ToString()
+        }
+        finally {
+            $wrappedWriter.Dispose()
+        }
+
+        $singleLineExpected = Get-Base64FileContent -FilePath $filePath
+        $wrappedExpected = Get-Base64FileContent -FilePath $filePath -InsertLineBreaks
+
+        Assert-True ($singleLineActual -eq $singleLineExpected) 'Expected streamed base64 writer to match the reference single-line output.'
+        Assert-True ($wrappedActual -eq $wrappedExpected) 'Expected streamed base64 writer to match the reference wrapped output.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-ValidationHelperPayloadCanonicalization {
     [CmdletBinding()]
     param()
@@ -1101,27 +1328,98 @@ function Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity {
         ) -join [Environment]::NewLine
         [System.IO.File]::WriteAllText($htmlPath, $dashboardHtml, [System.Text.UTF8Encoding]::new($false))
 
-        $mutatedRow = Get-TestVulnRow -Id 'streaming-audit-002' -CveId 'CVE-2026-0322' -SnapshotDate '2026-03-21' -Version '4.1.0'
-        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow, $mutatedRow)
+        $previousForceFull = $Script:DashboardValidationForceFull
+        $Script:DashboardValidationForceFull = $true
+        try {
+            $primeAudit = Get-StreamingDashboardAuditResult -ResolvedHtmlPath $htmlPath -ResolvedExportsPath $tempRoot -PayloadCacheEntry $payloadCacheEntry
 
-        $contentStoreFiles = @(
-            Get-VulnContentDictionaryPath -BasePath $tempRoot
-            Get-VulnCurrentRefsPath -BasePath $tempRoot
-            Get-VulnHistoryRefsPath -BasePath $tempRoot -PeriodKey '2026Q1'
-        )
-        foreach ($contentStoreFile in $contentStoreFiles) {
-            if (-not [string]::IsNullOrWhiteSpace($contentStoreFile) -and (Test-Path -LiteralPath $contentStoreFile -PathType Leaf)) {
-                Remove-Item -LiteralPath $contentStoreFile -Force -ErrorAction SilentlyContinue
+            $mutatedRow = Get-TestVulnRow -Id 'streaming-audit-002' -CveId 'CVE-2026-0322' -SnapshotDate '2026-03-21' -Version '4.1.0'
+            Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow, $mutatedRow)
+
+            $contentStoreFiles = @(
+                Get-VulnContentDictionaryPath -BasePath $tempRoot
+                Get-VulnCurrentRefsPath -BasePath $tempRoot
+                Get-VulnHistoryRefsPath -BasePath $tempRoot -PeriodKey '2026Q1'
+            )
+            foreach ($contentStoreFile in $contentStoreFiles) {
+                if (-not [string]::IsNullOrWhiteSpace($contentStoreFile) -and (Test-Path -LiteralPath $contentStoreFile -PathType Leaf)) {
+                    Remove-Item -LiteralPath $contentStoreFile -Force -ErrorAction SilentlyContinue
+                }
             }
+
+            $audit = Get-StreamingDashboardAuditResult -ResolvedHtmlPath $htmlPath -ResolvedExportsPath $tempRoot -PayloadCacheEntry $payloadCacheEntry
+        }
+        finally {
+            $Script:DashboardValidationForceFull = $previousForceFull
         }
 
-        $audit = Get-StreamingDashboardAuditResult -ResolvedHtmlPath $htmlPath -ResolvedExportsPath $tempRoot -PayloadCacheEntry $payloadCacheEntry
-
+        Assert-True ($primeAudit.RowComparison.Match -eq $true) 'Expected the priming forced streaming audit to succeed before the source exports diverge.'
+        Assert-True ($primeAudit.SemanticParity.SourceSignatureCacheUsed -eq $false) 'Expected the priming forced streaming audit to build the source signature cache.'
         Assert-True ($audit.PayloadParity.Match -eq $true) 'Expected dashboard payload bytes to remain equal to the cached normalized payload.'
         Assert-True ($audit.SemanticParity.PayloadByteParityMatch -eq $true) 'Expected streaming audit diagnostics to record dashboard payload byte parity.'
         Assert-True ($audit.RowComparison.Match -eq $false) 'Expected streaming semantic parity to fail when the source exports diverge from the dashboard payload.'
         Assert-True ($audit.RowComparison.MissingCount -eq 1) 'Expected the extra source row to be reported as missing from the dashboard payload.'
         Assert-True ([string]$audit.SemanticParity.ComparisonPayloadSource -eq 'cached-payload') 'Expected source streaming audit to reuse the cached payload when byte parity proves dashboard equivalence.'
+        Assert-True ($audit.SemanticParity.SourceSignatureCacheUsed -eq $false) 'Expected the streaming audit to bypass the cached source signature set after the source exports fingerprint changes.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-StreamingDashboardAuditReusesCachedPayloadSignatureSet {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('streaming-dashboard-payload-signatures-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+    $vulnOutputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $htmlPath = Join-Path $tempRoot 'dashboard.html'
+
+    try {
+        . (Join-Path $repoRoot 'build\Import-ValidationHelpers.ps1')
+
+        $currentRow = Get-TestVulnRow -Id 'streaming-cache-001' -CveId 'CVE-2026-0421' -SnapshotDate '2026-03-20' -Version '5.0.0'
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+
+        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $vulnOutputPath -PayloadOutputPath $payloadPath -Machines @{} -AdvancedHuntingData @{}
+        $payloadCacheEntry = Publish-NormalizedPayloadCache -BasePath $tempRoot -PayloadPath $normalizedResult.PayloadPath -VulnCount $normalizedResult.VulnCount -DeviceCount $normalizedResult.Lookups.devices.Count -CveCount $normalizedResult.Lookups.cves.Count -Quality $normalizedResult.Quality
+
+        $dashboardConfigJson = ([ordered]@{ payloadUrl = 'payload.json.gz' } | ConvertTo-Json -Compress)
+        $dashboardHtml = @(
+            '<!DOCTYPE html>'
+            '<html lang="en">'
+            '<head><meta charset="utf-8"><title>Streaming Audit Cache Fixture</title></head>'
+            '<body>'
+            '<script id="dataFormat" type="application/json">external-compressed</script>'
+            ('<script id="dashboardConfig" type="application/json">' + $dashboardConfigJson + '</script>')
+            '</body>'
+            '</html>'
+        ) -join [Environment]::NewLine
+        [System.IO.File]::WriteAllText($htmlPath, $dashboardHtml, [System.Text.UTF8Encoding]::new($false))
+
+        $previousForceFull = $Script:DashboardValidationForceFull
+        $Script:DashboardValidationForceFull = $true
+        try {
+            $firstAudit = Get-StreamingDashboardAuditResult -ResolvedHtmlPath $htmlPath -ResolvedExportsPath $tempRoot -PayloadCacheEntry $payloadCacheEntry
+            $secondAudit = Get-StreamingDashboardAuditResult -ResolvedHtmlPath $htmlPath -ResolvedExportsPath $tempRoot -PayloadCacheEntry $payloadCacheEntry
+        }
+        finally {
+            $Script:DashboardValidationForceFull = $previousForceFull
+        }
+
+        Assert-True ($firstAudit.RowComparison.Match -eq $true) 'Expected the initial forced streaming audit to succeed before caching payload signatures.'
+        Assert-True ($firstAudit.SemanticParity.SourceSignatureCacheUsed -eq $false) 'Expected the initial forced streaming audit to build the source signature cache.'
+        Assert-True ($firstAudit.SemanticParity.PayloadSignatureCacheUsed -eq $false) 'Expected the initial forced streaming audit to build the payload signature cache.'
+        Assert-True ($secondAudit.RowComparison.Match -eq $true) 'Expected the repeated forced streaming audit to preserve semantic parity.'
+        Assert-True ($secondAudit.SemanticParity.SourceSignatureCacheUsed -eq $true) 'Expected the repeated forced streaming audit to reuse the cached source signature set.'
+        Assert-True ($secondAudit.SemanticParity.PayloadSignatureCacheUsed -eq $true) 'Expected the repeated forced streaming audit to reuse the cached payload signature set.'
+        Assert-True ([double]$secondAudit.SemanticParity.SourceSignatureElapsedSeconds -lt [double]$firstAudit.SemanticParity.SourceSignatureElapsedSeconds) 'Expected cached source signature reuse to reduce the source signature phase time on the repeated forced streaming audit.'
+        Assert-True ([double]$secondAudit.SemanticParity.PayloadSignatureElapsedSeconds -lt [double]$firstAudit.SemanticParity.PayloadSignatureElapsedSeconds) 'Expected cached payload signature reuse to reduce the payload signature phase time on the repeated forced streaming audit.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -1523,6 +1821,12 @@ Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
 Write-Output '  Advanced Hunting device-user normalization checks passed.'
 Test-WriteCombinedPayloadGzipPreservesColumnPayload
 Write-Output '  Combined payload writer column-path checks passed.'
+Test-NormalizedVulnColumnCacheRebuildsPayloadWithFreshLookups
+Write-Output '  Normalized vuln column cache reuse checks passed.'
+Test-NormalizedVulnColumnCacheRefreshesInventoryColumn
+Write-Output '  Inventory-backed normalized vuln column cache reuse checks passed.'
+Test-WriteBase64FileContentMatchesReferenceOutput
+Write-Output '  Streamed base64 writer checks passed.'
 Test-ValidationHelperPayloadCanonicalization
 Write-Output '  Validation helper payload-format checks passed.'
 Test-ValidationHelperStandaloneImport
@@ -1531,6 +1835,8 @@ Test-DashboardValidationFailureExtendedEnrichmentGate
 Write-Output '  Validation helper failure-gate checks passed.'
 Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity
 Write-Output '  Streaming dashboard source-parity checks passed.'
+Test-StreamingDashboardAuditReusesCachedPayloadSignatureSet
+Write-Output '  Streaming dashboard payload-signature reuse checks passed.'
 Test-DashboardValidationUsesStableFallbackDeviceProfile
 Write-Output '  Dashboard validation fallback device profile checks passed.'
 Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff

@@ -173,6 +173,300 @@ function Get-PartitionedSignatureFilePath {
     return (Join-Path $DirectoryPath ("p{0:D3}.txt" -f $Index))
 }
 
+function Get-PartitionedSignatureSetMetadataPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DirectoryPath
+    )
+
+    return (Join-Path $DirectoryPath 'signature-set.json')
+}
+
+function Get-PayloadSignatureCacheDirectory {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $PayloadCacheEntry,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Create
+    )
+
+    $payloadDirectory = Split-Path -Path ([System.IO.Path]::GetFullPath([string]$PayloadCacheEntry.PayloadPath)) -Parent
+    $cacheDirectory = Join-Path $payloadDirectory ("payload-signatures-{0}" -f [string]$PayloadCacheEntry.Fingerprint)
+    if ($Create) {
+        [void](New-Item -Path $cacheDirectory -ItemType Directory -Force)
+    }
+
+    return $cacheDirectory
+}
+
+function Get-SourceSignatureCacheDirectory {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $PayloadCacheEntry,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SourceFingerprint,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Create
+    )
+
+    $payloadDirectory = Split-Path -Path ([System.IO.Path]::GetFullPath([string]$PayloadCacheEntry.PayloadPath)) -Parent
+    $cacheDirectory = Join-Path $payloadDirectory ("source-signatures-{0}" -f $SourceFingerprint)
+    if ($Create) {
+        [void](New-Item -Path $cacheDirectory -ItemType Directory -Force)
+    }
+
+    return $cacheDirectory
+}
+
+function Clear-StalePayloadSignatureCaches {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper clears multiple cached payload signature directories by design.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $PayloadCacheEntry
+    )
+
+    $payloadDirectory = Split-Path -Path ([System.IO.Path]::GetFullPath([string]$PayloadCacheEntry.PayloadPath)) -Parent
+    if (-not (Test-Path -LiteralPath $payloadDirectory -PathType Container)) {
+        return
+    }
+
+    $expectedDirectory = Get-PayloadSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry
+    foreach ($cacheDirectory in @(Get-ChildItem -Path $payloadDirectory -Directory -Filter 'payload-signatures-*' -ErrorAction SilentlyContinue)) {
+        if ([System.StringComparer]::OrdinalIgnoreCase.Equals($cacheDirectory.FullName, $expectedDirectory)) {
+            continue
+        }
+
+        Remove-Item -LiteralPath $cacheDirectory.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Clear-StaleSourceSignatureCaches {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper clears multiple cached source signature directories by design.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $PayloadCacheEntry,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSourceFingerprint
+    )
+
+    $payloadDirectory = Split-Path -Path ([System.IO.Path]::GetFullPath([string]$PayloadCacheEntry.PayloadPath)) -Parent
+    if (-not (Test-Path -LiteralPath $payloadDirectory -PathType Container)) {
+        return
+    }
+
+    $expectedDirectory = Get-SourceSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry -SourceFingerprint $ExpectedSourceFingerprint
+    foreach ($cacheDirectory in @(Get-ChildItem -Path $payloadDirectory -Directory -Filter 'source-signatures-*' -ErrorAction SilentlyContinue)) {
+        if ([System.StringComparer]::OrdinalIgnoreCase.Equals($cacheDirectory.FullName, $expectedDirectory)) {
+            continue
+        }
+
+        Remove-Item -LiteralPath $cacheDirectory.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-CachedPayloadSignatureSet {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $PayloadCacheEntry,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedPayloadSha256,
+
+        [Parameter(Mandatory = $true)]
+        [int]$ExpectedPayloadRowCount
+    )
+
+    $cacheDirectory = Get-PayloadSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry
+    $metadataPath = Get-PartitionedSignatureSetMetadataPath -DirectoryPath $cacheDirectory
+    if ((-not (Test-Path -LiteralPath $cacheDirectory -PathType Container)) -or (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf))) {
+        return $null
+    }
+
+    $metadata = Read-NormalizedPayloadManifest -Path $metadataPath
+    if ($null -eq $metadata) {
+        return $null
+    }
+
+    if ([string]$metadata.Version -ne 'payload-signature-cache-v1') {
+        return $null
+    }
+
+    if ([string]$metadata.ValidationLogicVersion -ne (Get-DashboardSemanticValidationLogicVersion)) {
+        return $null
+    }
+
+    if ([string]$metadata.Fingerprint -ne [string]$PayloadCacheEntry.Fingerprint) {
+        return $null
+    }
+
+    if ([string]$metadata.PayloadSha256 -ne $ExpectedPayloadSha256) {
+        return $null
+    }
+
+    if ([int]$metadata.PayloadRowCount -ne $ExpectedPayloadRowCount) {
+        return $null
+    }
+
+    $partitionCount = [int]$metadata.PartitionCount
+    $rowCount = [int]$metadata.RowCount
+    if (($partitionCount -lt 1) -or ($rowCount -lt 0)) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        DirectoryPath = $cacheDirectory
+        Count = $rowCount
+        PartitionCount = $partitionCount
+        Persistent = $true
+    }
+}
+
+function Get-CachedSourceSignatureSet {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $PayloadCacheEntry,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSourceFingerprint
+    )
+
+    $cacheDirectory = Get-SourceSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry -SourceFingerprint $ExpectedSourceFingerprint
+    $metadataPath = Get-PartitionedSignatureSetMetadataPath -DirectoryPath $cacheDirectory
+    if ((-not (Test-Path -LiteralPath $cacheDirectory -PathType Container)) -or (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf))) {
+        return $null
+    }
+
+    $metadata = Read-NormalizedPayloadManifest -Path $metadataPath
+    if ($null -eq $metadata) {
+        return $null
+    }
+
+    if ([string]$metadata.Version -ne 'source-signature-cache-v1') {
+        return $null
+    }
+
+    if ([string]$metadata.ValidationLogicVersion -ne (Get-DashboardSemanticValidationLogicVersion)) {
+        return $null
+    }
+
+    if ([string]$metadata.SourceFingerprint -ne $ExpectedSourceFingerprint) {
+        return $null
+    }
+
+    $partitionCount = [int]$metadata.PartitionCount
+    $rowCount = [int]$metadata.RowCount
+    if (($partitionCount -lt 1) -or ($rowCount -lt 0)) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        DirectoryPath = $cacheDirectory
+        Count = $rowCount
+        PartitionCount = $partitionCount
+        Persistent = $true
+        SourceMissingMachineCount = [int]$metadata.SourceMissingMachineCount
+        SourceFirstLastSwappedCount = [int]$metadata.SourceFirstLastSwappedCount
+        SourceUniqueVendors = @($metadata.SourceUniqueVendors | ForEach-Object { [string]$_ })
+    }
+}
+
+function Write-CachedPayloadSignatureSetMetadata {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only writes cache metadata for a signature set generated from the current payload cache entry.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper writes metadata that describes a cached payload signature set.')]
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $PayloadCacheEntry,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PayloadSha256,
+
+        [Parameter(Mandatory = $true)]
+        [int]$PayloadRowCount,
+
+        [Parameter(Mandatory = $true)]
+        $SignatureSet
+    )
+
+    $cacheDirectory = Get-PayloadSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry -Create
+    $metadataPath = Get-PartitionedSignatureSetMetadataPath -DirectoryPath $cacheDirectory
+    $metadata = [ordered]@{
+        Version = 'payload-signature-cache-v1'
+        ValidationLogicVersion = Get-DashboardSemanticValidationLogicVersion
+        Fingerprint = [string]$PayloadCacheEntry.Fingerprint
+        PayloadPath = [string]$PayloadCacheEntry.PayloadPath
+        PayloadSha256 = $PayloadSha256
+        PayloadRowCount = $PayloadRowCount
+        PartitionCount = [int]$SignatureSet.PartitionCount
+        RowCount = [int]$SignatureSet.Count
+        GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+
+    return (Write-NormalizedPayloadManifest -Path $metadataPath -Manifest $metadata)
+}
+
+function Write-CachedSourceSignatureSetMetadata {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only writes cache metadata for a signature set generated from the current source exports.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper writes metadata that describes a cached source signature set.')]
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $PayloadCacheEntry,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SourceFingerprint,
+
+        [Parameter(Mandatory = $true)]
+        $SignatureSet,
+
+        [Parameter(Mandatory = $true)]
+        [int]$SourceMissingMachineCount,
+
+        [Parameter(Mandatory = $true)]
+        [int]$SourceFirstLastSwappedCount,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [string[]]$SourceUniqueVendors
+    )
+
+    $cacheDirectory = Get-SourceSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry -SourceFingerprint $SourceFingerprint -Create
+    $metadataPath = Get-PartitionedSignatureSetMetadataPath -DirectoryPath $cacheDirectory
+    $metadata = [ordered]@{
+        Version = 'source-signature-cache-v1'
+        ValidationLogicVersion = Get-DashboardSemanticValidationLogicVersion
+        SourceFingerprint = $SourceFingerprint
+        PartitionCount = [int]$SignatureSet.PartitionCount
+        RowCount = [int]$SignatureSet.Count
+        SourceMissingMachineCount = $SourceMissingMachineCount
+        SourceFirstLastSwappedCount = $SourceFirstLastSwappedCount
+        SourceUniqueVendors = @($SourceUniqueVendors)
+        GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
+    }
+
+    return (Write-NormalizedPayloadManifest -Path $metadataPath -Manifest $metadata)
+}
+
 function Remove-PartitionedSignatureSet {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
@@ -183,6 +477,10 @@ function Remove-PartitionedSignatureSet {
     )
 
     if ($null -eq $SignatureSet) {
+        return
+    }
+
+    if ($SignatureSet.PSObject.Properties['Persistent'] -and ($SignatureSet.Persistent -eq $true)) {
         return
     }
 
@@ -208,11 +506,27 @@ function Write-PartitionedSignatureSet {
 
         [Parameter(Mandatory = $false)]
         [ValidateRange(10000, 1000000)]
-        [int]$ProgressInterval = 250000
+        [int]$ProgressInterval = 250000,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$OutputDirectoryPath,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Persistent
     )
 
-    $directoryPath = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-audit-signatures-' + [guid]::NewGuid().ToString('N'))
+    $directoryPath = if (-not [string]::IsNullOrWhiteSpace($OutputDirectoryPath)) {
+        [System.IO.Path]::GetFullPath($OutputDirectoryPath)
+    }
+    else {
+        Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-audit-signatures-' + [guid]::NewGuid().ToString('N'))
+    }
+
     [void](New-Item -Path $directoryPath -ItemType Directory -Force)
+    foreach ($existingFile in @(Get-ChildItem -Path $directoryPath -File -ErrorAction SilentlyContinue)) {
+        Remove-Item -LiteralPath $existingFile.FullName -Force -ErrorAction SilentlyContinue
+    }
 
     $writers = [System.IO.StreamWriter[]]::new($PartitionCount)
     $count = 0
@@ -248,6 +562,7 @@ function Write-PartitionedSignatureSet {
         DirectoryPath = $directoryPath
         Count = $count
         PartitionCount = $PartitionCount
+        Persistent = ($Persistent -eq $true)
     }
 }
 
@@ -1418,11 +1733,32 @@ function New-AttestedStreamingDashboardAuditResult {
         [int]$CachedPayloadRowCount
     )
 
+    $phaseTimings = [PSCustomObject]@{
+        MachineLoadElapsedSeconds = 0
+        AdvancedHuntingLoadElapsedSeconds = 0
+        SourceMaterializationElapsedSeconds = $null
+        PayloadLoadElapsedSeconds = $null
+        VendorIndexElapsedSeconds = 0
+        SourceSignatureElapsedSeconds = 0
+        PayloadSignatureElapsedSeconds = 0
+        RowComparisonElapsedSeconds = $null
+        EnrichmentAuditElapsedSeconds = $null
+        ReportComparisonsElapsedSeconds = $null
+        DuplicateIdentityElapsedSeconds = $null
+        OpenStateElapsedSeconds = $null
+        ComparisonElapsedSeconds = 0
+        BaselineAuditElapsedSeconds = $null
+        BaselineCoverageElapsedSeconds = $null
+        LegacyFixtureRegressionElapsedSeconds = $null
+        TotalElapsedSeconds = 0
+    }
+
     return [PSCustomObject]@{
         GeneratedOn = (Get-Date).ToString('o')
         HtmlPath = $ResolvedHtmlPath
         ExportsPath = $ResolvedExportsPath
         AuditMode = 'streaming-large-dataset-attested'
+        PhaseTimings = $phaseTimings
         Source = [PSCustomObject]@{
             RowCount = [int]$Attestation.SourceRowCount
             MissingMachineCount = [int]$Attestation.SourceMissingMachineCount
@@ -1495,19 +1831,13 @@ function New-AttestedStreamingDashboardAuditResult {
             IncludesMachineInfo = $true
             ComparisonStorage = 'attested-manifest'
             ComparisonPayloadSource = 'cached-payload'
+            SourceSignatureCacheUsed = $false
+            PayloadSignatureCacheUsed = $false
             PartitionCount = if ($Attestation.PSObject.Properties['PartitionCount']) { [int]$Attestation.PartitionCount } else { $null }
             SourceSignatureElapsedSeconds = 0
             PayloadSignatureElapsedSeconds = 0
             ComparisonElapsedSeconds = 0
-            PhaseTimings = [PSCustomObject]@{
-                MachineLoadElapsedSeconds = 0
-                AdvancedHuntingLoadElapsedSeconds = 0
-                VendorIndexElapsedSeconds = 0
-                SourceSignatureElapsedSeconds = 0
-                PayloadSignatureElapsedSeconds = 0
-                ComparisonElapsedSeconds = 0
-                TotalElapsedSeconds = 0
-            }
+            PhaseTimings = $phaseTimings
             PayloadByteParityMatch = $true
             AttestationUsed = $true
             ValidationLogicVersion = [string]$Attestation.ValidationLogicVersion
@@ -1571,6 +1901,8 @@ function Get-StreamingDashboardAuditResult {
     $sourceUniqueVendors = @()
     $sourceFirstLastSwappedCount = 0
     $sourceMissingMachineCount = 0
+    $sourceSignatureCacheUsed = $false
+    $payloadSignatureCacheUsed = $false
     $auditStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
     try {
@@ -1580,28 +1912,11 @@ function Get-StreamingDashboardAuditResult {
             Write-Information ("  Requested partition compare runspace throttle: {0}" -f $Script:DashboardValidationPartitionCompareParallelism) -InformationAction Continue
         }
 
-        $machineLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $machines = Read-MachineData -Path $ResolvedExportsPath
-        $machineLoadStopwatch.Stop()
-        $machineLoadElapsedSeconds = [math]::Round($machineLoadStopwatch.Elapsed.TotalSeconds, 2)
-
-        $advancedHuntingLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $advancedHunting = Read-AdvancedHuntingData -Path $ResolvedExportsPath
-    $advancedHuntingInventory = Read-AdvancedHuntingInventoryData -Path $ResolvedExportsPath
-    $nvdCveData = Read-NvdCveData -Path $ResolvedExportsPath
-        $advancedHuntingLoadStopwatch.Stop()
-        $advancedHuntingLoadElapsedSeconds = [math]::Round($advancedHuntingLoadStopwatch.Elapsed.TotalSeconds, 2)
-
-        $vendorIndexStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        $vendorSet = Get-SourceVendorSetForAudit -ExportsPath $ResolvedExportsPath -SkipObservedWindowMerge:$skipObservedWindowMerge
-        $vendorIndexStopwatch.Stop()
-        $vendorIndexElapsedSeconds = [math]::Round($vendorIndexStopwatch.Elapsed.TotalSeconds, 2)
-        $sourceUniqueVendors = @($vendorSet | Sort-Object)
-
         if ($payloadParityMatch) {
             $comparisonPayloadSource = 'cached-payload'
             $comparisonPayloadPath = $PayloadCacheEntry.PayloadPath
             $comparisonPayloadLabel = 'dashboard-cache'
+            Clear-StalePayloadSignatureCaches -PayloadCacheEntry $PayloadCacheEntry
             Write-Information '  Dashboard payload matches the normalized payload cache; reusing cached payload for semantic comparison.' -InformationAction Continue
         }
         else {
@@ -1610,27 +1925,97 @@ function Get-StreamingDashboardAuditResult {
             Write-Information '  Dashboard payload differs from the normalized payload cache; comparing dashboard payload directly against source exports.' -InformationAction Continue
         }
 
+        $currentSourceFingerprint = Get-DashboardPayloadCacheFingerprint -BasePath $ResolvedExportsPath -SkipObservedWindowMerge:$skipObservedWindowMerge
+        if (-not [string]::IsNullOrWhiteSpace($currentSourceFingerprint)) {
+            Clear-StaleSourceSignatureCaches -PayloadCacheEntry $PayloadCacheEntry -ExpectedSourceFingerprint $currentSourceFingerprint
+        }
+
         try {
             $sourceStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-            $sourceSignatureSet = Write-PartitionedSignatureSet -Label 'source' -ProgressInterval $Script:DashboardValidationProgressInterval -SignatureSource {
-                Read-SourceCanonicalSignatureStream `
-                    -ExportsPath $ResolvedExportsPath `
-                    -Machines $machines `
-                    -AdvancedHunting $advancedHunting `
-                    -AdvancedHuntingInventory $advancedHuntingInventory `
-                    -NvdCveData $nvdCveData `
-                    -VendorSet $vendorSet `
-                    -SkipObservedWindowMerge:$skipObservedWindowMerge `
-                    -FirstLastSwappedCount ([ref]$sourceFirstLastSwappedCount) `
-                    -MissingMachineCount ([ref]$sourceMissingMachineCount)
+            if (-not [string]::IsNullOrWhiteSpace($currentSourceFingerprint)) {
+                $sourceSignatureSet = Get-CachedSourceSignatureSet -PayloadCacheEntry $PayloadCacheEntry -ExpectedSourceFingerprint $currentSourceFingerprint
+            }
+
+            if ($null -ne $sourceSignatureSet) {
+                $sourceSignatureCacheUsed = $true
+                $sourceMissingMachineCount = [int]$sourceSignatureSet.SourceMissingMachineCount
+                $sourceFirstLastSwappedCount = [int]$sourceSignatureSet.SourceFirstLastSwappedCount
+                $sourceUniqueVendors = @($sourceSignatureSet.SourceUniqueVendors)
+                Write-Information '  Reusing cached source signature set for semantic comparison.' -InformationAction Continue
+            }
+            else {
+                $machineLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+                $machines = Read-MachineData -Path $ResolvedExportsPath
+                $machineLoadStopwatch.Stop()
+                $machineLoadElapsedSeconds = [math]::Round($machineLoadStopwatch.Elapsed.TotalSeconds, 2)
+
+                $advancedHuntingLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+                $advancedHunting = Read-AdvancedHuntingData -Path $ResolvedExportsPath
+                $advancedHuntingInventory = Read-AdvancedHuntingInventoryData -Path $ResolvedExportsPath
+                $nvdCveData = Read-NvdCveData -Path $ResolvedExportsPath
+                $advancedHuntingLoadStopwatch.Stop()
+                $advancedHuntingLoadElapsedSeconds = [math]::Round($advancedHuntingLoadStopwatch.Elapsed.TotalSeconds, 2)
+
+                $vendorIndexStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+                $vendorSet = Get-SourceVendorSetForAudit -ExportsPath $ResolvedExportsPath -SkipObservedWindowMerge:$skipObservedWindowMerge
+                $vendorIndexStopwatch.Stop()
+                $vendorIndexElapsedSeconds = [math]::Round($vendorIndexStopwatch.Elapsed.TotalSeconds, 2)
+                $sourceUniqueVendors = @($vendorSet | Sort-Object)
+
+                if (-not [string]::IsNullOrWhiteSpace($currentSourceFingerprint)) {
+                    $sourceSignatureSet = Write-PartitionedSignatureSet -Label 'source' -ProgressInterval $Script:DashboardValidationProgressInterval -OutputDirectoryPath (Get-SourceSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry -SourceFingerprint $currentSourceFingerprint -Create) -Persistent -SignatureSource {
+                        Read-SourceCanonicalSignatureStream `
+                            -ExportsPath $ResolvedExportsPath `
+                            -Machines $machines `
+                            -AdvancedHunting $advancedHunting `
+                            -AdvancedHuntingInventory $advancedHuntingInventory `
+                            -NvdCveData $nvdCveData `
+                            -VendorSet $vendorSet `
+                            -SkipObservedWindowMerge:$skipObservedWindowMerge `
+                            -FirstLastSwappedCount ([ref]$sourceFirstLastSwappedCount) `
+                            -MissingMachineCount ([ref]$sourceMissingMachineCount)
+                    }
+                    Write-CachedSourceSignatureSetMetadata -PayloadCacheEntry $PayloadCacheEntry -SourceFingerprint $currentSourceFingerprint -SignatureSet $sourceSignatureSet -SourceMissingMachineCount $sourceMissingMachineCount -SourceFirstLastSwappedCount $sourceFirstLastSwappedCount -SourceUniqueVendors $sourceUniqueVendors | Out-Null
+                    Write-Information '  Cached source signature set for future semantic comparisons.' -InformationAction Continue
+                }
+                else {
+                    $sourceSignatureSet = Write-PartitionedSignatureSet -Label 'source' -ProgressInterval $Script:DashboardValidationProgressInterval -SignatureSource {
+                        Read-SourceCanonicalSignatureStream `
+                            -ExportsPath $ResolvedExportsPath `
+                            -Machines $machines `
+                            -AdvancedHunting $advancedHunting `
+                            -AdvancedHuntingInventory $advancedHuntingInventory `
+                            -NvdCveData $nvdCveData `
+                            -VendorSet $vendorSet `
+                            -SkipObservedWindowMerge:$skipObservedWindowMerge `
+                            -FirstLastSwappedCount ([ref]$sourceFirstLastSwappedCount) `
+                            -MissingMachineCount ([ref]$sourceMissingMachineCount)
+                    }
+                }
             }
             $sourceStopwatch.Stop()
             $sourceElapsedSeconds = [math]::Round($sourceStopwatch.Elapsed.TotalSeconds, 2)
             Write-Information ("  Source signature pass completed in {0:N2}s" -f $sourceElapsedSeconds) -InformationAction Continue
 
             $payloadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-            $payloadSignatureSet = Write-PartitionedSignatureSet -Label $comparisonPayloadLabel -ProgressInterval $Script:DashboardValidationProgressInterval -SignatureSource {
-                Read-PayloadCanonicalSignatureStream -PayloadPath $comparisonPayloadPath
+            if ($payloadParityMatch) {
+                $payloadSignatureSet = Get-CachedPayloadSignatureSet -PayloadCacheEntry $PayloadCacheEntry -ExpectedPayloadSha256 $cachedPayloadSha256 -ExpectedPayloadRowCount $cachedPayloadRowCount
+                if ($null -ne $payloadSignatureSet) {
+                    $payloadSignatureCacheUsed = $true
+                    Write-Information '  Reusing cached payload signature set for semantic comparison.' -InformationAction Continue
+                }
+                else {
+                    $payloadSignatureSet = Write-PartitionedSignatureSet -Label $comparisonPayloadLabel -ProgressInterval $Script:DashboardValidationProgressInterval -OutputDirectoryPath (Get-PayloadSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry -Create) -Persistent -SignatureSource {
+                        Read-PayloadCanonicalSignatureStream -PayloadPath $comparisonPayloadPath
+                    }
+                    Write-CachedPayloadSignatureSetMetadata -PayloadCacheEntry $PayloadCacheEntry -PayloadSha256 $cachedPayloadSha256 -PayloadRowCount $cachedPayloadRowCount -SignatureSet $payloadSignatureSet | Out-Null
+                    Write-Information '  Cached payload signature set for future semantic comparisons.' -InformationAction Continue
+                }
+            }
+            else {
+                $payloadSignatureSet = Write-PartitionedSignatureSet -Label $comparisonPayloadLabel -ProgressInterval $Script:DashboardValidationProgressInterval -SignatureSource {
+                    Read-PayloadCanonicalSignatureStream -PayloadPath $comparisonPayloadPath
+                }
             }
             $payloadStopwatch.Stop()
             $payloadElapsedSeconds = [math]::Round($payloadStopwatch.Elapsed.TotalSeconds, 2)
@@ -1664,6 +2049,25 @@ function Get-StreamingDashboardAuditResult {
     $auditStopwatch.Stop()
     $totalElapsedSeconds = [math]::Round($auditStopwatch.Elapsed.TotalSeconds, 2)
     $comparisonPartitionCount = if ($sourceSignatureSet) { [int]$sourceSignatureSet.PartitionCount } elseif ($payloadSignatureSet) { [int]$payloadSignatureSet.PartitionCount } else { $null }
+    $phaseTimings = [PSCustomObject]@{
+        MachineLoadElapsedSeconds = $machineLoadElapsedSeconds
+        AdvancedHuntingLoadElapsedSeconds = $advancedHuntingLoadElapsedSeconds
+        SourceMaterializationElapsedSeconds = $null
+        PayloadLoadElapsedSeconds = $null
+        VendorIndexElapsedSeconds = $vendorIndexElapsedSeconds
+        SourceSignatureElapsedSeconds = $sourceElapsedSeconds
+        PayloadSignatureElapsedSeconds = $payloadElapsedSeconds
+        RowComparisonElapsedSeconds = $null
+        EnrichmentAuditElapsedSeconds = $null
+        ReportComparisonsElapsedSeconds = $null
+        DuplicateIdentityElapsedSeconds = $null
+        OpenStateElapsedSeconds = $null
+        ComparisonElapsedSeconds = $comparisonElapsedSeconds
+        BaselineAuditElapsedSeconds = $null
+        BaselineCoverageElapsedSeconds = $null
+        LegacyFixtureRegressionElapsedSeconds = $null
+        TotalElapsedSeconds = $totalElapsedSeconds
+    }
 
     if ($payloadParityMatch -and $rowComparison.Match) {
         $semanticAttestation = [ordered]@{
@@ -1698,6 +2102,7 @@ function Get-StreamingDashboardAuditResult {
         HtmlPath = $ResolvedHtmlPath
         ExportsPath = $ResolvedExportsPath
         AuditMode = 'streaming-large-dataset'
+        PhaseTimings = $phaseTimings
         Source = [PSCustomObject]@{
             RowCount = [int]$rowComparison.ExpectedRows
             MissingMachineCount = $sourceMissingMachineCount
@@ -1760,19 +2165,13 @@ function Get-StreamingDashboardAuditResult {
             IncludesMachineInfo = $true
             ComparisonStorage = $comparisonStorage
             ComparisonPayloadSource = $comparisonPayloadSource
+            SourceSignatureCacheUsed = $sourceSignatureCacheUsed
+            PayloadSignatureCacheUsed = $payloadSignatureCacheUsed
             PartitionCount = $comparisonPartitionCount
             SourceSignatureElapsedSeconds = $sourceElapsedSeconds
             PayloadSignatureElapsedSeconds = $payloadElapsedSeconds
             ComparisonElapsedSeconds = $comparisonElapsedSeconds
-            PhaseTimings = [PSCustomObject]@{
-                MachineLoadElapsedSeconds = $machineLoadElapsedSeconds
-                AdvancedHuntingLoadElapsedSeconds = $advancedHuntingLoadElapsedSeconds
-                VendorIndexElapsedSeconds = $vendorIndexElapsedSeconds
-                SourceSignatureElapsedSeconds = $sourceElapsedSeconds
-                PayloadSignatureElapsedSeconds = $payloadElapsedSeconds
-                ComparisonElapsedSeconds = $comparisonElapsedSeconds
-                TotalElapsedSeconds = $totalElapsedSeconds
-            }
+            PhaseTimings = $phaseTimings
             PayloadByteParityMatch = $payloadParityMatch
         }
     }

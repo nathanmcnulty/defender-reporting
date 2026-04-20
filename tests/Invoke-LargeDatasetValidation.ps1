@@ -60,6 +60,9 @@ param(
     [string]$DashboardOutputPath,
 
     [Parameter(Mandatory = $false)]
+    [string]$ValidationOutputPath,
+
+    [Parameter(Mandatory = $false)]
     [ValidateRange(15, 3600)]
     [int]$ValidationHeartbeatSeconds = 60,
 
@@ -72,6 +75,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'build\Import-SharedHelpers.ps1')
+
+if (-not $Validate -and -not [string]::IsNullOrWhiteSpace($ValidationOutputPath)) {
+    throw 'ValidationOutputPath requires -Validate.'
+}
 
 function Get-StreamingCount {
     [CmdletBinding()]
@@ -89,6 +96,37 @@ function Get-StreamingCount {
     }
 
     return $count
+}
+
+function Get-ValidationAuditSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Audit
+    )
+
+    if ($null -eq $Audit) {
+        return $null
+    }
+
+    $semanticParity = if ($Audit.PSObject.Properties['SemanticParity']) {
+        $Audit.SemanticParity
+    }
+    else {
+        $null
+    }
+
+    return [PSCustomObject]@{
+        auditMode = if ($Audit.PSObject.Properties['AuditMode']) { [string]$Audit.AuditMode } else { $null }
+        rowMatch = if ($Audit.PSObject.Properties['RowComparison']) { [bool]$Audit.RowComparison.Match } else { $null }
+        payloadByteParityMatch = if ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['PayloadByteParityMatch']) { [bool]$semanticParity.PayloadByteParityMatch } else { $null }
+        attestationUsed = if ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['AttestationUsed']) { [bool]$semanticParity.AttestationUsed } else { $false }
+        comparisonStorage = if ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['ComparisonStorage']) { [string]$semanticParity.ComparisonStorage } else { $null }
+        comparisonPayloadSource = if ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['ComparisonPayloadSource']) { [string]$semanticParity.ComparisonPayloadSource } else { $null }
+        phaseTimings = if ($Audit.PSObject.Properties['PhaseTimings']) { $Audit.PhaseTimings } elseif ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['PhaseTimings']) { $semanticParity.PhaseTimings } else { $null }
+    }
 }
 
 function Write-StressValidationReport {
@@ -109,6 +147,10 @@ function Write-StressValidationReport {
         [Parameter(Mandatory = $true)]
         [string]$DashboardOutputPath,
 
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$ResolvedValidationAuditPath,
+
         [Parameter(Mandatory = $true)]
         [double]$ElapsedSeconds,
 
@@ -126,6 +168,9 @@ function Write-StressValidationReport {
         $Manifest,
 
         [Parameter(Mandatory = $true)]
+        [bool]$SkipObservedWindowMerge,
+
+        [Parameter(Mandatory = $true)]
         [ValidateSet('success', 'failure')]
         [string]$Status,
 
@@ -135,7 +180,11 @@ function Write-StressValidationReport {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        $FailureRecord
+        $FailureRecord,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Audit
     )
 
     $resolvedDashboardOutputPath = [System.IO.Path]::GetFullPath($DashboardOutputPath)
@@ -162,7 +211,9 @@ function Write-StressValidationReport {
             validate = $Validate.IsPresent
             heartbeatSeconds = $ValidationHeartbeatSeconds
             partitionCompareParallelism = $ValidationPartitionCompareParallelism
-            skipObservedWindowMerge = $skipObservedWindowMerge
+            skipObservedWindowMerge = $SkipObservedWindowMerge
+            auditPath = if ([string]::IsNullOrWhiteSpace($ResolvedValidationAuditPath)) { $null } else { [System.IO.Path]::GetFullPath($ResolvedValidationAuditPath) }
+            auditSummary = Get-ValidationAuditSummary -Audit $Audit
         }
         error = if ($null -ne $FailureRecord) {
             [PSCustomObject]@{
@@ -232,6 +283,16 @@ else {
     Join-Path ([System.IO.Path]::GetTempPath()) ('stress-dashboard-' + [guid]::NewGuid().ToString('N') + '.html')
 }
 
+$resolvedValidationOutputPath = if (-not [string]::IsNullOrWhiteSpace($ValidationOutputPath)) {
+    [System.IO.Path]::GetFullPath($ValidationOutputPath)
+}
+elseif ($Validate) {
+    Join-Path $resolvedSyntheticPath 'dashboard-audit.json'
+}
+else {
+    $null
+}
+
 if ($null -ne $manifest) {
     $machineCount = [int]$manifest.actualDeviceCount
     $currentRowCount = [int]$manifest.actualCurrentRows
@@ -262,6 +323,9 @@ if ($skipObservedWindowMerge) {
 }
 if ($Validate) {
     $generateArgs.Validate = $true
+    if (-not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
+        $generateArgs.ValidationOutputPath = $resolvedValidationOutputPath
+    }
 }
 
 $reportPath = Join-Path $resolvedSyntheticPath 'stress-validation-report.json'
@@ -272,6 +336,9 @@ if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
 if (Test-Path -LiteralPath $dashboardOutput -PathType Leaf) {
     Remove-Item -LiteralPath $dashboardOutput -Force
 }
+if (-not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath) -and (Test-Path -LiteralPath $resolvedValidationOutputPath -PathType Leaf)) {
+    Remove-Item -LiteralPath $resolvedValidationOutputPath -Force
+}
 
 Write-Output ''
 Write-Output 'Running dashboard generation against the synthetic exports...'
@@ -280,6 +347,7 @@ $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $status = 'success'
 $dashboardExitCode = $null
 $failureRecord = $null
+$audit = $null
 try {
     $global:LASTEXITCODE = 0
     & $dashboardScript @generateArgs
@@ -291,6 +359,14 @@ try {
 
     if (-not (Test-Path -LiteralPath $dashboardOutput -PathType Leaf)) {
         throw "Dashboard output '$dashboardOutput' was not created."
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
+        if (-not (Test-Path -LiteralPath $resolvedValidationOutputPath -PathType Leaf)) {
+            throw "Validation audit '$resolvedValidationOutputPath' was not created."
+        }
+
+        $audit = Get-Content -Path $resolvedValidationOutputPath -Raw | ConvertFrom-Json -Depth 100
     }
 }
 catch {
@@ -306,14 +382,17 @@ finally {
         -Preset $Preset `
         -SyntheticPath $resolvedSyntheticPath `
         -DashboardOutputPath $dashboardOutput `
+        -ResolvedValidationAuditPath $resolvedValidationOutputPath `
         -ElapsedSeconds $stopwatch.Elapsed.TotalSeconds `
         -MachineCount $machineCount `
         -CurrentRowCount $currentRowCount `
         -HistoryRowCount $historyRowCount `
         -Manifest $manifest `
+        -SkipObservedWindowMerge $skipObservedWindowMerge `
         -Status $status `
         -DashboardExitCode $dashboardExitCode `
-        -FailureRecord $failureRecord
+        -FailureRecord $failureRecord `
+        -Audit $audit
 }
 
 $dashboardItem = Get-Item -LiteralPath $dashboardOutput
@@ -322,6 +401,9 @@ Write-Output ''
 Write-Output 'Stress validation completed.'
 Write-Output ("  Synthetic path: {0}" -f $resolvedSyntheticPath)
 Write-Output ("  Dashboard output: {0}" -f ([System.IO.Path]::GetFullPath($dashboardOutput)))
+if (-not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
+    Write-Output ("  Validation audit: {0}" -f $resolvedValidationOutputPath)
+}
 Write-Output ("  Elapsed: {0} seconds" -f ([math]::Round($stopwatch.Elapsed.TotalSeconds, 2)))
 Write-Output ("  Devices: {0}" -f $machineCount)
 Write-Output ("  Vulnerability rows: {0} current + {1} history = {2} total" -f $currentRowCount, $historyRowCount, ($currentRowCount + $historyRowCount))

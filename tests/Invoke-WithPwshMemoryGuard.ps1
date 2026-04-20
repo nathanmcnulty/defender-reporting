@@ -12,8 +12,8 @@ param(
     [string]$WorkingDirectory = (Get-Location).Path,
 
     [Parameter(Mandatory = $false)]
-    [ValidateRange(1, 64)]
-    [int]$MinimumAvailableMemoryGB = 4,
+    [ValidateRange(0.5, 64.0)]
+    [double]$MinimumAvailableMemoryGB = 4,
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(1, 60)]
@@ -129,7 +129,17 @@ function Write-LogTail {
     }
 }
 
-$resolvedFilePath = [System.IO.Path]::GetFullPath((Join-Path $WorkingDirectory $FilePath))
+$resolvedWorkingDirectory = [System.IO.Path]::GetFullPath($WorkingDirectory)
+if (-not (Test-Path -LiteralPath $resolvedWorkingDirectory -PathType Container)) {
+    throw "Working directory '$resolvedWorkingDirectory' was not found."
+}
+
+$resolvedFilePath = if ([System.IO.Path]::IsPathRooted($FilePath)) {
+    [System.IO.Path]::GetFullPath($FilePath)
+}
+else {
+    [System.IO.Path]::GetFullPath((Join-Path $resolvedWorkingDirectory $FilePath))
+}
 if (-not (Test-Path -LiteralPath $resolvedFilePath -PathType Leaf)) {
     throw "File '$resolvedFilePath' was not found."
 }
@@ -139,12 +149,12 @@ $stderrPath = Join-Path ([System.IO.Path]::GetTempPath()) ('pwsh-guard-stderr-' 
 $pwshArgs = @('-NoProfile', '-File', $resolvedFilePath) + @($ArgumentList)
 
 Write-Output ("Starting guarded PowerShell process: {0}" -f $resolvedFilePath)
-Write-Output ("Working directory: {0}" -f $WorkingDirectory)
+Write-Output ("Working directory: {0}" -f $resolvedWorkingDirectory)
 Write-Output ("Minimum available memory threshold: {0} GB" -f $MinimumAvailableMemoryGB)
 
 $process = Start-Process -FilePath 'pwsh' `
     -ArgumentList $pwshArgs `
-    -WorkingDirectory $WorkingDirectory `
+    -WorkingDirectory $resolvedWorkingDirectory `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath `
     -PassThru
@@ -175,7 +185,7 @@ try {
         else {
             'n/a'
         }
-        Write-Output ("Guard status: elapsed={0} tree-procs={1} pwsh={2} tree-ws={3} GB largest={4} available={5} GB" -f $stopwatch.Elapsed.ToString('hh\:mm\:ss'), $processTree.Count, $pwshProcessCount, $treeWorkingSetGB, $largestProcessSummary, $availableMemoryGB)
+        Write-Output ("[{0}] Guard status: elapsed={1} tree-procs={2} pwsh={3} tree-ws={4} GB largest={5} available={6} GB" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $stopwatch.Elapsed.ToString('hh\:mm\:ss'), $processTree.Count, $pwshProcessCount, $treeWorkingSetGB, $largestProcessSummary, $availableMemoryGB)
 
         if ($availableMemoryGB -le $MinimumAvailableMemoryGB) {
             $processIds = if ($processTree.Count -gt 0) { ($processTree | ForEach-Object { $_.Id }) -join ', ' } else { [string]$process.Id }

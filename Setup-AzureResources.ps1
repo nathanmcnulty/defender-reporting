@@ -954,7 +954,23 @@ try {
 
     # Also assign Storage Blob Data Contributor to the caller (needed for template uploads, downloads)
     Write-Host "  Assigning Storage Blob Data Contributor to current user..." -ForegroundColor Gray
-    $callerObjectId = (Get-AzContext).Account.ExtendedProperties.HomeAccountId.Split('.')[0]
+    $callerObjectId = $null
+    $currentContext = Get-AzContext
+    $homeAccountId = $null
+    if ($null -ne $currentContext -and $null -ne $currentContext.Account) {
+        $extendedProperties = $currentContext.Account.ExtendedProperties
+        if ($extendedProperties -is [System.Collections.IDictionary]) {
+            $homeAccountId = [string]$extendedProperties['HomeAccountId']
+        }
+        elseif ($null -ne $extendedProperties -and $extendedProperties.PSObject.Properties['HomeAccountId']) {
+            $homeAccountId = [string]$extendedProperties.PSObject.Properties['HomeAccountId'].Value
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($homeAccountId)) {
+        $callerObjectId = $homeAccountId.Split('.')[0]
+    }
+
     if (-not $callerObjectId) {
         # Fallback: use Graph to resolve
         try {
@@ -964,7 +980,19 @@ try {
             $callerObjectId = $meResponse.id
         }
         catch {
-            Write-Warning "Could not determine current user's object ID. Assign Storage Blob Data Contributor manually."
+            try {
+                $callerObjectId = [string](& az ad signed-in-user show --query id -o tsv 2>$null)
+                if ([string]::IsNullOrWhiteSpace($callerObjectId)) {
+                    $callerObjectId = $null
+                }
+            }
+            catch {
+                $callerObjectId = $null
+            }
+
+            if (-not $callerObjectId) {
+                Write-Warning "Could not determine current user's object ID. Assign Storage Blob Data Contributor manually."
+            }
         }
     }
 
@@ -1234,7 +1262,7 @@ try {
             # Deploy function app code via az CLI zip deployment (Flex Consumption
             # uses a Kudu-lite pipeline that packages and uploads to blob storage)
             Write-Host "  Deploying function app code via zip deployment..." -ForegroundColor Gray
-            $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) 'funcapp-deploy.zip'
+            $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) ('funcapp-deploy-' + [guid]::NewGuid().ToString('N') + '.zip')
             if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 
             Push-Location $functionAppDir
@@ -1244,15 +1272,68 @@ try {
                 Pop-Location
             }
 
-            az functionapp deployment source config-zip `
-                --src $zipPath `
-                --name $FunctionAppName `
-                --resource-group $ResourceGroupName `
-                --output none
-            if ($LASTEXITCODE -ne 0) {
-                throw "Function App zip deployment failed (exit code $LASTEXITCODE)."
+            try {
+                $maxAttempts = 3
+                $deployed = $false
+                for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+                    $deployOutput = @(az functionapp deployment source config-zip `
+                        --src $zipPath `
+                        --name $FunctionAppName `
+                        --resource-group $ResourceGroupName `
+                        --output none 2>&1)
+
+                    $deployText = (($deployOutput | ForEach-Object {
+                        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                            $_.Exception.Message
+                        }
+                        else {
+                            [string]$_
+                        }
+                    }) -join [Environment]::NewLine).Trim()
+
+                    if (-not [string]::IsNullOrWhiteSpace($deployText)) {
+                        foreach ($line in ($deployText -split "`r?`n")) {
+                            if ([string]::IsNullOrWhiteSpace($line)) {
+                                continue
+                            }
+
+                            if ($line -match '^WARNING:\s*(.+)') {
+                                Write-Host ("  Deployment status: {0}" -f $Matches[1]) -ForegroundColor Gray
+                            }
+                            else {
+                                Write-Host ("  {0}" -f $line) -ForegroundColor Gray
+                            }
+                        }
+                    }
+
+                    if ($LASTEXITCODE -eq 0) {
+                        $deployed = $true
+                        break
+                    }
+
+                    if ($deployText -match 'Deployment was partially successful') {
+                        Write-Warning 'Function App zip deployment reported partial success without retained logs. Continuing and relying on host readiness validation.'
+                        $deployed = $true
+                        break
+                    }
+
+                    if ($attempt -lt $maxAttempts -and $deployText -match 'BadGatewayConnection|Bad Gateway') {
+                        Write-Warning ("Function App zip deployment hit a transient gateway error (attempt {0}/{1}). Retrying..." -f $attempt, $maxAttempts)
+                        Start-Sleep -Seconds (5 * $attempt)
+                        continue
+                    }
+
+                    throw "Function App zip deployment failed (exit code $LASTEXITCODE)."
+                }
+
+                if (-not $deployed) {
+                    throw "Function App zip deployment failed for '$FunctionAppName' after $maxAttempts attempt(s)."
+                }
             }
-            Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+            finally {
+                Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+            }
+
             Write-Host "  Function App deployed successfully" -ForegroundColor Green
         }
     }

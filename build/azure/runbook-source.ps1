@@ -72,6 +72,61 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+function Resolve-PipelineExecutionHostDescriptor {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param()
+
+    foreach ($environmentVariableName in @(
+        'WEBSITE_INSTANCE_ID'
+        'WEBSITE_HOSTNAME'
+        'WEBSITE_SITE_NAME'
+        'FUNCTIONS_WORKER_RUNTIME'
+        'FUNCTIONS_EXTENSION_VERSION'
+        'FUNCTIONS_WORKER_DIRECTORY'
+        'FUNCTIONS_APPLICATION_DIRECTORY'
+    )) {
+        $environmentValue = [System.Environment]::GetEnvironmentVariable($environmentVariableName)
+        if (-not [string]::IsNullOrWhiteSpace([string]$environmentValue)) {
+            return [PSCustomObject]@{
+                Name = 'FunctionApp'
+                Evidence = $environmentVariableName
+            }
+        }
+    }
+
+    foreach ($environmentVariableName in @(
+        'AUTOMATION_ASSET_ACCOUNTID'
+        'AZUREPS_HOST_ENVIRONMENT'
+    )) {
+        $environmentValue = [System.Environment]::GetEnvironmentVariable($environmentVariableName)
+        if (-not [string]::IsNullOrWhiteSpace([string]$environmentValue)) {
+            return [PSCustomObject]@{
+                Name = 'Automation'
+                Evidence = $environmentVariableName
+            }
+        }
+    }
+
+    $psPrivateMetadataVariable = Get-Variable -Name PSPrivateMetadata -Scope Global -ErrorAction SilentlyContinue
+    if ($null -ne $psPrivateMetadataVariable) {
+        $psPrivateMetadata = $psPrivateMetadataVariable.Value
+        $jobIdProperty = if ($null -ne $psPrivateMetadata) { $psPrivateMetadata.PSObject.Properties['JobId'] } else { $null }
+        $jobId = if ($null -ne $jobIdProperty) { [string]$jobIdProperty.Value } else { '' }
+        if (-not [string]::IsNullOrWhiteSpace($jobId)) {
+            return [PSCustomObject]@{
+                Name = 'Automation'
+                Evidence = 'PSPrivateMetadata.JobId'
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        Name = 'Unknown'
+        Evidence = $null
+    }
+}
+
 # =============================================================================
 # CONSTANTS
 # =============================================================================
@@ -96,6 +151,14 @@ $Script:BlobAccessTiers = @{
 $Script:DashboardBlobName = 'VulnerabilityDashboard.html'
 $Script:DashboardAssetsDirectoryName = ([System.IO.Path]::GetFileNameWithoutExtension($Script:DashboardBlobName) + '.assets')
 $Script:DashboardHostedAssetFileNames = @('dashboard.css', 'dashboard.js', 'pako.js', 'chart.js', 'pdf-export.bundle.js', 'payload.json.gz')
+$Script:PipelineControlBlobName = '_diagnostics/ExportAndGenerate.control.json'
+$Script:PipelineStatusBlobName = '_diagnostics/ExportAndGenerate.status.json'
+$Script:PipelineRunId = [guid]::NewGuid().ToString('N')
+$Script:PipelineStartedOnUtc = [datetime]::UtcNow
+$Script:PipelineCurrentStage = 'Initializing'
+$Script:PipelineCurrentStageMessage = 'Initializing pipeline.'
+$Script:PipelineExecutionHostDescriptor = Resolve-PipelineExecutionHostDescriptor
+$Script:PipelineExecutionHost = [string]$Script:PipelineExecutionHostDescriptor.Name
 
 $Script:LibraryConfig = @{
     ChartJs = @{
@@ -150,6 +213,90 @@ function Write-MemoryUsage {
     $gcHeapMB     = [math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
     $prefix = if ($Label) { "[$Label] " } else { "" }
     Write-Output "  ${prefix}Memory — Working set: ${workingSetMB}MB  |  GC heap: ${gcHeapMB}MB"
+}
+
+function Set-PipelineExecutionStage {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only updates in-memory pipeline stage state for status reporting.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Stage,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+
+    $Script:PipelineCurrentStage = $Stage
+    $Script:PipelineCurrentStageMessage = $Message
+}
+
+function Write-PipelineExecutionStatus {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StorageToken,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('running', 'succeeded', 'failed')]
+        [string]$Status,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Stage = $Script:PipelineCurrentStage,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Message = $Script:PipelineCurrentStageMessage,
+
+        [Parameter(Mandatory = $false)]
+        [hashtable]$AdditionalProperties = @{}
+    )
+
+    if ([string]::IsNullOrWhiteSpace($AccountName) -or [string]::IsNullOrWhiteSpace($StorageToken)) {
+        return $false
+    }
+
+    $statusFilePath = Join-Path ([System.IO.Path]::GetTempPath()) ("pipeline-status-{0}.json" -f $Script:PipelineRunId)
+
+    try {
+        $statusDocument = [ordered]@{
+            version = 1
+            runId = $Script:PipelineRunId
+            executionHost = $Script:PipelineExecutionHost
+            executionHostEvidence = if ($null -ne $Script:PipelineExecutionHostDescriptor) { [string]$Script:PipelineExecutionHostDescriptor.Evidence } else { $null }
+            status = $Status
+            stage = $Stage
+            message = $Message
+            startedOnUtc = $Script:PipelineStartedOnUtc.ToString('o')
+            updatedOnUtc = ([datetime]::UtcNow).ToString('o')
+            storageAccountName = $AccountName
+            dashboardDeliveryMode = if ([string]::IsNullOrWhiteSpace($DashboardDeliveryMode)) { $null } else { $DashboardDeliveryMode }
+            includeAdvancedHunting = [bool]$IncludeAdvancedHunting
+            useExistingExportsOnly = [bool]$UseExistingExportsOnly
+            exportTarget = $Export
+        }
+
+        if ($Status -ne 'running') {
+            $statusDocument.completedOnUtc = ([datetime]::UtcNow).ToString('o')
+        }
+
+        foreach ($key in $AdditionalProperties.Keys) {
+            $statusDocument[$key] = $AdditionalProperties[$key]
+        }
+
+        $statusDocument | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $statusFilePath -Encoding utf8
+        Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $Script:PipelineStatusBlobName -SourcePath $statusFilePath -StorageToken $StorageToken -ContentType 'application/json' -AccessTier $Script:BlobAccessTiers.Dashboards
+        return $true
+    }
+    catch {
+        Write-Verbose ("Pipeline status write failed: {0}" -f $_.Exception.Message)
+        return $false
+    }
+    finally {
+        Remove-Item -LiteralPath $statusFilePath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # =============================================================================
@@ -396,6 +543,45 @@ function Get-BlobContent {
     Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -OutFile $DestinationPath
 }
 
+function Get-BlobTextContent {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Container,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BlobName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StorageToken
+    )
+
+    $downloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ("blob-text-{0}.tmp" -f [guid]::NewGuid().ToString('N'))
+    try {
+        Get-BlobContent -AccountName $AccountName -Container $Container -BlobName $BlobName -DestinationPath $downloadPath -StorageToken $StorageToken
+        if (-not (Test-Path -LiteralPath $downloadPath -PathType Leaf)) {
+            return $null
+        }
+
+        return (Get-Content -LiteralPath $downloadPath -Raw)
+    }
+    catch {
+        $statusCode = Get-BlobErrorStatusCode -ErrorRecord $_
+        if ($statusCode -eq 404) {
+            return $null
+        }
+
+        throw
+    }
+    finally {
+        Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Set-BlobContent {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
@@ -507,6 +693,47 @@ function Remove-Blob {
             throw "Failed to delete blob '$BlobName' from '$Container': $_"
         }
     }
+}
+
+function Get-PipelineExecutionControlSettings {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper reads the full pipeline control settings document.')]
+    [CmdletBinding()]
+    [OutputType([object])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StorageToken
+    )
+
+    $content = Get-BlobTextContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $Script:PipelineControlBlobName -StorageToken $StorageToken
+    if ([string]::IsNullOrWhiteSpace($content)) {
+        return $null
+    }
+
+    try {
+        $control = $content | ConvertFrom-Json -Depth 12
+    }
+    catch {
+        Write-Warning ("Ignoring invalid pipeline control blob '{0}': {1}" -f $Script:PipelineControlBlobName, $_.Exception.Message)
+        return $null
+    }
+
+    if ($control.PSObject.Properties['notAfterUtc'] -and -not [string]::IsNullOrWhiteSpace([string]$control.notAfterUtc)) {
+        try {
+            if (([datetimeoffset]$control.notAfterUtc).UtcDateTime -lt [datetime]::UtcNow) {
+                Write-Output ("  Ignoring expired pipeline control blob '{0}'." -f $Script:PipelineControlBlobName)
+                return $null
+            }
+        }
+        catch {
+            Write-Warning ("Ignoring pipeline control blob with invalid notAfterUtc value: {0}" -f $_.Exception.Message)
+            return $null
+        }
+    }
+
+    return $control
 }
 
 # =============================================================================
@@ -717,6 +944,7 @@ function Export-ToStaticWebApp {
 $tempRoot = $null
 
 try {
+    Set-PipelineExecutionStage -Stage 'Authentication' -Message 'Authenticating with managed identity and resolving configuration.'
     Write-Output "========================================"
     Write-Output "  Vulnerability Dashboard Pipeline"
     Write-Output "========================================"
@@ -764,6 +992,13 @@ try {
 
     Write-Output "  Acquiring tokens..."
     $storageToken = Get-PlainToken -ResourceUrl 'https://storage.azure.com/'
+
+    $pipelineExecutionControl = Get-PipelineExecutionControlSettings -AccountName $StorageAccountName -StorageToken $storageToken
+    if ($null -ne $pipelineExecutionControl -and $pipelineExecutionControl.PSObject.Properties['useExistingExportsOnly']) {
+        $UseExistingExportsOnly = [bool]$pipelineExecutionControl.useExistingExportsOnly
+        Write-Output ("  Control blob override: UseExistingExportsOnly = {0}" -f $UseExistingExportsOnly)
+    }
+
     if ($UseExistingExportsOnly) {
         $mdeHeaders = $null
         Write-Output "  Stress mode enabled: using existing exports from blob storage only"
@@ -788,6 +1023,8 @@ try {
     # -----------------------------------------------------------------
     # Stage B: Download historical data from blob storage
     # -----------------------------------------------------------------
+    Set-PipelineExecutionStage -Stage 'DownloadHistoricalData' -Message 'Downloading historical exports and dashboard templates from blob storage.'
+    [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
     Write-Output "`n--- Stage B: Download historical data ---"
 
     $tempBasePath = $null
@@ -932,6 +1169,8 @@ try {
     # -----------------------------------------------------------------
     # Stage C: Export fresh MDE data
     # -----------------------------------------------------------------
+    Set-PipelineExecutionStage -Stage 'ExportFreshMdeData' -Message $(if ($UseExistingExportsOnly) { 'Reusing existing export blobs without calling the MDE APIs.' } else { 'Exporting fresh vulnerability, machine, and Advanced Hunting data from MDE APIs.' })
+    [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
     Write-Output "`n--- Stage C: Export fresh MDE data ---"
 
     if ($UseExistingExportsOnly) {
@@ -1007,6 +1246,8 @@ try {
     # -----------------------------------------------------------------
     # Stage D: Generate dashboard
     # -----------------------------------------------------------------
+    Set-PipelineExecutionStage -Stage 'GenerateDashboard' -Message 'Generating the dashboard artifacts from the normalized export data.'
+    [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
     Write-Output "`n--- Stage D: Generate dashboard ---"
 
     $tempVulnsPath = Join-Path -Path $tempRoot -ChildPath 'vulns.json'
@@ -1200,6 +1441,8 @@ try {
     # -----------------------------------------------------------------
     # Stage E: Export results
     # -----------------------------------------------------------------
+    Set-PipelineExecutionStage -Stage 'ExportResults' -Message ("Uploading dashboard and export artifacts using export target '{0}'." -f $Export)
+    [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
     Write-Output "`n--- Stage E: Export ($Export) ---"
 
     switch ($Export) {
@@ -1244,6 +1487,15 @@ try {
         }
     }
 
+    Set-PipelineExecutionStage -Stage 'Completed' -Message 'Pipeline completed successfully.'
+    [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'succeeded' -AdditionalProperties @{
+            vulnerabilities = [int]$vulnCount
+            devices = [int]$deviceCount
+            cves = [int]$cveCount
+            dashboardSizeMb = [math]::Round([double]$finalSize, 2)
+            dashboardBlobName = $Script:DashboardBlobName
+        })
+
     # -----------------------------------------------------------------
     # Cleanup
     # -----------------------------------------------------------------
@@ -1267,6 +1519,13 @@ try {
     Write-Output "  Completed: $(([datetime]::UtcNow).ToString('yyyy-MM-dd HH:mm:ss')) UTC"
 }
 catch {
+    if (-not [string]::IsNullOrWhiteSpace($StorageAccountName) -and -not [string]::IsNullOrWhiteSpace($storageToken)) {
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'failed' -AdditionalProperties @{
+                error = [string]$_
+                stackTrace = [string]$_.ScriptStackTrace
+            })
+    }
+
     Write-Output "========================================"
     Write-Output "  Pipeline Failed!"
     Write-Output "========================================"

@@ -37,8 +37,8 @@ param(
     [int]$SafetyRowLimit = 2500000,
 
     [Parameter(Mandatory = $false)]
-    [ValidateRange(1, 256)]
-    [int]$MinimumAvailableMemoryGB = 8,
+    [ValidateRange(0.5, 256.0)]
+    [double]$MinimumAvailableMemoryGB = 8,
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(1, 2048)]
@@ -158,7 +158,7 @@ function Assert-SyntheticGenerationPreflight {
         [int]$SafetyRowLimit,
 
         [Parameter(Mandatory = $true)]
-        [int]$MinimumAvailableMemoryGB,
+        [double]$MinimumAvailableMemoryGB,
 
         [Parameter(Mandatory = $true)]
         [int]$MinimumFreeDiskGB,
@@ -1234,7 +1234,7 @@ try {
                 Sync-GzipWriter -WriterState $writerState
             }
 
-            Write-Output ("Progress: {0}/{1} devices, {2} current rows, {3} history rows, elapsed {4}" -f $plan.DeviceOrdinal, $TargetDeviceCount, $writtenCurrentRows, $writtenHistoryRows, $generationStopwatch.Elapsed.ToString('hh\:mm\:ss'))
+            Write-Output ("[{0}] Progress: {1}/{2} devices, {3} current rows, {4} history rows, elapsed {5}" -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $plan.DeviceOrdinal, $TargetDeviceCount, $writtenCurrentRows, $writtenHistoryRows, $generationStopwatch.Elapsed.ToString('hh\:mm\:ss'))
             Write-GenerationCheckpoint -OutputPath $OutputPath -Stage 'writing-vulnerability-rows' -CompletedDevices $plan.DeviceOrdinal -TotalDevices $TargetDeviceCount -WrittenCurrentRows $writtenCurrentRows -WrittenHistoryRows $writtenHistoryRows -Stopwatch $generationStopwatch -Extra @{
                 targetCurrentRows = $targetCurrentRows
                 targetHistoryRows = $targetHistoryRows

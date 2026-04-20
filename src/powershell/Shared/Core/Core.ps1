@@ -96,8 +96,12 @@ function Test-IsAzureHostedEnvironment {
 
     foreach ($environmentVariableName in @(
         'WEBSITE_INSTANCE_ID'
+        'WEBSITE_HOSTNAME'
+        'WEBSITE_SITE_NAME'
         'FUNCTIONS_WORKER_RUNTIME'
         'FUNCTIONS_EXTENSION_VERSION'
+        'FUNCTIONS_WORKER_DIRECTORY'
+        'FUNCTIONS_APPLICATION_DIRECTORY'
         'AUTOMATION_ASSET_ACCOUNTID'
         'AZUREPS_HOST_ENVIRONMENT'
     )) {
