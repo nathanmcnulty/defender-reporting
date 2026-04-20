@@ -259,13 +259,22 @@ function Write-JsonValueToWriter {
     }
 
     if ($Value -is [System.Management.Automation.PSObject]) {
-        $psProperties = @($Value.PSObject.Properties | Where-Object { $_.MemberType -eq [System.Management.Automation.PSMemberTypes]::NoteProperty })
-        if ($psProperties.Count -gt 0) {
-            $Writer.WriteStartObject()
-            foreach ($property in $psProperties) {
-                $Writer.WritePropertyName([string]$property.Name)
-                Write-JsonValueToWriter -Writer $Writer -Value $property.Value
+        $wroteNoteProperties = $false
+        foreach ($property in $Value.PSObject.Properties) {
+            if ($property.MemberType -ne [System.Management.Automation.PSMemberTypes]::NoteProperty) {
+                continue
             }
+
+            if (-not $wroteNoteProperties) {
+                $Writer.WriteStartObject()
+                $wroteNoteProperties = $true
+            }
+
+            $Writer.WritePropertyName([string]$property.Name)
+            Write-JsonValueToWriter -Writer $Writer -Value $property.Value
+        }
+
+        if ($wroteNoteProperties) {
             $Writer.WriteEndObject()
             return
         }
@@ -361,6 +370,93 @@ function Write-JsonValueToWriter {
     }
 
     $Writer.WriteValue($Value.ToString())
+}
+
+function Get-NormalizedLookupPropertyValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Value,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        return $Value[$Name]
+    }
+
+    $property = $Value.PSObject.Properties[$Name]
+    if ($null -ne $property) {
+        return $property.Value
+    }
+
+    return $null
+}
+
+function Write-NormalizedDeviceMachineInfoToWriter {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextWriter]$Writer,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$MachineInfo
+    )
+
+    if ($null -eq $MachineInfo) {
+        $Writer.WriteNull()
+        return
+    }
+
+    $Writer.WriteStartObject()
+    foreach ($propertyName in @('ip', 'eip', 'u', 'hs', 'rs', 'el', 'dv', 'mb', 'aad', 'ls', 'fs')) {
+        $Writer.WritePropertyName($propertyName)
+        Write-JsonValueToWriter -Writer $Writer -Value (Get-NormalizedLookupPropertyValue -Value $MachineInfo -Name $propertyName)
+    }
+    $Writer.WriteEndObject()
+}
+
+function Write-NormalizedDeviceLookupsToWriter {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextWriter]$Writer,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Devices
+    )
+
+    if ($null -eq $Devices) {
+        $Writer.WriteNull()
+        return
+    }
+
+    $Writer.WriteStartArray()
+    foreach ($device in $Devices) {
+        if ($null -eq $device) {
+            $Writer.WriteNull()
+            continue
+        }
+
+        $Writer.WriteStartObject()
+        foreach ($propertyName in @('id', 'n', 'g', 'o', 'ov', 't')) {
+            $Writer.WritePropertyName($propertyName)
+            Write-JsonValueToWriter -Writer $Writer -Value (Get-NormalizedLookupPropertyValue -Value $device -Name $propertyName)
+        }
+        $Writer.WritePropertyName('m')
+        Write-NormalizedDeviceMachineInfoToWriter -Writer $Writer -MachineInfo (Get-NormalizedLookupPropertyValue -Value $device -Name 'm')
+        $Writer.WriteEndObject()
+    }
+    $Writer.WriteEndArray()
 }
 
 function Open-JsonArrayFileWriter {
@@ -670,6 +766,56 @@ function Read-CompactJsonReaderValue {
     }
 }
 
+function Open-CompactJsonArrayReader {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $streamReader = [System.IO.StreamReader]::new($resolvedPath, [System.Text.Encoding]::UTF8)
+    $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($streamReader)
+    if (-not $jsonReader.Read() -or $jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartArray) {
+        $jsonReader.Dispose()
+        $streamReader.Dispose()
+        throw "Expected JSON array in '$resolvedPath'."
+    }
+
+    return [PSCustomObject]@{
+        Path = $resolvedPath
+        StreamReader = $streamReader
+        JsonReader = $jsonReader
+    }
+}
+
+function Read-NextCompactJsonArrayValue {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$ReaderState
+    )
+
+    $jsonReader = $ReaderState.JsonReader
+    while ($jsonReader.Read()) {
+        if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndArray) {
+            return [PSCustomObject]@{
+                HasValue = $false
+                Value = $null
+            }
+        }
+
+        return [PSCustomObject]@{
+            HasValue = $true
+            Value = (Read-CompactJsonReaderValue -Reader $jsonReader)
+        }
+    }
+
+    throw "Unexpected end of compact JSON array '$($ReaderState.Path)'."
+}
+
 function Skip-JsonReaderValue {
     [CmdletBinding()]
     param(
@@ -902,73 +1048,9 @@ function Get-DashboardEmbeddedPayloadTempPath {
     return $tempPayloadPath
 }
 
-function Get-EmbeddedDashboardPayloadVulnCount {
+function Get-DashboardEmbeddedPayloadInspection {
     [CmdletBinding()]
-    [OutputType([int])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    $resolvedPath = Resolve-Path -LiteralPath $Path -ErrorAction Stop
-    $content = Get-Content -LiteralPath $resolvedPath -Raw
-    $dataFormat = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dataFormat'
-    if ($dataFormat -eq 'external-compressed') {
-        $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dashboardConfig'
-        if ([string]::IsNullOrWhiteSpace($dashboardConfigJson)) {
-            throw "Unable to locate dashboardConfig metadata in '$Path'."
-        }
-
-        $dashboardConfig = $dashboardConfigJson | ConvertFrom-Json -Depth 20
-        $payloadUrl = [string]$dashboardConfig.payloadUrl
-        if ([string]::IsNullOrWhiteSpace($payloadUrl)) {
-            throw "dashboardConfig in '$Path' does not define payloadUrl."
-        }
-
-        $htmlDirectory = Split-Path -Path $resolvedPath -Parent
-        $payloadRelativePath = $payloadUrl.Replace('/', '\')
-        $payloadPath = [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
-        return (Get-CompressedPayloadVulnCount -Path $payloadPath)
-    }
-
-    $startMarker = '<script id="vulnsData" type="application/json">'
-    $endMarker = '</script>'
-    $startIndex = $content.IndexOf($startMarker)
-    if ($startIndex -lt 0) {
-        throw "Unable to locate embedded vulnerability payload in '$Path'."
-    }
-
-    $payloadStart = $startIndex + $startMarker.Length
-    $payloadEnd = $content.IndexOf($endMarker, $payloadStart)
-    if ($payloadEnd -lt 0) {
-        throw "Unable to locate payload terminator in '$Path'."
-    }
-
-    $base64 = ($content.Substring($payloadStart, $payloadEnd - $payloadStart) -replace '\s+', '')
-    $bytes = [Convert]::FromBase64String($base64)
-    $stream = $null
-    $gzip = $null
-    $reader = $null
-    $jsonReader = $null
-
-    try {
-        $stream = [System.IO.MemoryStream]::new($bytes)
-        $gzip = [System.IO.Compression.GZipStream]::new($stream, [System.IO.Compression.CompressionMode]::Decompress)
-        $reader = [System.IO.StreamReader]::new($gzip, [System.Text.Encoding]::UTF8)
-        $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
-        return (Get-PayloadVulnCountFromJsonReader -Reader $jsonReader -Path $Path)
-    }
-    finally {
-        if ($jsonReader) { $jsonReader.Close() }
-        elseif ($reader) { $reader.Dispose() }
-        elseif ($gzip) { $gzip.Dispose() }
-        elseif ($stream) { $stream.Dispose() }
-    }
-}
-
-function Get-DashboardPayloadGzipSha256 {
-    [CmdletBinding()]
-    [OutputType([string])]
+    [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
@@ -993,7 +1075,12 @@ function Get-DashboardPayloadGzipSha256 {
         $htmlDirectory = Split-Path -Path $resolvedPath -Parent
         $payloadRelativePath = $payloadUrl.Replace('/', '\')
         $payloadPath = [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
-        return (Get-FileSha256Hex -Path $payloadPath)
+        return [PSCustomObject]@{
+            DataFormat = $dataFormat
+            PayloadPath = $payloadPath
+            PayloadRowCount = (Get-CompressedPayloadVulnCount -Path $payloadPath)
+            PayloadSha256 = (Get-FileSha256Hex -Path $payloadPath)
+        }
     }
 
     $startMarker = '<script id="vulnsData" type="application/json">'
@@ -1011,8 +1098,54 @@ function Get-DashboardPayloadGzipSha256 {
 
     $base64 = ($content.Substring($payloadStart, $payloadEnd - $payloadStart) -replace '\s+', '')
     $bytes = [Convert]::FromBase64String($base64)
-    $hashBytes = [System.Security.Cryptography.SHA256]::HashData($bytes)
-    return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+    $stream = $null
+    $gzip = $null
+    $reader = $null
+    $jsonReader = $null
+
+    try {
+        $stream = [System.IO.MemoryStream]::new($bytes, $false)
+        $gzip = [System.IO.Compression.GZipStream]::new($stream, [System.IO.Compression.CompressionMode]::Decompress)
+        $reader = [System.IO.StreamReader]::new($gzip, [System.Text.Encoding]::UTF8)
+        $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
+        $payloadRowCount = Get-PayloadVulnCountFromJsonReader -Reader $jsonReader -Path $Path
+    }
+    finally {
+        if ($jsonReader) { $jsonReader.Close() }
+        elseif ($reader) { $reader.Dispose() }
+        elseif ($gzip) { $gzip.Dispose() }
+        elseif ($stream) { $stream.Dispose() }
+    }
+
+    $payloadSha256 = ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::HashData($bytes))).Replace('-', '').ToLowerInvariant()
+    return [PSCustomObject]@{
+        DataFormat = $dataFormat
+        PayloadPath = $null
+        PayloadRowCount = $payloadRowCount
+        PayloadSha256 = $payloadSha256
+    }
+}
+
+function Get-EmbeddedDashboardPayloadVulnCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return [int](Get-DashboardEmbeddedPayloadInspection -Path $Path).PayloadRowCount
+}
+
+function Get-DashboardPayloadGzipSha256 {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return [string](Get-DashboardEmbeddedPayloadInspection -Path $Path).PayloadSha256
 }
 
 function Get-NormalizedAuditDecimalString {
@@ -1198,7 +1331,12 @@ function Write-CombinedPayloadLookupsValue {
         else {
             $lookupValue = $Lookups.PSObject.Properties[$lookupPropertyName].Value
         }
-        Write-JsonValueToWriter -Writer $Writer -Value $lookupValue
+        if ($lookupPropertyName -eq 'devices') {
+            Write-NormalizedDeviceLookupsToWriter -Writer $Writer -Devices $lookupValue
+        }
+        else {
+            Write-JsonValueToWriter -Writer $Writer -Value $lookupValue
+        }
     }
     $Writer.WriteEndObject()
 }
@@ -2451,6 +2589,255 @@ function Get-VulnerabilityPayloadFingerprintSourceFileSet {
     return [System.IO.FileInfo[]]$files.ToArray()
 }
 
+function Get-NormalizedVulnColumnCacheFingerprint {
+        [CmdletBinding()]
+        [OutputType([string])]
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$BasePath,
+
+            [Parameter(Mandatory = $false)]
+            [switch]$SkipObservedWindowMerge
+        )
+
+        if (-not (Sync-VulnContentStoreSidecar -BasePath $BasePath)) {
+            return $null
+        }
+
+        $files = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+        foreach ($file in @(Get-VulnerabilityPayloadFingerprintSourceFileSet -BasePath $BasePath -SkipObservedWindowMerge:$SkipObservedWindowMerge)) {
+            if ($null -ne $file) {
+                $files.Add($file)
+            }
+        }
+
+        if ($files.Count -eq 0) {
+            return $null
+        }
+
+        $builder = [System.Text.StringBuilder]::new()
+        [void]$builder.AppendLine('dashboard-vuln-column-cache-v1')
+        [void]$builder.AppendLine(('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true)))
+        foreach ($file in @($files | Sort-Object FullName -Unique)) {
+            $hash = Get-FileSha256Hex -Path $file.FullName
+            [void]$builder.Append($file.FullName).Append('|')
+            [void]$builder.Append($file.Length).Append('|')
+            [void]$builder.Append($file.LastWriteTimeUtc.Ticks).Append('|')
+            [void]$builder.AppendLine($hash)
+        }
+
+    $fingerprintBytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
+    $fingerprintHash = [System.Security.Cryptography.SHA256]::HashData($fingerprintBytes)
+    return ([System.BitConverter]::ToString($fingerprintHash)).Replace('-', '').ToLowerInvariant()
+}
+
+function Get-NormalizedVulnColumnCacheDirectoryPath {
+        [CmdletBinding()]
+        [OutputType([string])]
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$BasePath,
+
+            [Parameter(Mandatory = $true)]
+            [string]$Fingerprint,
+
+            [Parameter(Mandatory = $false)]
+            [switch]$Create
+        )
+
+    $cacheDirectory = Get-DashboardCacheDirectory -BasePath $BasePath -ChildPath 'vuln-columns' -Create:$Create
+    return Join-Path $cacheDirectory ("columns-{0}" -f $Fingerprint)
+}
+
+function Get-NormalizedVulnColumnCacheManifestPath {
+        [CmdletBinding()]
+        [OutputType([string])]
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$BasePath,
+
+            [Parameter(Mandatory = $true)]
+            [string]$Fingerprint,
+
+            [Parameter(Mandatory = $false)]
+            [switch]$Create
+        )
+
+    $cacheDirectory = Get-DashboardCacheDirectory -BasePath $BasePath -ChildPath 'vuln-columns' -Create:$Create
+    return Join-Path $cacheDirectory ("columns-{0}.json" -f $Fingerprint)
+}
+
+function Get-NormalizedVulnColumnCacheColumnPaths {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper intentionally returns the full set of normalized vulnerability column paths.')]
+        [CmdletBinding()]
+        [OutputType([hashtable])]
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$DirectoryPath
+        )
+
+        $paths = [ordered]@{}
+        foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp', 'iv')) {
+            $paths[$columnName] = Join-Path $DirectoryPath ($columnName + '.json')
+        }
+
+    return $paths
+}
+
+function Clear-StaleNormalizedVulnColumnCache {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$BasePath,
+
+            [Parameter(Mandatory = $false)]
+            [string[]]$KeepPaths = @()
+        )
+
+        $cacheDirectory = Get-DashboardCacheDirectory -BasePath $BasePath -ChildPath 'vuln-columns'
+        if (-not (Test-Path -LiteralPath $cacheDirectory -PathType Container)) {
+            return
+        }
+
+        $normalizedKeepPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($keepPath in @($KeepPaths)) {
+            if (-not [string]::IsNullOrWhiteSpace($keepPath)) {
+                [void]$normalizedKeepPaths.Add([System.IO.Path]::GetFullPath($keepPath))
+            }
+        }
+
+    foreach ($cacheItem in @(Get-ChildItem -Path $cacheDirectory -Force -ErrorAction SilentlyContinue)) {
+        if ($normalizedKeepPaths.Contains($cacheItem.FullName)) {
+            continue
+        }
+
+        Remove-Item -LiteralPath $cacheItem.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-NormalizedVulnColumnCacheEntry {
+        [CmdletBinding()]
+        [OutputType([pscustomobject])]
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$BasePath,
+
+            [Parameter(Mandatory = $false)]
+            [switch]$SkipObservedWindowMerge
+        )
+
+        $fingerprint = Get-NormalizedVulnColumnCacheFingerprint -BasePath $BasePath -SkipObservedWindowMerge:$SkipObservedWindowMerge
+        if ([string]::IsNullOrWhiteSpace($fingerprint)) {
+            return $null
+        }
+
+        $columnDirectoryPath = Get-NormalizedVulnColumnCacheDirectoryPath -BasePath $BasePath -Fingerprint $fingerprint -Create
+        $manifestPath = Get-NormalizedVulnColumnCacheManifestPath -BasePath $BasePath -Fingerprint $fingerprint -Create
+        if ((-not (Test-Path -LiteralPath $columnDirectoryPath -PathType Container)) -or (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf))) {
+            return $null
+        }
+
+        $columnPaths = Get-NormalizedVulnColumnCacheColumnPaths -DirectoryPath $columnDirectoryPath
+        foreach ($columnPath in $columnPaths.Values) {
+            if (-not (Test-Path -LiteralPath ([string]$columnPath) -PathType Leaf)) {
+                return $null
+            }
+        }
+
+        $manifest = Read-NormalizedPayloadManifest -Path $manifestPath
+        if ($null -eq $manifest) {
+            return $null
+        }
+
+        if ([string]$manifest.Fingerprint -ne $fingerprint) {
+            return $null
+        }
+
+    Clear-StaleNormalizedVulnColumnCache -BasePath $BasePath -KeepPaths @($columnDirectoryPath, $manifestPath)
+    return [PSCustomObject]@{
+        Fingerprint = $fingerprint
+        ColumnDirectoryPath = $columnDirectoryPath
+        ColumnPaths = $columnPaths
+        ManifestPath = $manifestPath
+        Manifest = $manifest
+    }
+}
+
+function Publish-NormalizedVulnColumnCache {
+        [CmdletBinding()]
+        [OutputType([pscustomobject])]
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$BasePath,
+
+            [Parameter(Mandatory = $true)]
+            [hashtable]$VulnColumnPaths,
+
+            [Parameter(Mandatory = $true)]
+            [int]$VulnCount,
+
+            [Parameter(Mandatory = $true)]
+            [object[]]$Dates,
+
+            [Parameter(Mandatory = $false)]
+            [object]$Quality,
+
+            [Parameter(Mandatory = $false)]
+            [switch]$SkipObservedWindowMerge,
+
+            [Parameter(Mandatory = $false)]
+            [int]$InventoryTupleCount = 0
+        )
+
+        $fingerprint = Get-NormalizedVulnColumnCacheFingerprint -BasePath $BasePath -SkipObservedWindowMerge:$SkipObservedWindowMerge
+        if ([string]::IsNullOrWhiteSpace($fingerprint)) {
+            return $null
+        }
+
+        $columnDirectoryPath = Get-NormalizedVulnColumnCacheDirectoryPath -BasePath $BasePath -Fingerprint $fingerprint -Create
+        $manifestPath = Get-NormalizedVulnColumnCacheManifestPath -BasePath $BasePath -Fingerprint $fingerprint -Create
+        $existingEntry = Get-NormalizedVulnColumnCacheEntry -BasePath $BasePath -SkipObservedWindowMerge:$SkipObservedWindowMerge
+        if ($existingEntry -and ([string]$existingEntry.Fingerprint -eq $fingerprint)) {
+            return $existingEntry
+        }
+
+        if (-not (Test-Path -LiteralPath $columnDirectoryPath -PathType Container)) {
+            [void](New-Item -Path $columnDirectoryPath -ItemType Directory -Force)
+        }
+
+        $cacheColumnPaths = Get-NormalizedVulnColumnCacheColumnPaths -DirectoryPath $columnDirectoryPath
+        foreach ($columnName in @($cacheColumnPaths.Keys)) {
+            $sourcePath = [string]$VulnColumnPaths[$columnName]
+            $destinationPath = [string]$cacheColumnPaths[$columnName]
+            if ([string]::IsNullOrWhiteSpace($sourcePath) -or -not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+                return $null
+            }
+
+            Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
+        }
+
+        $manifest = [ordered]@{
+            Version = 'dashboard-vuln-column-cache-v1'
+            Fingerprint = $fingerprint
+            GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
+            VulnCount = $VulnCount
+            Dates = @($Dates)
+            Quality = $Quality
+            SkipObservedWindowMerge = ($SkipObservedWindowMerge -eq $true)
+            InventoryTupleCount = $InventoryTupleCount
+        }
+        Write-NormalizedPayloadManifest -Path $manifestPath -Manifest $manifest | Out-Null
+
+    Clear-StaleNormalizedVulnColumnCache -BasePath $BasePath -KeepPaths @($columnDirectoryPath, $manifestPath)
+    return [PSCustomObject]@{
+        Fingerprint = $fingerprint
+        ColumnDirectoryPath = $columnDirectoryPath
+        ColumnPaths = $cacheColumnPaths
+        ManifestPath = $manifestPath
+        Manifest = [PSCustomObject]$manifest
+    }
+}
+
 function Get-DashboardPayloadCacheFingerprint {
     [CmdletBinding()]
     [OutputType([string])]
@@ -3087,6 +3474,308 @@ function Get-NormalizationContext {
     }
 }
 
+function ConvertTo-NormalizedLookupRecord {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Lookups,
+
+        [Parameter(Mandatory = $true)]
+        [int]$NoTagsIdx
+    )
+
+    return [PSCustomObject]@{
+        vendors = $Lookups.vendors
+        severities = $Lookups.severities
+        exploitLevels = $Lookups.exploitLevels
+        groups = $Lookups.groups
+        platforms = $Lookups.platforms
+        tags = $Lookups.tags
+        updates = $Lookups.updates
+        versions = $Lookups.versions
+        dates = $Lookups.dates
+        diskPaths = $Lookups.diskPaths
+        regPaths = $Lookups.regPaths
+        affSoftware = $Lookups.affSoftware
+        batchTitles = $Lookups.batchTitles
+        devices = $Lookups.devices
+        inventory = $Lookups.inventory
+        software = $Lookups.software
+        cves = $Lookups.cves
+        noTagsIdx = $NoTagsIdx
+    }
+}
+
+function Restore-ContentStoreNormalizedLookupsFromColumnCache {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DataPath,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Machines,
+
+        [Parameter(Mandatory = $false)]
+        [hashtable]$AdvancedHuntingData = @{},
+
+        [Parameter(Mandatory = $false)]
+        [hashtable]$AdvancedHuntingDeviceUsers = @{},
+
+        [Parameter(Mandatory = $false)]
+        [hashtable]$AdvancedHuntingInventoryData = @{},
+
+        [Parameter(Mandatory = $false)]
+        [hashtable]$NvdCveData = @{},
+
+        [Parameter(Mandatory = $false)]
+        [object[]]$CachedDates = @()
+    )
+
+    $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $DataPath
+    if (-not (Test-Path -LiteralPath $dictionaryPath -PathType Leaf)) {
+        throw "Content dictionary '$dictionaryPath' was not found."
+    }
+
+    Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
+
+    $context = Get-NormalizationContext
+    $context.Machines = $Machines
+    $context.AdvancedHuntingData = $AdvancedHuntingData
+    $context.AdvancedHuntingDeviceUsers = $AdvancedHuntingDeviceUsers
+    $context.AdvancedHuntingInventoryData = $AdvancedHuntingInventoryData
+    $context.NvdCveData = $NvdCveData
+
+    foreach ($cachedDate in @($CachedDates)) {
+        $dateText = [string]$cachedDate
+        if ([string]::IsNullOrWhiteSpace($dateText)) {
+            continue
+        }
+
+        if (-not $context.Indexes.dates.ContainsKey($dateText)) {
+            $context.Indexes.dates[$dateText] = $context.Lookups.dates.Count
+            $context.Lookups.dates.Add($dateText)
+        }
+    }
+
+    $dictionary = Read-VulnContentDictionary -Path $dictionaryPath
+    foreach ($deviceProfile in @($dictionary.deviceProfiles)) {
+        Add-NormalizedDevice `
+            -DeviceId ([string]$deviceProfile.id) `
+            -DeviceName ([string]$deviceProfile.n) `
+            -GroupName ([string]$deviceProfile.g) `
+            -OsPlatform ([string]$deviceProfile.o) `
+            -OsVersion ([string]$deviceProfile.ov) `
+            -MachineTags $(if ($deviceProfile.t) { @($deviceProfile.t) } else { @() }) `
+            -Context $context | Out-Null
+    }
+
+    foreach ($contentTemplate in @($dictionary.contentTemplates)) {
+        Resolve-NormalizedContentLookup `
+            -SoftwareVendor ([string]$contentTemplate.sv) `
+            -SoftwareName ([string]$contentTemplate.sn) `
+            -RecommendationReference ([string]$contentTemplate.rr) `
+            -CveId ([string]$contentTemplate.c) `
+            -CvssScore $contentTemplate.sc `
+            -SeverityLevel ([string]$contentTemplate.sev) `
+            -ExploitabilityLevel ([string]$contentTemplate.ex) `
+            -CveUrl ([string]$contentTemplate.bu) `
+            -CveBatchTitle ([string]$contentTemplate.bt) `
+            -RecommendedSecurityUpdate ([string]$contentTemplate.ru) `
+            -RecommendedSecurityUpdateId ([string]$contentTemplate.rid) `
+            -RecommendedSecurityUpdateUrl ([string]$contentTemplate.url) `
+            -SoftwareVersion ([string]$contentTemplate.ver) `
+            -DiskPaths @($contentTemplate.dp) `
+            -RegistryPaths @($contentTemplate.rp) `
+            -SecurityUpdateAvailable ($contentTemplate.ua -eq $true) `
+            -Context $context | Out-Null
+    }
+
+    $lookups = $context.Lookups
+    $tagIndex = $context.Indexes.tags
+    $noTagsLabel = '(No Tags)'
+    if ($context.HasNoTags -and -not $tagIndex.ContainsKey($noTagsLabel)) {
+        $tagIndex[$noTagsLabel] = $lookups.tags.Count
+        $lookups.tags.Add($noTagsLabel)
+    }
+    $noTagsIdx = if ($tagIndex.ContainsKey($noTagsLabel)) { $tagIndex[$noTagsLabel] } else { -1 }
+
+    Update-NormalizedAffectedSoftwareLookup -Lookups $lookups
+
+    return [PSCustomObject]@{
+        Lookups = (ConvertTo-NormalizedLookupRecord -Lookups $lookups -NoTagsIdx $noTagsIdx)
+        Quality = [PSCustomObject]@{
+            FirstLastSwappedCount = 0
+        }
+        Context = $context
+    }
+}
+
+function Restore-NormalizedVulnColumnPathsFromCache {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$CachedColumnPaths,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$RestoredLookupsResult,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputDirectoryPath,
+
+        [Parameter(Mandatory = $false)]
+        [int]$CachedInventoryTupleCount = 0
+    )
+
+    $context = $RestoredLookupsResult.Context
+    $currentInventoryTupleCount = if ($null -ne $context -and $null -ne $context.AdvancedHuntingInventoryData) { $context.AdvancedHuntingInventoryData.Count } else { 0 }
+    if (($CachedInventoryTupleCount -eq 0) -and ($currentInventoryTupleCount -eq 0)) {
+        return [PSCustomObject]@{
+            ColumnPaths = $CachedColumnPaths
+            RefreshedInventoryColumn = $false
+            RowCount = 0
+        }
+    }
+
+    if ($null -eq $context) {
+        throw 'Restored lookup result does not contain the normalization context needed to refresh cached inventory columns.'
+    }
+
+    $resolvedOutputDirectoryPath = [System.IO.Path]::GetFullPath($OutputDirectoryPath)
+    if (Test-Path -LiteralPath $resolvedOutputDirectoryPath -PathType Container) {
+        Remove-Item -LiteralPath $resolvedOutputDirectoryPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    [void](New-Item -Path $resolvedOutputDirectoryPath -ItemType Directory -Force)
+
+    $inventoryColumnPath = Join-Path $resolvedOutputDirectoryPath 'iv.json'
+    $inventoryColumnWriter = [PSCustomObject]@{
+        Path = $inventoryColumnPath
+        StreamWriter = [System.IO.StreamWriter]::new($inventoryColumnPath, $false, [System.Text.UTF8Encoding]::new($false))
+        Buffer = [System.Text.StringBuilder]::new(131072)
+        HasValue = $false
+    }
+    $inventoryColumnWriter.StreamWriter.Write('[')
+
+    $readerStates = [System.Collections.Generic.List[System.IDisposable]]::new()
+    $deviceReaderState = $null
+    $softwareReaderState = $null
+    $versionReaderState = $null
+
+    try {
+        foreach ($requiredColumnName in @('d', 's', 'v')) {
+            $columnPath = [string]$CachedColumnPaths[$requiredColumnName]
+            if ([string]::IsNullOrWhiteSpace($columnPath) -or -not (Test-Path -LiteralPath $columnPath -PathType Leaf)) {
+                throw "Cached normalized vulnerability column '$requiredColumnName' was not found."
+            }
+        }
+
+        $deviceReaderState = Open-CompactJsonArrayReader -Path ([string]$CachedColumnPaths['d'])
+        $softwareReaderState = Open-CompactJsonArrayReader -Path ([string]$CachedColumnPaths['s'])
+        $versionReaderState = Open-CompactJsonArrayReader -Path ([string]$CachedColumnPaths['v'])
+        [void]$readerStates.Add($deviceReaderState.JsonReader)
+        [void]$readerStates.Add($deviceReaderState.StreamReader)
+        [void]$readerStates.Add($softwareReaderState.JsonReader)
+        [void]$readerStates.Add($softwareReaderState.StreamReader)
+        [void]$readerStates.Add($versionReaderState.JsonReader)
+        [void]$readerStates.Add($versionReaderState.StreamReader)
+
+        $lookups = $context.Lookups
+        $rowCount = 0
+        while ($true) {
+            $deviceValueState = Read-NextCompactJsonArrayValue -ReaderState $deviceReaderState
+            $softwareValueState = Read-NextCompactJsonArrayValue -ReaderState $softwareReaderState
+            $versionValueState = Read-NextCompactJsonArrayValue -ReaderState $versionReaderState
+
+            if ((-not $deviceValueState.HasValue) -and (-not $softwareValueState.HasValue) -and (-not $versionValueState.HasValue)) {
+                break
+            }
+
+            if ((-not $deviceValueState.HasValue) -or (-not $softwareValueState.HasValue) -or (-not $versionValueState.HasValue)) {
+                throw 'Cached normalized vulnerability columns d/s/v have mismatched lengths.'
+            }
+
+            $deviceId = $null
+            $softwareVendor = ''
+            $softwareName = ''
+            $softwareVersion = ''
+
+            if ($null -ne $deviceValueState.Value) {
+                $deviceIndex = [int]$deviceValueState.Value
+                if ($deviceIndex -ge 0 -and $deviceIndex -lt $lookups.devices.Count) {
+                    $deviceEntry = $lookups.devices[$deviceIndex]
+                    $deviceId = if ($deviceEntry.PSObject.Properties['id']) { [string]$deviceEntry.id } else { $null }
+                }
+            }
+
+            if ($null -ne $softwareValueState.Value) {
+                $softwareIndex = [int]$softwareValueState.Value
+                if ($softwareIndex -ge 0 -and $softwareIndex -lt $lookups.software.Count) {
+                    $softwareEntry = $lookups.software[$softwareIndex]
+                    $softwareName = if ($softwareEntry.PSObject.Properties['n']) { [string]$softwareEntry.n } else { '' }
+                    if ($softwareEntry.PSObject.Properties['v'] -and $null -ne $softwareEntry.v) {
+                        $vendorIndex = [int]$softwareEntry.v
+                        if ($vendorIndex -ge 0 -and $vendorIndex -lt $lookups.vendors.Count) {
+                            $softwareVendor = [string]$lookups.vendors[$vendorIndex]
+                        }
+                    }
+                }
+            }
+
+            if ($null -ne $versionValueState.Value) {
+                $versionIndex = [int]$versionValueState.Value
+                if ($versionIndex -ge 0 -and $versionIndex -lt $lookups.versions.Count) {
+                    $softwareVersion = [string]$lookups.versions[$versionIndex]
+                }
+            }
+
+            $inventoryValue = Resolve-NormalizedInventoryLookup `
+                -DeviceId $deviceId `
+                -SoftwareVendor $softwareVendor `
+                -SoftwareName $softwareName `
+                -SoftwareVersion $softwareVersion `
+                -Context $context
+            Write-CompactColumnFileValue -WriterState $inventoryColumnWriter -Value $inventoryValue
+
+            $rowCount++
+            if (($rowCount % 100000) -eq 0) {
+                if ($inventoryColumnWriter.Buffer.Length -gt 0) {
+                    $inventoryColumnWriter.StreamWriter.Write($inventoryColumnWriter.Buffer.ToString())
+                    [void]$inventoryColumnWriter.Buffer.Clear()
+                }
+                $inventoryColumnWriter.StreamWriter.Flush()
+            }
+        }
+    }
+    finally {
+        foreach ($disposable in $readerStates) {
+            $disposable.Dispose()
+        }
+
+        if ($inventoryColumnWriter.StreamWriter) {
+            if ($inventoryColumnWriter.Buffer.Length -gt 0) {
+                $inventoryColumnWriter.StreamWriter.Write($inventoryColumnWriter.Buffer.ToString())
+                [void]$inventoryColumnWriter.Buffer.Clear()
+            }
+            $inventoryColumnWriter.StreamWriter.Write(']')
+            $inventoryColumnWriter.StreamWriter.Dispose()
+            $inventoryColumnWriter.StreamWriter = $null
+        }
+    }
+
+    $restoredColumnPaths = [ordered]@{}
+    foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp', 'iv')) {
+        $restoredColumnPaths[$columnName] = if ($columnName -eq 'iv') { $inventoryColumnPath } else { [string]$CachedColumnPaths[$columnName] }
+    }
+
+    return [PSCustomObject]@{
+        ColumnPaths = $restoredColumnPaths
+        RefreshedInventoryColumn = $true
+        RowCount = $rowCount
+    }
+}
+
 function Write-CompactVulnRecordJson {
     param(
         [Parameter(Mandatory = $true)]
@@ -3268,6 +3957,74 @@ function Get-JsonElementPropertyValue {
     return Convert-JsonElementToScalarValue -Element $property
 }
 
+function Compress-NormalizationMachineLookup {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [hashtable]$Machines
+    )
+
+    if ($null -eq $Machines -or $Machines.Count -eq 0) {
+        return @{}
+    }
+
+    foreach ($deviceId in @($Machines.Keys)) {
+        $machine = $Machines[$deviceId]
+        if ($null -eq $machine) {
+            $Machines.Remove($deviceId)
+            continue
+        }
+
+        if ($machine -is [System.Array] -and $machine.Length -ge 10) {
+            continue
+        }
+
+        $ip = $machine.PSObject.Properties['lastIpAddress']?.Value
+        $externalIp = $machine.PSObject.Properties['lastExternalIpAddress']?.Value
+        $healthStatus = $machine.PSObject.Properties['healthStatus']?.Value
+        $riskScore = $machine.PSObject.Properties['riskScore']?.Value
+        $exposureLevel = $machine.PSObject.Properties['exposureLevel']?.Value
+        $deviceValue = $machine.PSObject.Properties['deviceValue']?.Value
+        $managedBy = $machine.PSObject.Properties['managedBy']?.Value
+        $isAadJoined = $machine.PSObject.Properties['isAadJoined']?.Value
+        $lastSeen = $machine.PSObject.Properties['lastSeen']?.Value
+        $firstSeen = $machine.PSObject.Properties['firstSeen']?.Value
+
+        if (
+            $null -eq $ip -and
+            $null -eq $externalIp -and
+            $null -eq $healthStatus -and
+            $null -eq $riskScore -and
+            $null -eq $exposureLevel -and
+            $null -eq $deviceValue -and
+            $null -eq $managedBy -and
+            $null -eq $isAadJoined -and
+            $null -eq $lastSeen -and
+            $null -eq $firstSeen
+        ) {
+            $Machines.Remove($deviceId)
+            continue
+        }
+
+        $Machines[$deviceId] = [object[]]@(
+            $ip,
+            $externalIp,
+            $healthStatus,
+            $riskScore,
+            $exposureLevel,
+            $deviceValue,
+            $managedBy,
+            $isAadJoined,
+            $lastSeen,
+            $firstSeen
+        )
+    }
+
+    return $Machines
+}
+
 function Add-NormalizedDevice {
     param(
         $DeviceId,
@@ -3300,6 +4057,7 @@ function Add-NormalizedDevice {
 
     if (-not $deviceIndex.ContainsKey($deviceKey)) {
         $machine = if (-not [string]::IsNullOrWhiteSpace($DeviceId)) { $Context.Machines[$DeviceId] } else { $null }
+        $machineTuple = if ($machine -is [System.Array] -and $machine.Length -ge 10) { $machine } else { $null }
         $machineUsers = [string[]]@()
         if ($null -ne $Context.AdvancedHuntingDeviceUsers -and -not [string]::IsNullOrWhiteSpace($DeviceId)) {
             $rawMachineUsers = $Context.AdvancedHuntingDeviceUsers[[string]$DeviceId]
@@ -3312,18 +4070,16 @@ function Add-NormalizedDevice {
             }
         }
 
-        $resolvedGroupName = if ($machine) { $machine.PSObject.Properties['rbacGroupName']?.Value } else { $GroupName }
+        $resolvedGroupName = $GroupName
         if ([string]::IsNullOrWhiteSpace([string]$resolvedGroupName)) {
             $resolvedGroupName = if ([string]::IsNullOrWhiteSpace([string]$GroupName)) { '(none)' } else { $GroupName }
         }
         $groupIdx = Get-OrCreateIndex -value $resolvedGroupName -list $lookups.groups -indexMap $groupIndex
 
-        $osPlat = if ($machine) { $machine.PSObject.Properties['osPlatform']?.Value } else { $OsPlatform }
+        $osPlat = $OsPlatform
         $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
 
-        $effectiveTags = if ($machine -and $machine.PSObject.Properties['machineTags']?.Value) { $machine.machineTags }
-                        elseif ($MachineTags) { $MachineTags }
-                        else { @() }
+        $effectiveTags = if ($MachineTags) { $MachineTags } else { @() }
         $tagIndices = [System.Collections.Generic.List[int]]::new()
         foreach ($tag in $effectiveTags) {
             $tagIdx = Get-OrCreateIndex -value $tag -list $lookups.tags -indexMap $tagIndex
@@ -3335,18 +4091,18 @@ function Add-NormalizedDevice {
 
         $machineInfo = $null
         if ($machine -or $machineUsers.Count -gt 0) {
-            $machineLastSeen = if ($machine) { $machine.PSObject.Properties['lastSeen']?.Value } else { $null }
-            $machineFirstSeen = if ($machine) { $machine.PSObject.Properties['firstSeen']?.Value } else { $null }
+            $machineLastSeen = if ($machineTuple) { $machineTuple[8] } elseif ($machine) { $machine.PSObject.Properties['lastSeen']?.Value } else { $null }
+            $machineFirstSeen = if ($machineTuple) { $machineTuple[9] } elseif ($machine) { $machine.PSObject.Properties['firstSeen']?.Value } else { $null }
             $machineInfo = [PSCustomObject]@{
-                ip = if ($machine) { $machine.PSObject.Properties['lastIpAddress']?.Value } else { $null }
-                eip = if ($machine) { $machine.PSObject.Properties['lastExternalIpAddress']?.Value } else { $null }
+                ip = if ($machineTuple) { $machineTuple[0] } elseif ($machine) { $machine.PSObject.Properties['lastIpAddress']?.Value } else { $null }
+                eip = if ($machineTuple) { $machineTuple[1] } elseif ($machine) { $machine.PSObject.Properties['lastExternalIpAddress']?.Value } else { $null }
                 u = if ($machineUsers.Count -gt 0) { @($machineUsers) } else { $null }
-                hs = if ($machine) { $machine.PSObject.Properties['healthStatus']?.Value } else { $null }
-                rs = if ($machine) { $machine.PSObject.Properties['riskScore']?.Value } else { $null }
-                el = if ($machine) { $machine.PSObject.Properties['exposureLevel']?.Value } else { $null }
-                dv = if ($machine) { $machine.PSObject.Properties['deviceValue']?.Value } else { $null }
-                mb = if ($machine) { $machine.PSObject.Properties['managedBy']?.Value } else { $null }
-                aad = if ($machine) { $machine.PSObject.Properties['isAadJoined']?.Value } else { $null }
+                hs = if ($machineTuple) { $machineTuple[2] } elseif ($machine) { $machine.PSObject.Properties['healthStatus']?.Value } else { $null }
+                rs = if ($machineTuple) { $machineTuple[3] } elseif ($machine) { $machine.PSObject.Properties['riskScore']?.Value } else { $null }
+                el = if ($machineTuple) { $machineTuple[4] } elseif ($machine) { $machine.PSObject.Properties['exposureLevel']?.Value } else { $null }
+                dv = if ($machineTuple) { $machineTuple[5] } elseif ($machine) { $machine.PSObject.Properties['deviceValue']?.Value } else { $null }
+                mb = if ($machineTuple) { $machineTuple[6] } elseif ($machine) { $machine.PSObject.Properties['managedBy']?.Value } else { $null }
+                aad = if ($machineTuple) { $machineTuple[7] } elseif ($machine) { $machine.PSObject.Properties['isAadJoined']?.Value } else { $null }
                 ls = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineLastSeen
                 fs = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineFirstSeen
             }
@@ -3354,10 +4110,10 @@ function Add-NormalizedDevice {
 
         $lookups.devices.Add([PSCustomObject]@{
             id = $DeviceId
-            n = if ($machine) { $machine.PSObject.Properties['computerDnsName']?.Value } elseif ($DeviceName) { $DeviceName } else { '(no machine data)' }
+            n = if ($DeviceName) { $DeviceName } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['computerDnsName']?.Value } else { '(no machine data)' }
             g = $groupIdx
             o = $platIdx
-            ov = if ($machine) { $machine.PSObject.Properties['osVersion']?.Value } else { $OsVersion }
+            ov = if ($OsVersion) { $OsVersion } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['osVersion']?.Value } else { $null }
             t = $tagIndices
             m = $machineInfo
         })
@@ -4214,6 +4970,8 @@ function Invoke-ContentStoreNormalization {
     $contentTemplates = @($dictionary.contentTemplates)
     $deviceProfileCount = $deviceProfiles.Count
     $contentTemplateCount = $contentTemplates.Count
+    $deviceProfileIds = [string[]]::new($deviceProfileCount)
+    $contentInventoryKeys = [object[]]::new($contentTemplateCount)
     $deviceLookupIndices = New-Object 'System.Int32[]' $deviceProfileCount
     $deviceOnboardedFlags = New-Object 'System.Boolean[]' $deviceProfileCount
     $contentLookupCache = New-Object 'System.Object[]' $contentTemplateCount
@@ -4224,6 +4982,7 @@ function Invoke-ContentStoreNormalization {
 
     for ($deviceProfileIndexValue = 0; $deviceProfileIndexValue -lt $deviceProfileCount; $deviceProfileIndexValue++) {
         $deviceProfile = $deviceProfiles[$deviceProfileIndexValue]
+        $deviceProfileIds[$deviceProfileIndexValue] = [string]$deviceProfile.id
         $machineTags = if ($deviceProfile.t) { @($deviceProfile.t) } else { @() }
         $deviceLookupIndices[$deviceProfileIndexValue] = Add-NormalizedDevice `
             -DeviceId ([string]$deviceProfile.id) `
@@ -4234,10 +4993,23 @@ function Invoke-ContentStoreNormalization {
             -MachineTags $machineTags `
             -Context $Context
         $deviceOnboardedFlags[$deviceProfileIndexValue] = ($deviceProfile.ob -eq $true)
+        $deviceProfiles[$deviceProfileIndexValue] = $null
+    }
+
+    $deviceProfiles = $deviceProfileIds
+
+    $dictionaryDeviceProfilesProperty = if ($null -ne $dictionary) { $dictionary.PSObject.Properties['deviceProfiles'] } else { $null }
+    if ($null -ne $dictionaryDeviceProfilesProperty) {
+        $dictionaryDeviceProfilesProperty.Value = @()
     }
 
     for ($contentTemplateIndexValue = 0; $contentTemplateIndexValue -lt $contentTemplateCount; $contentTemplateIndexValue++) {
         $contentTemplate = $contentTemplates[$contentTemplateIndexValue]
+        $contentInventoryKeys[$contentTemplateIndexValue] = [object[]]@(
+            [string]$contentTemplate.sv,
+            [string]$contentTemplate.sn,
+            [string]$contentTemplate.ver
+        )
 
         $contentLookupCache[$contentTemplateIndexValue] = Resolve-NormalizedContentLookup `
             -SoftwareVendor ([string]$contentTemplate.sv) `
@@ -4257,6 +5029,15 @@ function Invoke-ContentStoreNormalization {
             -RegistryPaths @($contentTemplate.rp) `
             -SecurityUpdateAvailable ($contentTemplate.ua -eq $true) `
             -Context $Context
+
+        $contentTemplates[$contentTemplateIndexValue] = $null
+    }
+
+    $contentTemplates = $contentInventoryKeys
+
+    $dictionaryContentTemplatesProperty = if ($null -ne $dictionary) { $dictionary.PSObject.Properties['contentTemplates'] } else { $null }
+    if ($null -ne $dictionaryContentTemplatesProperty) {
+        $dictionaryContentTemplatesProperty.Value = @()
     }
 
     try {
@@ -4380,7 +5161,7 @@ function Invoke-ContentStoreNormalization {
 
                             $contentLookup = $contentLookupCache[$contentTemplateIndexValue]
                             $contentTemplate = $contentTemplates[$contentTemplateIndexValue]
-                            $deviceProfile = $deviceProfiles[$deviceProfileIndexValue]
+                            $deviceProfileId = $deviceProfiles[$deviceProfileIndexValue]
                             $compactRecord[0] = $deviceLookupIndices[$deviceProfileIndexValue]
                             $compactRecord[1] = $contentLookup.cve
                             $compactRecord[2] = $contentLookup.sw
@@ -4392,10 +5173,10 @@ function Invoke-ContentStoreNormalization {
                             $compactRecord[8] = $contentLookup.dp
                             $compactRecord[9] = $contentLookup.rp
                             $compactRecord[10] = Resolve-NormalizedInventoryLookup `
-                                -DeviceId ([string]$deviceProfile.id) `
-                                -SoftwareVendor ([string]$contentTemplate.sv) `
-                                -SoftwareName ([string]$contentTemplate.sn) `
-                                -SoftwareVersion ([string]$contentTemplate.ver) `
+                                -DeviceId ([string]$deviceProfileId) `
+                                -SoftwareVendor ([string]$contentTemplate[0]) `
+                                -SoftwareName ([string]$contentTemplate[1]) `
+                                -SoftwareVersion ([string]$contentTemplate[2]) `
                                 -Context $Context
 
                             if ($columnStates) {
@@ -4526,7 +5307,7 @@ function Invoke-ContentStoreNormalization {
 
                                     $contentLookup = $contentLookupCache[$ctv]
                                     $contentTemplate = $contentTemplates[$ctv]
-                                    $deviceProfile = $deviceProfiles[$dpv]
+                                    $deviceProfileId = $deviceProfiles[$dpv]
                                     $compactRecord[0] = $deviceLookupIndices[$dpv]
                                     $compactRecord[1] = $contentLookup.cve
                                     $compactRecord[2] = $contentLookup.sw
@@ -4538,10 +5319,10 @@ function Invoke-ContentStoreNormalization {
                                     $compactRecord[8] = $contentLookup.dp
                                     $compactRecord[9] = $contentLookup.rp
                                     $compactRecord[10] = Resolve-NormalizedInventoryLookup `
-                                        -DeviceId ([string]$deviceProfile.id) `
-                                        -SoftwareVendor ([string]$contentTemplate.sv) `
-                                        -SoftwareName ([string]$contentTemplate.sn) `
-                                        -SoftwareVersion ([string]$contentTemplate.ver) `
+                                        -DeviceId ([string]$deviceProfileId) `
+                                        -SoftwareVendor ([string]$contentTemplate[0]) `
+                                        -SoftwareName ([string]$contentTemplate[1]) `
+                                        -SoftwareVersion ([string]$contentTemplate[2]) `
                                         -Context $Context
 
                                     if ($columnStates) {
@@ -4617,6 +5398,45 @@ function Invoke-ContentStoreNormalization {
         }
 
         Sync-NormalizedVulnWriter -WriterState $writerState
+
+        # Payload finalization only needs the compact lookup collections. Release
+        # the much larger content-store scaffolding first so hosted Automation
+        # does not carry that transient state into lookup serialization.
+        foreach ($transientArray in @($deviceProfiles, $contentTemplates, $deviceLookupIndices, $deviceOnboardedFlags, $contentLookupCache)) {
+            if ($null -ne $transientArray) {
+                [System.Array]::Clear($transientArray, 0, $transientArray.Length)
+            }
+        }
+
+        if ($null -ne $refPaths) {
+            $refPaths.Clear()
+        }
+
+        $Context.Machines = @{}
+        $Context.AdvancedHuntingData = @{}
+        $Context.AdvancedHuntingDeviceUsers = @{}
+        $Context.AdvancedHuntingInventoryData = @{}
+        $Context.NvdCveData = @{}
+
+        $dateValueCacheProperty = $Context.PSObject.Properties['DateValueCache']
+        if ($null -ne $dateValueCacheProperty -and $null -ne $dateValueCacheProperty.Value) {
+            $dateValueCacheProperty.Value.Clear()
+        }
+
+        $dictionary = $null
+        $deviceProfiles = $null
+        $contentTemplates = $null
+        $deviceLookupIndices = $null
+        $deviceOnboardedFlags = $null
+        $contentLookupCache = $null
+        $refPaths = $null
+
+        if (-not [string]::IsNullOrWhiteSpace($PayloadOutputPath)) {
+            Invoke-FullGarbageCollection
+            if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+                $null = Write-MemoryUsage -Label 'Pre-PayloadClose'
+            }
+        }
     }
     finally {
         if ($writerState) {
@@ -5489,6 +6309,7 @@ function ConvertTo-NormalizedData {
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
     Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s), {3} inventory tuple(s), {4} NVD CVE(s)" -f $Machines.Count, $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count, $AdvancedHuntingInventoryData.Count, $NvdCveData.Count) -InformationAction Continue
+    Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
     $context = Get-NormalizationContext
     $context.Machines = $Machines
     $context.AdvancedHuntingData = $AdvancedHuntingData
@@ -5628,26 +6449,7 @@ function ConvertTo-NormalizedData {
     Update-NormalizedAffectedSoftwareLookup -Lookups $lookups
 
     return @{
-        Lookups = [PSCustomObject]@{
-            vendors = $lookups.vendors
-            severities = $lookups.severities
-            exploitLevels = $lookups.exploitLevels
-            groups = $lookups.groups
-            platforms = $lookups.platforms
-            tags = $lookups.tags
-            updates = $lookups.updates
-            versions = $lookups.versions
-            dates = $lookups.dates
-            diskPaths = $lookups.diskPaths
-            regPaths = $lookups.regPaths
-            affSoftware = $lookups.affSoftware
-            batchTitles = $lookups.batchTitles
-            devices = $lookups.devices
-            inventory = $lookups.inventory
-            software = $lookups.software
-            cves = $lookups.cves
-            noTagsIdx = $noTagsIdx
-        }
+        Lookups = (ConvertTo-NormalizedLookupRecord -Lookups $lookups -NoTagsIdx $noTagsIdx)
         Quality = [PSCustomObject]@{
             FirstLastSwappedCount = $firstLastSwappedCount
         }

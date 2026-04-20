@@ -41,6 +41,80 @@ function Get-AvailableMemoryGB {
     return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
 }
 
+function Get-HeartbeatTimestampText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    return (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+}
+
+function Get-HeartbeatFileStatus {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return [PSCustomObject]@{
+            bytes = 0L
+            ageSeconds = $null
+        }
+    }
+
+    $item = Get-Item -LiteralPath $Path
+    return [PSCustomObject]@{
+        bytes = [int64]$item.Length
+        ageSeconds = [math]::Round(((Get-Date).ToUniversalTime() - $item.LastWriteTimeUtc).TotalSeconds, 1)
+    }
+}
+
+function Write-StressHeartbeat {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Stopwatch]$Stopwatch,
+
+        [Parameter(Mandatory = $false)]
+        [System.Collections.Generic.List[object]]$Samples,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StdoutPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DashboardPath,
+
+        [Parameter(Mandatory = $true)]
+        [int64]$PeakRssBytes,
+
+        [Parameter(Mandatory = $true)]
+        [int64]$PeakPrivateBytes
+    )
+
+    $lastSample = if ($null -ne $Samples -and $Samples.Count -gt 0) { $Samples[$Samples.Count - 1] } else { $null }
+    $stdoutStatus = Get-HeartbeatFileStatus -Path $StdoutPath
+    $availableMemory = if ($null -ne $lastSample) { [double]$lastSample.available_memory_gb } else { Get-AvailableMemoryGB }
+    $stdoutAgeText = if ($null -ne $stdoutStatus.ageSeconds) { ('{0:N1}s' -f $stdoutStatus.ageSeconds) } else { 'n/a' }
+
+    $message = "[{0}] Stress heartbeat ({1}): elapsed={2} peak-rss={3}GB peak-private={4}GB available={5}GB dashboard-exists={6} stdout-bytes={7} stdout-age={8}" -f @(
+        (Get-HeartbeatTimestampText)
+        $Name
+        $Stopwatch.Elapsed.ToString('hh\:mm\:ss')
+        [math]::Round(($PeakRssBytes / 1GB), 3)
+        [math]::Round(($PeakPrivateBytes / 1GB), 3)
+        $availableMemory
+        (Test-Path -LiteralPath $DashboardPath -PathType Leaf)
+        $stdoutStatus.bytes
+        $stdoutAgeText
+    )
+    Write-Output $message
+}
+
 function Get-ProcessTree {
     [CmdletBinding()]
     [OutputType([System.Diagnostics.Process[]])]
@@ -210,11 +284,15 @@ function Add-MeasurementSample {
 }
 
 Add-MeasurementSample -Samples $samples -Process $process -Stopwatch $stopwatch -PeakRssBytes ([ref]$peakRssBytes) -PeakRssAt ([ref]$peakRssAt) -PeakPrivateBytes ([ref]$peakPrivateBytes) -PeakPrivateAt ([ref]$peakPrivateAt)
+Write-StressHeartbeat -Name $Name -Stopwatch $stopwatch -Samples $samples -StdoutPath $stdoutPath -DashboardPath $resolvedDashboardPath -PeakRssBytes $peakRssBytes -PeakPrivateBytes $peakPrivateBytes
 
 while (-not $process.HasExited) {
     Start-Sleep -Seconds $PollIntervalSeconds
     $process.Refresh()
     Add-MeasurementSample -Samples $samples -Process $process -Stopwatch $stopwatch -PeakRssBytes ([ref]$peakRssBytes) -PeakRssAt ([ref]$peakRssAt) -PeakPrivateBytes ([ref]$peakPrivateBytes) -PeakPrivateAt ([ref]$peakPrivateAt)
+    if (-not $process.HasExited) {
+        Write-StressHeartbeat -Name $Name -Stopwatch $stopwatch -Samples $samples -StdoutPath $stdoutPath -DashboardPath $resolvedDashboardPath -PeakRssBytes $peakRssBytes -PeakPrivateBytes $peakPrivateBytes
+    }
 }
 
 $process.WaitForExit()

@@ -32,11 +32,15 @@ This directory contains maintainer-facing build, validation, import, and packagi
 .\build\Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext
 
 # Rebuild locally, redeploy Azure Automation + Function App, and execute both live validation paths
-.\build\Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName aa-defender-reporting -FunctionAppName func-defender-reporting -SkipMdePermissions
+.\build\Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName aa-defender-reporting -FunctionAppName func-defender-reporting -SkipMdePermissions -FunctionExecutionDatasetPath .\exports
 
 # Build the same Azure release zip used by the release workflow
 .\build\Build-AzureReleasePackage.ps1
 ```
+
+When `-SkipMdePermissions` is paired with Function App execution validation, pass `-FunctionExecutionDatasetPath <dataset>` so the script can reseed the Function App exports container before invocation. Use `-SkipFunctionExecution` only when you intentionally want deployment validation without the final Function App run.
+
+During seeded Function App validation, the script now writes a short-lived control blob at `dashboards/_diagnostics/ExportAndGenerate.control.json` and polls the runtime status blob at `dashboards/_diagnostics/ExportAndGenerate.status.json`. This makes Flex Consumption execution diagnosable even when admin VFS access and built-in log streaming are unavailable.
 
 ## User-facing scripts
 

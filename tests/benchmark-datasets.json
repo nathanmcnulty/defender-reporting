@@ -1,0 +1,16 @@
+﻿[
+  {
+    "id": "benchmark-medium-v1",
+    "description": "Durable benchmark baseline dataset for Azure and local performance review.",
+    "preset": "BalancedMediumHeavy",
+    "seed": 20260322,
+    "targetDeviceCount": 1500,
+    "targetTotalVulnRows": 120000,
+    "sourceRelativePath": "exports",
+    "outputRelativePath": ".local/benchmark-datasets/benchmark-medium-v1",
+    "historyTags": [
+      "benchmark-medium-v1",
+      "durable-baseline"
+    ]
+  }
+]

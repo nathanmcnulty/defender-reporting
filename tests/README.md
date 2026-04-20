@@ -70,6 +70,7 @@ That command:
 - regenerates the synthetic exports
 - runs `Generate-VulnerabilityDashboard.ps1` against them
 - writes `synthetic-manifest.json` and `stress-validation-report.json` under `exports-synthetic/`
+- writes `dashboard-audit.json` under `exports-synthetic/` when `-Validate` is set
 
 Supported presets:
 - `DeviceCardinalityFirst`
@@ -91,7 +92,74 @@ Defaults:
 
 `-SkipContentStoreSidecars` keeps the output in raw-export form so downstream validation paths can rebuild sidecars on demand.
 
+## Hot phase review
+
+Review the local generator and validation hot phases with:
+
+```powershell
+pwsh -NoProfile -File .\tests\Invoke-HotPhaseReview.ps1 -DirectoryPath .\exports
+```
+
+That command:
+- runs `Generate-VulnerabilityDashboard.ps1` with validation enabled
+- captures local process memory samples plus the generator stdout and stderr logs
+- parses the local phase markers emitted by `Generate-VulnerabilityDashboard.ps1`
+- extracts the audit `PhaseTimings` block for any validation mode and falls back to `SemanticParity.PhaseTimings` for older audit shapes
+- writes `hot-phase-review.json` under `.local/hot-phase-review/<timestamp>/`
+
+Long-running review, stress, and benchmark wrappers now emit timestamped heartbeat lines at their poll interval so you can confirm they are still making progress even when the child process is temporarily quiet.
+
+Use a smaller synthetic dataset while iterating, then move to the benchmark and Azure validation entrypoints once the local hot phases improve.
+
+## Validation mode comparison
+
+Split packaging, full validation, and attested validation into separate measured runs with:
+
+```powershell
+pwsh -NoProfile -File .\tests\Invoke-ValidationModeComparison.ps1 -DirectoryPath .\exports
+```
+
+That command:
+- warms a reusable normalized payload artifact with `-NormalizeOnly`
+- measures `-PackageOnly` against that payload artifact
+- measures `-ValidateOnly -ForceFullValidation` and the attested `-ValidateOnly` fast path against the same packaged dashboard
+- measures end-to-end `-Validate -ForceFullValidation` and the default `-Validate` path
+- writes `validation-mode-comparison.json` under `.local/validation-mode-comparison/<timestamp>/`
+
+Use this workflow when validation is the dominant hot phase and you need to distinguish package cost from semantic replay cost.
+
 ## Benchmarking
+
+Create or refresh the durable benchmark dataset with:
+
+```powershell
+pwsh -NoProfile -File .\tests\New-BenchmarkDataset.ps1 -DatasetId benchmark-medium-v1
+```
+
+That dataset definition currently maps to:
+- dataset id: `benchmark-medium-v1`
+- preset: `BalancedMediumHeavy`
+- target devices: `1,500`
+- target vulnerability rows: `120,000`
+- seed: `20260322`
+- output path: `.local\benchmark-datasets\benchmark-medium-v1`
+
+Capture a repeatable multi-run benchmark series against the standard dataset with:
+
+```powershell
+pwsh -NoProfile -File .\tests\Invoke-BenchmarkSeries.ps1 -BenchmarkDatasetId benchmark-medium-v1 -Iterations 3 -IncludePersistentLocalWorkflow
+```
+
+That command:
+- ensures the durable benchmark dataset exists
+- records each benchmark JSON under `.local\benchmark-series\`
+- appends each run to `.local\benchmark-history\benchmark-history.jsonl`
+- writes aggregate `series-summary.json` and `series-summary.md` artifacts
+
+Function App timing semantics:
+- `function_app.elapsed_seconds` now tracks active execution time when the runtime status blob is available
+- `function_app.end_to_end_elapsed_seconds` retains invoke-to-finish timing for queue and cold-start review
+- `function_app.pickup_delay_seconds` records the gap between admin invocation and active execution start
 
 Capture a current-branch-only benchmark baseline with:
 
@@ -100,7 +168,15 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 pwsh -NoProfile -File .\tests\Measure-BranchVsMainBenchmark.ps1 -CurrentOnly -CurrentBaselineName 'current-live' -DatasetPath .\exports-synthetic-live -ResultsOutputPath (Join-Path $PWD ('.local\current-baseline-live-' + $stamp + '.json'))
 ```
 
+Append a normalized local history entry after a benchmark completes with:
+
+```powershell
+pwsh -NoProfile -File .\tests\Record-BenchmarkHistory.ps1 -BenchmarkResultPath .\.local\current-baseline-live-<timestamp>.json
+```
+
 Recommendations:
 - keep raw benchmark outputs under `.local/`
+- use `.local\benchmark-history\benchmark-history.jsonl` plus `.local\benchmark-history\latest-summary.md` for repeated review and Azure acceptance captures that you want to compare over time
+- prefer `benchmark-medium-v1` plus `Invoke-BenchmarkSeries.ps1` when you need the durable, merge-tracked benchmark cadence instead of an ad hoc review capture
 - use the staged local copy behavior in `Measure-BranchVsMainBenchmark.ps1` when benchmarking raw datasets without sidecars
-- use `docs/performance-baselines.md` for the merge-tracked summary of recorded baseline numbers
+- use `docs/performance-baselines.md` only for accepted durable datasets that should remain merge-tracked as baseline documentation
