@@ -1,5 +1,28 @@
 ﻿# Source-first Azure provisioning helpers used by Setup-AzureResources.ps1.
 
+function Write-ProvisioningLogLine {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ForegroundColor = 'Gray'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        return
+    }
+
+    foreach ($line in ($Message -split "`r?`n")) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        Write-Host ("[{0}] {1}" -f (Get-Date).ToUniversalTime().ToString('u'), $line) -ForegroundColor $ForegroundColor
+    }
+}
+
 function Wait-WithPolling {
     <#
     .SYNOPSIS
@@ -20,14 +43,14 @@ function Wait-WithPolling {
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
         if (& $Condition) {
-            Write-Host "  $Description - confirmed" -ForegroundColor Green
+            Write-ProvisioningLogLine -Message ("  {0} - confirmed" -f $Description) -ForegroundColor Green
             return $true
         }
-        Write-Host "  Waiting for $Description... ($([int]$stopwatch.Elapsed.TotalSeconds)s)" -ForegroundColor Gray
+        Write-ProvisioningLogLine -Message ("  Waiting for {0}... ({1}s)" -f $Description, [int]$stopwatch.Elapsed.TotalSeconds) -ForegroundColor Gray
         Start-Sleep -Seconds $IntervalSeconds
     }
     $stopwatch.Stop()
-    Write-Warning "$Description did not complete within ${TimeoutSeconds}s"
+    Write-Warning ("[{0}] {1} did not complete within {2}s" -f (Get-Date).ToUniversalTime().ToString('u'), $Description, $TimeoutSeconds)
     return $false
 }
 
@@ -50,13 +73,31 @@ function Invoke-ArmApi {
         [string]$Description = 'ARM API call'
     )
 
-    $params = @{
-        Path = $Path
-        Method = $Method
+    $requestUri = if ($Path -match '^https?://') {
+        $Path
     }
-    if ($Payload) { $params.Payload = $Payload }
+    elseif ($Path.StartsWith('/')) {
+        "https://management.azure.com$Path"
+    }
+    else {
+        "https://management.azure.com/$Path"
+    }
 
-    $response = Invoke-AzRestMethod @params
+    $params = @{
+        Uri = $requestUri
+        Method = $Method
+        Headers = @{
+            Authorization = "Bearer $(Get-ArmToken)"
+        }
+        ErrorAction = 'Stop'
+        SkipHttpErrorCheck = $true
+    }
+    if ($Payload) {
+        $params.ContentType = 'application/json'
+        $params.Body = $Payload
+    }
+
+    $response = Invoke-WebRequest @params
 
     if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
         if ($response.Content) {
@@ -178,10 +219,33 @@ function Get-ArmToken {
         [string]$ResourceUrl = 'https://management.azure.com/'
     )
 
-    $tokenResponse = Get-AzAccessToken -ResourceUrl $ResourceUrl -AsSecureString
-    $ssPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResponse.Token)
-    try { return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ssPtr) }
-    finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ssPtr) }
+    try {
+        $tokenResponse = Get-AzAccessToken -ResourceUrl $ResourceUrl -AsSecureString -ErrorAction Stop
+        $ssPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResponse.Token)
+        try { return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ssPtr) }
+        finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ssPtr) }
+    }
+    catch {
+        Write-Verbose "Get-AzAccessToken failed for '$ResourceUrl': $_"
+    }
+
+    if ($null -ne (Get-Command -Name 'az' -CommandType Application -ErrorAction SilentlyContinue)) {
+        try {
+            $azAccessToken = (& az 'account' 'get-access-token' '--resource' $ResourceUrl '--query' 'accessToken' '-o' 'tsv' 2>&1 | Out-String)
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($azAccessToken)) {
+                return $azAccessToken.Trim()
+            }
+
+            if ($LASTEXITCODE -ne 0 -and -not [string]::IsNullOrWhiteSpace($azAccessToken)) {
+                Write-Verbose ("Azure CLI token acquisition failed for '{0}': {1}" -f $ResourceUrl, $azAccessToken.Trim())
+            }
+        }
+        catch {
+            Write-Verbose "Azure CLI token acquisition failed for '$ResourceUrl': $_"
+        }
+    }
+
+    throw "No Azure token source available for resource '$ResourceUrl'. Run Connect-AzAccount or az login, then retry."
 }
 
 function Get-JwtPayload {
