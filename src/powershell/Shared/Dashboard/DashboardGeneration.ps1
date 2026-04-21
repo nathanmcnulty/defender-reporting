@@ -399,6 +399,74 @@ function Get-NormalizedLookupPropertyValue {
     return $null
 }
 
+function Set-NormalizedLookupPropertyValue {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper updates in-memory lookup state during payload finalization.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Lookups,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Value
+    )
+
+    if ($Lookups -is [System.Collections.IDictionary]) {
+        $Lookups[$Name] = $Value
+        return
+    }
+
+    $property = $Lookups.PSObject.Properties[$Name]
+    if ($null -ne $property) {
+        $property.Value = $Value
+        return
+    }
+
+    Add-Member -InputObject $Lookups -NotePropertyName $Name -NotePropertyValue $Value -Force
+}
+
+function Get-NormalizedLookupCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Lookups,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $value = Get-NormalizedLookupPropertyValue -Value $Lookups -Name $Name
+    if ($null -eq $value) {
+        return 0
+    }
+
+    if ($value -is [System.Collections.ICollection]) {
+        return [int]$value.Count
+    }
+
+    return [int]@($value).Count
+}
+
+function Get-NormalizedLookupCountSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Lookups
+    )
+
+    return [PSCustomObject]@{
+        DeviceCount = Get-NormalizedLookupCount -Lookups $Lookups -Name 'devices'
+        CveCount = Get-NormalizedLookupCount -Lookups $Lookups -Name 'cves'
+        SoftwareCount = Get-NormalizedLookupCount -Lookups $Lookups -Name 'software'
+        VendorCount = Get-NormalizedLookupCount -Lookups $Lookups -Name 'vendors'
+    }
+}
+
 function Write-NormalizedDeviceMachineInfoToWriter {
     [CmdletBinding()]
     param(
@@ -1285,11 +1353,14 @@ function Write-CombinedPayloadLookups {
         [Newtonsoft.Json.JsonTextWriter]$Writer,
 
         [Parameter(Mandatory = $true)]
-        [object]$Lookups
+        [object]$Lookups,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ConsumeLookups
     )
 
     $Writer.WritePropertyName('lookups')
-    Write-CombinedPayloadLookupsValue -Writer $Writer -Lookups $Lookups
+    Write-CombinedPayloadLookupsValue -Writer $Writer -Lookups $Lookups -ConsumeLookups:$ConsumeLookups
 }
 
 function Write-CombinedPayloadLookupsValue {
@@ -1300,7 +1371,10 @@ function Write-CombinedPayloadLookupsValue {
         [Newtonsoft.Json.JsonTextWriter]$Writer,
 
         [Parameter(Mandatory = $true)]
-        [object]$Lookups
+        [object]$Lookups,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ConsumeLookups
     )
 
     $Writer.WriteStartObject()
@@ -1336,6 +1410,13 @@ function Write-CombinedPayloadLookupsValue {
         }
         else {
             Write-JsonValueToWriter -Writer $Writer -Value $lookupValue
+        }
+
+        if ($ConsumeLookups) {
+            Set-NormalizedLookupPropertyValue -Lookups $Lookups -Name $lookupPropertyName -Value $null
+            if ($lookupPropertyName -in @('devices', 'inventory', 'software', 'cves')) {
+                Invoke-FullGarbageCollection
+            }
         }
     }
     $Writer.WriteEndObject()
@@ -1392,12 +1473,15 @@ function Close-CombinedPayloadWriter {
         [pscustomobject]$WriterState,
 
         [Parameter(Mandatory = $true)]
-        [object]$Lookups
+        [object]$Lookups,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ConsumeLookups
     )
 
     try {
         Update-NormalizedAffectedSoftwareLookup -Lookups $Lookups
-        Write-CombinedPayloadLookups -Writer $WriterState.JsonWriter -Lookups $Lookups
+        Write-CombinedPayloadLookups -Writer $WriterState.JsonWriter -Lookups $Lookups -ConsumeLookups:$ConsumeLookups
         $WriterState.JsonWriter.WriteEndObject()
         $WriterState.JsonWriter.Flush()
     }
@@ -1573,7 +1657,10 @@ function Close-NormalizedVulnWriter {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [object]$Lookups
+        [object]$Lookups,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ConsumeLookups
     )
 
     if ($WriterState.Mode -eq 'column') {
@@ -1589,7 +1676,7 @@ function Close-NormalizedVulnWriter {
 
     if ($WriterState.Mode -eq 'payload') {
         $WriterState.JsonWriter.WriteEndArray()
-        Close-CombinedPayloadWriter -WriterState $WriterState.PayloadWriter -Lookups $Lookups
+        Close-CombinedPayloadWriter -WriterState $WriterState.PayloadWriter -Lookups $Lookups -ConsumeLookups:$ConsumeLookups
         return [PSCustomObject]@{
             Mode = 'payload'
             VulnsPath = $null
@@ -4946,7 +5033,10 @@ function Invoke-ContentStoreNormalization {
         [string[]]$MergedRefPaths,
 
         [Parameter(Mandatory = $false)]
-        [string]$PayloadOutputPath
+        [string]$PayloadOutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ConsumeLookupsOnPayloadClose
     )
 
     $lookups = $Context.Lookups
@@ -4979,6 +5069,8 @@ function Invoke-ContentStoreNormalization {
     $firstLastSwappedCountRef = [ref]0
     $writerState = $null
     $writerCloseResult = $null
+    $lookupCountSummary = $null
+    $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
 
     for ($deviceProfileIndexValue = 0; $deviceProfileIndexValue -lt $deviceProfileCount; $deviceProfileIndexValue++) {
         $deviceProfile = $deviceProfiles[$deviceProfileIndexValue]
@@ -5432,6 +5524,9 @@ function Invoke-ContentStoreNormalization {
         $refPaths = $null
 
         if (-not [string]::IsNullOrWhiteSpace($PayloadOutputPath)) {
+            if ($consumeLookups) {
+                $lookupCountSummary = Get-NormalizedLookupCountSummary -Lookups $Context.Lookups
+            }
             Invoke-FullGarbageCollection
             if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
                 $null = Write-MemoryUsage -Label 'Pre-PayloadClose'
@@ -5440,11 +5535,15 @@ function Invoke-ContentStoreNormalization {
     }
     finally {
         if ($writerState) {
-            $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups
+            $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups -ConsumeLookups:$consumeLookups
         }
     }
 
     Test-NormalizedWriterRowCount -WriterCloseResult $writerCloseResult -ExpectedRowCount $processedCountRef.Value
+
+    if ($null -eq $lookupCountSummary) {
+        $lookupCountSummary = Get-NormalizedLookupCountSummary -Lookups $Context.Lookups
+    }
 
     return [PSCustomObject]@{
         ProcessedCount = $processedCountRef.Value
@@ -5453,6 +5552,10 @@ function Invoke-ContentStoreNormalization {
         VulnsPath = $writerCloseResult.VulnsPath
         VulnColumnPaths = $writerCloseResult.VulnColumnPaths
         PayloadPath = $writerCloseResult.PayloadPath
+        DeviceCount = [int]$lookupCountSummary.DeviceCount
+        CveCount = [int]$lookupCountSummary.CveCount
+        SoftwareCount = [int]$lookupCountSummary.SoftwareCount
+        VendorCount = [int]$lookupCountSummary.VendorCount
     }
 }
 
@@ -5488,7 +5591,10 @@ function Invoke-RawStoreNormalization {
         [hashtable]$NvdCveData = @{},
 
         [Parameter(Mandatory = $false)]
-        [string]$PayloadOutputPath
+        [string]$PayloadOutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ConsumeLookupsOnPayloadClose
     )
 
     $Context.Machines = $Machines
@@ -5503,6 +5609,8 @@ function Invoke-RawStoreNormalization {
     $writerState = $null
     $writerCloseResult = $null
     $compactRecord = [object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1)
+    $lookupCountSummary = $null
+    $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
 
     try {
         $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
@@ -5855,14 +5963,22 @@ function Invoke-RawStoreNormalization {
         } | Out-Null
 
         Sync-NormalizedVulnWriter -WriterState $writerState
+
+        if ($consumeLookups) {
+            $lookupCountSummary = Get-NormalizedLookupCountSummary -Lookups $Context.Lookups
+        }
     }
     finally {
         if ($writerState) {
-            $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups
+            $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups -ConsumeLookups:$consumeLookups
         }
     }
 
     Test-NormalizedWriterRowCount -WriterCloseResult $writerCloseResult -ExpectedRowCount $processedCountRef.Value
+
+    if ($null -eq $lookupCountSummary) {
+        $lookupCountSummary = Get-NormalizedLookupCountSummary -Lookups $Context.Lookups
+    }
 
     return [PSCustomObject]@{
         ProcessedCount = $processedCountRef.Value
@@ -5871,6 +5987,10 @@ function Invoke-RawStoreNormalization {
         VulnsPath = $writerCloseResult.VulnsPath
         VulnColumnPaths = $writerCloseResult.VulnColumnPaths
         PayloadPath = $writerCloseResult.PayloadPath
+        DeviceCount = [int]$lookupCountSummary.DeviceCount
+        CveCount = [int]$lookupCountSummary.CveCount
+        SoftwareCount = [int]$lookupCountSummary.SoftwareCount
+        VendorCount = [int]$lookupCountSummary.VendorCount
     }
 }
 
@@ -6304,7 +6424,10 @@ function ConvertTo-NormalizedData {
         [switch]$SkipObservedWindowMerge,
 
         [Parameter(Mandatory = $false)]
-        [string]$PayloadOutputPath
+        [string]$PayloadOutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ConsumeLookupsOnPayloadClose
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
@@ -6325,6 +6448,8 @@ function ConvertTo-NormalizedData {
     $writerState = $null
     $writerCloseResult = $null
     $autoColumnDir = $null
+    $lookupCountSummary = $null
+    $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
 
     # Auto-enable column-store format for better gzip compression when caller
     # has not explicitly specified a column directory.
@@ -6353,10 +6478,16 @@ function ConvertTo-NormalizedData {
         else {
             Write-Information '  Content-store detected; using fast path (no merge).' -InformationAction Continue
         }
-        $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -MergedRefPaths $mergedRefPaths -PayloadOutputPath $PayloadOutputPath
+        $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -MergedRefPaths $mergedRefPaths -PayloadOutputPath $PayloadOutputPath -ConsumeLookupsOnPayloadClose:$consumeLookups
         $processedCount = [int]$rawNormalizationResult.ProcessedCount
         $firstLastSwappedCount = [int]$rawNormalizationResult.FirstLastSwappedCount
         $hasNoTags = ($rawNormalizationResult.HasNoTags -eq $true)
+        $lookupCountSummary = [PSCustomObject]@{
+            DeviceCount = [int]$rawNormalizationResult.DeviceCount
+            CveCount = [int]$rawNormalizationResult.CveCount
+            SoftwareCount = [int]$rawNormalizationResult.SoftwareCount
+            VendorCount = [int]$rawNormalizationResult.VendorCount
+        }
         $writerCloseResult = [PSCustomObject]@{
             Mode = if ($rawNormalizationResult.PayloadPath) { 'payload' } elseif ($rawNormalizationResult.VulnColumnPaths) { 'column' } else { 'rows' }
             VulnsPath = $rawNormalizationResult.VulnsPath
@@ -6366,10 +6497,16 @@ function ConvertTo-NormalizedData {
     }
     elseif ($effectiveSkipObservedWindowMerge -and $storeExists) {
         Write-Information '  Raw store detected; using raw store normalization fast path.' -InformationAction Continue
-        $rawNormalizationResult = Invoke-RawStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -PayloadOutputPath $PayloadOutputPath
+        $rawNormalizationResult = Invoke-RawStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -PayloadOutputPath $PayloadOutputPath -ConsumeLookupsOnPayloadClose:$consumeLookups
         $processedCount = [int]$rawNormalizationResult.ProcessedCount
         $firstLastSwappedCount = [int]$rawNormalizationResult.FirstLastSwappedCount
         $hasNoTags = ($rawNormalizationResult.HasNoTags -eq $true)
+        $lookupCountSummary = [PSCustomObject]@{
+            DeviceCount = [int]$rawNormalizationResult.DeviceCount
+            CveCount = [int]$rawNormalizationResult.CveCount
+            SoftwareCount = [int]$rawNormalizationResult.SoftwareCount
+            VendorCount = [int]$rawNormalizationResult.VendorCount
+        }
         $writerCloseResult = [PSCustomObject]@{
             Mode = if ($rawNormalizationResult.PayloadPath) { 'payload' } elseif ($rawNormalizationResult.VulnColumnPaths) { 'column' } else { 'rows' }
             VulnsPath = $rawNormalizationResult.VulnsPath
@@ -6423,7 +6560,10 @@ function ConvertTo-NormalizedData {
         }
         finally {
             if ($writerState) {
-                $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $context.Lookups
+                if ($consumeLookups) {
+                    $lookupCountSummary = Get-NormalizedLookupCountSummary -Lookups $context.Lookups
+                }
+                $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $context.Lookups -ConsumeLookups:$consumeLookups
             }
         }
         $hasNoTags = $context.HasNoTags
@@ -6431,25 +6571,46 @@ function ConvertTo-NormalizedData {
 
     Test-NormalizedWriterRowCount -WriterCloseResult $writerCloseResult -ExpectedRowCount $processedCount
 
+    if ($null -eq $lookupCountSummary) {
+        $lookupCountSummary = Get-NormalizedLookupCountSummary -Lookups $lookups
+    }
+
     if ($processedCount -eq 0) { throw 'No onboarded vulnerabilities found after streaming all export files.' }
     Write-Information "  Loaded $processedCount onboarded vulnerability records" -InformationAction Continue
 
-    $noTagsLabel = '(No Tags)'
-    if ($hasNoTags -and -not $tagIndex.ContainsKey($noTagsLabel)) {
-        $tagIndex[$noTagsLabel] = $lookups.tags.Count
-        $lookups.tags.Add($noTagsLabel)
-    }
-    $noTagsIdx = if ($tagIndex.ContainsKey($noTagsLabel)) { $tagIndex[$noTagsLabel] } else { -1 }
+    $deviceCount = [int]$lookupCountSummary.DeviceCount
+    $cveCount = [int]$lookupCountSummary.CveCount
+    $softwareCount = [int]$lookupCountSummary.SoftwareCount
+    $vendorCount = [int]$lookupCountSummary.VendorCount
 
-    Write-Information "  Normalized: $($lookups.devices.Count) devices, $($lookups.cves.Count) CVEs, $($lookups.software.Count) software, $($lookups.vendors.Count) vendors" -InformationAction Continue
+    $noTagsIdx = -1
+    if (-not $consumeLookups) {
+        $noTagsLabel = '(No Tags)'
+        if ($hasNoTags -and -not $tagIndex.ContainsKey($noTagsLabel)) {
+            $tagIndex[$noTagsLabel] = $lookups.tags.Count
+            $lookups.tags.Add($noTagsLabel)
+        }
+        $noTagsIdx = if ($tagIndex.ContainsKey($noTagsLabel)) { $tagIndex[$noTagsLabel] } else { -1 }
+    }
+
+    Write-Information "  Normalized: $deviceCount devices, $cveCount CVEs, $softwareCount software, $vendorCount vendors" -InformationAction Continue
     if ($firstLastSwappedCount -gt 0) {
         Write-Warning "  Corrected $firstLastSwappedCount record(s) with FirstSeenTimestamp > LastSeenTimestamp"
     }
 
-    Update-NormalizedAffectedSoftwareLookup -Lookups $lookups
+    $lookupRecord = $null
+    if (-not $consumeLookups) {
+        Update-NormalizedAffectedSoftwareLookup -Lookups $lookups
+        $lookupRecord = ConvertTo-NormalizedLookupRecord -Lookups $lookups -NoTagsIdx $noTagsIdx
+    }
 
     return @{
-        Lookups = (ConvertTo-NormalizedLookupRecord -Lookups $lookups -NoTagsIdx $noTagsIdx)
+        Lookups = $lookupRecord
+        LookupsConsumed = $consumeLookups
+        DeviceCount = $deviceCount
+        CveCount = $cveCount
+        SoftwareCount = $softwareCount
+        VendorCount = $vendorCount
         Quality = [PSCustomObject]@{
             FirstLastSwappedCount = $firstLastSwappedCount
         }

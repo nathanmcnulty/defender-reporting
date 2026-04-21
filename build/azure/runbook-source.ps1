@@ -487,7 +487,7 @@ function Get-BlobList {
     $headers = Get-BlobHeader -StorageToken $StorageToken
 
     try {
-        $webResponse = Invoke-WebRequest -Uri $uri -Headers $headers -Method Get
+        $webResponse = Invoke-WebRequestWithRetry -Uri $uri -Headers $headers -Method Get
         $xmlContent = $webResponse.Content.TrimStart([char]0xFEFF)
         $xmlDoc = [System.Xml.XmlDocument]::new()
         $xmlDoc.LoadXml($xmlContent)
@@ -540,7 +540,7 @@ function Get-BlobContent {
         New-Item -Path $parentDir -ItemType Directory -Force | Out-Null
     }
 
-    Invoke-RestMethod -Uri $uri -Headers $headers -Method Get -OutFile $DestinationPath
+    Invoke-WebRequestWithRetry -Uri $uri -Headers $headers -Method Get -OutFile $DestinationPath | Out-Null
 }
 
 function Get-BlobTextContent {
@@ -615,7 +615,7 @@ function Set-BlobContent {
         $headers['x-ms-access-tier'] = $AccessTier
     }
 
-    [void](Invoke-RestMethod -Uri $uri -Method Put -Headers $headers -InFile $SourcePath -ContentType $ContentType)
+    Invoke-WebRequestWithRetry -Uri $uri -Method Put -Headers $headers -InFile $SourcePath -ContentType $ContentType | Out-Null
 }
 
 function Get-DashboardBlobContentType {
@@ -655,7 +655,7 @@ function Test-BlobExistence {
     $headers = Get-BlobHeader -StorageToken $StorageToken
 
     try {
-        Invoke-WebRequest -Uri $uri -Headers $headers -Method Head -ErrorAction Stop | Out-Null
+        Invoke-WebRequestWithRetry -Uri $uri -Headers $headers -Method Head | Out-Null
         return $true
     }
     catch {
@@ -685,7 +685,7 @@ function Remove-Blob {
     $headers = Get-BlobHeader -StorageToken $StorageToken
 
     try {
-        Invoke-WebRequest -Uri $uri -Headers $headers -Method Delete -ErrorAction Stop | Out-Null
+        Invoke-WebRequestWithRetry -Uri $uri -Headers $headers -Method Delete | Out-Null
     }
     catch {
         $statusCode = Get-BlobErrorStatusCode -ErrorRecord $_
@@ -1281,7 +1281,7 @@ try {
         if ($skipObservedWindowMerge) {
             Write-Output "Synthetic manifest detected. Skipping observed-window merge for stress normalization."
         }
-        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge
+        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose
         $machines = $null
         $advancedHuntingData = $null
         $advancedHuntingDeviceUsers = $null
@@ -1290,8 +1290,8 @@ try {
         # Step 3: Prepare payload for embedding
         Write-Output "Preparing data for embedding..."
         $vulnCount = $normalizedResult.VulnCount
-        $deviceCount = $normalizedResult.Lookups.devices.Count
-        $cveCount = $normalizedResult.Lookups.cves.Count
+        $deviceCount = [int]$normalizedResult.DeviceCount
+        $cveCount = [int]$normalizedResult.CveCount
         if (-not [string]::IsNullOrWhiteSpace($normalizedResult.VulnsPath) -and (Test-Path -LiteralPath $normalizedResult.VulnsPath -PathType Leaf)) {
             $vulnsFileSize = [math]::Round((Get-Item $normalizedResult.VulnsPath).Length / 1KB, 1)
             Write-Output "  Vulns JSON file: ${vulnsFileSize}KB"

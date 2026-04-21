@@ -792,6 +792,40 @@ function Test-ConvertToNormalizedDataPreservesOptionalNvdFallback {
     }
 }
 
+function Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-consume-lookups-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'consume-lookups-001' -CveId 'CVE-2026-0151' -SnapshotDate '2026-03-20' -Version '2.0.0'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+
+        $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -PayloadOutputPath $payloadPath -Machines @{} -AdvancedHuntingData @{} -ConsumeLookupsOnPayloadClose
+        $payload = Read-GzipTextFile -Path $payloadPath | ConvertFrom-Json -Depth 100
+
+        Assert-True ([string]::IsNullOrWhiteSpace([string]$result.VulnsPath)) 'Expected consuming payload mode not to materialize a vuln rows file.'
+        Assert-True ([string]$result.PayloadPath -eq $payloadPath) 'Expected consuming payload mode to return the payload path.'
+        Assert-True ($result.LookupsConsumed -eq $true) 'Expected consuming payload mode to report that lookups were released during payload close.'
+        Assert-True ($null -eq $result.Lookups) 'Expected consuming payload mode not to retain the lookup record.'
+        Assert-True ($result.DeviceCount -eq 1) 'Expected consuming payload mode to preserve the device count summary.'
+        Assert-True ($result.CveCount -eq 1) 'Expected consuming payload mode to preserve the CVE count summary.'
+        Assert-True ((Get-CompressedPayloadVulnCount -Path $payloadPath) -eq $result.VulnCount) 'Expected consuming payload mode to keep the payload row count aligned with processed vulnerabilities.'
+        Assert-True ($payload.lookups.devices.Count -eq 1) 'Expected consuming payload mode to still serialize device lookups into the payload.'
+        Assert-True ($payload.lookups.cves.Count -eq 1) 'Expected consuming payload mode to still serialize CVE lookups into the payload.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap {
     [CmdletBinding()]
     param()
@@ -1817,6 +1851,8 @@ Test-ConvertToNormalizedDataWritesDirectPayload
 Write-Output '  Direct payload normalization checks passed.'
 Test-ConvertToNormalizedDataPreservesOptionalNvdFallback
 Write-Output '  Optional NVD fallback normalization checks passed.'
+Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose
+Write-Output '  Consuming payload-close lookup checks passed.'
 Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
 Write-Output '  Advanced Hunting device-user normalization checks passed.'
 Test-WriteCombinedPayloadGzipPreservesColumnPayload

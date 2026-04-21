@@ -408,7 +408,19 @@ function Invoke-WebRequestWithRetry {
         [string]$Uri,
 
         [Parameter(Mandatory = $false)]
+        [string]$Method = 'Get',
+
+        [Parameter(Mandatory = $false)]
+        [hashtable]$Headers,
+
+        [Parameter(Mandatory = $false)]
         [string]$OutFile,
+
+        [Parameter(Mandatory = $false)]
+        [string]$InFile,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ContentType,
 
         [Parameter(Mandatory = $false)]
         [int]$MaxRetries = 3,
@@ -417,17 +429,31 @@ function Invoke-WebRequestWithRetry {
         [int]$InitialDelayMs = 1000,
 
         [Parameter(Mandatory = $false)]
-        [double]$BackoffMultiplier = 2.0
+        [double]$BackoffMultiplier = 2.0,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 3600)]
+        [int]$TimeoutSec
     )
 
     $attempt = 0
     $delay = $InitialDelayMs
+    $requestLabel = if ($Method -eq 'Get' -and $OutFile) {
+        'Download'
+    }
+    else {
+        'HTTP request'
+    }
 
     while ($true) {
         try {
             $attempt++
-            $webParams = @{ Uri = $Uri; ErrorAction = 'Stop' }
+            $webParams = @{ Uri = $Uri; Method = $Method; ErrorAction = 'Stop' }
+            if ($Headers) { $webParams['Headers'] = $Headers }
             if ($OutFile) { $webParams['OutFile'] = $OutFile }
+            if ($InFile) { $webParams['InFile'] = $InFile }
+            if ($ContentType) { $webParams['ContentType'] = $ContentType }
+            if ($PSBoundParameters.ContainsKey('TimeoutSec')) { $webParams['TimeoutSec'] = $TimeoutSec }
 
             return Invoke-WebRequest @webParams
         }
@@ -462,7 +488,7 @@ function Invoke-WebRequestWithRetry {
                 $delay
             }
 
-            Write-Warning "Download failed (attempt $attempt/$MaxRetries, HTTP $statusCode): $($_.Exception.Message). Retrying in $([math]::Round($waitMs / 1000, 1))s..."
+            Write-Warning "$requestLabel failed (attempt $attempt/$MaxRetries, HTTP $statusCode): $($_.Exception.Message). Retrying in $([math]::Round($waitMs / 1000, 1))s..."
             Start-Sleep -Milliseconds $waitMs
             $delay = [int]($delay * $BackoffMultiplier)
         }

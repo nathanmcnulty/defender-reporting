@@ -491,6 +491,7 @@ function Write-NdjsonRecordsFile {
     $fileStream = $null
     $gzipStream = $null
     $writer = $null
+    $jsonWriter = $null
     try {
         if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
             $fileStream = [System.IO.File]::Create($Path)
@@ -501,27 +502,20 @@ function Write-NdjsonRecordsFile {
             $writer = [System.IO.StreamWriter]::new($Path, $false, [System.Text.UTF8Encoding]::new($false))
         }
 
+        $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($writer)
+        $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
+
         foreach ($record in $Records) {
             if ($null -eq $record) { continue }
 
-            $lineWriter = $null
-            $jsonWriter = $null
-            try {
-                $lineWriter = [System.IO.StringWriter]::new([System.Globalization.CultureInfo]::InvariantCulture)
-                $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($lineWriter)
-                $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
-                Write-JsonValueToWriter -Writer $jsonWriter -Value $record
-                $jsonWriter.Flush()
-                $writer.WriteLine($lineWriter.ToString())
-            }
-            finally {
-                if ($jsonWriter) { $jsonWriter.Close() }
-                elseif ($lineWriter) { $lineWriter.Dispose() }
-            }
+            Write-JsonValueToWriter -Writer $jsonWriter -Value $record
+            $jsonWriter.Flush()
+            $writer.WriteLine()
         }
     }
     finally {
-        if ($writer) { $writer.Dispose() }
+        if ($jsonWriter) { $jsonWriter.Close() }
+        elseif ($writer) { $writer.Dispose() }
         elseif ($gzipStream) { $gzipStream.Dispose() }
         elseif ($fileStream) { $fileStream.Dispose() }
     }

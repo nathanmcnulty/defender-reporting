@@ -480,6 +480,21 @@ h1 {
     color: var(--color-text-muted);
 }
 
+.filter-popover-date-field input[aria-invalid="true"] {
+    border-color: var(--color-critical);
+    box-shadow: 0 0 0 1px rgba(209, 52, 56, 0.18);
+}
+
+.filter-popover-date-validation {
+    margin-top: var(--spacing-sm);
+    color: var(--color-critical);
+    font-size: var(--font-size-sm);
+}
+
+.filter-popover-date-validation:empty {
+    display: none;
+}
+
 .filter-popover-empty {
     padding: var(--spacing-md);
     color: var(--color-text-muted);
