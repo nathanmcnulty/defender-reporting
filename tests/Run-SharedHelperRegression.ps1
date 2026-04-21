@@ -1112,7 +1112,7 @@ function Test-NormalizedVulnColumnCacheRefreshesInventoryColumn {
     }
 }
 
-function Test-AdvancedHuntingBundleMatchesDedicatedReaders {
+function Test-AdvancedHuntingBundleMatchesDedicatedReaderData {
     [CmdletBinding()]
     param()
 
@@ -2031,7 +2031,7 @@ Test-DashboardSplitAssetsGenerationAndValidation
 Write-Output '  Dashboard split-assets generation and validation checks passed.'
 Test-DashboardDualPackagingGenerationAndValidation
 Write-Output '  Dashboard dual packaging generation and validation checks passed.'
-Test-AdvancedHuntingBundleMatchesDedicatedReaders
+Test-AdvancedHuntingBundleMatchesDedicatedReaderData
 Write-Output '  Advanced Hunting bundle reader checks passed.'
 Test-VulnContentStoreRoundTrip
 Write-Output '  Vulnerability content store round-trip checks passed.'

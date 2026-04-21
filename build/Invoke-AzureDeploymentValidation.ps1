@@ -1437,6 +1437,10 @@ else {
     Resolve-ResourceGroupForResource -Name $AutomationAccountName -ResourceType 'Microsoft.Automation/automationAccounts'
 }
 $effectiveDashboardDeliveryMode = Resolve-DashboardDeliveryMode -AutomationAccountName $AutomationAccountName -FunctionAppName $FunctionAppName -SubscriptionId $subscriptionId -AutomationResourceGroup $automationResourceGroup -FunctionResourceGroup $functionResourceGroup -RequestedDashboardDeliveryMode $DashboardDeliveryMode
+$resolvedValidationDatasetPath = $null
+if ($SkipMdePermissions) {
+    $resolvedValidationDatasetPath = Resolve-FunctionExecutionDatasetPath -RequestedPath $FunctionExecutionDatasetPath
+}
 
 Write-ValidationLogLine -Message 'Regenerating Azure deployment artifacts locally...' -ForegroundColor Cyan
 Invoke-TimestampedCommand -FailureDescription 'Runbook build' -ScriptBlock { & (Join-Path $buildRoot 'azure\Build-Runbook.ps1') }
@@ -1446,6 +1450,10 @@ $setupCommonParameters = @{
     SkipMdePermissions = $SkipMdePermissions
     ValidationTimeoutSeconds = $ValidationTimeoutSeconds
     DashboardDeliveryMode = $effectiveDashboardDeliveryMode
+}
+
+if (-not [string]::IsNullOrWhiteSpace($resolvedValidationDatasetPath)) {
+    $setupCommonParameters.ValidationDatasetPath = $resolvedValidationDatasetPath
 }
 
 if ($ResourceGroupName) {
@@ -1465,13 +1473,8 @@ if (-not $SkipFunctionExecution) {
         throw "STORAGE_ACCOUNT_NAME is not configured on Function App '$FunctionAppName'."
     }
 
-    $resolvedFunctionExecutionDatasetPath = $null
-    if ($SkipMdePermissions) {
-        $resolvedFunctionExecutionDatasetPath = Resolve-FunctionExecutionDatasetPath -RequestedPath $FunctionExecutionDatasetPath
-    }
-
     Write-ValidationLogLine -Message 'Validating Function App execution...' -ForegroundColor Cyan
-    $functionExecutionResult = Invoke-FunctionExecutionValidation -FunctionAppName $FunctionAppName -FunctionResourceGroup $functionResourceGroup -StorageAccountName $storageAccountName -DashboardDeliveryMode $effectiveDashboardDeliveryMode -TimeoutMinutes $FunctionExecutionTimeoutMinutes -UseExistingExportsOnly:$SkipMdePermissions -DatasetPath $resolvedFunctionExecutionDatasetPath
+    $functionExecutionResult = Invoke-FunctionExecutionValidation -FunctionAppName $FunctionAppName -FunctionResourceGroup $functionResourceGroup -StorageAccountName $storageAccountName -DashboardDeliveryMode $effectiveDashboardDeliveryMode -TimeoutMinutes $FunctionExecutionTimeoutMinutes -UseExistingExportsOnly:$SkipMdePermissions -DatasetPath $resolvedValidationDatasetPath
 }
 
 $result = [PSCustomObject]@{

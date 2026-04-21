@@ -22,7 +22,7 @@ param(
     [string]$DashboardDeliveryMode = 'SelfContained',
 
     [Parameter(Mandatory = $false)]
-    [switch]$UseExistingExportsOnly = $true,
+    [switch]$UseExistingExportsOnly,
 
     [Parameter(Mandatory = $false)]
     [int]$ExpectedTotalRows = 1500000,
@@ -44,6 +44,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+
+$script:AutomationAccountName = $AutomationAccountName
+$script:AutomationResourceGroup = $AutomationResourceGroup
+$script:RunbookName = $RunbookName
+$script:StorageAccountName = $StorageAccountName
+$script:DashboardDeliveryMode = $DashboardDeliveryMode
+$script:UseExistingExportsOnly = if ($PSBoundParameters.ContainsKey('UseExistingExportsOnly')) { [bool]$UseExistingExportsOnly } else { $true }
+$script:ExpectedTotalRows = $ExpectedTotalRows
+$script:PollIntervalSeconds = $PollIntervalSeconds
 
 function Invoke-AzCli {
     [CmdletBinding()]
@@ -131,20 +140,20 @@ function Build-AndDeploy-Runbook {
     $artifactPath = Join-Path -Path $RepoPath -ChildPath 'azure/Invoke-DashboardPipeline.ps1'
     Invoke-AzCli -Arguments @(
         'automation', 'runbook', 'replace-content',
-        '--automation-account-name', $AutomationAccountName,
-        '--resource-group', $AutomationResourceGroup,
-        '--name', $RunbookName,
+        '--automation-account-name', $script:AutomationAccountName,
+        '--resource-group', $script:AutomationResourceGroup,
+        '--name', $script:RunbookName,
         '--content', ("@{0}" -f $artifactPath)
     ) | Out-Null
     Invoke-AzCli -Arguments @(
         'automation', 'runbook', 'publish',
-        '--automation-account-name', $AutomationAccountName,
-        '--resource-group', $AutomationResourceGroup,
-        '--name', $RunbookName
+        '--automation-account-name', $script:AutomationAccountName,
+        '--resource-group', $script:AutomationResourceGroup,
+        '--name', $script:RunbookName
     ) | Out-Null
 }
 
-function Upload-TemplatesForRunbook {
+function Publish-RunbookTemplateBundle {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -158,20 +167,24 @@ function Upload-TemplatesForRunbook {
 }
 
 function Start-RunbookBenchmark {
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess)]
     [OutputType([pscustomobject])]
     param()
 
-    $parameterPairs = @("DashboardDeliveryMode=$DashboardDeliveryMode")
-    if ($UseExistingExportsOnly) {
+    if (-not $PSCmdlet.ShouldProcess(("{0}/{1}" -f $script:AutomationAccountName, $script:RunbookName), 'Start Azure Automation runbook benchmark job')) {
+        return $null
+    }
+
+    $parameterPairs = @("DashboardDeliveryMode=$script:DashboardDeliveryMode")
+    if ($script:UseExistingExportsOnly) {
         $parameterPairs += 'UseExistingExportsOnly=true'
     }
 
     $arguments = @(
         'automation', 'runbook', 'start',
-        '--automation-account-name', $AutomationAccountName,
-        '--resource-group', $AutomationResourceGroup,
-        '--name', $RunbookName,
+        '--automation-account-name', $script:AutomationAccountName,
+        '--resource-group', $script:AutomationResourceGroup,
+        '--name', $script:RunbookName,
         '--parameters'
     )
     $arguments += $parameterPairs
@@ -196,14 +209,14 @@ function Get-RunbookJobStatus {
 
     return (Invoke-AzCli -Arguments @(
         'automation', 'job', 'show',
-        '--automation-account-name', $AutomationAccountName,
-        '--resource-group', $AutomationResourceGroup,
+        '--automation-account-name', $script:AutomationAccountName,
+        '--resource-group', $script:AutomationResourceGroup,
         '--name', $JobName,
         '-o', 'json'
     ) -ExpectJson)
 }
 
-function Get-RunbookEvents {
+function Get-RunbookEventList {
     [CmdletBinding()]
     [OutputType([object[]])]
     param(
@@ -217,7 +230,7 @@ function Get-RunbookEvents {
         [datetime]$NotBeforeUtc
     )
 
-    $uri = "/subscriptions/$SubscriptionId/resourceGroups/$AutomationResourceGroup/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/$JobName/streams?api-version=2019-06-01"
+    $uri = "/subscriptions/$SubscriptionId/resourceGroups/$script:AutomationResourceGroup/providers/Microsoft.Automation/automationAccounts/$script:AutomationAccountName/jobs/$JobName/streams?api-version=2019-06-01"
     $payload = Invoke-AzCli -Arguments @('rest', '--method', 'get', '--url', $uri, '-o', 'json') -ExpectJson
     $events = [System.Collections.Generic.List[object]]::new()
 
@@ -372,7 +385,7 @@ if (-not $SkipDeployRunbook) {
 
 if (-not $SkipTemplateUpload) {
     Write-Host 'Uploading templates for the runbook benchmark...' -ForegroundColor Yellow
-    Upload-TemplatesForRunbook -RepoPath $repoFullPath -StorageAccountName $StorageAccountName
+    Publish-RunbookTemplateBundle -RepoPath $repoFullPath -StorageAccountName $script:StorageAccountName
 }
 
 $runbookState = Start-RunbookBenchmark
@@ -380,16 +393,16 @@ Write-Host ("Started runbook job {0}" -f $runbookState.name) -ForegroundColor Ye
 
 $runbookJob = $null
 do {
-    Start-Sleep -Seconds $PollIntervalSeconds
+    Start-Sleep -Seconds $script:PollIntervalSeconds
     $runbookJob = Get-RunbookJobStatus -JobName $runbookState.name
     Write-Host ("Runbook status: {0}" -f [string]$runbookJob.status) -ForegroundColor DarkGray
 }
 while ($runbookJob.status -notin @('Completed', 'Failed', 'Stopped', 'Suspended'))
 
-$runbookEvents = @(Get-RunbookEvents -JobName $runbookState.name -SubscriptionId ([string]$subscription.id) -NotBeforeUtc $runbookState.creationTimeUtc)
+$runbookEvents = @(Get-RunbookEventList -JobName $runbookState.name -SubscriptionId ([string]$subscription.id) -NotBeforeUtc $runbookState.creationTimeUtc)
 $runbookCompletedUtc = ([datetimeoffset]$runbookJob.lastModifiedTime).UtcDateTime
 $elapsedSeconds = [math]::Round((New-TimeSpan -Start $runbookState.creationTimeUtc -End $runbookCompletedUtc).TotalSeconds, 2)
-$runbookSummary = Get-PipelineEventSummary -Events $runbookEvents -TotalElapsedSeconds $elapsedSeconds -TotalRows $ExpectedTotalRows -TerminalStatus ([string]$runbookJob.status)
+$runbookSummary = Get-PipelineEventSummary -Events $runbookEvents -TotalElapsedSeconds $elapsedSeconds -TotalRows $script:ExpectedTotalRows -TerminalStatus ([string]$runbookJob.status)
 
 $repoCommit = (git -C $repoFullPath rev-parse HEAD).Trim()
 $repoBranch = (git -C $repoFullPath branch --show-current).Trim()
@@ -415,9 +428,9 @@ $result = [ordered]@{
         terminal_status = [string]$runbookJob.status
     }
     parameters = [ordered]@{
-        dashboard_delivery_mode = $DashboardDeliveryMode
-        use_existing_exports_only = ($UseExistingExportsOnly -eq $true)
-        expected_total_rows = $ExpectedTotalRows
+        dashboard_delivery_mode = $script:DashboardDeliveryMode
+        use_existing_exports_only = $script:UseExistingExportsOnly
+        expected_total_rows = $script:ExpectedTotalRows
     }
     runbook_events = @($runbookEvents)
 }
