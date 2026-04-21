@@ -85,15 +85,23 @@ Either compute type works with the Container App:
 
 `-SecurityGroup` accepts either an Entra object ID or a display name.
 
-## Hosted split-assets mode in Azure
+## Hosted and dual packaging mode in Azure
 
 `Setup-AzureResources.ps1` resolves the Azure dashboard packaging mode automatically:
 
 - With `-IncludeContainerApp`, the default is `Hosted`.
 - Without `-IncludeContainerApp`, the default is `SelfContained`.
 - Use `-DashboardDeliveryMode` to override either default.
+- `Dual` publishes both the self-contained dashboard and a hosted split-assets variant from the same normalized payload.
 
 If you want to use the split-assets hosted dashboard in Azure, serve the hosted HTML and its sibling `.assets/` directory from the same HTTPS origin. That avoids browser cross-origin requests and keeps Easy Auth in front of the whole site.
+
+When Azure runs in `Dual` mode, the dashboards container keeps both artifacts:
+
+- `VulnerabilityDashboard.html` for the self-contained direct-open artifact.
+- `VulnerabilityDashboard.Hosted.html` plus `VulnerabilityDashboard.Hosted.assets/` for hosted delivery.
+
+If you provision a Container App with `Dual`, the Container App serves the hosted variant while the self-contained HTML remains available in blob storage for download or other non-hosted consumers.
 
 Using blob CORS alone is not sufficient for the current secured setup:
 
@@ -115,7 +123,7 @@ For local validation of the hosted split-assets build, use a local HTTP server i
 | `-Location` | No | Azure region, default `westus2` |
 | `-SkipMdePermissions` | No | Skip automatic MDE app role assignment |
 | `-SkipValidation` | No | Skip the post-provisioning validation run |
-| `-DashboardDeliveryMode` | No | `Auto`, `SelfContained`, or `Hosted`; `Auto` chooses `Hosted` with `-IncludeContainerApp`, otherwise `SelfContained` |
+| `-DashboardDeliveryMode` | No | `Auto`, `SelfContained`, `Hosted`, or `Dual`; `Auto` chooses `Hosted` with `-IncludeContainerApp`, otherwise `SelfContained` |
 | `-IncludeContainerApp` | No | Deploy the Entra-protected Container App |
 | `-SecurityGroup` | With `-IncludeContainerApp` | Group allowed to access the Container App |
 | `-ContainerAppName` | No | Override the derived Container App name |

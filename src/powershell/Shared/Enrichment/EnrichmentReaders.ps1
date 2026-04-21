@@ -1,6 +1,364 @@
 # Shared enrichment readers used by dashboard generation, validation, and Azure
 # packaging outputs.
 
+function Resolve-AdvancedHuntingBundleSourceFiles {
+    [CmdletBinding()]
+    [OutputType([System.IO.FileInfo[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
+    $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
+
+    if ((-not (Test-Path -LiteralPath $currentPath -PathType Leaf)) -and (Test-Path -LiteralPath $legacyCurrentPath -PathType Leaf)) {
+        $currentPath = $legacyCurrentPath
+    }
+
+    if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
+        return @((Get-Item -LiteralPath $currentPath))
+    }
+
+    return @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File -ErrorAction SilentlyContinue |
+        Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
+        Sort-Object Name -Descending)
+}
+
+function ConvertTo-AdvancedHuntingBundleStringArray {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return @()
+    }
+
+    $values = [System.Collections.Generic.List[string]]::new()
+    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        foreach ($item in $Value) {
+            if ($null -eq $item) { continue }
+            $text = [string]$item
+            if (-not [string]::IsNullOrWhiteSpace($text)) {
+                $values.Add($text)
+            }
+        }
+    }
+    else {
+        $text = [string]$Value
+        if (-not [string]::IsNullOrWhiteSpace($text)) {
+            $values.Add($text)
+        }
+    }
+
+    return [string[]]$values.ToArray()
+}
+
+function ConvertTo-AdvancedHuntingBundleDescriptionValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [string]) {
+        return $Value
+    }
+
+    $parts = @(ConvertTo-AdvancedHuntingBundleStringArray -Value $Value)
+    if ($parts.Count -eq 0) {
+        return $null
+    }
+
+    return ($parts -join "`n")
+}
+
+function ConvertTo-AdvancedHuntingBundleNullableBoolean {
+    [CmdletBinding()]
+    [OutputType([Nullable[bool]])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [bool]) {
+        return $Value
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    switch -Regex ($text.Trim().ToLowerInvariant()) {
+        '^(true|1|yes)$' { return $true }
+        '^(false|0|no)$' { return $false }
+    }
+
+    return $null
+}
+
+function Add-AdvancedHuntingBundleLoggedOnUserValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.List[string]]$Values,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.Generic.HashSet[string]]$Seen
+    )
+
+    if ($null -eq $Value) {
+        return
+    }
+
+    if ($Value -is [string]) {
+        $text = $Value.Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return
+        }
+
+        if ((($text.StartsWith('[') -and $text.EndsWith(']')) -or ($text.StartsWith('{') -and $text.EndsWith('}')))) {
+            try {
+                $parsedValue = $text | ConvertFrom-Json -Depth 20
+                Add-AdvancedHuntingBundleLoggedOnUserValue -Value $parsedValue -Values $Values -Seen $Seen
+                return
+            }
+            catch {
+                Write-Verbose ("Falling back to raw LoggedOnUsers text after JSON parse failed: {0}" -f $_.Exception.Message)
+            }
+        }
+
+        if ($Seen.Add($text)) {
+            $Values.Add($text)
+        }
+        return
+    }
+
+    if ($Value -is [pscustomobject] -or $Value -is [System.Collections.IDictionary]) {
+        $propertyBag = $Value.PSObject.Properties
+        $upn = [string]$propertyBag['UserPrincipalName']?.Value
+        $domainName = [string]$propertyBag['DomainName']?.Value
+        $accountName = [string]$propertyBag['AccountName']?.Value
+        $userName = [string]$propertyBag['UserName']?.Value
+        $displayName = [string]$propertyBag['Name']?.Value
+
+        $resolvedName = $null
+        if (-not [string]::IsNullOrWhiteSpace($upn)) {
+            $resolvedName = $upn.Trim()
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($accountName)) {
+            $resolvedName = if (-not [string]::IsNullOrWhiteSpace($domainName)) {
+                $domainName.Trim() + '\' + $accountName.Trim()
+            }
+            else {
+                $accountName.Trim()
+            }
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($userName)) {
+            $resolvedName = if (-not [string]::IsNullOrWhiteSpace($domainName)) {
+                $domainName.Trim() + '\' + $userName.Trim()
+            }
+            else {
+                $userName.Trim()
+            }
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($displayName)) {
+            $resolvedName = $displayName.Trim()
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($resolvedName)) {
+            if ($Seen.Add($resolvedName)) {
+                $Values.Add($resolvedName)
+            }
+            return
+        }
+
+        foreach ($property in $propertyBag) {
+            Add-AdvancedHuntingBundleLoggedOnUserValue -Value $property.Value -Values $Values -Seen $Seen
+        }
+        return
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
+        foreach ($item in $Value) {
+            Add-AdvancedHuntingBundleLoggedOnUserValue -Value $item -Values $Values -Seen $Seen
+        }
+        return
+    }
+
+    $fallbackText = [string]$Value
+    if (-not [string]::IsNullOrWhiteSpace($fallbackText) -and $Seen.Add($fallbackText)) {
+        $Values.Add($fallbackText)
+    }
+}
+
+function ConvertTo-AdvancedHuntingBundleLoggedOnUserList {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    $values = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Add-AdvancedHuntingBundleLoggedOnUserValue -Value $Value -Values $values -Seen $seen
+    return [string[]]$values.ToArray()
+}
+
+function Read-AdvancedHuntingBundle {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$IncludeDeviceUsers,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$IncludeInventoryData
+    )
+
+    return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
+
+        Write-Information "Reading Advanced Hunting bundle data from $Path..." -InformationAction Continue
+
+        $ahData = @{}
+        $deviceUsers = @{}
+        $inventoryData = @{}
+        $parseErrors = 0
+        $sourceFiles = @(Resolve-AdvancedHuntingBundleSourceFiles -Path $Path)
+
+        if ($sourceFiles.Count -eq 0) {
+            Write-Information '  No Advanced Hunting data files found. Bundle outputs will be empty.' -InformationAction Continue
+            return [PSCustomObject]@{
+                AdvancedHuntingData = @{}
+                DeviceUsers = @{}
+                InventoryData = @{}
+            }
+        }
+
+        if ($sourceFiles.Count -eq 1) {
+            Write-Information "  Using $($sourceFiles[0].Name)" -InformationAction Continue
+        }
+        else {
+            Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
+        }
+
+        foreach ($file in $sourceFiles) {
+            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
+            foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
+                try {
+                    $recordType = Get-AdvancedHuntingRecordType -Record $record
+
+                    if ($IncludeInventoryData -and $recordType -eq 'Inventory') {
+                        $inventoryKey = Get-AdvancedHuntingInventoryMatchKey `
+                            -DeviceId ([string]$record.PSObject.Properties['DeviceId']?.Value) `
+                            -SoftwareVendor ([string]$record.PSObject.Properties['SoftwareVendor']?.Value) `
+                            -SoftwareName ([string]$record.PSObject.Properties['SoftwareName']?.Value) `
+                            -SoftwareVersion ([string]$record.PSObject.Properties['SoftwareVersion']?.Value)
+                        if ([string]::IsNullOrWhiteSpace($inventoryKey) -or $inventoryData.ContainsKey($inventoryKey)) {
+                            continue
+                        }
+
+                        $productCodeCpe = [string]$record.PSObject.Properties['ProductCodeCpe']?.Value
+                        $endOfSupportStatus = [string]$record.PSObject.Properties['EndOfSupportStatus']?.Value
+                        $endOfSupportDate = Convert-ToYmdDate -DateValue $record.PSObject.Properties['EndOfSupportDate']?.Value
+
+                        if ([string]::IsNullOrWhiteSpace($productCodeCpe) -and [string]::IsNullOrWhiteSpace($endOfSupportStatus) -and [string]::IsNullOrWhiteSpace($endOfSupportDate)) {
+                            continue
+                        }
+
+                        $inventoryData[$inventoryKey] = @{
+                            ProductCodeCpe = if ([string]::IsNullOrWhiteSpace($productCodeCpe)) { $null } else { $productCodeCpe }
+                            EndOfSupportStatus = if ([string]::IsNullOrWhiteSpace($endOfSupportStatus)) { $null } else { $endOfSupportStatus }
+                            EndOfSupportDate = $endOfSupportDate
+                        }
+                        continue
+                    }
+
+                    if ($IncludeDeviceUsers -and $recordType -eq 'DeviceUsers') {
+                        $deviceId = [string]$record.PSObject.Properties['DeviceId']?.Value
+                        if ([string]::IsNullOrWhiteSpace($deviceId) -or $deviceUsers.ContainsKey($deviceId)) {
+                            continue
+                        }
+
+                        $loggedOnUsers = @(ConvertTo-AdvancedHuntingBundleLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
+                        if ($loggedOnUsers.Count -gt 0) {
+                            $deviceUsers[$deviceId] = @($loggedOnUsers)
+                        }
+                        continue
+                    }
+
+                    $cveId = [string]$record.PSObject.Properties['CveId']?.Value
+                    if (-not [string]::IsNullOrWhiteSpace($cveId) -and -not $ahData.ContainsKey($cveId)) {
+                        $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
+                        $rawDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
+                        $rawAffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
+                        $affectedSoftware = @(ConvertTo-AdvancedHuntingBundleStringArray -Value $rawAffectedSoftware)
+                        $ahData[$cveId] = @{
+                            PublishedDate = Convert-ToYmdDate -DateValue $pdRaw
+                            VulnerabilityDescription = ConvertTo-AdvancedHuntingBundleDescriptionValue -Value $rawDescription
+                            EpssScore = $record.PSObject.Properties['EpssScore']?.Value
+                            AffectedSoftware = if ($affectedSoftware.Count -gt 0) { @($affectedSoftware) } else { $null }
+                            IsExploitAvailable = ConvertTo-AdvancedHuntingBundleNullableBoolean -Value $record.PSObject.Properties['IsExploitAvailable']?.Value
+                        }
+                    }
+                }
+                catch {
+                    $parseErrors++
+                    if ($parseErrors -le 5) {
+                        Write-Warning "Failed to process Advanced Hunting bundle record in $($file.Name): $_"
+                    }
+                }
+            }
+        }
+
+        if ($parseErrors -gt 0) {
+            Write-Warning "Total bundle parse errors: $parseErrors"
+        }
+
+        Write-Information "  Bundle loaded $($ahData.Count) unique CVE(s)" -InformationAction Continue
+        if ($IncludeDeviceUsers) {
+            Write-Information "  Bundle loaded $($deviceUsers.Count) device-user record(s)" -InformationAction Continue
+        }
+        if ($IncludeInventoryData) {
+            Write-Information "  Bundle loaded $($inventoryData.Count) inventory tuple(s)" -InformationAction Continue
+        }
+
+        return [PSCustomObject]@{
+            AdvancedHuntingData = $ahData
+            DeviceUsers = $deviceUsers
+            InventoryData = $inventoryData
+        }
+    }
+}
+
 function Read-AdvancedHuntingData {
     [CmdletBinding()]
     [OutputType([hashtable])]

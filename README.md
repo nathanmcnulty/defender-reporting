@@ -60,7 +60,20 @@ $secret = Read-Host -AsSecureString -Prompt 'Enter client secret'
 
 Recommended convention: keep `VulnerabilityDashboard.html` as the direct-open artifact, and use `VulnerabilityDashboard.Hosted.html` for the hosted build. The hosted build writes a sibling `VulnerabilityDashboard.Hosted.assets\` directory containing the dashboard CSS, JavaScript, libraries, and compressed payload.
 
-4. Re-run validation later without regenerating the HTML.
+4. Generate both outputs from one normalized payload when you need to support hosted and non-hosted consumers at the same time.
+
+```powershell
+.\Generate-VulnerabilityDashboard.ps1 `
+    -DirectoryPath .\exports `
+    -OutputPath .\VulnerabilityDashboard.html `
+    -ExportMachineData $false `
+    -DualPackage `
+    -Validate
+```
+
+This writes `VulnerabilityDashboard.html` plus `VulnerabilityDashboard.Hosted.html` and `VulnerabilityDashboard.Hosted.assets\` from the same normalized payload.
+
+5. Re-run validation later without regenerating the HTML.
 
 ```powershell
 .\Generate-VulnerabilityDashboard.ps1 `
@@ -69,7 +82,7 @@ Recommended convention: keep `VulnerabilityDashboard.html` as the direct-open ar
     -ValidateOnly
 ```
 
-5. Split normalization, packaging, and validation when you want reusable payload artifacts or cheaper repeat validation.
+6. Split normalization, packaging, and validation when you want reusable payload artifacts or cheaper repeat validation.
 
 ```powershell
 # Materialize a reusable normalized payload plus manifest
@@ -85,7 +98,8 @@ Recommended convention: keep `VulnerabilityDashboard.html` as the direct-open ar
     -ExportMachineData $false `
     -PackageOnly `
     -NormalizedPayloadInputPath .\.local\payload\dashboard-payload.json.gz `
-    -OutputPath .\VulnerabilityDashboard.html
+    -OutputPath .\VulnerabilityDashboard.html `
+    -DualPackage
 ```
 
 `-PackageOnly` writes a sibling validation sidecar next to the HTML. After one successful full large-dataset semantic validation, later `-ValidateOnly` runs can reuse a versioned attestation when the dashboard still embeds the exact same normalized payload bytes. Use `-ForceFullValidation` when you explicitly want to bypass that fast-path and replay the full semantic audit.
@@ -94,15 +108,16 @@ For managed identity auth, Azure provisioning, and GitHub workflow setup, use th
 
 ## Dashboard packaging modes
 
-`Generate-VulnerabilityDashboard.ps1` supports two delivery modes:
+`Generate-VulnerabilityDashboard.ps1` supports three delivery modes:
 
 - Default: a self-contained HTML dashboard that can be opened directly from disk and works well for offline or file-share workflows.
 - `-SplitAssets`: a hosted variant that writes relative asset files beside the HTML so browsers can cache the CSS, JavaScript, libraries, and compressed payload independently.
+- `-DualPackage`: writes both outputs from one normalized payload so offline users can keep the self-contained HTML while hosted users get the split-assets variant.
 
 Recommended project convention:
 
 - Commit `VulnerabilityDashboard.html` as the canonical repo artifact.
-- Generate `VulnerabilityDashboard.Hosted.html` only for hosted publishing, release artifacts, or deployment packaging.
+- When you need both delivery models, generate `VulnerabilityDashboard.Hosted.html` with `-DualPackage` so both outputs share the same normalized payload bytes.
 
 Azure note: `Setup-AzureResources.ps1` resolves this automatically. With `-IncludeContainerApp`, Azure defaults to the hosted split-assets mode. Without a Container App, Azure defaults to the self-contained mode unless you override it.
 
