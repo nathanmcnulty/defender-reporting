@@ -283,6 +283,38 @@ function Test-BulkSnapshotImportSingleSnapshot {
     }
 }
 
+function Test-VulnCurrentFileRejectsDuplicateId {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-current-duplicate-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $currentPath = Get-VulnCurrentPath -BasePath $tempRoot
+        Write-NdjsonRecordsFile -Path $currentPath -Records @(
+            (Get-TestVulnRow -Id 'duplicate-001' -CveId 'CVE-2026-0101' -SnapshotDate '2026-03-20' -Version '1.0.0'),
+            (Get-TestVulnRow -Id 'duplicate-001' -CveId 'CVE-2026-0101' -SnapshotDate '2026-03-21' -Version '1.0.1')
+        )
+
+        $duplicateFailure = $null
+        try {
+            $null = Test-VulnCurrentFile -Path $currentPath
+        }
+        catch {
+            $duplicateFailure = $_
+        }
+
+        Assert-True ($null -ne $duplicateFailure) 'Expected current-file validation to reject duplicate Id values.'
+        Assert-True (([string]$duplicateFailure).Contains("duplicate Id 'duplicate-001'")) 'Expected duplicate current-file validation failure to mention the repeated Id.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore {
     [CmdletBinding()]
     param()
@@ -1975,6 +2007,8 @@ Test-BulkSnapshotImportSmoke
 Write-Output '  Bulk snapshot import smoke checks passed.'
 Test-BulkSnapshotImportSingleSnapshot
 Write-Output '  Single-snapshot vulnerability import checks passed.'
+Test-VulnCurrentFileRejectsDuplicateId
+Write-Output '  Current-file duplicate Id checks passed.'
 Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore
 Write-Output '  Canonical quarterly history repair skip checks passed.'
 Test-VulnStoreRequiresCanonicalRepairDetectsMalformedQuarterlyHistory
