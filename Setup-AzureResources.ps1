@@ -166,6 +166,9 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Skip MDE API app role assignment")]
     [switch]$SkipMdePermissions,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Optional local dataset path used to seed the exports container for deterministic validation when -SkipMdePermissions is set")]
+    [string]$ValidationDatasetPath,
+
     [Parameter(Mandatory = $false, HelpMessage = "Skip end-to-end validation (template upload, pipeline run, result check)")]
     [switch]$SkipValidation,
 
@@ -189,6 +192,124 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Resolve-ValidationDatasetPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$RequestedPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RequestedPath)) {
+        return $null
+    }
+
+    $resolvedPath = if ([System.IO.Path]::IsPathRooted($RequestedPath)) {
+        [System.IO.Path]::GetFullPath($RequestedPath)
+    }
+    else {
+        [System.IO.Path]::GetFullPath((Join-Path -Path $PSScriptRoot -ChildPath $RequestedPath))
+    }
+
+    if (-not (Test-Path -LiteralPath $resolvedPath -PathType Container)) {
+        throw "Validation dataset path not found: $resolvedPath"
+    }
+
+    return $resolvedPath
+}
+
+function Get-ValidationDatasetFileList {
+    [CmdletBinding()]
+    [OutputType([System.IO.FileInfo[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return @(
+        Get-ChildItem -LiteralPath $Path -File |
+            Where-Object {
+                $_.Name -match '\.json(\.gz)?$' -and
+                $_.Name -notin @(
+                    '.synthetic-progress.json',
+                    '.synthetic-progress.json.gz',
+                    'stress-validation-report.json',
+                    'stress-validation-report.json.gz'
+                )
+            } |
+            Sort-Object -Property Name
+    )
+}
+
+function Clear-BlobContainerContent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerName
+    )
+
+    $blobsJson = (& az storage blob list --account-name $AccountName --container-name $ContainerName --auth-mode login --output json 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        throw ("Failed to list blobs in container '{0}': {1}" -f $ContainerName, $blobsJson.Trim())
+    }
+
+    $blobs = if ([string]::IsNullOrWhiteSpace($blobsJson)) { @() } else { @($blobsJson | ConvertFrom-Json -Depth 20) }
+    foreach ($blob in @($blobs)) {
+        if ($null -eq $blob -or [string]::IsNullOrWhiteSpace([string]$blob.name)) {
+            continue
+        }
+
+        & az storage blob delete --account-name $AccountName --container-name $ContainerName --name ([string]$blob.name) --auth-mode login --output none | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw ("Failed to delete blob '{0}' from container '{1}'." -f ([string]$blob.name), $ContainerName)
+        }
+    }
+}
+
+function Initialize-ValidationExportsContainer {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DatasetPath
+    )
+
+    $datasetFiles = @(Get-ValidationDatasetFileList -Path $DatasetPath)
+    if ($datasetFiles.Count -eq 0) {
+        throw "Validation dataset '$DatasetPath' does not contain any export files."
+    }
+
+    $missingFiles = [System.Collections.Generic.List[string]]::new()
+    foreach ($requiredName in @('Machines_Current.json.gz', 'VulnContentDictionary.json.gz', 'VulnCurrentRefs.json.gz')) {
+        if (-not (Test-Path -LiteralPath (Join-Path -Path $DatasetPath -ChildPath $requiredName) -PathType Leaf)) {
+            $missingFiles.Add($requiredName) | Out-Null
+        }
+    }
+
+    if (@(Get-ChildItem -LiteralPath $DatasetPath -Filter 'VulnHistoryRefs_*.json.gz' -File -ErrorAction SilentlyContinue).Count -eq 0) {
+        $missingFiles.Add('VulnHistoryRefs_*.json.gz') | Out-Null
+    }
+
+    if ($missingFiles.Count -gt 0) {
+        throw ("Validation dataset is incomplete. Missing required file(s): {0}" -f ($missingFiles -join ', '))
+    }
+
+    Clear-BlobContainerContent -AccountName $AccountName -ContainerName 'exports'
+    foreach ($file in $datasetFiles) {
+        $contentType = if ($file.Name.EndsWith('.gz')) { 'application/gzip' } else { 'application/json' }
+        & az storage blob upload --account-name $AccountName --container-name exports --name $file.Name --file $file.FullName --content-type $contentType --auth-mode login --overwrite --output none | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw ("Failed to upload '{0}' to the exports container." -f $file.Name)
+        }
+    }
+}
 
 # =============================================================================
 # COMPUTE TYPE VALIDATION
@@ -1443,18 +1564,35 @@ try {
         }
 
         if ($ComputeType -eq 'AutomationAccount') {
+            $resolvedValidationDatasetPath = $null
+            if ($SkipMdePermissions) {
+                $resolvedValidationDatasetPath = Resolve-ValidationDatasetPath -RequestedPath $ValidationDatasetPath
+                if (-not [string]::IsNullOrWhiteSpace($resolvedValidationDatasetPath)) {
+                    Write-Host ("  Seeding exports container from local validation dataset: {0}" -f $resolvedValidationDatasetPath) -ForegroundColor Gray
+                    Initialize-ValidationExportsContainer -AccountName $StorageAccountName -DatasetPath $resolvedValidationDatasetPath
+                }
+                else {
+                    Write-Host "  SkipMdePermissions validation is reusing whatever export blobs already exist in storage. Pass -ValidationDatasetPath for deterministic validation input." -ForegroundColor Yellow
+                }
+            }
+
             # 14b: Start a runbook job
             Write-Host "  Starting validation job..." -ForegroundColor Gray
             $runbookName = 'Invoke-DashboardPipeline'
             $jobId = [guid]::NewGuid().ToString()
             $jobPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/${jobId}?api-version=$($Script:ArmApiVersions.AutomationAccount)"
+            $validationParameters = @{
+                StorageAccountName = $StorageAccountName
+                DashboardDeliveryMode = $effectiveDashboardDeliveryMode
+            }
+            if ($SkipMdePermissions) {
+                $validationParameters.UseExistingExportsOnly = $true
+            }
+
             $jobPayload = @{
                 properties = @{
                     runbook    = @{ name = $runbookName }
-                    parameters = @{
-                        StorageAccountName = $StorageAccountName
-                        DashboardDeliveryMode = $effectiveDashboardDeliveryMode
-                    }
+                    parameters = $validationParameters
                 }
             } | ConvertTo-Json -Depth 5
 

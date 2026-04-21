@@ -1,7 +1,7 @@
 # Shared enrichment readers used by dashboard generation, validation, and Azure
 # packaging outputs.
 
-function Resolve-AdvancedHuntingBundleSourceFiles {
+function Resolve-AdvancedHuntingBundleSourceFileList {
     [CmdletBinding()]
     [OutputType([System.IO.FileInfo[]])]
     param(
@@ -243,6 +243,9 @@ function Read-AdvancedHuntingBundle {
         [switch]$IncludeInventoryData
     )
 
+    $includeDeviceUsersRequested = [bool]$IncludeDeviceUsers
+    $includeInventoryDataRequested = [bool]$IncludeInventoryData
+
     return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
         Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
 
@@ -252,7 +255,7 @@ function Read-AdvancedHuntingBundle {
         $deviceUsers = @{}
         $inventoryData = @{}
         $parseErrors = 0
-        $sourceFiles = @(Resolve-AdvancedHuntingBundleSourceFiles -Path $Path)
+        $sourceFiles = @(Resolve-AdvancedHuntingBundleSourceFileList -Path $Path)
 
         if ($sourceFiles.Count -eq 0) {
             Write-Information '  No Advanced Hunting data files found. Bundle outputs will be empty.' -InformationAction Continue
@@ -276,7 +279,7 @@ function Read-AdvancedHuntingBundle {
                 try {
                     $recordType = Get-AdvancedHuntingRecordType -Record $record
 
-                    if ($IncludeInventoryData -and $recordType -eq 'Inventory') {
+                    if ($includeInventoryDataRequested -and $recordType -eq 'Inventory') {
                         $inventoryKey = Get-AdvancedHuntingInventoryMatchKey `
                             -DeviceId ([string]$record.PSObject.Properties['DeviceId']?.Value) `
                             -SoftwareVendor ([string]$record.PSObject.Properties['SoftwareVendor']?.Value) `
@@ -302,7 +305,7 @@ function Read-AdvancedHuntingBundle {
                         continue
                     }
 
-                    if ($IncludeDeviceUsers -and $recordType -eq 'DeviceUsers') {
+                    if ($includeDeviceUsersRequested -and $recordType -eq 'DeviceUsers') {
                         $deviceId = [string]$record.PSObject.Properties['DeviceId']?.Value
                         if ([string]::IsNullOrWhiteSpace($deviceId) -or $deviceUsers.ContainsKey($deviceId)) {
                             continue

@@ -74,7 +74,7 @@ function Add-ExperimentSnapshot {
     Write-Output ("[{0}] working-set={1}MB gc-heap={2}MB elapsed={3}s" -f $snapshot.label, $snapshot.working_set_mb, $snapshot.gc_heap_mb, $snapshot.elapsed_seconds)
 }
 
-function Resolve-AdvancedHuntingSourceFiles {
+function Resolve-AdvancedHuntingSourceFileList {
     [CmdletBinding()]
     [OutputType([System.IO.FileInfo[]])]
     param(
@@ -108,6 +108,8 @@ function Read-AdvancedHuntingBundle {
         [Parameter(Mandatory = $false)]
         [switch]$IncludeDeviceUsers
     )
+
+    $includeDeviceUsersRequested = [bool]$IncludeDeviceUsers
 
     function ConvertTo-AdvancedHuntingStringArray {
         [CmdletBinding()]
@@ -319,7 +321,7 @@ function Read-AdvancedHuntingBundle {
         $ahData = @{}
         $deviceUsers = @{}
         $parseErrors = 0
-        $sourceFiles = @(Resolve-AdvancedHuntingSourceFiles -Path $Path)
+        $sourceFiles = @(Resolve-AdvancedHuntingSourceFileList -Path $Path)
 
         if ($sourceFiles.Count -eq 0) {
             return [PSCustomObject]@{
@@ -332,7 +334,7 @@ function Read-AdvancedHuntingBundle {
             foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $file.FullName) {
                 try {
                     $recordType = Get-AdvancedHuntingRecordType -Record $record
-                    if ($recordType -eq 'DeviceUsers' -and $IncludeDeviceUsers) {
+                    if ($recordType -eq 'DeviceUsers' -and $includeDeviceUsersRequested) {
                         $deviceId = [string]$record.PSObject.Properties['DeviceId']?.Value
                         if (-not [string]::IsNullOrWhiteSpace($deviceId) -and -not $deviceUsers.ContainsKey($deviceId)) {
                             $loggedOnUsers = @(ConvertTo-AdvancedHuntingLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
