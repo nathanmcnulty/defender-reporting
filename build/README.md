@@ -93,10 +93,12 @@ This makes dependency order explicit, lets the regression preflight catch orphan
 .\Generate-VulnerabilityDashboard.ps1 -DirectoryPath .\exports -ExportMachineData:$false -NormalizeOnly -NormalizedPayloadOutputPath .\.local\payload\dashboard-payload.json.gz
 
 # Build HTML later from that normalized payload without re-normalizing exports
-.\Generate-VulnerabilityDashboard.ps1 -DirectoryPath .\exports -ExportMachineData:$false -PackageOnly -NormalizedPayloadInputPath .\.local\payload\dashboard-payload.json.gz -OutputPath .\VulnerabilityDashboard.html
+.\Generate-VulnerabilityDashboard.ps1 -DirectoryPath .\exports -ExportMachineData:$false -PackageOnly -NormalizedPayloadInputPath .\.local\payload\dashboard-payload.json.gz -OutputPath .\VulnerabilityDashboard.html -DualPackage
 
 # Re-run validation; use -ForceFullValidation to bypass the attested fast-path
 .\Generate-VulnerabilityDashboard.ps1 -DirectoryPath .\exports -OutputPath .\VulnerabilityDashboard.html -ValidateOnly
 ```
 
 Large-dataset validation writes and consumes a sibling `.validation.json` sidecar beside the HTML. Once a full semantic validation passes for a given source fingerprint and payload SHA, later `-ValidateOnly` runs can skip the full replay when the dashboard still embeds the same normalized payload bytes.
+
+When you need both delivery models, prefer `-DualPackage` over separate self-contained and split-assets runs. That keeps both outputs aligned to the same normalized payload artifact and avoids a second normalization pass.

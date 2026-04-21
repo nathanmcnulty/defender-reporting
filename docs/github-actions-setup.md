@@ -12,7 +12,7 @@ The repo includes an automated dashboard update workflow that authenticates to A
 - Validates the dashboard and uploads the audit as an artifact
 - Commits updated exports and dashboard output unless you run in dry-run mode
 
-Recommended repo convention: commit the self-contained HTML output, and generate a distinct split-assets build such as `VulnerabilityDashboard.Hosted.html` only for hosted deployment or release packaging.
+Recommended repo convention: commit the self-contained HTML output, and generate a distinct split-assets build such as `VulnerabilityDashboard.Hosted.html` only for hosted deployment or release packaging. When you need both from the same run, prefer `-DualPackage` so the hosted and self-contained artifacts share the same normalized payload.
 
 ## Recommended setup
 

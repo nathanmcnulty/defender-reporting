@@ -76,7 +76,8 @@
     Controls which dashboard packaging mode the compute pipeline publishes.
     Auto uses Hosted when -IncludeContainerApp is set, otherwise SelfContained.
     Hosted publishes the HTML plus a sibling asset directory for same-origin
-    delivery through the Container App or another HTTP host.
+    delivery through the Container App or another HTTP host. Dual publishes
+    both the self-contained dashboard and a hosted split-assets variant.
 
 .PARAMETER SecurityGroup
     Entra ID security group that is allowed to access the Container App
@@ -173,7 +174,7 @@ param(
     [int]$ValidationTimeoutSeconds = 1800,
 
     [Parameter(Mandatory = $false, HelpMessage = "Dashboard packaging mode. Auto uses Hosted when -IncludeContainerApp is set, otherwise SelfContained")]
-    [ValidateSet('Auto', 'SelfContained', 'Hosted')]
+    [ValidateSet('Auto', 'SelfContained', 'Hosted', 'Dual')]
     [string]$DashboardDeliveryMode = 'Auto',
 
     [Parameter(Mandatory = $false, HelpMessage = "Include Azure Container Apps deployment with Easy Auth")]
@@ -343,6 +344,8 @@ $Script:StorageBlobDataReaderRoleId = '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'
 $Script:CaddyImage = 'docker.io/library/caddy:alpine'
 $Script:DashboardBlobName = 'VulnerabilityDashboard.html'
 $Script:DashboardAssetsDirectoryName = ([System.IO.Path]::GetFileNameWithoutExtension($Script:DashboardBlobName) + '.assets')
+$Script:HostedDashboardBlobName = 'VulnerabilityDashboard.Hosted.html'
+$Script:HostedDashboardAssetsDirectoryName = ([System.IO.Path]::GetFileNameWithoutExtension($Script:HostedDashboardBlobName) + '.assets')
 $Script:DashboardHostedAssetFileNames = @('dashboard.css', 'dashboard.js', 'pako.js', 'chart.js', 'pdf-export.bundle.js', 'payload.json.gz')
 $Script:ProvisioningTags = @{
     workload = 'defender-reporting'
@@ -1155,7 +1158,7 @@ try {
         [PSCustomObject]@{
             Name = 'DashboardDeliveryMode'
             Value = $effectiveDashboardDeliveryMode
-            Description = 'Dashboard packaging mode for the pipeline (SelfContained or Hosted)'
+            Description = 'Dashboard packaging mode for the pipeline (SelfContained, Hosted, or Dual)'
         }
     )
 
@@ -1702,11 +1705,38 @@ try {
         # then starts Caddy to serve it. The script is base64-encoded to avoid JSON/shell
         # escaping issues. NOTE: We download in the main container (not an init container)
         # because the Container Apps identity sidecar is only available after init containers finish.
+        $containerAppDashboardBlobName = if ($effectiveDashboardDeliveryMode -eq 'Dual') {
+            $Script:HostedDashboardBlobName
+        }
+        else {
+            $Script:DashboardBlobName
+        }
+        $containerAppDashboardAssetsDirectoryName = if ($effectiveDashboardDeliveryMode -eq 'Dual') {
+            $Script:HostedDashboardAssetsDirectoryName
+        }
+        else {
+            $Script:DashboardAssetsDirectoryName
+        }
+        $containerAppDashboardAssetFileNames = if ($effectiveDashboardDeliveryMode -in @('Hosted', 'Dual')) {
+            $Script:DashboardHostedAssetFileNames
+        }
+        else {
+            @()
+        }
         $assetDownloadLines = @(
-            foreach ($assetFileName in $Script:DashboardHostedAssetFileNames) {
-                                '  download_blob /data/{0}/{1} "{0}/{1}" || true' -f $Script:DashboardAssetsDirectoryName, $assetFileName
+            foreach ($assetFileName in $containerAppDashboardAssetFileNames) {
+                                '  download_blob /data/{0}/{1} "{0}/{1}" || true' -f $containerAppDashboardAssetsDirectoryName, $assetFileName
             }
         ) -join "`n"
+        $assetDownloadBlock = if ($containerAppDashboardAssetFileNames.Count -gt 0) {
+@"
+        mkdir -p "/data/$containerAppDashboardAssetsDirectoryName"
+$assetDownloadLines
+"@
+        }
+        else {
+            ''
+        }
 
         $startupScript = @"
 #!/bin/sh
@@ -1741,9 +1771,8 @@ sync_dashboard() {
                 return 1
         fi
 
-        download_blob /data/index.html "$($Script:DashboardBlobName)" || return 1
-        mkdir -p "/data/$($Script:DashboardAssetsDirectoryName)"
-$assetDownloadLines
+        download_blob /data/index.html "$containerAppDashboardBlobName" || return 1
+    $assetDownloadBlock
 
         return 0
 }
@@ -2168,10 +2197,21 @@ exec caddy file-server --root /data --listen :80
         } else {
             Write-Host "  3. The function app will update the dashboard daily at 2:00 AM UTC" -ForegroundColor Gray
         }
-        Write-Host "  4. Container App scales to zero when idle; cold starts fetch the latest blob`n" -ForegroundColor Gray
+        if ($effectiveDashboardDeliveryMode -eq 'Dual') {
+            Write-Host "  4. The Container App serves the hosted dashboard while the self-contained HTML remains available in blob storage" -ForegroundColor Gray
+            Write-Host "  5. Container App scales to zero when idle; cold starts fetch the latest blob`n" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "  4. Container App scales to zero when idle; cold starts fetch the latest blob`n" -ForegroundColor Gray
+        }
     }
     elseif (-not $SkipValidation) {
-        Write-Host "  1. Download VulnerabilityDashboard.html from the 'dashboards' container" -ForegroundColor Gray
+        if ($effectiveDashboardDeliveryMode -eq 'Dual') {
+            Write-Host "  1. Download VulnerabilityDashboard.html and VulnerabilityDashboard.Hosted.html from the 'dashboards' container" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "  1. Download VulnerabilityDashboard.html from the 'dashboards' container" -ForegroundColor Gray
+        }
         if ($ComputeType -eq 'AutomationAccount') {
             Write-Host "  2. The runbook will run automatically every day`n" -ForegroundColor Gray
         } else {
@@ -2185,7 +2225,12 @@ exec caddy file-server --root /data --listen :80
         } else {
             Write-Host "  2. Run the pipeline: trigger the function app manually from the Azure portal" -ForegroundColor Gray
         }
-        Write-Host "  3. Download VulnerabilityDashboard.html from the 'dashboards' container`n" -ForegroundColor Gray
+        if ($effectiveDashboardDeliveryMode -eq 'Dual') {
+            Write-Host "  3. Download VulnerabilityDashboard.html and VulnerabilityDashboard.Hosted.html from the 'dashboards' container`n" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "  3. Download VulnerabilityDashboard.html from the 'dashboards' container`n" -ForegroundColor Gray
+        }
     }
 
 }

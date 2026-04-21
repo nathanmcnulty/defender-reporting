@@ -1112,6 +1112,79 @@ function Test-NormalizedVulnColumnCacheRefreshesInventoryColumn {
     }
 }
 
+function Test-AdvancedHuntingBundleMatchesDedicatedReaders {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('advanced-hunting-bundle-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        Write-NdjsonRecordsFile -Path (Get-AdvancedHuntingCurrentPath -BasePath $tempRoot) -Records @(
+            [PSCustomObject]@{
+                CveId = 'CVE-2026-0711'
+                PublishedDate = '2026-03-20'
+                VulnerabilityDescription = @('Bundle regression line 1.', 'Bundle regression line 2.')
+                EpssScore = 0.31
+                AffectedSoftware = @('contoso:legacy_agent')
+                IsExploitAvailable = 'true'
+            }
+            [PSCustomObject]@{
+                DeviceId = 'device-001'
+                LoggedOnUsers = @(
+                    [PSCustomObject]@{ UserPrincipalName = 'user1@contoso.com' }
+                    [PSCustomObject]@{ DomainName = 'CONTOSO'; AccountName = 'user2' }
+                )
+            }
+            [PSCustomObject]@{
+                DeviceId = 'device-001'
+                SoftwareVendor = 'contoso'
+                SoftwareName = 'legacy_agent'
+                SoftwareVersion = '6.0.0'
+                ProductCodeCpe = 'cpe:/a:contoso:legacy_agent:6.0.0'
+                EndOfSupportStatus = 'supported'
+                EndOfSupportDate = '2027-10-01'
+            }
+        )
+
+        $advancedHuntingData = Read-AdvancedHuntingData -Path $tempRoot
+        $advancedHuntingDeviceUsers = Read-AdvancedHuntingDeviceUserMap -Path $tempRoot
+        $advancedHuntingInventoryData = Read-AdvancedHuntingInventoryData -Path $tempRoot
+        $bundle = Read-AdvancedHuntingBundle -Path $tempRoot -IncludeDeviceUsers -IncludeInventoryData
+
+        Assert-True ($bundle.AdvancedHuntingData.Count -eq $advancedHuntingData.Count) 'Expected Advanced Hunting bundle CVE count to match the dedicated reader.'
+        Assert-True ($bundle.DeviceUsers.Count -eq $advancedHuntingDeviceUsers.Count) 'Expected Advanced Hunting bundle device-user count to match the dedicated reader.'
+        Assert-True ($bundle.InventoryData.Count -eq $advancedHuntingInventoryData.Count) 'Expected Advanced Hunting bundle inventory count to match the dedicated reader.'
+
+        $bundleCve = $bundle.AdvancedHuntingData['CVE-2026-0711']
+        $dedicatedCve = $advancedHuntingData['CVE-2026-0711']
+        Assert-True ($bundleCve.PublishedDate -eq $dedicatedCve.PublishedDate) 'Expected bundle CVE published date to match the dedicated reader.'
+        Assert-True ($bundleCve.VulnerabilityDescription -eq $dedicatedCve.VulnerabilityDescription) 'Expected bundle CVE description to match the dedicated reader.'
+        Assert-True ($bundleCve.EpssScore -eq $dedicatedCve.EpssScore) 'Expected bundle CVE EPSS score to match the dedicated reader.'
+        Assert-True ($bundleCve.IsExploitAvailable -eq $dedicatedCve.IsExploitAvailable) 'Expected bundle CVE exploit availability to match the dedicated reader.'
+        Assert-True (@($bundleCve.AffectedSoftware).Count -eq @($dedicatedCve.AffectedSoftware).Count) 'Expected bundle CVE affected software count to match the dedicated reader.'
+        Assert-True (@($bundleCve.AffectedSoftware)[0] -eq @($dedicatedCve.AffectedSoftware)[0]) 'Expected bundle CVE affected software values to match the dedicated reader.'
+
+        $bundleUsers = @($bundle.DeviceUsers['device-001'])
+        $dedicatedUsers = @($advancedHuntingDeviceUsers['device-001'])
+        Assert-True ($bundleUsers.Count -eq $dedicatedUsers.Count) 'Expected bundle device-user list length to match the dedicated reader.'
+        Assert-True ($bundleUsers[0] -eq $dedicatedUsers[0]) 'Expected bundle device-user list to preserve the first user.'
+        Assert-True ($bundleUsers[1] -eq $dedicatedUsers[1]) 'Expected bundle device-user list to preserve the second user.'
+
+        $inventoryKey = Get-AdvancedHuntingInventoryMatchKey -DeviceId 'device-001' -SoftwareVendor 'contoso' -SoftwareName 'legacy_agent' -SoftwareVersion '6.0.0'
+        $bundleInventory = $bundle.InventoryData[$inventoryKey]
+        $dedicatedInventory = $advancedHuntingInventoryData[$inventoryKey]
+        Assert-True ($bundleInventory.ProductCodeCpe -eq $dedicatedInventory.ProductCodeCpe) 'Expected bundle inventory ProductCodeCpe to match the dedicated reader.'
+        Assert-True ($bundleInventory.EndOfSupportStatus -eq $dedicatedInventory.EndOfSupportStatus) 'Expected bundle inventory EndOfSupportStatus to match the dedicated reader.'
+        Assert-True ($bundleInventory.EndOfSupportDate -eq $dedicatedInventory.EndOfSupportDate) 'Expected bundle inventory EndOfSupportDate to match the dedicated reader.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-WriteBase64FileContentMatchesReferenceOutput {
     [CmdletBinding()]
     param()
@@ -1121,7 +1194,7 @@ function Test-WriteBase64FileContentMatchesReferenceOutput {
     $filePath = Join-Path $tempRoot 'fixture.bin'
 
     try {
-        $bytes = [byte[]]::new(8195)
+        $bytes = [byte[]]::new(65539)
         for ($index = 0; $index -lt $bytes.Length; $index++) {
             $bytes[$index] = [byte](($index * 17 + 29) % 256)
         }
@@ -1696,6 +1769,81 @@ function Test-DashboardSplitAssetsGenerationAndValidation {
     }
 }
 
+function Test-DashboardDualPackagingGenerationAndValidation {
+    [CmdletBinding()]
+    param()
+
+    $fixturePath = Join-Path $PSScriptRoot 'fixtures\legacy-migration-none-severity'
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-dual-package-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $dashboardScriptPath = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Generate-VulnerabilityDashboard.ps1'
+    $selfContainedOutputPath = Join-Path $tempRoot 'dashboard.html'
+    $hostedOutputPath = Join-Path $tempRoot 'dashboard.Hosted.html'
+    $hostedAssetsPath = Join-Path $tempRoot 'dashboard.Hosted.assets'
+    $normalizedPayloadPath = Join-Path $tempRoot '.local\payload\dashboard-payload.json.gz'
+    $selfAuditPath = Join-Path $tempRoot 'audit.json'
+    $hostedAuditPath = Join-Path $tempRoot 'audit.hosted.json'
+    $hostedValidateOnlyAuditPath = Join-Path $tempRoot 'audit.hosted.validate-only.json'
+
+    try {
+        Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
+        $null = Publish-VulnStoreFromBulkSnapshot -BasePath $tempRoot -RemoveSnapshotFiles
+
+        $cachePath = Join-Path $tempRoot '.dashboard-cache'
+        if (Test-Path -LiteralPath $cachePath) {
+            Remove-Item -LiteralPath $cachePath -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        & $dashboardScriptPath -DirectoryPath $tempRoot -ExportMachineData:$false -NormalizeOnly -NormalizedPayloadOutputPath $normalizedPayloadPath | Out-Null
+        Assert-True ((Test-Path -LiteralPath $normalizedPayloadPath -PathType Leaf)) 'Expected NormalizeOnly to materialize the normalized payload for dual packaging.'
+
+        & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $selfContainedOutputPath -ExportMachineData:$false -PackageOnly -NormalizedPayloadInputPath $normalizedPayloadPath -DualPackage -Validate -ValidationOutputPath $selfAuditPath | Out-Null
+
+        Assert-True ((Test-Path -LiteralPath $selfContainedOutputPath -PathType Leaf)) 'Expected dual packaging to write the self-contained dashboard HTML.'
+        Assert-True ((Test-Path -LiteralPath $hostedOutputPath -PathType Leaf)) 'Expected dual packaging to write the hosted dashboard HTML.'
+        Assert-True ((Test-Path -LiteralPath $hostedAssetsPath -PathType Container)) 'Expected dual packaging to create the hosted sibling asset directory.'
+
+        foreach ($assetFileName in @('dashboard.css', 'dashboard.js', 'pako.js', 'chart.js', 'pdf-export.bundle.js', 'payload.json.gz')) {
+            Assert-True ((Test-Path -LiteralPath (Join-Path $hostedAssetsPath $assetFileName) -PathType Leaf)) ("Expected dual packaging to write '{0}' to the hosted asset directory." -f $assetFileName)
+        }
+
+        Assert-True ((Test-Path -LiteralPath ($selfContainedOutputPath + '.validation.json') -PathType Leaf)) 'Expected dual packaging to write a self-contained validation sidecar.'
+        Assert-True ((Test-Path -LiteralPath ($hostedOutputPath + '.validation.json') -PathType Leaf)) 'Expected dual packaging to write a hosted validation sidecar.'
+
+        $selfContainedHtml = Get-Content -LiteralPath $selfContainedOutputPath -Raw
+        Assert-True ($selfContainedHtml.Contains('<script id="vulnsData" type="application/json">')) 'Expected the self-contained dashboard to embed the compressed payload script.'
+        Assert-True ($selfContainedHtml.Contains('compressed')) 'Expected the self-contained dashboard to advertise the embedded compressed payload mode.'
+
+        $hostedHtml = Get-Content -LiteralPath $hostedOutputPath -Raw
+        Assert-True ($hostedHtml.Contains('dashboard.Hosted.assets/dashboard.css')) 'Expected the hosted dual-packaged dashboard to reference the hosted stylesheet.'
+        Assert-True ($hostedHtml.Contains('dashboard.Hosted.assets/dashboard.js')) 'Expected the hosted dual-packaged dashboard to reference the hosted dashboard script.'
+        Assert-True ($hostedHtml.Contains('dashboard.Hosted.assets/payload.json.gz')) 'Expected the hosted dual-packaged dashboard to reference the hosted payload.'
+        Assert-True ($hostedHtml.Contains('external-compressed')) 'Expected the hosted dual-packaged dashboard to advertise the external-compressed payload mode.'
+
+        $selfAudit = Get-Content -LiteralPath $selfAuditPath -Raw | ConvertFrom-Json -Depth 100
+        Assert-True ($selfAudit.RowComparison.Match -eq $true) 'Expected dual packaging validation to preserve rows in the self-contained dashboard.'
+        Assert-True ($selfAudit.RowComparison.MissingCount -eq 0) 'Expected no missing rows in self-contained dual packaging validation.'
+        Assert-True ($selfAudit.RowComparison.ExtraCount -eq 0) 'Expected no extra rows in self-contained dual packaging validation.'
+
+        $hostedAudit = Get-Content -LiteralPath $hostedAuditPath -Raw | ConvertFrom-Json -Depth 100
+        Assert-True ($hostedAudit.RowComparison.Match -eq $true) 'Expected dual packaging validation to preserve rows in the hosted dashboard.'
+        Assert-True ($hostedAudit.RowComparison.MissingCount -eq 0) 'Expected no missing rows in hosted dual packaging validation.'
+        Assert-True ($hostedAudit.RowComparison.ExtraCount -eq 0) 'Expected no extra rows in hosted dual packaging validation.'
+
+        & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $hostedOutputPath -ValidateOnly -ValidationOutputPath $hostedValidateOnlyAuditPath | Out-Null
+
+        $hostedValidateOnlyAudit = Get-Content -LiteralPath $hostedValidateOnlyAuditPath -Raw | ConvertFrom-Json -Depth 100
+        Assert-True ($hostedValidateOnlyAudit.RowComparison.Match -eq $true) 'Expected ValidateOnly to validate the hosted dual-packaged dashboard.'
+        Assert-True ($hostedValidateOnlyAudit.RowComparison.MissingCount -eq 0) 'Expected ValidateOnly hosted dual packaging validation to report no missing rows.'
+        Assert-True ($hostedValidateOnlyAudit.RowComparison.ExtraCount -eq 0) 'Expected ValidateOnly hosted dual packaging validation to report no extra rows.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-VulnContentStoreRoundTrip {
     [CmdletBinding()]
     param()
@@ -1881,6 +2029,10 @@ Test-DashboardValidationPreservesNoneSeverityData
 Write-Output '  Dashboard none-severity validation checks passed.'
 Test-DashboardSplitAssetsGenerationAndValidation
 Write-Output '  Dashboard split-assets generation and validation checks passed.'
+Test-DashboardDualPackagingGenerationAndValidation
+Write-Output '  Dashboard dual packaging generation and validation checks passed.'
+Test-AdvancedHuntingBundleMatchesDedicatedReaders
+Write-Output '  Advanced Hunting bundle reader checks passed.'
 Test-VulnContentStoreRoundTrip
 Write-Output '  Vulnerability content store round-trip checks passed.'
 Test-VulnObservedWindowCacheRoundTrip

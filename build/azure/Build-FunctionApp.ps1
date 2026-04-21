@@ -65,7 +65,7 @@ $functionAppHeader = @'
 
     Environment variables (Function App settings):
         STORAGE_ACCOUNT_NAME        - (required) Azure Storage account name
-        DASHBOARD_DELIVERY_MODE     - SelfContained (default) or Hosted
+        DASHBOARD_DELIVERY_MODE     - SelfContained (default), Hosted, or Dual
         INCLUDE_ADVANCED_HUNTING    - true (default) or false
         USE_EXISTING_EXPORTS_ONLY   - true or false (default)
         EXPORT_TARGET               - BlobStorage (default), SharePoint, or StaticWebApp
@@ -193,8 +193,8 @@ $functionAppConfig = @'
     }
     Write-Output "  Storage account: $StorageAccountName"
 
-    if ($DashboardDeliveryMode -notin @('SelfContained', 'Hosted')) {
-        throw "DASHBOARD_DELIVERY_MODE must be SelfContained or Hosted. Received '$DashboardDeliveryMode'."
+    if ($DashboardDeliveryMode -notin @('SelfContained', 'Hosted', 'Dual')) {
+        throw "DASHBOARD_DELIVERY_MODE must be SelfContained, Hosted, or Dual. Received '$DashboardDeliveryMode'."
     }
     Write-Output "  Dashboard delivery mode: $DashboardDeliveryMode"
 '@

@@ -208,6 +208,58 @@ function Write-CombinedTextBundle {
     return $OutputPath
 }
 
+function Write-Base64CharBuffer {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.TextWriter]$Writer,
+
+        [Parameter(Mandatory = $true)]
+        [char[]]$Chars,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Count,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$CurrentLineLength,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$InsertLineBreaks
+    )
+
+    if ($Count -le 0) {
+        return
+    }
+
+    if (-not $InsertLineBreaks) {
+        $Writer.Write($Chars, 0, $Count)
+        return
+    }
+
+    $offset = 0
+    $lineLength = [int]$CurrentLineLength.Value
+    while ($offset -lt $Count) {
+        $remainingOnLine = 76 - $lineLength
+        if ($remainingOnLine -le 0) {
+            $Writer.Write("`r`n")
+            $lineLength = 0
+            $remainingOnLine = 76
+        }
+
+        $charsToWrite = [System.Math]::Min($remainingOnLine, $Count - $offset)
+        $Writer.Write($Chars, $offset, $charsToWrite)
+        $offset += $charsToWrite
+        $lineLength += $charsToWrite
+
+        if ($lineLength -eq 76 -and $offset -lt $Count) {
+            $Writer.Write("`r`n")
+            $lineLength = 0
+        }
+    }
+
+    $CurrentLineLength.Value = $lineLength
+}
+
 function Write-Base64FileContent {
     [CmdletBinding()]
     param(
@@ -221,9 +273,48 @@ function Write-Base64FileContent {
         [switch]$InsertLineBreaks
     )
 
-    $bytes = [System.IO.File]::ReadAllBytes($FilePath)
-    $formatting = if ($InsertLineBreaks) { [System.Base64FormattingOptions]::InsertLineBreaks } else { [System.Base64FormattingOptions]::None }
-    $Writer.Write([System.Convert]::ToBase64String($bytes, $formatting))
+    $inputBlockByteCount = 57 * 128
+    $inputBuffer = [byte[]]::new($inputBlockByteCount + 2)
+    $base64CharBuffer = [char[]]::new([int]([System.Math]::Ceiling($inputBuffer.Length / 3.0) * 4))
+    $currentLineLength = 0
+    $pendingByteCount = 0
+    $stream = $null
+
+    try {
+        $stream = [System.IO.File]::OpenRead($FilePath)
+        while (($bytesRead = $stream.Read($inputBuffer, $pendingByteCount, $inputBlockByteCount)) -gt 0) {
+            $totalByteCount = $pendingByteCount + $bytesRead
+            $bytesToEncode = if ($stream.Position -lt $stream.Length) {
+                $totalByteCount - ($totalByteCount % 3)
+            }
+            else {
+                $totalByteCount
+            }
+
+            if ($bytesToEncode -le 0) {
+                $pendingByteCount = $totalByteCount
+                continue
+            }
+
+            $base64CharCount = [System.Convert]::ToBase64CharArray($inputBuffer, 0, $bytesToEncode, $base64CharBuffer, 0)
+            Write-Base64CharBuffer -Writer $Writer -Chars $base64CharBuffer -Count $base64CharCount -CurrentLineLength ([ref]$currentLineLength) -InsertLineBreaks:$InsertLineBreaks
+
+            $pendingByteCount = $totalByteCount - $bytesToEncode
+            if ($pendingByteCount -gt 0) {
+                [System.Array]::Copy($inputBuffer, $bytesToEncode, $inputBuffer, 0, $pendingByteCount)
+            }
+        }
+
+        if ($pendingByteCount -gt 0) {
+            $base64CharCount = [System.Convert]::ToBase64CharArray($inputBuffer, 0, $pendingByteCount, $base64CharBuffer, 0)
+            Write-Base64CharBuffer -Writer $Writer -Chars $base64CharBuffer -Count $base64CharCount -CurrentLineLength ([ref]$currentLineLength) -InsertLineBreaks:$InsertLineBreaks
+        }
+    }
+    finally {
+        if ($stream) {
+            $stream.Dispose()
+        }
+    }
 }
 
 function Get-Base64FileContent {

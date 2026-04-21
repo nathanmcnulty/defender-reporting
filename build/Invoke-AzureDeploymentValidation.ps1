@@ -12,7 +12,7 @@ param(
     [string]$ResourceGroupName,
 
     [Parameter(Mandatory = $false)]
-    [ValidateSet('Auto', 'SelfContained', 'Hosted')]
+    [ValidateSet('Auto', 'SelfContained', 'Hosted', 'Dual')]
     [string]$DashboardDeliveryMode,
 
     [Parameter(Mandatory = $false)]
