@@ -4984,6 +4984,227 @@ function ConvertTo-CompactMachineRecord {
     }
 }
 
+function ConvertTo-NormalizationMachineTuple {
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$Machine
+    )
+
+    if ($null -eq $Machine) {
+        return $null
+    }
+
+    if ($Machine -is [System.Array] -and $Machine.Length -ge 10) {
+        return [object[]]$Machine
+    }
+
+    $ip = $Machine.PSObject.Properties['lastIpAddress']?.Value
+    $externalIp = $Machine.PSObject.Properties['lastExternalIpAddress']?.Value
+    $healthStatus = $Machine.PSObject.Properties['healthStatus']?.Value
+    $riskScore = $Machine.PSObject.Properties['riskScore']?.Value
+    $exposureLevel = $Machine.PSObject.Properties['exposureLevel']?.Value
+    $deviceValue = $Machine.PSObject.Properties['deviceValue']?.Value
+    $managedBy = $Machine.PSObject.Properties['managedBy']?.Value
+    $isAadJoined = $Machine.PSObject.Properties['isAadJoined']?.Value
+    $lastSeen = $Machine.PSObject.Properties['lastSeen']?.Value
+    $firstSeen = $Machine.PSObject.Properties['firstSeen']?.Value
+
+    if (
+        $null -eq $ip -and
+        $null -eq $externalIp -and
+        $null -eq $healthStatus -and
+        $null -eq $riskScore -and
+        $null -eq $exposureLevel -and
+        $null -eq $deviceValue -and
+        $null -eq $managedBy -and
+        $null -eq $isAadJoined -and
+        $null -eq $lastSeen -and
+        $null -eq $firstSeen
+    ) {
+        return $null
+    }
+
+    return [object[]]@(
+        $ip,
+        $externalIp,
+        $healthStatus,
+        $riskScore,
+        $exposureLevel,
+        $deviceValue,
+        $managedBy,
+        $isAadJoined,
+        $lastSeen,
+        $firstSeen
+    )
+}
+
+function Get-MachineJsonElementScalarValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Text.Json.JsonElement]$Element,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $property = [System.Text.Json.JsonElement]::new()
+    if (-not $Element.TryGetProperty($Name, [ref]$property)) {
+        return $null
+    }
+
+    switch ($property.ValueKind) {
+        ([System.Text.Json.JsonValueKind]::Undefined) { return $null }
+        ([System.Text.Json.JsonValueKind]::Null) { return $null }
+        ([System.Text.Json.JsonValueKind]::String) { return $property.GetString() }
+        ([System.Text.Json.JsonValueKind]::True) { return $true }
+        ([System.Text.Json.JsonValueKind]::False) { return $false }
+        ([System.Text.Json.JsonValueKind]::Number) {
+            $int64Value = 0L
+            if ($property.TryGetInt64([ref]$int64Value)) {
+                return $int64Value
+            }
+
+            $doubleValue = 0.0
+            if ($property.TryGetDouble([ref]$doubleValue)) {
+                return $doubleValue
+            }
+
+            return $property.GetRawText()
+        }
+        default { return $property.GetRawText() }
+    }
+}
+
+function ConvertFrom-MachineJsonElementToNormalizationEntry {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Text.Json.JsonElement]$MachineElement
+    )
+
+    $machineId = [string](Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'id')
+    if ([string]::IsNullOrWhiteSpace($machineId)) {
+        return $null
+    }
+
+    if ((Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'removed') -eq $true) {
+        return [PSCustomObject]@{
+            id = $machineId
+            removed = $true
+        }
+    }
+
+    $tuple = [object[]]@(
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'lastIpAddress'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'lastExternalIpAddress'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'healthStatus'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'riskScore'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'exposureLevel'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'deviceValue'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'managedBy'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'isAadJoined'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'lastSeen'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'firstSeen')
+    )
+
+    $hasTupleValue = $false
+    foreach ($value in $tuple) {
+        if ($null -ne $value) {
+            $hasTupleValue = $true
+            break
+        }
+    }
+
+    return [PSCustomObject]@{
+        id = $machineId
+        removed = $false
+        tuple = if ($hasTupleValue) { $tuple } else { $null }
+    }
+}
+
+function Read-MachineNormalizationEntriesFromFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fileMode = Get-JsonFileMode -Path $Path
+    if ($fileMode -eq 'Empty') {
+        return
+    }
+
+    if ($fileMode -eq 'Array') {
+        $rawContent = Read-TextFileContent -Path $Path
+        if ([string]::IsNullOrWhiteSpace($rawContent)) {
+            return
+        }
+
+        $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawContent)
+        $rawContent = $null
+        try {
+            if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
+                return
+            }
+
+            foreach ($machineElement in $jsonDocument.RootElement.EnumerateArray()) {
+                $entry = ConvertFrom-MachineJsonElementToNormalizationEntry -MachineElement $machineElement
+                if ($null -ne $entry) {
+                    $entry
+                }
+            }
+        }
+        finally {
+            $jsonDocument.Dispose()
+        }
+
+        return
+    }
+
+    $fileStream = [System.IO.File]::OpenRead($Path)
+    try {
+        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        } else { $fileStream }
+        try {
+            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
+            try {
+                while (-not $reader.EndOfStream) {
+                    $line = $reader.ReadLine()
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+                    $jsonDocument = $null
+                    try {
+                        $jsonDocument = [System.Text.Json.JsonDocument]::Parse($line)
+                    }
+                    catch {
+                        Write-Warning "Failed to parse machine line in $(Split-Path -Leaf $Path): $_"
+                        continue
+                    }
+
+                    try {
+                        $entry = ConvertFrom-MachineJsonElementToNormalizationEntry -MachineElement $jsonDocument.RootElement
+                        if ($null -ne $entry) {
+                            $entry
+                        }
+                    }
+                    finally {
+                        $jsonDocument.Dispose()
+                    }
+                }
+            }
+            finally { $reader.Dispose() }
+        }
+        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
+    }
+    finally { $fileStream.Dispose() }
+}
+
 function Get-NormalizedMachineTag {
     [CmdletBinding()]
     [OutputType([string[]])]
@@ -10679,8 +10900,26 @@ function Read-MachineData {
     [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$AsNormalizationTuple
     )
+
+    $asNormalizationTupleRequested = [bool]$AsNormalizationTuple
+    $machineRecordReader = {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$SourcePath
+        )
+
+        if ($asNormalizationTupleRequested) {
+            Read-MachineNormalizationEntriesFromFile -Path $SourcePath
+        }
+        else {
+            Read-MachineRecordsFromFile -Path $SourcePath
+        }
+    }
 
     return Invoke-WithStoreLock -BasePath $Path -StoreName 'machines' -ScriptBlock {
         Restore-StoreTransaction -BasePath $Path -StoreName 'machines'
@@ -10695,26 +10934,36 @@ function Read-MachineData {
 
         if ($null -ne $currentReadPath) {
             Write-Information "  Using $(Split-Path -Leaf $currentReadPath)" -InformationAction Continue
-            foreach ($record in Read-MachineRecordsFromFile -Path $currentReadPath) {
+            foreach ($record in (& $machineRecordReader $currentReadPath)) {
                 if ($record.id) {
                     if ($record.PSObject.Properties['removed']?.Value -eq $true) {
                         $machines.Remove($record.id)
                         continue
                     }
-                    $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
+                    $machineRecord = if ($asNormalizationTupleRequested) { $record.PSObject.Properties['tuple']?.Value } else { ConvertTo-CompactMachineRecord -Machine $record }
+                    if ($null -eq $machineRecord) {
+                        $machines.Remove($record.id)
+                        continue
+                    }
+                    $machines[$record.id] = $machineRecord
                 }
             }
         }
         elseif ($historySourcePaths.Count -gt 0) {
             Write-Information "  Reconstructing current state from $($historySourcePaths.Count) machine history source file(s)" -InformationAction Continue
             foreach ($sourcePath in $historySourcePaths) {
-                foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
+                foreach ($record in (& $machineRecordReader $sourcePath)) {
                     if ($record.id) {
                         if ($record.PSObject.Properties['removed']?.Value -eq $true) {
                             $machines.Remove($record.id)
                             continue
                         }
-                        $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
+                        $machineRecord = if ($asNormalizationTupleRequested) { $record.PSObject.Properties['tuple']?.Value } else { ConvertTo-CompactMachineRecord -Machine $record }
+                        if ($null -eq $machineRecord) {
+                            $machines.Remove($record.id)
+                            continue
+                        }
+                        $machines[$record.id] = $machineRecord
                     }
                 }
             }
@@ -10730,9 +10979,12 @@ function Read-MachineData {
             Write-Information "  Found $($machineFiles.Count) legacy machine snapshot file(s)" -InformationAction Continue
             foreach ($file in $machineFiles) {
                 Write-Information "  Processing $($file.Name)..." -InformationAction Continue
-                foreach ($record in Read-MachineRecordsFromFile -Path $file.FullName) {
+                foreach ($record in (& $machineRecordReader $file.FullName)) {
                     if ($record.id -and -not $machines.ContainsKey($record.id)) {
-                        $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
+                        $machineRecord = if ($asNormalizationTupleRequested) { $record.PSObject.Properties['tuple']?.Value } else { ConvertTo-CompactMachineRecord -Machine $record }
+                        if ($null -ne $machineRecord) {
+                            $machines[$record.id] = $machineRecord
+                        }
                     }
                 }
             }
@@ -12715,49 +12967,13 @@ function Compress-NormalizationMachineLookup {
             continue
         }
 
-        if ($machine -is [System.Array] -and $machine.Length -ge 10) {
-            continue
-        }
-
-        $ip = $machine.PSObject.Properties['lastIpAddress']?.Value
-        $externalIp = $machine.PSObject.Properties['lastExternalIpAddress']?.Value
-        $healthStatus = $machine.PSObject.Properties['healthStatus']?.Value
-        $riskScore = $machine.PSObject.Properties['riskScore']?.Value
-        $exposureLevel = $machine.PSObject.Properties['exposureLevel']?.Value
-        $deviceValue = $machine.PSObject.Properties['deviceValue']?.Value
-        $managedBy = $machine.PSObject.Properties['managedBy']?.Value
-        $isAadJoined = $machine.PSObject.Properties['isAadJoined']?.Value
-        $lastSeen = $machine.PSObject.Properties['lastSeen']?.Value
-        $firstSeen = $machine.PSObject.Properties['firstSeen']?.Value
-
-        if (
-            $null -eq $ip -and
-            $null -eq $externalIp -and
-            $null -eq $healthStatus -and
-            $null -eq $riskScore -and
-            $null -eq $exposureLevel -and
-            $null -eq $deviceValue -and
-            $null -eq $managedBy -and
-            $null -eq $isAadJoined -and
-            $null -eq $lastSeen -and
-            $null -eq $firstSeen
-        ) {
+        $machineTuple = ConvertTo-NormalizationMachineTuple -Machine $machine
+        if ($null -eq $machineTuple) {
             $Machines.Remove($deviceId)
             continue
         }
 
-        $Machines[$deviceId] = [object[]]@(
-            $ip,
-            $externalIp,
-            $healthStatus,
-            $riskScore,
-            $exposureLevel,
-            $deviceValue,
-            $managedBy,
-            $isAadJoined,
-            $lastSeen,
-            $firstSeen
-        )
+        $Machines[$deviceId] = $machineTuple
     }
 
     return $Machines
@@ -16355,9 +16571,12 @@ try {
     }
     else {
         # Step 1: Read machine and Advanced Hunting data
-        $machines = Read-MachineData -Path $tempExports
+        $machines = Read-MachineData -Path $tempExports -AsNormalizationTuple
+        Write-MemoryUsage -Label "Post-MachineRead"
         Compress-NormalizationMachineLookup -Machines $machines | Out-Null
+        Write-MemoryUsage -Label "Post-MachineLookupCompression"
         $advancedHuntingBundle = Read-AdvancedHuntingBundle -Path $tempExports -IncludeDeviceUsers
+        Write-MemoryUsage -Label "Post-AdvancedHuntingBundle"
         $advancedHuntingData = [hashtable]$advancedHuntingBundle.AdvancedHuntingData
         $advancedHuntingDeviceUsers = [hashtable]$advancedHuntingBundle.DeviceUsers
         Write-MemoryUsage -Label "Post-NormalizationInputs"
@@ -16368,10 +16587,12 @@ try {
             Write-Output "Synthetic manifest detected. Skipping observed-window merge for stress normalization."
         }
         $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+        Write-MemoryUsage -Label "Post-ConvertToNormalizedData"
         $machines = $null
         $advancedHuntingData = $null
         $advancedHuntingDeviceUsers = $null
         Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label "Post-NormalizationCleanup"
 
         # Step 3: Prepare payload for embedding
         Write-Output "Preparing data for embedding..."
@@ -16406,6 +16627,7 @@ try {
         if ($cacheEntry) {
             Write-Output ("  Cached normalized payload as {0}" -f $cacheEntry.Fingerprint.Substring(0, 12))
         }
+        Write-MemoryUsage -Label "Post-PayloadCachePublish"
     }
     Invoke-FullGarbageCollection
     Write-MemoryUsage -Label "Post-Normalize"

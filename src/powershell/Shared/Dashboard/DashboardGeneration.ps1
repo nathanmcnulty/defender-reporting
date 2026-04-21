@@ -2119,8 +2119,26 @@ function Read-MachineData {
     [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$AsNormalizationTuple
     )
+
+    $asNormalizationTupleRequested = [bool]$AsNormalizationTuple
+    $machineRecordReader = {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$SourcePath
+        )
+
+        if ($asNormalizationTupleRequested) {
+            Read-MachineNormalizationEntriesFromFile -Path $SourcePath
+        }
+        else {
+            Read-MachineRecordsFromFile -Path $SourcePath
+        }
+    }
 
     return Invoke-WithStoreLock -BasePath $Path -StoreName 'machines' -ScriptBlock {
         Restore-StoreTransaction -BasePath $Path -StoreName 'machines'
@@ -2135,26 +2153,36 @@ function Read-MachineData {
 
         if ($null -ne $currentReadPath) {
             Write-Information "  Using $(Split-Path -Leaf $currentReadPath)" -InformationAction Continue
-            foreach ($record in Read-MachineRecordsFromFile -Path $currentReadPath) {
+            foreach ($record in (& $machineRecordReader $currentReadPath)) {
                 if ($record.id) {
                     if ($record.PSObject.Properties['removed']?.Value -eq $true) {
                         $machines.Remove($record.id)
                         continue
                     }
-                    $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
+                    $machineRecord = if ($asNormalizationTupleRequested) { $record.PSObject.Properties['tuple']?.Value } else { ConvertTo-CompactMachineRecord -Machine $record }
+                    if ($null -eq $machineRecord) {
+                        $machines.Remove($record.id)
+                        continue
+                    }
+                    $machines[$record.id] = $machineRecord
                 }
             }
         }
         elseif ($historySourcePaths.Count -gt 0) {
             Write-Information "  Reconstructing current state from $($historySourcePaths.Count) machine history source file(s)" -InformationAction Continue
             foreach ($sourcePath in $historySourcePaths) {
-                foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
+                foreach ($record in (& $machineRecordReader $sourcePath)) {
                     if ($record.id) {
                         if ($record.PSObject.Properties['removed']?.Value -eq $true) {
                             $machines.Remove($record.id)
                             continue
                         }
-                        $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
+                        $machineRecord = if ($asNormalizationTupleRequested) { $record.PSObject.Properties['tuple']?.Value } else { ConvertTo-CompactMachineRecord -Machine $record }
+                        if ($null -eq $machineRecord) {
+                            $machines.Remove($record.id)
+                            continue
+                        }
+                        $machines[$record.id] = $machineRecord
                     }
                 }
             }
@@ -2170,9 +2198,12 @@ function Read-MachineData {
             Write-Information "  Found $($machineFiles.Count) legacy machine snapshot file(s)" -InformationAction Continue
             foreach ($file in $machineFiles) {
                 Write-Information "  Processing $($file.Name)..." -InformationAction Continue
-                foreach ($record in Read-MachineRecordsFromFile -Path $file.FullName) {
+                foreach ($record in (& $machineRecordReader $file.FullName)) {
                     if ($record.id -and -not $machines.ContainsKey($record.id)) {
-                        $machines[$record.id] = ConvertTo-CompactMachineRecord -Machine $record
+                        $machineRecord = if ($asNormalizationTupleRequested) { $record.PSObject.Properties['tuple']?.Value } else { ConvertTo-CompactMachineRecord -Machine $record }
+                        if ($null -ne $machineRecord) {
+                            $machines[$record.id] = $machineRecord
+                        }
                     }
                 }
             }
@@ -4155,49 +4186,13 @@ function Compress-NormalizationMachineLookup {
             continue
         }
 
-        if ($machine -is [System.Array] -and $machine.Length -ge 10) {
-            continue
-        }
-
-        $ip = $machine.PSObject.Properties['lastIpAddress']?.Value
-        $externalIp = $machine.PSObject.Properties['lastExternalIpAddress']?.Value
-        $healthStatus = $machine.PSObject.Properties['healthStatus']?.Value
-        $riskScore = $machine.PSObject.Properties['riskScore']?.Value
-        $exposureLevel = $machine.PSObject.Properties['exposureLevel']?.Value
-        $deviceValue = $machine.PSObject.Properties['deviceValue']?.Value
-        $managedBy = $machine.PSObject.Properties['managedBy']?.Value
-        $isAadJoined = $machine.PSObject.Properties['isAadJoined']?.Value
-        $lastSeen = $machine.PSObject.Properties['lastSeen']?.Value
-        $firstSeen = $machine.PSObject.Properties['firstSeen']?.Value
-
-        if (
-            $null -eq $ip -and
-            $null -eq $externalIp -and
-            $null -eq $healthStatus -and
-            $null -eq $riskScore -and
-            $null -eq $exposureLevel -and
-            $null -eq $deviceValue -and
-            $null -eq $managedBy -and
-            $null -eq $isAadJoined -and
-            $null -eq $lastSeen -and
-            $null -eq $firstSeen
-        ) {
+        $machineTuple = ConvertTo-NormalizationMachineTuple -Machine $machine
+        if ($null -eq $machineTuple) {
             $Machines.Remove($deviceId)
             continue
         }
 
-        $Machines[$deviceId] = [object[]]@(
-            $ip,
-            $externalIp,
-            $healthStatus,
-            $riskScore,
-            $exposureLevel,
-            $deviceValue,
-            $managedBy,
-            $isAadJoined,
-            $lastSeen,
-            $firstSeen
-        )
+        $Machines[$deviceId] = $machineTuple
     }
 
     return $Machines
