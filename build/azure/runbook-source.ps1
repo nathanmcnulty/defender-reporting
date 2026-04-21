@@ -1278,9 +1278,12 @@ try {
     }
     else {
         # Step 1: Read machine and Advanced Hunting data
-        $machines = Read-MachineData -Path $tempExports
+        $machines = Read-MachineData -Path $tempExports -AsNormalizationTuple
+        Write-MemoryUsage -Label "Post-MachineRead"
         Compress-NormalizationMachineLookup -Machines $machines | Out-Null
+        Write-MemoryUsage -Label "Post-MachineLookupCompression"
         $advancedHuntingBundle = Read-AdvancedHuntingBundle -Path $tempExports -IncludeDeviceUsers
+        Write-MemoryUsage -Label "Post-AdvancedHuntingBundle"
         $advancedHuntingData = [hashtable]$advancedHuntingBundle.AdvancedHuntingData
         $advancedHuntingDeviceUsers = [hashtable]$advancedHuntingBundle.DeviceUsers
         Write-MemoryUsage -Label "Post-NormalizationInputs"
@@ -1291,10 +1294,12 @@ try {
             Write-Output "Synthetic manifest detected. Skipping observed-window merge for stress normalization."
         }
         $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+        Write-MemoryUsage -Label "Post-ConvertToNormalizedData"
         $machines = $null
         $advancedHuntingData = $null
         $advancedHuntingDeviceUsers = $null
         Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label "Post-NormalizationCleanup"
 
         # Step 3: Prepare payload for embedding
         Write-Output "Preparing data for embedding..."
@@ -1329,6 +1334,7 @@ try {
         if ($cacheEntry) {
             Write-Output ("  Cached normalized payload as {0}" -f $cacheEntry.Fingerprint.Substring(0, 12))
         }
+        Write-MemoryUsage -Label "Post-PayloadCachePublish"
     }
     Invoke-FullGarbageCollection
     Write-MemoryUsage -Label "Post-Normalize"
