@@ -4137,17 +4137,67 @@ function Test-VulnCurrentFile {
         [string]$Path
     )
 
-    $idSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $validationPartitionRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-current-validation-' + [guid]::NewGuid().ToString('N'))
+    $partitionCount = if ($Script:VulnDiskPartitionCount -gt 0) { [int]$Script:VulnDiskPartitionCount } else { 128 }
+    $partitionWriters = @{}
     $rowCount = 0
-    foreach ($row in Read-VulnNdjsonRecordsFromPath -Path $Path) {
-        $id = [string](Get-VulnPropertyValue -InputObject $row -Name 'Id')
-        if ([string]::IsNullOrWhiteSpace($id)) {
-            throw 'Current vulnerability store contains a row without Id.'
+
+    [void](New-Item -Path $validationPartitionRoot -ItemType Directory -Force)
+    try {
+        try {
+            foreach ($row in Read-VulnNdjsonRecordsFromPath -Path $Path) {
+                $id = [string](Get-VulnPropertyValue -InputObject $row -Name 'Id')
+                if ([string]::IsNullOrWhiteSpace($id)) {
+                    throw 'Current vulnerability store contains a row without Id.'
+                }
+
+                $partitionIndex = Get-VulnPartitionIndex -Id $id -PartitionCount $partitionCount
+                if (-not $partitionWriters.ContainsKey($partitionIndex)) {
+                    $partitionPath = Get-VulnPartitionFilePath -Root $validationPartitionRoot -Prefix 'id' -Index $partitionIndex
+                    $partitionWriters[$partitionIndex] = [System.IO.StreamWriter]::new($partitionPath, $true, [System.Text.UTF8Encoding]::new($false))
+                }
+
+                $partitionWriters[$partitionIndex].WriteLine($id)
+                $rowCount++
+            }
         }
-        if (-not $idSet.Add($id)) {
-            throw "Current vulnerability store contains duplicate Id '$id'."
+        finally {
+            foreach ($writer in @($partitionWriters.Values)) {
+                if ($null -ne $writer) {
+                    $writer.Dispose()
+                }
+            }
         }
-        $rowCount++
+
+        for ($partitionIndex = 0; $partitionIndex -lt $partitionCount; $partitionIndex++) {
+            $partitionPath = Get-VulnPartitionFilePath -Root $validationPartitionRoot -Prefix 'id' -Index $partitionIndex
+            if (-not (Test-Path -LiteralPath $partitionPath -PathType Leaf)) {
+                continue
+            }
+
+            $idSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            $reader = [System.IO.StreamReader]::new($partitionPath, [System.Text.UTF8Encoding]::new($false))
+            try {
+                while (-not $reader.EndOfStream) {
+                    $id = $reader.ReadLine()
+                    if ([string]::IsNullOrWhiteSpace($id)) {
+                        throw 'Current vulnerability store contains a row without Id.'
+                    }
+
+                    if (-not $idSet.Add($id)) {
+                        throw "Current vulnerability store contains duplicate Id '$id'."
+                    }
+                }
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $validationPartitionRoot -PathType Container) {
+            Remove-Item -LiteralPath $validationPartitionRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 
     return $rowCount
@@ -6410,7 +6460,7 @@ function Export-MdeAdvancedHuntingData {
     return $result
 }
 
-function Get-MdeMachineSnapshotMap {
+function Get-MdeMachineRefreshPublishPlan {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param(
@@ -6421,36 +6471,132 @@ function Get-MdeMachineSnapshotMap {
         [string]$BaseApiUrl,
 
         [Parameter(Mandatory = $true)]
-        [string]$ObservedOn
+        [string]$ObservedOn,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$CurrentRecords,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StagedCurrentPath
     )
 
     $url = "$BaseApiUrl/api/machines?`$filter=onboardingStatus eq 'Onboarded'"
     $pageCount = 0
-    $snapshotsById = @{}
+    $machineCount = 0
+    $changeCount = 0
+    $seenMachineIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $currentFileStream = $null
+    $currentGzipStream = $null
+    $currentWriter = $null
+    $currentJsonWriter = $null
+    $stagedHistoryPath = $null
+    $historyTargetPath = $null
+    $historyFileStream = $null
+    $historyGzipStream = $null
+    $historyWriter = $null
+    $historyJsonWriter = $null
 
-    do {
-        $pageCount++
-        $response = Invoke-RestMethodWithRetry -Uri $url -Headers $Headers -Method Get
+    try {
+        $currentFileStream = [System.IO.File]::Create($StagedCurrentPath)
+        $currentGzipStream = [System.IO.Compression.GZipStream]::new($currentFileStream, [System.IO.Compression.CompressionMode]::Compress)
+        $currentWriter = [System.IO.StreamWriter]::new($currentGzipStream, [System.Text.UTF8Encoding]::new($false))
+        $currentJsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($currentWriter)
+        $currentJsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
 
-        if ($response.value) {
-            foreach ($machine in $response.value) {
-                $snapshot = New-MachineSnapshotRecord -Machine $machine -ObservedOn $ObservedOn
-                $snapshotsById[$snapshot.id] = $snapshot
+        do {
+            $pageCount++
+            $response = Invoke-RestMethodWithRetry -Uri $url -Headers $Headers -Method Get
+
+            if ($response.value) {
+                foreach ($machine in $response.value) {
+                    $snapshot = New-MachineSnapshotRecord -Machine $machine -ObservedOn $ObservedOn
+                    $snapshotId = [string]$snapshot.id
+                    if ([string]::IsNullOrWhiteSpace($snapshotId)) {
+                        continue
+                    }
+
+                    if (-not $seenMachineIds.Add($snapshotId)) {
+                        continue
+                    }
+
+                    Write-JsonValueToWriter -Writer $currentJsonWriter -Value $snapshot
+                    $currentJsonWriter.Flush()
+                    $currentWriter.WriteLine()
+                    $machineCount++
+
+                    $existing = $CurrentRecords[$snapshotId]
+                    if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
+                        if ($null -eq $historyJsonWriter) {
+                            $historyFileName = New-MachineHistorySegmentFileName
+                            $stageDirectory = Split-Path -Path $StagedCurrentPath -Parent
+                            $stagedHistoryPath = Join-Path $stageDirectory ('.' + $historyFileName)
+                            $historyTargetPath = Join-Path $stageDirectory $historyFileName
+                            $historyFileStream = [System.IO.File]::Create($stagedHistoryPath)
+                            $historyGzipStream = [System.IO.Compression.GZipStream]::new($historyFileStream, [System.IO.Compression.CompressionMode]::Compress)
+                            $historyWriter = [System.IO.StreamWriter]::new($historyGzipStream, [System.Text.UTF8Encoding]::new($false))
+                            $historyJsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($historyWriter)
+                            $historyJsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
+                        }
+
+                        Write-JsonValueToWriter -Writer $historyJsonWriter -Value $snapshot
+                        $historyJsonWriter.Flush()
+                        $historyWriter.WriteLine()
+                        $changeCount++
+                    }
+
+                    [void]$CurrentRecords.Remove($snapshotId)
+                }
             }
-        }
 
-        $url = if ($response.PSObject.Properties['@odata.nextLink']) {
-            $response.'@odata.nextLink'
+            $url = if ($response.PSObject.Properties['@odata.nextLink']) {
+                $response.'@odata.nextLink'
+            }
+            else {
+                $null
+            }
+            $response = $null
+        } while ($url)
+
+        foreach ($existingId in @($CurrentRecords.Keys)) {
+            $removalRecord = New-MachineRemovalRecord -MachineId $existingId -ObservedOn $ObservedOn
+
+            if ($null -eq $historyJsonWriter) {
+                $historyFileName = New-MachineHistorySegmentFileName
+                $stageDirectory = Split-Path -Path $StagedCurrentPath -Parent
+                $stagedHistoryPath = Join-Path $stageDirectory ('.' + $historyFileName)
+                $historyTargetPath = Join-Path $stageDirectory $historyFileName
+                $historyFileStream = [System.IO.File]::Create($stagedHistoryPath)
+                $historyGzipStream = [System.IO.Compression.GZipStream]::new($historyFileStream, [System.IO.Compression.CompressionMode]::Compress)
+                $historyWriter = [System.IO.StreamWriter]::new($historyGzipStream, [System.Text.UTF8Encoding]::new($false))
+                $historyJsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($historyWriter)
+                $historyJsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
+            }
+
+            Write-JsonValueToWriter -Writer $historyJsonWriter -Value $removalRecord
+            $historyJsonWriter.Flush()
+            $historyWriter.WriteLine()
+            $changeCount++
         }
-        else {
-            $null
-        }
-        $response = $null
-    } while ($url)
+    }
+    finally {
+        if ($currentJsonWriter) { $currentJsonWriter.Close() }
+        elseif ($currentWriter) { $currentWriter.Dispose() }
+        elseif ($currentGzipStream) { $currentGzipStream.Dispose() }
+        elseif ($currentFileStream) { $currentFileStream.Dispose() }
+
+        if ($historyJsonWriter) { $historyJsonWriter.Close() }
+        elseif ($historyWriter) { $historyWriter.Dispose() }
+        elseif ($historyGzipStream) { $historyGzipStream.Dispose() }
+        elseif ($historyFileStream) { $historyFileStream.Dispose() }
+    }
 
     return [PSCustomObject]@{
-        SnapshotsById = $snapshotsById
+        ChangeCount = $changeCount
+        MachineCount = $machineCount
         PageCount = $pageCount
+        StagedCurrentPath = $StagedCurrentPath
+        StagedHistoryPath = $stagedHistoryPath
+        HistoryTargetPath = $historyTargetPath
     }
 }
 
@@ -6469,15 +6615,13 @@ function Get-MachineStoreRefreshPlan {
     )
 
     $changeRecords = [System.Collections.Generic.List[object]]::new()
-    $nextCurrentRecords = @{}
+    $nextCurrentRecords = $FetchedSnapshotsById
 
     foreach ($snapshot in $FetchedSnapshotsById.Values) {
         $existing = $CurrentRecords[$snapshot.id]
         if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
             $changeRecords.Add($snapshot)
         }
-
-        $nextCurrentRecords[$snapshot.id] = $snapshot
     }
 
     foreach ($existingId in @($CurrentRecords.Keys)) {
@@ -6489,7 +6633,7 @@ function Get-MachineStoreRefreshPlan {
     return [PSCustomObject]@{
         ChangeRecords = $changeRecords
         NextCurrentRecords = $nextCurrentRecords
-        MachineCount = $nextCurrentRecords.Count
+        MachineCount = $FetchedSnapshotsById.Count
     }
 }
 
@@ -6504,51 +6648,53 @@ function Publish-MachineStoreState {
         [hashtable]$Store,
 
         [Parameter(Mandatory = $true)]
-        $ChangeRecords
+        [int]$ChangeCount,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StagedCurrentPath,
+
+        [Parameter(Mandatory = $true)]
+        [int]$CurrentRecordCount,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [string]$StagedHistoryPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [string]$HistoryTargetPath
     )
 
     $stageRoot = Join-Path $OutputPath ('.machine-store-staging-' + [guid]::NewGuid().ToString('N'))
     [void](New-Item -Path $stageRoot -ItemType Directory -Force)
 
     try {
-        $stagedCurrentPath = Join-Path $stageRoot (Split-Path -Leaf $Store.CurrentPath)
-        Write-NdjsonRecordsFile -Path $stagedCurrentPath -Records $Store.CurrentRecords.Values
-        Write-Information ("  Machine store publish: {0} current record(s), {1} history period(s), {2} change record(s)" -f $Store.CurrentRecords.Count, $Store.HistoryRecordsByPeriod.Count, @($ChangeRecords).Count) -InformationAction Continue
+        $historyFileCount = if ([string]::IsNullOrWhiteSpace($HistoryTargetPath)) { 0 } else { 1 }
+        Write-Information ("  Machine store publish: {0} current record(s), {1} staged history file(s), {2} change record(s)" -f $CurrentRecordCount, $historyFileCount, $ChangeCount) -InformationAction Continue
 
         $filesToPublish = [System.Collections.Generic.List[object]]::new()
         $filesToPublish.Add([PSCustomObject]@{
-            StagePath = $stagedCurrentPath
+            StagePath = $StagedCurrentPath
             TargetPath = $Store.CurrentPath
         })
 
         $outputFiles = [System.Collections.Generic.List[string]]::new()
         $outputFiles.Add($Store.CurrentPath)
 
-        $historyRecordKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($periodKey in @($Store.HistoryRecordsByPeriod.Keys)) {
-            foreach ($record in @($Store.HistoryRecordsByPeriod[$periodKey])) {
-                [void]$historyRecordKeys.Add((Get-MachineHistoryRecordKey -Record $record))
-            }
-        }
-
-        foreach ($changeRecord in $ChangeRecords) {
-            Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $Store.HistoryRecordsByPeriod -RecordKeys $historyRecordKeys -Record $changeRecord
-        }
-
         $publishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($periodKey in @($Store.HistoryRecordsByPeriod.Keys | Sort-Object)) {
-            $historyStagePath = Get-MachineHistoryQuarterlyPath -BasePath $stageRoot -PeriodKey $periodKey
-            Write-NdjsonRecordsFile -Path $historyStagePath -Records $Store.HistoryRecordsByPeriod[$periodKey]
+        foreach ($historyFile in Get-MachineHistoryQuarterlyFiles -BasePath $OutputPath) {
+            [void]$publishedHistoryNames.Add($historyFile.Name)
+        }
 
-            $historyTargetPath = Get-MachineHistoryQuarterlyPath -BasePath $OutputPath -PeriodKey $periodKey
+        if (-not [string]::IsNullOrWhiteSpace($StagedHistoryPath) -and -not [string]::IsNullOrWhiteSpace($HistoryTargetPath)) {
             $filesToPublish.Add([PSCustomObject]@{
-                StagePath = $historyStagePath
-                TargetPath = $historyTargetPath
+                StagePath = $StagedHistoryPath
+                TargetPath = $HistoryTargetPath
             })
 
-            $historyName = Split-Path -Leaf $historyTargetPath
+            $historyName = Split-Path -Leaf $HistoryTargetPath
             [void]$publishedHistoryNames.Add($historyName)
-            $outputFiles.Add($historyTargetPath)
+            $outputFiles.Add($HistoryTargetPath)
         }
 
         $removePaths = @(Get-MachineHistoryRemovePaths -BasePath $OutputPath -PublishedHistoryNames $publishedHistoryNames)
@@ -6556,7 +6702,7 @@ function Publish-MachineStoreState {
 
         return [PSCustomObject]@{
             Success = $true
-            ChangeCount = $ChangeRecords.Count
+            ChangeCount = $ChangeCount
             OutputFiles = @($outputFiles)
             MigratedLegacy = $Store.MigratedLegacy
         }
@@ -6582,23 +6728,41 @@ function Invoke-MdeMachineStoreRefresh {
     )
 
     $observedOn = Get-Date -Format 'yyyy-MM-dd'
-    $snapshotResult = Get-MdeMachineSnapshotMap -Headers $Headers -BaseApiUrl $BaseApiUrl -ObservedOn $observedOn
+    $resolvedHeaders = $Headers
+    $resolvedOutputPath = $OutputPath
+    $resolvedBaseApiUrl = $BaseApiUrl
+    $resolvedObservedOn = $observedOn
 
-    return Invoke-WithStoreLock -BasePath $OutputPath -StoreName 'machines' -ScriptBlock {
-        Restore-StoreTransaction -BasePath $OutputPath -StoreName 'machines'
+    return Invoke-WithStoreLock -BasePath $resolvedOutputPath -StoreName 'machines' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $resolvedOutputPath -StoreName 'machines'
 
-        $store = Initialize-MachineHistoryStore -Path $OutputPath -RemoveLegacyFiles
-        $refreshPlan = Get-MachineStoreRefreshPlan -CurrentRecords $store.CurrentRecords -FetchedSnapshotsById $snapshotResult.SnapshotsById -ObservedOn $observedOn
-        $store.CurrentRecords = $refreshPlan.NextCurrentRecords
+        $store = Initialize-MachineHistoryStore -Path $resolvedOutputPath -RemoveLegacyFiles
+        $stagedCurrentPath = Join-Path $resolvedOutputPath ('.machine-current-staged-' + [guid]::NewGuid().ToString('N') + '.json.gz')
+        $refreshPlan = Get-MdeMachineRefreshPublishPlan -Headers $resolvedHeaders -BaseApiUrl $resolvedBaseApiUrl -ObservedOn $resolvedObservedOn -CurrentRecords $store.CurrentRecords -StagedCurrentPath $stagedCurrentPath
+        $store.CurrentRecords = $null
 
-        $publishResult = Publish-MachineStoreState -OutputPath $OutputPath -Store $store -ChangeRecords $refreshPlan.ChangeRecords
-        return [PSCustomObject]@{
-            Success = $true
-            MachineCount = $refreshPlan.MachineCount
-            ChangeCount = $publishResult.ChangeCount
-            PageCount = $snapshotResult.PageCount
-            OutputFiles = @($publishResult.OutputFiles)
-            MigratedLegacy = $publishResult.MigratedLegacy
+        if (Get-Command -Name Invoke-FullGarbageCollection -ErrorAction SilentlyContinue) {
+            Invoke-FullGarbageCollection
+        }
+
+        try {
+            $publishResult = Publish-MachineStoreState -OutputPath $resolvedOutputPath -Store $store -ChangeCount $refreshPlan.ChangeCount -StagedCurrentPath $refreshPlan.StagedCurrentPath -CurrentRecordCount $refreshPlan.MachineCount -StagedHistoryPath $refreshPlan.StagedHistoryPath -HistoryTargetPath $refreshPlan.HistoryTargetPath
+            return [PSCustomObject]@{
+                Success = $true
+                MachineCount = $refreshPlan.MachineCount
+                ChangeCount = $publishResult.ChangeCount
+                PageCount = $refreshPlan.PageCount
+                OutputFiles = @($publishResult.OutputFiles)
+                MigratedLegacy = $publishResult.MigratedLegacy
+            }
+        }
+        finally {
+            if (Test-Path -LiteralPath $stagedCurrentPath -PathType Leaf) {
+                Remove-Item -LiteralPath $stagedCurrentPath -Force -ErrorAction SilentlyContinue
+            }
+            if (-not [string]::IsNullOrWhiteSpace($refreshPlan.StagedHistoryPath) -and (Test-Path -LiteralPath $refreshPlan.StagedHistoryPath -PathType Leaf)) {
+                Remove-Item -LiteralPath $refreshPlan.StagedHistoryPath -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 }
