@@ -42,6 +42,29 @@ When `-SkipMdePermissions` is paired with Function App execution validation, pas
 
 During seeded Function App validation, the script now writes a short-lived control blob at `dashboards/_diagnostics/ExportAndGenerate.control.json` and polls the runtime status blob at `dashboards/_diagnostics/ExportAndGenerate.status.json`. This makes Flex Consumption execution diagnosable even when admin VFS access and built-in log streaming are unavailable.
 
+## Fast maintenance loops
+
+When you change `templates/dashboard.js`, run the focused dashboard assertions before the heavier preflight path:
+
+```powershell
+node .\tests\Assert-DashboardActiveChartSeries.js
+node .\tests\Assert-DashboardHistoricalRangeSemantics.js
+node .\tests\Assert-DashboardImpactChartSeries.js
+node .\tests\Assert-DashboardRemediationViews.js
+```
+
+These scripts share the lightweight VM harness in `tests/helpers/dashboard-test-harness.js` and are the quickest way to catch regressions in dashboard filtering, chart aggregation, and remediation-report behavior.
+
+When you change `src/powershell/Shared/**/*.ps1` or `build/azure/runbook-source.ps1`, refresh the generated Azure artifacts before opening a PR:
+
+```powershell
+.\build\Build-SharedHelpers.ps1
+.\build\azure\Build-Runbook.ps1
+.\build\azure\Build-FunctionApp.ps1 -SkipModuleStaging
+```
+
+Use the default `Build-FunctionApp.ps1` invocation when you also need module staging for packaging. `-SkipModuleStaging` is sufficient for the routine script-only refresh loop.
+
 ## User-facing scripts
 
 The repository root keeps the scripts that new users are most likely to need directly:

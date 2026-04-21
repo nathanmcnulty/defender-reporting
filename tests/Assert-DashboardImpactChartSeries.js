@@ -1,124 +1,5 @@
 ﻿const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-
-function createStubElement() {
-    return {
-        textContent: '',
-        innerHTML: '',
-        value: '',
-        checked: false,
-        disabled: false,
-        style: {},
-        dataset: {},
-        classList: {
-            add() {},
-            remove() {},
-            contains() { return false; }
-        },
-        appendChild() {},
-        removeChild() {},
-        remove() {},
-        setAttribute() {},
-        getAttribute() { return null; },
-        addEventListener() {},
-        removeEventListener() {},
-        querySelector() { return null; },
-        querySelectorAll() { return []; },
-        closest() { return null; },
-        focus() {},
-        click() {},
-        getBoundingClientRect() {
-            return { top: 0, bottom: 0, left: 0, width: 0, height: 0 };
-        }
-    };
-}
-
-function createDocumentStub() {
-    const elements = new Map();
-
-    function getOrCreateElement(id) {
-        if (!elements.has(id)) {
-            const element = createStubElement();
-            if (id === 'dataFormat') {
-                element.textContent = 'normalized';
-            }
-            elements.set(id, element);
-        }
-
-        return elements.get(id);
-    }
-
-    return {
-        body: {
-            classList: {
-                add() {},
-                remove() {}
-            },
-            appendChild() {}
-        },
-        getElementById(id) {
-            return getOrCreateElement(id);
-        },
-        querySelector() {
-            return null;
-        },
-        querySelectorAll() {
-            return [];
-        },
-        createElement() {
-            return createStubElement();
-        },
-        createDocumentFragment() {
-            return createStubElement();
-        },
-        addEventListener() {},
-        removeEventListener() {}
-    };
-}
-
-function loadDashboardHarness() {
-    const dashboardPath = path.join(__dirname, '..', 'templates', 'dashboard.js');
-    const dashboardSource = fs.readFileSync(dashboardPath, 'utf8');
-    const exportSource = `
-module.exports = {
-    applyDerivedVulnerabilityFields,
-    buildImpactChartSeries
-};
-`;
-
-    const sandbox = {
-        console,
-        require,
-        module: { exports: {} },
-        exports: {},
-        document: createDocumentStub(),
-        window: {
-            addEventListener() {},
-            removeEventListener() {},
-            innerHeight: 1080,
-            innerWidth: 1920
-        },
-        navigator: {
-            clipboard: {
-                writeText: async () => {}
-            }
-        },
-        performance: {
-            now() { return 0; }
-        },
-        setTimeout,
-        clearTimeout,
-        setInterval,
-        clearInterval,
-        alert() {},
-        confirm() { return true; }
-    };
-
-    vm.runInNewContext(`${dashboardSource}\n${exportSource}`, sandbox, { filename: dashboardPath });
-    return sandbox.module.exports;
-}
+const { loadDashboardHarness } = require('./helpers/dashboard-test-harness');
 
 function createTestRow(overrides = {}) {
     return {
@@ -145,7 +26,12 @@ function createTestRow(overrides = {}) {
 }
 
 function main() {
-    const dashboard = loadDashboardHarness();
+    const dashboard = loadDashboardHarness(`
+module.exports = {
+    applyDerivedVulnerabilityFields,
+    buildImpactChartSeries
+};
+`);
     const rows = [
         createTestRow({
             _index: 0,

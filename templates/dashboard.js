@@ -72,6 +72,7 @@ let chartInstance = null;
 let remediationChartInstance = null;
 let impactChartInstance = null;
 let chartJsLoadPromise = null;
+let pdfLibrariesLoadPromise = null;
 const loadedScriptPromises = new Map();
 
 // Device facet catalog used by filtering
@@ -313,11 +314,57 @@ function normalizeFilterValueArray(values) {
         : [];
 }
 
+function normalizeFilterDateValue(value) {
+    if (typeof value !== 'string') {
+        return '';
+    }
+
+    const trimmedValue = value.trim();
+    return /^\d{4}-\d{2}-\d{2}$/.test(trimmedValue) ? trimmedValue : '';
+}
+
+function normalizeFilterDateRange(startDate, endDate, swapInverted = false) {
+    const normalizedStartDate = normalizeFilterDateValue(startDate);
+    const normalizedEndDate = normalizeFilterDateValue(endDate);
+    const isInverted = Boolean(normalizedStartDate && normalizedEndDate && normalizedStartDate > normalizedEndDate);
+
+    if (!isInverted || !swapInverted) {
+        return {
+            startDate: normalizedStartDate,
+            endDate: normalizedEndDate,
+            isInverted,
+            wasInverted: false
+        };
+    }
+
+    return {
+        startDate: normalizedEndDate,
+        endDate: normalizedStartDate,
+        isInverted: false,
+        wasInverted: true
+    };
+}
+
+function getDateRangeValidationMessage(state = filterState) {
+    const normalizedDateRange = normalizeFilterDateRange(state?.startDate, state?.endDate, false);
+    return normalizedDateRange.isInverted
+        ? 'Start date must be on or before end date.'
+        : '';
+}
+
 function finalizeFilterState(state) {
     const nextState = createEmptyFilterState();
+    const normalizedDateRange = normalizeFilterDateRange(state.startDate, state.endDate, true);
+
     nextState.datePreset = typeof state.datePreset === 'string' ? state.datePreset : '';
-    nextState.startDate = state.startDate || '';
-    nextState.endDate = state.endDate || '';
+    if (nextState.datePreset !== 'custom' && !DATE_PRESET_CONFIG[nextState.datePreset]) {
+        nextState.datePreset = (normalizedDateRange.startDate || normalizedDateRange.endDate) ? 'custom' : '';
+    }
+    if (normalizedDateRange.wasInverted) {
+        nextState.datePreset = 'custom';
+    }
+    nextState.startDate = normalizedDateRange.startDate;
+    nextState.endDate = normalizedDateRange.endDate;
     nextState.deviceSearch = state.deviceSearch || '';
     nextState.deviceSearchNormalized = nextState.deviceSearch.toLowerCase();
     nextState.deviceNames = normalizeFilterValueArray(state.deviceNames);
@@ -919,6 +966,7 @@ function loadExternalScript(url) {
         script.onload = () => resolve();
         script.onerror = () => {
             loadedScriptPromises.delete(url);
+            script.remove();
             reject(new Error(`Failed to load script: ${url}`));
         };
         document.head.appendChild(script);
@@ -952,6 +1000,10 @@ function ensureChartJsLoaded() {
                 throw new Error('Chart.js did not initialize correctly.');
             }
             Chart.defaults.animation = false;
+        })
+        .catch(error => {
+            chartJsLoadPromise = null;
+            throw error;
         });
 
     return chartJsLoadPromise;
@@ -965,56 +1017,80 @@ const VULNDB_NAME = 'VulnDashboardCache';
 const VULNDB_VERSION = 1;
 const VULNDB_STORE = 'denormalized';
 
-/**
- * Compute a lightweight fingerprint for the embedded dataset.
- * Samples records evenly across the array to detect changes anywhere,
- * not just at the boundaries.
- */
-function computeDataFingerprint() {
-    const len = getRawVulnCount();
-    if (len === 0) return 'empty';
-    // Sample up to 10 records evenly distributed across the array
-    const sampleCount = Math.min(10, len);
-    let sample = '' + len;
-    for (let i = 0; i < sampleCount; i++) {
-        const idx = Math.floor(i * len / sampleCount);
-        sample += JSON.stringify(getRawVulnRecord(idx));
+function bytesToHex(bytes) {
+    let output = '';
+    for (let index = 0; index < bytes.length; index++) {
+        output += bytes[index].toString(16).padStart(2, '0');
     }
-    // Include key lookup-table slices so enrichment-only changes invalidate cache
-    if (lookups) {
-        const lookupKeys = ['groups', 'devices', 'cves', 'updates', 'dates', 'batchTitles', 'affSoftware'];
-        for (let i = 0; i < lookupKeys.length; i++) {
-            const key = lookupKeys[i];
-            const arr = lookups[key] || [];
-            sample += `|${key}:${arr.length}`;
-            if (arr.length > 0) sample += JSON.stringify(arr[0]);
-            if (arr.length > 1) sample += JSON.stringify(arr[arr.length - 1]);
+    return output;
+}
+
+function computeFallbackDigestHex(bytes) {
+    let hash = 0xcbf29ce484222325n;
+    const prime = 0x100000001b3n;
+    for (let index = 0; index < bytes.length; index++) {
+        hash ^= BigInt(bytes[index]);
+        hash = BigInt.asUintN(64, hash * prime);
+    }
+    return hash.toString(16).padStart(16, '0');
+}
+
+async function computeDigestHex(bytes) {
+    const subtle = globalThis.crypto && globalThis.crypto.subtle ? globalThis.crypto.subtle : null;
+    if (subtle) {
+        const digest = await subtle.digest('SHA-256', bytes);
+        return bytesToHex(new Uint8Array(digest));
+    }
+
+    if (typeof require === 'function') {
+        try {
+            const nodeCrypto = require('crypto');
+            return nodeCrypto.createHash('sha256').update(Buffer.from(bytes)).digest('hex');
+        } catch (error) {
+            console.warn('Node SHA-256 fallback unavailable, using deterministic fallback digest.', error);
         }
     }
-    // djb2 hash of the combined sample
-    let hash = 5381;
-    for (let i = 0; i < sample.length; i++) {
-        hash = ((hash << 5) + hash + sample.charCodeAt(i)) | 0;
+
+    return computeFallbackDigestHex(bytes);
+}
+
+function getEmbeddedPayloadFingerprintInput() {
+    const lookupsText = getScriptElementText('lookupsData');
+    const vulnsText = getScriptElementText('vulnsData');
+
+    if (lookupsText || vulnsText) {
+        return `${lookupsText.length}:${lookupsText}\n${vulnsText.length}:${vulnsText}`;
     }
-    return 'fp_' + len + '_' + (hash >>> 0).toString(36);
+
+    const fallbackLookups = lookups ? JSON.stringify(lookups) : '';
+    const fallbackVulns = rawVulns ? JSON.stringify(rawVulns) : '';
+    return `${fallbackLookups.length}:${fallbackLookups}\n${fallbackVulns.length}:${fallbackVulns}`;
+}
+
+/**
+ * Compute a fingerprint for the embedded dataset using the full payload.
+ * @returns {Promise<string>}
+ */
+async function computeDataFingerprint() {
+    const len = getRawVulnCount();
+    if (len === 0) return 'empty';
+
+    const input = getEmbeddedPayloadFingerprintInput();
+    const bytes = new TextEncoder().encode(input);
+    const hash = await computeDigestHex(bytes);
+    return `fp_${len}_${hash}`;
 }
 
 /**
  * Compute a fingerprint from raw compressed bytes so we can check the
  * IndexedDB cache *before* decompressing / denormalizing.
- * Samples a few byte ranges and includes byte length.
  * @param {Uint8Array} bytes
- * @returns {string}
+ * @returns {Promise<string>}
  */
-function computeCompressedFingerprint(bytes) {
+async function computeCompressedFingerprint(bytes) {
     const len = bytes.length;
-    let hash = 5381 ^ len;
-    // Sample ~200 bytes spread across the payload
-    const step = Math.max(1, Math.floor(len / 200));
-    for (let i = 0; i < len; i += step) {
-        hash = ((hash << 5) + hash + bytes[i]) | 0;
-    }
-    return 'cfp_' + len + '_' + (hash >>> 0).toString(36);
+    const hash = await computeDigestHex(bytes);
+    return `cfp_${len}_${hash}`;
 }
 
 /**
@@ -1162,19 +1238,32 @@ self.onmessage = async function(e) {
         }
         return lookup[index];
     }
+    function getLookupRecord(lookup, index) {
+        var value = getLookupValue(lookup, index);
+        return value == null ? null : value;
+    }
     var rawCount = getRawVulnCount();
     var result = new Array(rawCount);
+    var resultCount = 0;
+    var skippedInvalidRows = 0;
     for (var i = 0; i < rawCount; i++) {
         var v = getRawVulnRecord(i);
-        var device = lookups.devices[v[0]];
-        var cve = lookups.cves[v[1]];
-        var software = lookups.software[v[2]];
+        var device = getLookupRecord(lookups.devices, v[0]);
+        var cve = getLookupRecord(lookups.cves, v[1]);
+        var software = getLookupRecord(lookups.software, v[2]);
+        if (!device || !cve || !software) {
+            skippedInvalidRows++;
+            continue;
+        }
 
         var tagNames;
         if (device.t && device.t.length > 0) {
             tagNames = [];
             for (var ti = 0; ti < device.t.length; ti++) {
-                tagNames.push(lookups.tags[device.t[ti]]);
+                var tagName = getLookupValue(lookups.tags, device.t[ti]);
+                if (tagName != null) {
+                    tagNames.push(tagName);
+                }
             }
         } else {
             tagNames = [];
@@ -1189,38 +1278,51 @@ self.onmessage = async function(e) {
         var updateUrl = updateObj ? updateObj.url : null;
 
         // Resolve version from lookup
-        var version = v[3] >= 0 ? lookups.versions[v[3]] : null;
+        var version = v[3] >= 0 ? getLookupValue(lookups.versions, v[3]) : null;
         // Resolve dates from lookup
-        var firstSeen = v[4] >= 0 ? normalizeDateYMD(lookups.dates[v[4]]) : '';
-        var lastSeen = v[5] >= 0 ? normalizeDateYMD(lookups.dates[v[5]]) : '';
+        var firstSeenValue = v[4] >= 0 ? getLookupValue(lookups.dates, v[4]) : null;
+        var lastSeenValue = v[5] >= 0 ? getLookupValue(lookups.dates, v[5]) : null;
+        var firstSeen = firstSeenValue ? normalizeDateYMD(firstSeenValue) : '';
+        var lastSeen = lastSeenValue ? normalizeDateYMD(lastSeenValue) : '';
         // Resolve evidence paths from lookup indices
         var diskPaths = [];
         if (v[8] && v[8].length > 0) {
             for (var di = 0; di < v[8].length; di++) {
-                diskPaths.push(lookups.diskPaths[v[8][di]]);
+                var diskPath = getLookupValue(lookups.diskPaths, v[8][di]);
+                if (diskPath != null) {
+                    diskPaths.push(diskPath);
+                }
             }
         }
         var regPathsArr = [];
         if (v[9] && v[9].length > 0) {
             for (var ri = 0; ri < v[9].length; ri++) {
-                regPathsArr.push(lookups.regPaths[v[9][ri]]);
+                var regPath = getLookupValue(lookups.regPaths, v[9][ri]);
+                if (regPath != null) {
+                    regPathsArr.push(regPath);
+                }
             }
         }
         // Resolve batch title from lookup
-        var batchTitle = cve.bt >= 0 ? lookups.batchTitles[cve.bt] : null;
+        var batchTitle = cve.bt >= 0 ? getLookupValue(lookups.batchTitles, cve.bt) : null;
         // Resolve affected software from lookup indices
         var affSoftware = null;
         if (cve.as && cve.as.length > 0) {
             affSoftware = [];
             for (var ai = 0; ai < cve.as.length; ai++) {
-                affSoftware.push(lookups.affSoftware[cve.as[ai]]);
+                var affectedSoftwareValue = getLookupValue(lookups.affSoftware, cve.as[ai]);
+                if (affectedSoftwareValue != null) {
+                    affSoftware.push(affectedSoftwareValue);
+                }
             }
+            if (affSoftware.length === 0) affSoftware = null;
         }
 
-        result[i] = {
+        var groupName = getLookupValue(lookups.groups, device.g);
+        result[resultCount++] = {
             DeviceId: device.id,
             DeviceName: device.n,
-            RbacGroupName: (getLookupValue(lookups.groups, device.g) && String(getLookupValue(lookups.groups, device.g)).trim() !== '') ? getLookupValue(lookups.groups, device.g) : '(none)',
+            RbacGroupName: (groupName && String(groupName).trim() !== '') ? groupName : '(none)',
             OSPlatform: getLookupValue(lookups.platforms, device.o),
             OSVersion: device.ov,
             MachineTags: tagNames,
@@ -1228,7 +1330,7 @@ self.onmessage = async function(e) {
             CveId: cve.id,
             CvssScore: cve.sc,
             VulnerabilitySeverityLevel: getLookupValue(lookups.severities, cve.sv),
-            ExploitabilityLevel: cve.ex >= 0 ? lookups.exploitLevels[cve.ex] : null,
+            ExploitabilityLevel: cve.ex >= 0 ? getLookupValue(lookups.exploitLevels, cve.ex) : null,
             CveBatchUrl: cve.u,
             CveBatchTitle: batchTitle,
             PublishedDate: normalizeDateYMD(cve.pd) || null,
@@ -1267,7 +1369,8 @@ self.onmessage = async function(e) {
             _index: i
         };
     }
-    self.postMessage({ rows: result, lookups: lookups, rawVulns: rawVulns });
+    result.length = resultCount;
+    self.postMessage({ rows: result, lookups: lookups, rawVulns: rawVulns, skippedInvalidRows: skippedInvalidRows });
 };
 `;
 }
@@ -1557,6 +1660,11 @@ function getRawVulnRecord(index) {
     ];
 }
 
+function getLookupRecord(lookup, index) {
+    const value = getLookupValue(lookup, index);
+    return value == null ? null : value;
+}
+
 /**
  * Denormalize a single vulnerability record from compact array format
  * @param {Array} v - Compact vulnerability record [devIdx, cveIdx, swIdx, version, firstSeen, lastSeen, updateAvail, updIdx, diskPaths, regPaths, inventoryIdx]
@@ -1572,6 +1680,8 @@ function denormalizeAllVulns() {
     const startTime = performance.now();
 
     vulnerabilityData = new Array(rawCount);
+    let rowCount = 0;
+    let skippedInvalidRows = 0;
 
     // Direct column references for hot loop — avoids getRawVulnRecord overhead
     const isColumnar = isColumnarRawVulnData(rawVulns);
@@ -1648,6 +1758,7 @@ function denormalizeAllVulns() {
     // Pre-compute per-CVE values (~30K items)
     for (let ci = 0; ci < lkCves.length; ci++) {
         const cve = lkCves[ci];
+        if (!cve) continue;
         cve._pdFmt = cve.pd ? (formatDateYMD(cve.pd) || null) : null;
         cve._isExploitAvailable = cve.ea == null ? null : cve.ea === true;
         const nvdLastModified = cve.nlm ? formatDateYMD(cve.nlm) : '-';
@@ -1713,9 +1824,13 @@ function denormalizeAllVulns() {
             fsIdx = row[4]; lsIdx = row[5]; updIdx = row[7]; invIdx = row.length > 10 ? row[10] : -1;
         }
 
-        const device = lkDevices[devIdx];
-        const cve = lkCves[cveIdx];
-        const software = lkSoftware[swIdx];
+        const device = getLookupRecord(lkDevices, devIdx);
+        const cve = getLookupRecord(lkCves, cveIdx);
+        const software = getLookupRecord(lkSoftware, swIdx);
+        if (!device || !cve || !software) {
+            skippedInvalidRows++;
+            continue;
+        }
         const inventory = invIdx >= 0 && invIdx < lkInventory.length ? lkInventory[invIdx] : null;
 
         const vendorName = software.v >= 0 && software.v < lkVendors.length ? lkVendors[software.v] : null;
@@ -1752,7 +1867,7 @@ function denormalizeAllVulns() {
             }
         }
 
-        vulnerabilityData[i] = {
+        vulnerabilityData[rowCount++] = {
             DeviceId: device.id,
             DeviceName: device.n,
             RbacGroupName: device._rbacGroupName,
@@ -1798,8 +1913,10 @@ function denormalizeAllVulns() {
         };
     }
 
+    vulnerabilityData.length = rowCount;
+
     // Second pass: assign _environmentFirstSeenDate (uses stored _issueKey)
-    for (let i = 0; i < rawCount; i++) {
+    for (let i = 0; i < vulnerabilityData.length; i++) {
         const v = vulnerabilityData[i];
         v._environmentFirstSeenDate = earliestFirstSeenByIssue.get(v._issueKey) || v._firstSeenDate;
 
@@ -1823,6 +1940,9 @@ function denormalizeAllVulns() {
     qualitySummary.uniqueCves = qualityCveIds.size;
     dataQualitySummary = qualitySummary;
     mostRecentLastSeenDate = _maxLatestActivity;
+    if (skippedInvalidRows > 0) {
+        console.warn('Skipped', skippedInvalidRows, 'vulnerability records with missing lookup references during denormalization.');
+    }
     const elapsed = Math.round(performance.now() - startTime);
     logDebug('Denormalization complete in', elapsed, 'ms');
 }
@@ -1849,31 +1969,52 @@ function materializeRow(v) {
         return v;
     }
     const rec = getRawVulnRecord(idx);
-    const device = lookups.devices[rec[0]];
-    const cve = lookups.cves[rec[1]];
-    const software = lookups.software[rec[2]];
+    const device = getLookupRecord(lookups.devices, rec[0]);
+    const cve = getLookupRecord(lookups.cves, rec[1]);
+    const software = getLookupRecord(lookups.software, rec[2]);
+    if (!device || !cve || !software) {
+        v.DiskPaths = v.DiskPaths || [];
+        v.RegistryPaths = v.RegistryPaths || [];
+        v.CveBatchUrl = v.CveBatchUrl || null;
+        v.CveBatchTitle = v.CveBatchTitle || null;
+        v.VulnerabilityDescription = v.VulnerabilityDescription || null;
+        v.AffectedSoftware = v.AffectedSoftware || null;
+        v.RecommendedSecurityUpdateId = v.RecommendedSecurityUpdateId || null;
+        v.RecommendedSecurityUpdateUrl = v.RecommendedSecurityUpdateUrl || null;
+        v.OSVersion = v.OSVersion || null;
+        v.SecurityUpdateAvailable = v.SecurityUpdateAvailable === true;
+        v.RecommendationReference = v.RecommendationReference || null;
+        v._mat = true;
+        return v;
+    }
     const updIdx = rec[7];
-    const updateObj = updIdx >= 0 ? lookups.updates[updIdx] : null;
+    const updateObj = updIdx >= 0 ? getLookupValue(lookups.updates, updIdx) : null;
 
     // Evidence paths (resolved from lookup indices)
     const dpArr = rec[8];
     const rpArr = rec[9];
     if (dpArr && dpArr.length > 0) {
-        v.DiskPaths = new Array(dpArr.length);
-        for (let i = 0; i < dpArr.length; i++) v.DiskPaths[i] = lookups.diskPaths[dpArr[i]];
+        v.DiskPaths = [];
+        for (let i = 0; i < dpArr.length; i++) {
+            const diskPath = getLookupValue(lookups.diskPaths, dpArr[i]);
+            if (diskPath != null) v.DiskPaths.push(diskPath);
+        }
     } else {
         v.DiskPaths = [];
     }
     if (rpArr && rpArr.length > 0) {
-        v.RegistryPaths = new Array(rpArr.length);
-        for (let i = 0; i < rpArr.length; i++) v.RegistryPaths[i] = lookups.regPaths[rpArr[i]];
+        v.RegistryPaths = [];
+        for (let i = 0; i < rpArr.length; i++) {
+            const regPath = getLookupValue(lookups.regPaths, rpArr[i]);
+            if (regPath != null) v.RegistryPaths.push(regPath);
+        }
     } else {
         v.RegistryPaths = [];
     }
 
     // Detail-only properties
     v.CveBatchUrl = cve.u;
-    v.CveBatchTitle = cve.bt >= 0 ? lookups.batchTitles[cve.bt] : null;
+    v.CveBatchTitle = cve.bt >= 0 ? getLookupValue(lookups.batchTitles, cve.bt) : null;
     v.VulnerabilityDescription = cve.desc || null;
     v.AffectedSoftware = cve._affSw;
     v.RecommendedSecurityUpdateId = updateObj ? (updateObj.id || null) : null;
@@ -1894,10 +2035,11 @@ function materializeRow(v) {
 async function denormalizeWithCaching() {
     const hasCompressed = !!pendingCompressedBytes;
     let compressedFp = null;
+    let fingerprint = null;
 
     // For compressed data, try cache using a fingerprint of the raw compressed bytes
     if (hasCompressed) {
-        compressedFp = computeCompressedFingerprint(pendingCompressedBytes);
+        compressedFp = await computeCompressedFingerprint(pendingCompressedBytes);
         logDebug('Compressed fingerprint:', compressedFp);
         const cached = await getCachedData(compressedFp);
         if (cached && cached.data && cached.data.length > 0) {
@@ -1920,7 +2062,7 @@ async function denormalizeWithCaching() {
     }
 
     if (!hasCompressed) {
-        const fingerprint = computeDataFingerprint();
+        fingerprint = await computeDataFingerprint();
         const rawCount = getRawVulnCount();
         logDebug('Data fingerprint:', fingerprint);
 
@@ -1945,6 +2087,9 @@ async function denormalizeWithCaching() {
         const result = await denormalizeInWorker(compBytes);
         if (result.lookups) lookups = result.lookups;
         if (result.rawVulns) rawVulns = result.rawVulns;
+        if (result.skippedInvalidRows > 0) {
+            console.warn('Skipped', result.skippedInvalidRows, 'vulnerability records with missing lookup references during Worker denormalization.');
+        }
         if (result.rows) {
             // Worker returned fully denormalized rows (non-compressed path)
             vulnerabilityData = result.rows;
@@ -1978,7 +2123,9 @@ async function denormalizeWithCaching() {
     // 3. Cache the result (fire-and-forget) — skip for very large datasets
     // IndexedDB structured clone fails with out-of-memory for 500K+ records
     if (vulnerabilityData.length < 500000) {
-        const fingerprint = computeDataFingerprint();
+        if (!fingerprint) {
+            fingerprint = await computeDataFingerprint();
+        }
         logDebug('Data fingerprint:', fingerprint);
         setCachedData(fingerprint, vulnerabilityData);
         if (compressedFp) {
@@ -2462,8 +2609,34 @@ function updateFilterPopoverFooterState() {
         return;
     }
 
-    applyButton.disabled = !isActiveFilterPopoverDirty();
+    const validationMessage = activeFilterPopoverKey === 'date'
+        ? updateDateFilterPopoverValidationState()
+        : '';
+
+    applyButton.disabled = Boolean(validationMessage) || !isActiveFilterPopoverDirty();
     resetButton.disabled = isFilterDefaultState(activeFilterPopoverKey, filterPopoverDraftState);
+}
+
+function updateDateFilterPopoverValidationState(state = filterPopoverDraftState) {
+    const validationMessage = activeFilterPopoverKey === 'date'
+        ? getDateRangeValidationMessage(state)
+        : '';
+    const isInvalid = Boolean(validationMessage);
+    const startInput = document.getElementById('filterPopoverStartDate');
+    const endInput = document.getElementById('filterPopoverEndDate');
+    const validationElement = document.getElementById('filterPopoverDateValidation');
+
+    if (startInput) {
+        startInput.setAttribute('aria-invalid', isInvalid ? 'true' : 'false');
+    }
+    if (endInput) {
+        endInput.setAttribute('aria-invalid', isInvalid ? 'true' : 'false');
+    }
+    if (validationElement) {
+        validationElement.textContent = validationMessage;
+    }
+
+    return validationMessage;
 }
 
 function updateDatePresetButtonState() {
@@ -2772,13 +2945,14 @@ function renderActiveFilterPopover() {
             <div class="filter-popover-date-inputs">
                 <div class="filter-popover-date-field">
                     <label for="filterPopoverStartDate">Start Date</label>
-                    <input type="date" id="filterPopoverStartDate" value="${escapeHtml(filterPopoverDraftState.startDate)}">
+                    <input type="date" id="filterPopoverStartDate" value="${escapeHtml(filterPopoverDraftState.startDate)}" aria-describedby="filterPopoverDateValidation">
                 </div>
                 <div class="filter-popover-date-field">
                     <label for="filterPopoverEndDate">End Date</label>
-                    <input type="date" id="filterPopoverEndDate" value="${escapeHtml(filterPopoverDraftState.endDate)}">
+                    <input type="date" id="filterPopoverEndDate" value="${escapeHtml(filterPopoverDraftState.endDate)}" aria-describedby="filterPopoverDateValidation">
                 </div>
-            </div>`;
+            </div>
+            <div id="filterPopoverDateValidation" class="filter-popover-date-validation" role="status" aria-live="polite"></div>`;
         updateFilterPopoverFooterState();
         return;
     }
@@ -2895,6 +3069,9 @@ function handleFilterPopoverClick(event) {
     }
 
     if (target.id === 'filterPopoverApplyButton') {
+        if (activeFilterPopoverKey === 'date' && updateDateFilterPopoverValidationState(filterPopoverDraftState)) {
+            return;
+        }
         filterState = finalizeFilterState(filterPopoverDraftState);
         closeActiveFilterPopover();
         renderFilterPills(filterState);
@@ -8392,6 +8569,12 @@ window.addEventListener('keydown', function(event) {
 // Track whether PDF libraries have been loaded
 let pdfLibrariesLoaded = false;
 
+function hasPdfLibrariesAvailable() {
+    return typeof pdfMake !== 'undefined'
+        && typeof pdfMake.createPdf === 'function'
+        && typeof html2canvas === 'function';
+}
+
 /**
  * Load PDF libraries on demand.
  * The embedded bundle contains html2canvas + pdfmake + vfs_fonts.
@@ -8400,13 +8583,20 @@ function loadPdfLibraries() {
     if (pdfLibrariesLoaded) {
         return Promise.resolve();
     }
-    
-    return new Promise((resolve, reject) => {
+
+    if (pdfLibrariesLoadPromise) {
+        return pdfLibrariesLoadPromise;
+    }
+
+    pdfLibrariesLoadPromise = new Promise((resolve, reject) => {
         try {
             const pdfBundleMode = dashboardConfig.pdfExportBundleMode || 'embedded';
             if (pdfBundleMode === 'external') {
                 loadExternalScript(dashboardConfig.pdfExportBundleUrl)
                     .then(() => {
+                        if (!hasPdfLibrariesAvailable()) {
+                            throw new Error('PDF export bundle did not initialize correctly.');
+                        }
                         pdfLibrariesLoaded = true;
                         logDebug('PDF libraries loaded successfully');
                         resolve();
@@ -8425,7 +8615,7 @@ function loadPdfLibraries() {
             let attempts = 0;
             const checkPdfMake = setInterval(() => {
                 attempts++;
-                if (typeof pdfMake !== 'undefined' && typeof pdfMake.createPdf === 'function' && typeof html2canvas === 'function') {
+                if (hasPdfLibrariesAvailable()) {
                     clearInterval(checkPdfMake);
                     pdfLibrariesLoaded = true;
                     logDebug('PDF libraries loaded successfully');
@@ -8439,7 +8629,12 @@ function loadPdfLibraries() {
             console.error('Failed to load PDF libraries:', error);
             reject(error);
         }
+    }).catch(error => {
+        pdfLibrariesLoadPromise = null;
+        throw error;
     });
+
+    return pdfLibrariesLoadPromise;
 }
 
 /**

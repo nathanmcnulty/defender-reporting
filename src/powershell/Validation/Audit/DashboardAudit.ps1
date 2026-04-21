@@ -1953,8 +1953,8 @@ function Get-DashboardAuditResult {
                 $tempPayloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-validation-payload-' + [System.Guid]::NewGuid().ToString('N') + '.json.gz')
                 $tempVulnsPath = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-validation-vulns-' + [System.Guid]::NewGuid().ToString('N') + '.json')
                 try {
-                    $normalizedResult = ConvertTo-NormalizedData -DataPath $ResolvedExportsPath -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHunting -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge
-                    $payloadCacheEntry = Publish-NormalizedPayloadCache -BasePath $ResolvedExportsPath -PayloadPath $normalizedResult.PayloadPath -VulnCount $normalizedResult.VulnCount -DeviceCount $normalizedResult.Lookups.devices.Count -CveCount $normalizedResult.Lookups.cves.Count -Quality $normalizedResult.Quality -SkipObservedWindowMerge:$skipObservedWindowMerge
+                    $normalizedResult = ConvertTo-NormalizedData -DataPath $ResolvedExportsPath -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHunting -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+                    $payloadCacheEntry = Publish-NormalizedPayloadCache -BasePath $ResolvedExportsPath -PayloadPath $normalizedResult.PayloadPath -VulnCount $normalizedResult.VulnCount -DeviceCount ([int]$normalizedResult.DeviceCount) -CveCount ([int]$normalizedResult.CveCount) -Quality $normalizedResult.Quality -SkipObservedWindowMerge:$skipObservedWindowMerge
                 }
                 finally {
                     if (Test-Path -LiteralPath $tempPayloadPath -PathType Leaf) {
