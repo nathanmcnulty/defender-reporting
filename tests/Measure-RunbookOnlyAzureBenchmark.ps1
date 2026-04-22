@@ -54,6 +54,68 @@ $script:UseExistingExportsOnly = if ($PSBoundParameters.ContainsKey('UseExisting
 $script:ExpectedTotalRows = $ExpectedTotalRows
 $script:PollIntervalSeconds = $PollIntervalSeconds
 
+function ConvertTo-UtcDateTime {
+    [CmdletBinding()]
+    [OutputType([datetime])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [datetime]) {
+        return ([datetime]$Value).ToUniversalTime()
+    }
+
+    if ($Value -is [datetimeoffset]) {
+        return ([datetimeoffset]$Value).UtcDateTime
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    $parsed = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParse($text, [ref]$parsed)) {
+        return $parsed.UtcDateTime
+    }
+
+    return $null
+}
+
+function Invoke-GitText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoPath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    if (-not (Test-Path -LiteralPath $RepoPath -PathType Container)) {
+        return $null
+    }
+
+    $output = (& git -C $RepoPath @Arguments 2>$null | Out-String)
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+
+    $trimmed = $output.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        return $null
+    }
+
+    return $trimmed
+}
+
 function Invoke-AzCli {
     [CmdletBinding()]
     param(
@@ -192,11 +254,16 @@ function Start-RunbookBenchmark {
 
     $job = Invoke-AzCli -Arguments $arguments -ExpectJson
 
+    $creationTimeUtc = ConvertTo-UtcDateTime -Value $job.creationTime
+    if ($null -eq $creationTimeUtc) {
+        throw ("Azure Automation job '{0}' did not return a usable creationTime value." -f [string]$job.name)
+    }
+
     return [PSCustomObject]@{
         name = [string]$job.name
         jobId = [string]$job.jobId
         status = [string]$job.status
-        creationTimeUtc = ([datetimeoffset]$job.creationTime).UtcDateTime
+        creationTimeUtc = $creationTimeUtc
     }
 }
 
@@ -389,6 +456,10 @@ if (-not $SkipTemplateUpload) {
 }
 
 $runbookState = Start-RunbookBenchmark
+if ($null -eq $runbookState) {
+    throw 'Runbook benchmark start was skipped before a job was created.'
+}
+
 Write-Host ("Started runbook job {0}" -f $runbookState.name) -ForegroundColor Yellow
 
 $runbookJob = $null
@@ -400,12 +471,29 @@ do {
 while ($runbookJob.status -notin @('Completed', 'Failed', 'Stopped', 'Suspended'))
 
 $runbookEvents = @(Get-RunbookEventList -JobName $runbookState.name -SubscriptionId ([string]$subscription.id) -NotBeforeUtc $runbookState.creationTimeUtc)
-$runbookCompletedUtc = ([datetimeoffset]$runbookJob.lastModifiedTime).UtcDateTime
+$runbookCompletedUtc = ConvertTo-UtcDateTime -Value $runbookJob.lastModifiedTime
+if ($null -eq $runbookCompletedUtc) {
+    $runbookCompletedUtc = ConvertTo-UtcDateTime -Value $runbookJob.endTime
+}
+if ($null -eq $runbookCompletedUtc) {
+    $runbookCompletedUtc = ConvertTo-UtcDateTime -Value $runbookJob.lastStatusModifiedTime
+}
+if ($null -eq $runbookCompletedUtc) {
+    throw ("Azure Automation job '{0}' did not return a usable completion timestamp." -f [string]$runbookState.name)
+}
+
 $elapsedSeconds = [math]::Round((New-TimeSpan -Start $runbookState.creationTimeUtc -End $runbookCompletedUtc).TotalSeconds, 2)
 $runbookSummary = Get-PipelineEventSummary -Events $runbookEvents -TotalElapsedSeconds $elapsedSeconds -TotalRows $script:ExpectedTotalRows -TerminalStatus ([string]$runbookJob.status)
 
-$repoCommit = (git -C $repoFullPath rev-parse HEAD).Trim()
-$repoBranch = (git -C $repoFullPath branch --show-current).Trim()
+$repoCommit = Invoke-GitText -RepoPath $repoFullPath -Arguments @('rev-parse', 'HEAD')
+if ([string]::IsNullOrWhiteSpace($repoCommit)) {
+    $repoCommit = '<unknown>'
+}
+
+$repoBranch = Invoke-GitText -RepoPath $repoFullPath -Arguments @('branch', '--show-current')
+if ([string]::IsNullOrWhiteSpace($repoBranch)) {
+    $repoBranch = '<detached>'
+}
 
 $result = [ordered]@{
     generated_utc = (Get-Date).ToUniversalTime().ToString('o')
