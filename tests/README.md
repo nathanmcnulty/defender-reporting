@@ -96,6 +96,27 @@ Defaults:
 
 Large-dataset review now needs three separate lanes. Do not rely on completed, content-store-ready datasets alone.
 
+### One-command workflow
+
+Use this entrypoint when you want the synthetic import lane prepared and locally checked end to end with one command:
+
+```powershell
+pwsh -NoProfile -File .\tests\Invoke-LargeImportCoverage.ps1
+```
+
+By default this workflow:
+- generates a raw synthetic dataset with canonical current/history row files
+- shifts that dataset forward to a live date without rebuilding content-store sidecars
+- materializes deterministic legacy `VulnExport_<group>_<date>.json.gz` files from the raw live dataset
+- builds `.local\large-import-coverage\azure-replay-existing-exports` with `Machines_Current.json.gz`, `AdvancedHunting_Current.json.gz`, and the synthetic legacy vulnerability snapshots for `UseExistingExportsOnly=true` Azure replay runs
+- runs local raw replay validation and local legacy vulnerability import validation unless you explicitly skip them
+
+Useful switches:
+- `-SkipRawValidation` while iterating on dataset prep only
+- `-SkipLegacyImportValidation` when you only need the replay dataset artifacts
+- `-SnapshotCount <n>` or `-SnapshotDates <yyyy-MM-dd,...>` to control which synthetic legacy snapshot dates are emitted
+- `-AllowLargeDataset` for unattended large captures beyond the default safety limits
+
 ### 1. Replay a completed dataset
 
 Use this lane for steady-state normalization, packaging, and dashboard generation against a fully prepared export set.
@@ -123,7 +144,13 @@ pwsh -NoProfile -File .\tests\New-SyntheticLiveExport.ps1 -SourcePath .\.local\l
 pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -SkipSyntheticGeneration -SyntheticOutputPath .\.local\large-datasets\synthetic-raw-live -Validate
 ```
 
-If you need Azure replay against that raw dataset, seed it into storage through `Measure-BranchVsMainBenchmark.ps1 -CurrentOnly -DatasetPath <raw-live-path>` so the benchmark harness stages the same files into the `exports` container before the runbook starts.
+Standalone legacy vulnerability snapshot materialization from that raw live dataset:
+
+```powershell
+pwsh -NoProfile -File .\tests\New-SyntheticLegacyVulnSnapshotSet.ps1 -SourcePath .\.local\large-datasets\synthetic-raw-live -OutputPath .\.local\large-datasets\synthetic-legacy-vuln -SnapshotCount 2 -Force
+```
+
+If you need Azure replay against that raw dataset, prefer the composite dataset produced by `Invoke-LargeImportCoverage.ps1` under `.local\large-import-coverage\azure-replay-existing-exports`, then seed that path into storage before starting `Measure-RunbookOnlyAzureBenchmark.ps1` or `Measure-BranchVsMainBenchmark.ps1` with `UseExistingExportsOnly=true`.
 
 ### 3. Run a live fresh-export Azure Automation job
 

@@ -11,6 +11,8 @@ Performance acceptance should record which benchmark lane was used:
 
 Do not compare those lanes as if they were interchangeable. Replay benchmarks are useful for steady-state normalization and packaging cost, while live fresh-export runs are the only coverage for Stage C import behavior and large MDE download/publish hot paths.
 
+`tests/Invoke-LargeImportCoverage.ps1` is the preferred deterministic prep entrypoint for large import-path spot checks. It produces both a raw sidecar-free replay dataset and an Azure-ready existing-export dataset that combines `Machines_Current.json.gz`, `AdvancedHunting_Current.json.gz`, and synthetic legacy `VulnExport_*.json.gz` files.
+
 The raw result JSON files from the April 5, 2026 capture remain local-only under `.local/`. The April 20, 2026 ad hoc hosted review captures remain local-only under `.local/perf-triage/`, and the April 20, 2026 durable benchmark series remains local-only under `.local/benchmark-series/benchmark-medium-v1-20260420-004103/`.
 
 ## Recorded baselines
