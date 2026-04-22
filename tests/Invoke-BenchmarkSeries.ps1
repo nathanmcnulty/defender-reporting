@@ -34,6 +34,39 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'Import-BenchmarkDatasetCatalog.ps1')
 
+function Get-PercentileValue {
+    [CmdletBinding()]
+    [OutputType([double])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [double[]]$SortedValues,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0.0, 100.0)]
+        [double]$Percentile
+    )
+
+    if ($SortedValues.Count -eq 0) {
+        return $null
+    }
+
+    if ($SortedValues.Count -eq 1) {
+        return [math]::Round($SortedValues[0], 2)
+    }
+
+    $rank = ($Percentile / 100.0) * ($SortedValues.Count - 1)
+    $lowerIndex = [int][math]::Floor($rank)
+    $upperIndex = [int][math]::Ceiling($rank)
+    if ($lowerIndex -eq $upperIndex) {
+        return [math]::Round($SortedValues[$lowerIndex], 2)
+    }
+
+    $weight = $rank - $lowerIndex
+    $interpolatedValue = $SortedValues[$lowerIndex] + (($SortedValues[$upperIndex] - $SortedValues[$lowerIndex]) * $weight)
+    return [math]::Round($interpolatedValue, 2)
+}
+
 function Get-NumericSeriesSummary {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -57,12 +90,27 @@ function Get-NumericSeriesSummary {
         [math]::Round((($orderedValues[$middleIndex - 1] + $orderedValues[$middleIndex]) / 2.0), 2)
     }
 
+    $average = [double](($orderedValues | Measure-Object -Average).Average)
+    $variance = if ($orderedValues.Count -gt 1) {
+        (($orderedValues | ForEach-Object { [math]::Pow(([double]$_ - $average), 2) } | Measure-Object -Sum).Sum) / ($orderedValues.Count - 1)
+    }
+    else {
+        0.0
+    }
+
+    $percentile05 = Get-PercentileValue -SortedValues $orderedValues -Percentile 5
+    $percentile95 = Get-PercentileValue -SortedValues $orderedValues -Percentile 95
+
     return [PSCustomObject]@{
         count = $orderedValues.Count
         min = [math]::Round(($orderedValues | Measure-Object -Minimum).Minimum, 2)
         max = [math]::Round(($orderedValues | Measure-Object -Maximum).Maximum, 2)
-        average = [math]::Round(($orderedValues | Measure-Object -Average).Average, 2)
+        average = [math]::Round($average, 2)
         median = $median
+        standard_deviation = [math]::Round([math]::Sqrt($variance), 2)
+        percentile_05 = $percentile05
+        percentile_95 = $percentile95
+        spread_90 = if ($null -ne $percentile05 -and $null -ne $percentile95) { [math]::Round(($percentile95 - $percentile05), 2) } else { $null }
     }
 }
 
@@ -82,7 +130,7 @@ function Get-MarkdownStatisticLine {
         return ('- {0}: n/a' -f $Label)
     }
 
-    return ('- {0}: min `{1:N2}s`, median `{2:N2}s`, avg `{3:N2}s`, max `{4:N2}s`' -f $Label, [double]$Summary.min, [double]$Summary.median, [double]$Summary.average, [double]$Summary.max)
+    return ('- {0}: min `{1:N2}s`, p05-p95 `{2:N2}s`-`{3:N2}s`, median `{4:N2}s`, avg `{5:N2}s`, max `{6:N2}s`, stdev `{7:N2}s`' -f $Label, [double]$Summary.min, [double]$Summary.percentile_05, [double]$Summary.percentile_95, [double]$Summary.median, [double]$Summary.average, [double]$Summary.max, [double]$Summary.standard_deviation)
 }
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent

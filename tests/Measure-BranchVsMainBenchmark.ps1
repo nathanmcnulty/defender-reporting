@@ -1399,6 +1399,22 @@ function Get-AvailableMemoryGB {
     return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
 }
 
+function Get-PreBenchmarkEnvironmentSnapshot {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return [PSCustomObject]@{
+        captured_utc = [datetime]::UtcNow.ToString('o')
+        logical_cpu_count = [int][System.Environment]::ProcessorCount
+        available_memory_gb = Get-AvailableMemoryGB
+        free_disk_gb = [math]::Round(((Get-FreeDiskByteCount -Path $Path) / 1GB), 2)
+    }
+}
+
 function Get-ProcessTree {
     [CmdletBinding()]
     [OutputType([System.Diagnostics.Process[]])]
@@ -1519,6 +1535,7 @@ function Start-LocalBenchmark {
         repoPath = $RepoPath
         sourceDatasetPath = $BenchmarkDatasetPath
         datasetPath = $localDatasetPath
+        environmentSnapshot = Get-PreBenchmarkEnvironmentSnapshot -Path $OutputDirectory
         process = $process
         stdoutPath = $stdoutPath
         stderrPath = $stderrPath
@@ -1627,6 +1644,7 @@ function Get-LocalBenchmarkResult {
         used_cached_payload = [bool]$logSummary.used_cached_payload
         used_cached_vuln_columns = [bool]$logSummary.used_cached_vuln_columns
         published_cached_vuln_columns = [bool]$logSummary.published_cached_vuln_columns
+        environment_snapshot = $State.environmentSnapshot
         stdout_path = $State.stdoutPath
         stderr_path = $State.stderrPath
         dashboard_path = $State.dashboardPath
@@ -1691,6 +1709,95 @@ function Get-PhaseElapsedSecondsValue {
     }
 
     return [double]$phaseProperty.Value
+}
+
+function Get-PhaseElapsedSecondsDeltaSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $CurrentResult,
+
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $MainResult
+    )
+
+    $phaseNames = [System.Collections.Generic.List[string]]::new()
+    foreach ($phaseContainer in @(
+        (Get-ObjectPropertyValue -InputObject $CurrentResult -Name 'phase_elapsed_seconds'),
+        (Get-ObjectPropertyValue -InputObject $MainResult -Name 'phase_elapsed_seconds')
+    )) {
+        if ($null -eq $phaseContainer) {
+            continue
+        }
+
+        foreach ($phaseProperty in $phaseContainer.PSObject.Properties) {
+            $phaseName = [string]$phaseProperty.Name
+            if (-not $phaseNames.Contains($phaseName)) {
+                $phaseNames.Add($phaseName) | Out-Null
+            }
+        }
+    }
+
+    $deltaByName = [ordered]@{}
+    foreach ($phaseName in $phaseNames) {
+        $currentPhaseSeconds = Get-PhaseElapsedSecondsValue -Result $CurrentResult -PhaseName $phaseName
+        $mainPhaseSeconds = Get-PhaseElapsedSecondsValue -Result $MainResult -PhaseName $phaseName
+        if ($null -eq $currentPhaseSeconds -or $null -eq $mainPhaseSeconds) {
+            continue
+        }
+
+        $deltaByName[$phaseName] = [math]::Round(($currentPhaseSeconds - $mainPhaseSeconds), 2)
+    }
+
+    if ($deltaByName.Count -eq 0) {
+        return $null
+    }
+
+    return [PSCustomObject]$deltaByName
+}
+
+function Get-EnvironmentSnapshotDeltaSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $CurrentResult,
+
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $MainResult
+    )
+
+    $currentEnvironmentSnapshot = Get-ObjectPropertyValue -InputObject $CurrentResult -Name 'environment_snapshot'
+    $mainEnvironmentSnapshot = Get-ObjectPropertyValue -InputObject $MainResult -Name 'environment_snapshot'
+    if ($null -eq $currentEnvironmentSnapshot -or $null -eq $mainEnvironmentSnapshot) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        available_memory_gb_delta = if ($null -ne $currentEnvironmentSnapshot.available_memory_gb -and $null -ne $mainEnvironmentSnapshot.available_memory_gb) {
+            [math]::Round(([double]$currentEnvironmentSnapshot.available_memory_gb - [double]$mainEnvironmentSnapshot.available_memory_gb), 2)
+        }
+        else {
+            $null
+        }
+        free_disk_gb_delta = if ($null -ne $currentEnvironmentSnapshot.free_disk_gb -and $null -ne $mainEnvironmentSnapshot.free_disk_gb) {
+            [math]::Round(([double]$currentEnvironmentSnapshot.free_disk_gb - [double]$mainEnvironmentSnapshot.free_disk_gb), 2)
+        }
+        else {
+            $null
+        }
+        logical_cpu_count_delta = if ($null -ne $currentEnvironmentSnapshot.logical_cpu_count -and $null -ne $mainEnvironmentSnapshot.logical_cpu_count) {
+            [int]$currentEnvironmentSnapshot.logical_cpu_count - [int]$mainEnvironmentSnapshot.logical_cpu_count
+        }
+        else {
+            $null
+        }
+    }
 }
 
 function Invoke-LocalPersistentCacheWorkflow {
@@ -2268,6 +2375,8 @@ function Get-ComparisonBlock {
             elapsed_seconds_delta = [math]::Round(($Current.local.elapsed_seconds - $Main.local.elapsed_seconds), 2)
             peak_rss_gb_delta = [math]::Round(($Current.local.peak_tree_rss_gb - $Main.local.peak_tree_rss_gb), 3)
             peak_private_gb_delta = [math]::Round(($Current.local.peak_tree_private_gb - $Main.local.peak_tree_private_gb), 3)
+            phase_elapsed_seconds_delta = Get-PhaseElapsedSecondsDeltaSummary -CurrentResult $Current.local -MainResult $Main.local
+            environment_snapshot_delta = Get-EnvironmentSnapshotDeltaSummary -CurrentResult $Current.local -MainResult $Main.local
         }
         local_persistent_cache = if ($Current.PSObject.Properties['local_persistent_cache'] -and $Main.PSObject.Properties['local_persistent_cache'] -and $null -ne $Current.local_persistent_cache -and $null -ne $Main.local_persistent_cache) {
             [PSCustomObject]@{
