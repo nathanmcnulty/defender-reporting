@@ -1267,7 +1267,7 @@ function Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs {
     Assert-True ($filteredResult[1] -eq 'fabrikam:browser') 'Expected Advanced Hunting bundle string normalization to preserve later non-empty values in order.'
 }
 
-function Test-ReadMachineDataTupleModeMatchesCompressedMachineLookup {
+function Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup {
     [CmdletBinding()]
     param()
 
@@ -1327,7 +1327,7 @@ function Test-ReadMachineDataTupleModeMatchesCompressedMachineLookup {
         }
         Compress-NormalizationMachineLookup -Machines $compressedMachines | Out-Null
 
-        $tupleMachines = Read-MachineData -Path $tempRoot -AsNormalizationTuple
+        $tupleMachines = Read-NormalizationMachineLookup -Path $tempRoot
 
         Assert-True ($tupleMachines.Count -eq $compressedMachines.Count) 'Expected tuple-mode machine loading to preserve the same machine count as the compressed machine lookup path.'
         Assert-True ($tupleMachines.ContainsKey('device-live')) 'Expected tuple-mode machine loading to preserve populated machines.'
@@ -1700,7 +1700,7 @@ function Test-StreamingDashboardAuditReusesCachedPayloadSignatureSet {
     }
 }
 
-function Test-DashboardAuditBootstrapsSyntheticLargePayloadCacheWithTupleMachines {
+function Test-DashboardAuditBootstrapsSyntheticLargePayloadCacheWithNormalizationLookup {
     [CmdletBinding()]
     param()
 
@@ -1745,7 +1745,7 @@ function Test-DashboardAuditBootstrapsSyntheticLargePayloadCacheWithTupleMachine
             actualHistoryRows = 0
         }) | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
 
-        $normalizationMachines = Read-MachineData -Path $tempRoot -AsNormalizationTuple
+        $normalizationMachines = Read-NormalizationMachineLookup -Path $tempRoot
         $normalizedResult = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $vulnOutputPath -PayloadOutputPath $payloadPath -Machines $normalizationMachines -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers @{} -AdvancedHuntingInventoryData @{} -NvdCveData @{} -SkipObservedWindowMerge
 
         $dashboardConfigJson = ([ordered]@{ payloadUrl = 'payload.json.gz' } | ConvertTo-Json -Compress)
@@ -2265,7 +2265,7 @@ Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity
 Write-Output '  Streaming dashboard source-parity checks passed.'
 Test-StreamingDashboardAuditReusesCachedPayloadSignatureSet
 Write-Output '  Streaming dashboard payload-signature reuse checks passed.'
-Test-DashboardAuditBootstrapsSyntheticLargePayloadCacheWithTupleMachines
+Test-DashboardAuditBootstrapsSyntheticLargePayloadCacheWithNormalizationLookup
 Write-Output '  Dashboard synthetic large-dataset bootstrap checks passed.'
 Test-DashboardValidationUsesStableFallbackDeviceProfile
 Write-Output '  Dashboard validation fallback device profile checks passed.'
@@ -2281,7 +2281,7 @@ Test-AdvancedHuntingBundleMatchesDedicatedReaderData
 Write-Output '  Advanced Hunting bundle reader checks passed.'
 Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs
 Write-Output '  Advanced Hunting bundle sparse string-array checks passed.'
-Test-ReadMachineDataTupleModeMatchesCompressedMachineLookup
+Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup
 Write-Output '  Machine tuple reader checks passed.'
 Test-VulnPropertyHelpersSupportSupportedRowShapes
 Write-Output '  Vulnerability property helper shape checks passed.'
