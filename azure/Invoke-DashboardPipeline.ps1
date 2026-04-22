@@ -5101,6 +5101,101 @@ function Get-MachineJsonElementScalarValue {
     }
 }
 
+function Get-MachineJsonElementStringArrayValue {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Text.Json.JsonElement]$Element,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $property = [System.Text.Json.JsonElement]::new()
+    if (-not $Element.TryGetProperty($Name, [ref]$property)) {
+        return [string[]]@()
+    }
+
+    switch ($property.ValueKind) {
+        ([System.Text.Json.JsonValueKind]::Undefined) { return [string[]]@() }
+        ([System.Text.Json.JsonValueKind]::Null) { return [string[]]@() }
+        ([System.Text.Json.JsonValueKind]::String) { return (Get-NormalizedMachineTag -Tags $property.GetString()) }
+        ([System.Text.Json.JsonValueKind]::Array) {
+            $tagList = [System.Collections.Generic.List[string]]::new()
+            foreach ($item in $property.EnumerateArray()) {
+                $tagValue = switch ($item.ValueKind) {
+                    ([System.Text.Json.JsonValueKind]::String) { $item.GetString() }
+                    ([System.Text.Json.JsonValueKind]::Null) { $null }
+                    ([System.Text.Json.JsonValueKind]::Undefined) { $null }
+                    default { $item.GetRawText() }
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace([string]$tagValue)) {
+                    $tagList.Add([string]$tagValue) | Out-Null
+                }
+            }
+
+            return (Get-NormalizedMachineTag -Tags @($tagList))
+        }
+        default { return (Get-NormalizedMachineTag -Tags (Get-MachineJsonElementScalarValue -Element $Element -Name $Name)) }
+    }
+}
+
+function ConvertFrom-MachineJsonElementToCompactMachineRecord {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Text.Json.JsonElement]$MachineElement
+    )
+
+    $machineId = [string](Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'id')
+    if ([string]::IsNullOrWhiteSpace($machineId)) {
+        return $null
+    }
+
+    $observedOn = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'observedOn'
+    $stateHash = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'stateHash'
+    if ((Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'removed') -eq $true) {
+        return [PSCustomObject]@{
+            id = $machineId
+            observedOn = $observedOn
+            removed = $true
+            stateHash = $stateHash
+        }
+    }
+
+    $record = [PSCustomObject]@{
+        id                    = $machineId
+        computerDnsName       = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'computerDnsName'
+        rbacGroupName         = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'rbacGroupName'
+        osPlatform            = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'osPlatform'
+        osVersion             = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'osVersion'
+        machineTags           = Get-MachineJsonElementStringArrayValue -Element $MachineElement -Name 'machineTags'
+        lastIpAddress         = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'lastIpAddress'
+        lastExternalIpAddress = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'lastExternalIpAddress'
+        healthStatus          = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'healthStatus'
+        riskScore             = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'riskScore'
+        exposureLevel         = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'exposureLevel'
+        deviceValue           = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'deviceValue'
+        managedBy             = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'managedBy'
+        isAadJoined           = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'isAadJoined'
+        lastSeen              = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'lastSeen'
+        firstSeen             = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'firstSeen'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$stateHash)) {
+        Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$observedOn)) {
+        Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn
+    }
+
+    return $record
+}
+
 function ConvertFrom-MachineJsonElementToNormalizationEntry {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -5156,75 +5251,69 @@ function Read-MachineNormalizationEntriesFromFile {
         [string]$Path
     )
 
-    $fileMode = Get-JsonFileMode -Path $Path
-    if ($fileMode -eq 'Empty') {
-        return
-    }
-
-    if ($fileMode -eq 'Array') {
-        $rawContent = Read-TextFileContent -Path $Path
-        if ([string]::IsNullOrWhiteSpace($rawContent)) {
+    $readContext = Open-JsonFileReadContext -Path $Path
+    try {
+        if ($readContext.Mode -eq 'Empty') {
             return
         }
 
-        $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawContent)
-        $rawContent = $null
-        try {
-            if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
+        if ($readContext.Mode -eq 'Array') {
+            $rawContent = Read-JsonFileRemainingContent -Context $readContext
+            if ([string]::IsNullOrWhiteSpace($rawContent)) {
                 return
             }
 
-            foreach ($machineElement in $jsonDocument.RootElement.EnumerateArray()) {
-                $entry = ConvertFrom-MachineJsonElementToNormalizationEntry -MachineElement $machineElement
+            $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawContent)
+            $rawContent = $null
+            try {
+                if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
+                    return
+                }
+
+                foreach ($machineElement in $jsonDocument.RootElement.EnumerateArray()) {
+                    $entry = ConvertFrom-MachineJsonElementToNormalizationEntry -MachineElement $machineElement
+                    if ($null -ne $entry) {
+                        $entry
+                    }
+                }
+            }
+            finally {
+                $jsonDocument.Dispose()
+            }
+
+            return
+        }
+
+        $isFirstLine = [ref]$true
+        while (-not $readContext.Reader.EndOfStream) {
+            $line = Read-JsonFileLine -Context $readContext -IsFirstLine $isFirstLine
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+            $jsonDocument = $null
+            try {
+                $jsonDocument = [System.Text.Json.JsonDocument]::Parse($line)
+            }
+            catch {
+                Write-Warning "Failed to parse machine line in $(Split-Path -Leaf $Path): $_"
+                continue
+            }
+
+            try {
+                $entry = ConvertFrom-MachineJsonElementToNormalizationEntry -MachineElement $jsonDocument.RootElement
                 if ($null -ne $entry) {
                     $entry
                 }
             }
-        }
-        finally {
-            $jsonDocument.Dispose()
-        }
-
-        return
-    }
-
-    $fileStream = [System.IO.File]::OpenRead($Path)
-    try {
-        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
-            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
-        } else { $fileStream }
-        try {
-            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
-            try {
-                while (-not $reader.EndOfStream) {
-                    $line = $reader.ReadLine()
-                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-
-                    $jsonDocument = $null
-                    try {
-                        $jsonDocument = [System.Text.Json.JsonDocument]::Parse($line)
-                    }
-                    catch {
-                        Write-Warning "Failed to parse machine line in $(Split-Path -Leaf $Path): $_"
-                        continue
-                    }
-
-                    try {
-                        $entry = ConvertFrom-MachineJsonElementToNormalizationEntry -MachineElement $jsonDocument.RootElement
-                        if ($null -ne $entry) {
-                            $entry
-                        }
-                    }
-                    finally {
-                        $jsonDocument.Dispose()
-                    }
+            finally {
+                if ($null -ne $jsonDocument) {
+                    $jsonDocument.Dispose()
                 }
             }
-            finally { $reader.Dispose() }
         }
-        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
     }
-    finally { $fileStream.Dispose() }
+    finally {
+        Close-JsonFileReadContext -Context $readContext
+    }
 }
 
 function Get-NormalizedMachineTag {
@@ -5485,38 +5574,145 @@ function Read-TextFileContent {
     return (Get-Content -Path $Path -Raw)
 }
 
-function Get-JsonFileMode {
+function Open-JsonFileReadContext {
     [CmdletBinding()]
-    [OutputType([string])]
+    [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
     )
 
-    $fileStream = [System.IO.File]::OpenRead($Path)
+    $fileStream = $null
+    $contentStream = $null
+    $reader = $null
     try {
+        $fileStream = [System.IO.File]::OpenRead($Path)
         $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
             [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
-        } else { $fileStream }
-        try {
-            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.Encoding]::UTF8, $true)
-            try {
-                while (-not $reader.EndOfStream) {
-                    $charValue = $reader.Read()
-                    if ($charValue -lt 0) { break }
-                    $char = [char]$charValue
-                    if (-not [char]::IsWhiteSpace($char)) {
-                        if ($char -eq '[') { return 'Array' }
-                        return 'Ndjson'
-                    }
-                }
-                return 'Empty'
-            }
-            finally { $reader.Dispose() }
         }
-        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
+        else {
+            $fileStream
+        }
+
+        $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.Encoding]::UTF8, $true)
+        $mode = 'Empty'
+        $firstContentText = $null
+        while (-not $reader.EndOfStream) {
+            $charValue = $reader.Read()
+            if ($charValue -lt 0) {
+                break
+            }
+
+            $char = [char]$charValue
+            if (-not [char]::IsWhiteSpace($char)) {
+                $mode = if ($char -eq '[') { 'Array' } else { 'Ndjson' }
+                $firstContentText = [string]$char
+                break
+            }
+        }
+
+        $context = [PSCustomObject]@{
+            Path = $Path
+            Mode = $mode
+            Reader = $reader
+            ContentStream = $contentStream
+            FileStream = $fileStream
+            FirstContentText = $firstContentText
+        }
+
+        $reader = $null
+        $contentStream = $null
+        $fileStream = $null
+        return $context
     }
-    finally { $fileStream.Dispose() }
+    finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
+        }
+        elseif ($null -ne $contentStream -and $contentStream -ne $fileStream) {
+            $contentStream.Dispose()
+        }
+
+        if ($null -ne $fileStream) {
+            $fileStream.Dispose()
+        }
+    }
+}
+
+function Close-JsonFileReadContext {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Context
+    )
+
+    if ($null -eq $Context) {
+        return
+    }
+
+    $reader = $Context.PSObject.Properties['Reader']?.Value
+    if ($null -ne $reader) {
+        $reader.Dispose()
+        return
+    }
+
+    $contentStream = $Context.PSObject.Properties['ContentStream']?.Value
+    $fileStream = $Context.PSObject.Properties['FileStream']?.Value
+    if ($null -ne $contentStream -and $contentStream -ne $fileStream) {
+        $contentStream.Dispose()
+    }
+
+    if ($null -ne $fileStream) {
+        $fileStream.Dispose()
+    }
+}
+
+function Read-JsonFileRemainingContent {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Context
+    )
+
+    if ($null -eq $Context -or $Context.Mode -eq 'Empty') {
+        return $null
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    if (-not [string]::IsNullOrEmpty([string]$Context.FirstContentText)) {
+        [void]$builder.Append([string]$Context.FirstContentText)
+    }
+
+    [void]$builder.Append($Context.Reader.ReadToEnd())
+    return $builder.ToString()
+}
+
+function Read-JsonFileLine {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Context,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$IsFirstLine
+    )
+
+    $line = $Context.Reader.ReadLine()
+    if ($null -eq $line) {
+        return $null
+    }
+
+    if ($IsFirstLine.Value) {
+        $IsFirstLine.Value = $false
+        if (-not [string]::IsNullOrEmpty([string]$Context.FirstContentText)) {
+            return ([string]$Context.FirstContentText + $line)
+        }
+    }
+
+    return $line
 }
 
 function Read-MachineRecordsFromFile {
@@ -5526,82 +5722,69 @@ function Read-MachineRecordsFromFile {
         [string]$Path
     )
 
-    $fileMode = Get-JsonFileMode -Path $Path
-    if ($fileMode -eq 'Empty') {
-        return
-    }
-
-    if ($fileMode -eq 'Array') {
-        $rawContent = Read-TextFileContent -Path $Path
-        $machineList = $rawContent | ConvertFrom-Json
-        $rawContent = $null
-        if ($null -eq $machineList) { return }
-        if ($machineList -isnot [System.Array]) { $machineList = @($machineList) }
-
-        foreach ($machine in $machineList) {
-            if ($null -eq $machine) { continue }
-            if ($machine.PSObject.Properties['removed']?.Value -eq $true) {
-                ([PSCustomObject]@{
-                    id = $machine.PSObject.Properties['id']?.Value
-                    observedOn = $machine.PSObject.Properties['observedOn']?.Value
-                    removed = $true
-                    stateHash = $machine.PSObject.Properties['stateHash']?.Value
-                })
-                continue
-            }
-            $record = ConvertTo-CompactMachineRecord -Machine $machine
-            $stateHash = $machine.PSObject.Properties['stateHash']?.Value
-            $observedOn = $machine.PSObject.Properties['observedOn']?.Value
-            if ($stateHash) { Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash }
-            if ($observedOn) { Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn }
-            $record
+    $readContext = Open-JsonFileReadContext -Path $Path
+    try {
+        if ($readContext.Mode -eq 'Empty') {
+            return
         }
 
-        return
-    }
+        if ($readContext.Mode -eq 'Array') {
+            $rawContent = Read-JsonFileRemainingContent -Context $readContext
+            if ([string]::IsNullOrWhiteSpace($rawContent)) {
+                return
+            }
 
-    $fileStream = [System.IO.File]::OpenRead($Path)
-    try {
-        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
-            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
-        } else { $fileStream }
-        try {
-            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
+            $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawContent)
+            $rawContent = $null
             try {
-                while (-not $reader.EndOfStream) {
-                    $line = $reader.ReadLine()
-                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                    try {
-                        $machine = $line | ConvertFrom-Json
-                    }
-                    catch {
-                        Write-Warning "Failed to parse machine line in $(Split-Path -Leaf $Path): $_"
-                        continue
-                    }
+                if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
+                    return
+                }
 
-                    if ($null -eq $machine) { continue }
-                    if ($machine.PSObject.Properties['removed']?.Value -eq $true) {
-                        ([PSCustomObject]@{
-                            id = $machine.PSObject.Properties['id']?.Value
-                            observedOn = $machine.PSObject.Properties['observedOn']?.Value
-                            removed = $true
-                            stateHash = $machine.PSObject.Properties['stateHash']?.Value
-                        })
-                        continue
+                foreach ($machineElement in $jsonDocument.RootElement.EnumerateArray()) {
+                    $record = ConvertFrom-MachineJsonElementToCompactMachineRecord -MachineElement $machineElement
+                    if ($null -ne $record) {
+                        $record
                     }
-                    $record = ConvertTo-CompactMachineRecord -Machine $machine
-                    $stateHash = $machine.PSObject.Properties['stateHash']?.Value
-                    $observedOn = $machine.PSObject.Properties['observedOn']?.Value
-                    if ($stateHash) { Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash }
-                    if ($observedOn) { Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn }
+                }
+            }
+            finally {
+                $jsonDocument.Dispose()
+            }
+
+            return
+        }
+
+        $isFirstLine = [ref]$true
+        while (-not $readContext.Reader.EndOfStream) {
+            $line = Read-JsonFileLine -Context $readContext -IsFirstLine $isFirstLine
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+            $jsonDocument = $null
+            try {
+                $jsonDocument = [System.Text.Json.JsonDocument]::Parse($line)
+            }
+            catch {
+                Write-Warning "Failed to parse machine line in $(Split-Path -Leaf $Path): $_"
+                continue
+            }
+
+            try {
+                $record = ConvertFrom-MachineJsonElementToCompactMachineRecord -MachineElement $jsonDocument.RootElement
+                if ($null -ne $record) {
                     $record
                 }
             }
-            finally { $reader.Dispose() }
+            finally {
+                if ($null -ne $jsonDocument) {
+                    $jsonDocument.Dispose()
+                }
+            }
         }
-        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
     }
-    finally { $fileStream.Dispose() }
+    finally {
+        Close-JsonFileReadContext -Context $readContext
+    }
 }
 
 function Get-MachineStateHash {
@@ -6124,52 +6307,48 @@ function Read-AdvancedHuntingRecordsFromFile {
         [string]$Path
     )
 
-    $fileMode = Get-JsonFileMode -Path $Path
-    if ($fileMode -eq 'Empty') {
-        return
-    }
-
-    if ($fileMode -eq 'Array') {
-        $rawContent = Read-TextFileContent -Path $Path
-        $records = $rawContent | ConvertFrom-Json
-        $rawContent = $null
-        if ($null -eq $records) { return }
-        if ($records -isnot [System.Array]) { $records = @($records) }
-
-        foreach ($record in $records) {
-            if ($null -ne $record) {
-                $record
-            }
+    $readContext = Open-JsonFileReadContext -Path $Path
+    try {
+        if ($readContext.Mode -eq 'Empty') {
+            return
         }
 
-        return
-    }
+        if ($readContext.Mode -eq 'Array') {
+            $rawContent = Read-JsonFileRemainingContent -Context $readContext
+            if ([string]::IsNullOrWhiteSpace($rawContent)) {
+                return
+            }
 
-    $fileStream = [System.IO.File]::OpenRead($Path)
-    try {
-        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
-            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
-        } else { $fileStream }
-        try {
-            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
-            try {
-                while (-not $reader.EndOfStream) {
-                    $line = $reader.ReadLine()
-                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                    try {
-                        $record = $line | ConvertFrom-Json
-                        if ($null -ne $record) { $record }
-                    }
-                    catch {
-                        Write-Warning "Failed to parse Advanced Hunting line in $(Split-Path -Leaf $Path): $_"
-                    }
+            $records = $rawContent | ConvertFrom-Json
+            $rawContent = $null
+            if ($null -eq $records) { return }
+            if ($records -isnot [System.Array]) { $records = @($records) }
+
+            foreach ($record in $records) {
+                if ($null -ne $record) {
+                    $record
                 }
             }
-            finally { $reader.Dispose() }
+
+            return
         }
-        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
+
+        $isFirstLine = [ref]$true
+        while (-not $readContext.Reader.EndOfStream) {
+            $line = Read-JsonFileLine -Context $readContext -IsFirstLine $isFirstLine
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            try {
+                $record = $line | ConvertFrom-Json
+                if ($null -ne $record) { $record }
+            }
+            catch {
+                Write-Warning "Failed to parse Advanced Hunting line in $(Split-Path -Leaf $Path): $_"
+            }
+        }
     }
-    finally { $fileStream.Dispose() }
+    finally {
+        Close-JsonFileReadContext -Context $readContext
+    }
 }
 
 function Initialize-AdvancedHuntingStore {
