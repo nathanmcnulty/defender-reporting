@@ -60,6 +60,9 @@ param(
     [string]$DashboardOutputPath,
 
     [Parameter(Mandatory = $false)]
+    [string]$DiagnosticPhaseLogPath,
+
+    [Parameter(Mandatory = $false)]
     [string]$ValidationOutputPath,
 
     [Parameter(Mandatory = $false)]
@@ -129,6 +132,129 @@ function Get-ValidationAuditSummary {
     }
 }
 
+function ConvertTo-DiagnosticUtcDateTime {
+    [CmdletBinding()]
+    [OutputType([datetime])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [datetime]) {
+        return ([datetime]$Value).ToUniversalTime()
+    }
+
+    if ($Value -is [datetimeoffset]) {
+        return ([datetimeoffset]$Value).UtcDateTime
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    $parsed = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParse($text, [ref]$parsed)) {
+        return $parsed.UtcDateTime
+    }
+
+    return $null
+}
+
+function Get-DiagnosticPhaseTimingSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    $phaseByName = [ordered]@{}
+    $pipelineStartUtc = $null
+    $pipelineEndUtc = $null
+
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        $parts = @([string]$line -split "`t")
+        if ($parts.Count -lt 3) {
+            continue
+        }
+
+        $timestampUtc = ConvertTo-DiagnosticUtcDateTime -Value $parts[0]
+        if ($null -eq $timestampUtc) {
+            continue
+        }
+
+        $eventType = [string]$parts[1]
+        $name = [string]$parts[2]
+        switch ($eventType) {
+            'pipeline-start' {
+                if ($null -eq $pipelineStartUtc) {
+                    $pipelineStartUtc = $timestampUtc
+                }
+            }
+            'pipeline-end' {
+                $pipelineEndUtc = $timestampUtc
+            }
+            'phase-start' {
+                if (-not $phaseByName.Contains($name)) {
+                    $phaseByName[$name] = [ordered]@{ start_utc = $null; end_utc = $null }
+                }
+
+                if ($null -eq $phaseByName[$name].start_utc) {
+                    $phaseByName[$name].start_utc = $timestampUtc
+                }
+            }
+            'phase-end' {
+                if (-not $phaseByName.Contains($name)) {
+                    $phaseByName[$name] = [ordered]@{ start_utc = $null; end_utc = $null }
+                }
+
+                $phaseByName[$name].end_utc = $timestampUtc
+            }
+        }
+    }
+
+    $phaseTimings = [ordered]@{}
+    $phaseElapsedSeconds = 0.0
+    foreach ($phaseName in $phaseByName.Keys) {
+        $phaseEntry = $phaseByName[$phaseName]
+        if ($null -eq $phaseEntry.start_utc -or $null -eq $phaseEntry.end_utc) {
+            continue
+        }
+
+        $elapsedSeconds = [math]::Round((New-TimeSpan -Start $phaseEntry.start_utc -End $phaseEntry.end_utc).TotalSeconds, 2)
+        $phaseTimings[$phaseName] = $elapsedSeconds
+        $phaseElapsedSeconds += $elapsedSeconds
+    }
+
+    return [PSCustomObject]@{
+        source = 'diagnostic-phase-log'
+        generated_on_utc = [datetime]::UtcNow.ToString('o')
+        pipeline_elapsed_seconds = if ($null -ne $pipelineStartUtc -and $null -ne $pipelineEndUtc) {
+            [math]::Round((New-TimeSpan -Start $pipelineStartUtc -End $pipelineEndUtc).TotalSeconds, 2)
+        }
+        else {
+            $null
+        }
+        phase_elapsed_seconds = [math]::Round($phaseElapsedSeconds, 2)
+        phase_timings = [PSCustomObject]$phaseTimings
+    }
+}
+
 function Write-StressValidationReport {
     [CmdletBinding()]
     param(
@@ -146,6 +272,10 @@ function Write-StressValidationReport {
 
         [Parameter(Mandatory = $true)]
         [string]$DashboardOutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$ResolvedDiagnosticPhaseLogPath,
 
         [Parameter(Mandatory = $false)]
         [AllowEmptyString()]
@@ -184,7 +314,11 @@ function Write-StressValidationReport {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        $Audit
+        $Audit,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $DiagnosticTimingSummary
     )
 
     $resolvedDashboardOutputPath = [System.IO.Path]::GetFullPath($DashboardOutputPath)
@@ -198,7 +332,22 @@ function Write-StressValidationReport {
         completedOn = (Get-Date).ToString('o')
         syntheticPath = $SyntheticPath
         dashboardOutputPath = $resolvedDashboardOutputPath
+        diagnosticPhaseLogPath = if ([string]::IsNullOrWhiteSpace($ResolvedDiagnosticPhaseLogPath)) { $null } else { [System.IO.Path]::GetFullPath($ResolvedDiagnosticPhaseLogPath) }
         elapsedSeconds = [math]::Round($ElapsedSeconds, 2)
+        generationTiming = if ($null -ne $DiagnosticTimingSummary) {
+            [PSCustomObject]@{
+                source = [string]$DiagnosticTimingSummary.source
+                generatedOnUtc = [string]$DiagnosticTimingSummary.generated_on_utc
+                pipelineElapsedSeconds = $DiagnosticTimingSummary.pipeline_elapsed_seconds
+                phaseElapsedSeconds = $DiagnosticTimingSummary.phase_elapsed_seconds
+                wrapperElapsedSeconds = [math]::Round($ElapsedSeconds, 2)
+                wrapperOverheadSeconds = [math]::Round(([math]::Round($ElapsedSeconds, 2) - [double]$DiagnosticTimingSummary.phase_elapsed_seconds), 2)
+                phaseTimings = $DiagnosticTimingSummary.phase_timings
+            }
+        }
+        else {
+            $null
+        }
         machineCount = $MachineCount
         currentRowCount = $CurrentRowCount
         historyRowCount = $HistoryRowCount
@@ -293,6 +442,13 @@ else {
     $null
 }
 
+$resolvedDiagnosticPhaseLogPath = if (-not [string]::IsNullOrWhiteSpace($DiagnosticPhaseLogPath)) {
+    [System.IO.Path]::GetFullPath($DiagnosticPhaseLogPath)
+}
+else {
+    $null
+}
+
 if ($null -ne $manifest) {
     $machineCount = [int]$manifest.actualDeviceCount
     $currentRowCount = [int]$manifest.actualCurrentRows
@@ -327,6 +483,9 @@ if ($Validate) {
         $generateArgs.ValidationOutputPath = $resolvedValidationOutputPath
     }
 }
+if (-not [string]::IsNullOrWhiteSpace($resolvedDiagnosticPhaseLogPath)) {
+    $generateArgs.DiagnosticPhaseLogPath = $resolvedDiagnosticPhaseLogPath
+}
 
 $reportPath = Join-Path $resolvedSyntheticPath 'stress-validation-report.json'
 if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
@@ -335,6 +494,9 @@ if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
 
 if (Test-Path -LiteralPath $dashboardOutput -PathType Leaf) {
     Remove-Item -LiteralPath $dashboardOutput -Force
+}
+if (-not [string]::IsNullOrWhiteSpace($resolvedDiagnosticPhaseLogPath) -and (Test-Path -LiteralPath $resolvedDiagnosticPhaseLogPath -PathType Leaf)) {
+    Remove-Item -LiteralPath $resolvedDiagnosticPhaseLogPath -Force
 }
 if (-not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath) -and (Test-Path -LiteralPath $resolvedValidationOutputPath -PathType Leaf)) {
     Remove-Item -LiteralPath $resolvedValidationOutputPath -Force
@@ -348,6 +510,7 @@ $status = 'success'
 $dashboardExitCode = $null
 $failureRecord = $null
 $audit = $null
+$diagnosticTimingSummary = $null
 try {
     $global:LASTEXITCODE = 0
     & $dashboardScript @generateArgs
@@ -375,6 +538,7 @@ catch {
     throw
 }
 finally {
+    $diagnosticTimingSummary = Get-DiagnosticPhaseTimingSummary -Path $resolvedDiagnosticPhaseLogPath
     $stopwatch.Stop()
     Write-StressValidationReport `
         -ReportPath $reportPath `
@@ -382,6 +546,7 @@ finally {
         -Preset $Preset `
         -SyntheticPath $resolvedSyntheticPath `
         -DashboardOutputPath $dashboardOutput `
+        -ResolvedDiagnosticPhaseLogPath $resolvedDiagnosticPhaseLogPath `
         -ResolvedValidationAuditPath $resolvedValidationOutputPath `
         -ElapsedSeconds $stopwatch.Elapsed.TotalSeconds `
         -MachineCount $machineCount `
@@ -392,7 +557,8 @@ finally {
         -Status $status `
         -DashboardExitCode $dashboardExitCode `
         -FailureRecord $failureRecord `
-        -Audit $audit
+        -Audit $audit `
+        -DiagnosticTimingSummary $diagnosticTimingSummary
 }
 
 $dashboardItem = Get-Item -LiteralPath $dashboardOutput
@@ -401,6 +567,9 @@ Write-Output ''
 Write-Output 'Stress validation completed.'
 Write-Output ("  Synthetic path: {0}" -f $resolvedSyntheticPath)
 Write-Output ("  Dashboard output: {0}" -f ([System.IO.Path]::GetFullPath($dashboardOutput)))
+if (-not [string]::IsNullOrWhiteSpace($resolvedDiagnosticPhaseLogPath)) {
+    Write-Output ("  Diagnostic phase log: {0}" -f $resolvedDiagnosticPhaseLogPath)
+}
 if (-not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
     Write-Output ("  Validation audit: {0}" -f $resolvedValidationOutputPath)
 }
