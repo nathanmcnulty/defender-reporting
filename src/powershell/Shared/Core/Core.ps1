@@ -1356,6 +1356,7 @@ function Test-IsExportTransferArtifactName {
 
     return (
         (Test-IsCanonicalExportStoreFileName -Name $normalizedName) -or
+        (Test-IsLegacyVulnSnapshotFileName -Name $normalizedName) -or
         ($normalizedName -eq 'synthetic-manifest.json')
     )
 }
@@ -1396,6 +1397,17 @@ function Get-ExportTransferArtifactNames {
 
     $names = [System.Collections.Generic.List[string]]::new()
     foreach ($name in @(Get-CanonicalExportStoreFileNames -BasePath $BasePath)) {
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $names.Add($name)
+        }
+    }
+
+    foreach ($name in @(
+        Get-ChildItem -Path $BasePath -Filter 'VulnExport_*' -File -ErrorAction SilentlyContinue |
+            Where-Object { Test-IsLegacyVulnSnapshotFileName -Name $_.Name } |
+            Sort-Object Name |
+            ForEach-Object { $_.Name }
+    )) {
         if (-not [string]::IsNullOrWhiteSpace($name)) {
             $names.Add($name)
         }

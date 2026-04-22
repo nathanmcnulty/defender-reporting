@@ -1182,9 +1182,19 @@ try {
 
     if ($UseExistingExportsOnly) {
         Write-Output 'Skipping fresh MDE export and reusing downloaded exports.'
-        $hasExistingVulnerabilityData = (Test-VulnStoreExistence -BasePath $tempExports) -or (Test-VulnContentStoreExistence -BasePath $tempExports)
+        $hasExistingLegacyVulnerabilitySnapshots = (@(Get-VulnLegacySnapshotFile -BasePath $tempExports).Count -gt 0)
+        $hasExistingVulnerabilityData = (Test-VulnStoreExistence -BasePath $tempExports) -or (Test-VulnContentStoreExistence -BasePath $tempExports) -or $hasExistingLegacyVulnerabilitySnapshots
         if (-not $hasExistingVulnerabilityData) {
-            throw "UseExistingExportsOnly was specified, but no vulnerability store or content-store sidecars were found in '$tempExports'."
+            throw "UseExistingExportsOnly was specified, but no vulnerability store, content-store sidecars, or legacy vulnerability snapshots were found in '$tempExports'."
+        }
+
+        if ($hasExistingLegacyVulnerabilitySnapshots -and -not (Test-VulnStoreExistence -BasePath $tempExports) -and -not (Test-VulnContentStoreExistence -BasePath $tempExports)) {
+            Write-Output 'Canonicalizing downloaded legacy vulnerability snapshots...'
+            $vulnStore = Publish-VulnStoreFromBulkSnapshot -BasePath $tempExports -RemoveSnapshotFiles
+            Write-Output "  Saved vulnerability current/history store with $($vulnStore.CurrentRows) current row(s) across $($vulnStore.HistoryYears) history period file(s)"
+            $vulnStore = $null
+            Invoke-FullGarbageCollection
+            Write-MemoryUsage -Label "Post-VulnStorePublish"
         }
 
         $machineCurrentPath = Get-MachineCurrentPath -BasePath $tempExports
