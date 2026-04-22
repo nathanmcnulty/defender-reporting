@@ -99,6 +99,36 @@ function Get-TestQuarterlyHistoryDocument {
     }
 }
 
+function Test-VulnPropertyHelpersSupportSupportedRowShapes {
+    [CmdletBinding()]
+    param()
+
+    $psRow = [PSCustomObject]@{
+        Id = 'ps-row-001'
+        MachineTags = @('Prod', 'Pilot')
+    }
+    $dictionaryRow = [ordered]@{
+        Id = 'dict-row-001'
+        MachineTags = @('Blue')
+    }
+    $jsonRow = [Newtonsoft.Json.Linq.JObject]::Parse('{"Id":"json-row-001","MachineTags":["Ring0","Ring1"]}')
+
+    Assert-True ([string](Get-VulnPropertyValue -InputObject $psRow -Name 'Id') -eq 'ps-row-001') 'Expected PSObject vulnerability rows to expose Id through Get-VulnPropertyValue.'
+    Assert-True ([string](Get-VulnPropertyValue -InputObject $dictionaryRow -Name 'Id') -eq 'dict-row-001') 'Expected dictionary-backed vulnerability rows to expose Id through Get-VulnPropertyValue.'
+    Assert-True ([string](Get-VulnPropertyValue -InputObject $jsonRow -Name 'Id') -eq 'json-row-001') 'Expected JObject vulnerability rows to expose Id through Get-VulnPropertyValue.'
+
+    $psTags = @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $psRow -Name 'MachineTags'))
+    $dictionaryTags = @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $dictionaryRow -Name 'MachineTags'))
+    $jsonTags = @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $jsonRow -Name 'MachineTags'))
+
+    Assert-True ($psTags.Count -eq 2 -and $psTags[0] -eq 'Prod' -and $psTags[1] -eq 'Pilot') 'Expected PSObject array properties to round-trip through Get-VulnPropertyValue.'
+    Assert-True ($dictionaryTags.Count -eq 1 -and $dictionaryTags[0] -eq 'Blue') 'Expected dictionary array properties to round-trip through Get-VulnPropertyValue.'
+    Assert-True ($jsonTags.Count -eq 2 -and $jsonTags[0] -eq 'Ring0' -and $jsonTags[1] -eq 'Ring1') 'Expected JObject array properties to round-trip through Get-VulnPropertyValue.'
+
+    Assert-True ((Test-VulnPropertyPresence -InputObject $psRow -Name 'Id') -eq $true) 'Expected Test-VulnPropertyPresence to report present PSObject properties.'
+    Assert-True ((Test-VulnPropertyPresence -InputObject $psRow -Name 'Missing') -eq $false) 'Expected Test-VulnPropertyPresence to report missing PSObject properties as absent.'
+}
+
 function Test-CanonicalLayoutHelper {
     [CmdletBinding()]
     param()
@@ -1217,6 +1247,26 @@ function Test-AdvancedHuntingBundleMatchesDedicatedReaderData {
     }
 }
 
+function Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs {
+    [CmdletBinding()]
+    param()
+
+    $emptyResult = ConvertTo-AdvancedHuntingBundleStringArray -Value @()
+    Assert-True ($emptyResult -is [string[]]) 'Expected empty Advanced Hunting bundle string arrays to preserve the string[] output type.'
+    Assert-True ($emptyResult.Count -eq 0) 'Expected an empty Advanced Hunting bundle input to remain empty.'
+
+    $singletonResult = ConvertTo-AdvancedHuntingBundleStringArray -Value 'contoso:legacy_agent'
+    Assert-True ($singletonResult -is [string[]]) 'Expected singleton Advanced Hunting bundle values to preserve the string[] output type.'
+    Assert-True ($singletonResult.Count -eq 1) 'Expected a singleton Advanced Hunting bundle value to stay a single entry.'
+    Assert-True ($singletonResult[0] -eq 'contoso:legacy_agent') 'Expected a singleton Advanced Hunting bundle value to remain unchanged.'
+
+    $filteredResult = ConvertTo-AdvancedHuntingBundleStringArray -Value @($null, 'contoso:legacy_agent', '   ', 'fabrikam:browser', "`t")
+    Assert-True ($filteredResult -is [string[]]) 'Expected filtered Advanced Hunting bundle values to preserve the string[] output type.'
+    Assert-True ($filteredResult.Count -eq 2) 'Expected Advanced Hunting bundle string normalization to drop null and whitespace-only entries.'
+    Assert-True ($filteredResult[0] -eq 'contoso:legacy_agent') 'Expected Advanced Hunting bundle string normalization to preserve the first non-empty value.'
+    Assert-True ($filteredResult[1] -eq 'fabrikam:browser') 'Expected Advanced Hunting bundle string normalization to preserve later non-empty values in order.'
+}
+
 function Test-WriteBase64FileContentMatchesReferenceOutput {
     [CmdletBinding()]
     param()
@@ -2067,6 +2117,10 @@ Test-DashboardDualPackagingGenerationAndValidation
 Write-Output '  Dashboard dual packaging generation and validation checks passed.'
 Test-AdvancedHuntingBundleMatchesDedicatedReaderData
 Write-Output '  Advanced Hunting bundle reader checks passed.'
+Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs
+Write-Output '  Advanced Hunting bundle sparse string-array checks passed.'
+Test-VulnPropertyHelpersSupportSupportedRowShapes
+Write-Output '  Vulnerability property helper shape checks passed.'
 Test-VulnContentStoreRoundTrip
 Write-Output '  Vulnerability content store round-trip checks passed.'
 Test-VulnObservedWindowCacheRoundTrip

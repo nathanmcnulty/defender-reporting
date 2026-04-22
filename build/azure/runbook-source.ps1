@@ -1211,6 +1211,10 @@ try {
         Write-Output "Updating vulnerability current/history store..."
         $vulnStore = Publish-VulnStoreFromBulkSnapshot -BasePath $tempExports -RemoveSnapshotFiles
         Write-Output "  Saved vulnerability current/history store with $($vulnStore.CurrentRows) current row(s) across $($vulnStore.HistoryYears) history period file(s)"
+        $bulkExport = $null
+        $vulnStore = $null
+        Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label "Post-VulnStorePublish"
 
         # Machine data
         Write-Output 'Exporting machine data from MDE API...'
@@ -1220,6 +1224,10 @@ try {
         }
         $machineOutputFiles = @($machineExport.OutputFiles | ForEach-Object { Split-Path -Leaf $_ })
         Write-Output "  Saved machine current/history store to $($machineOutputFiles -join ' and ')"
+        $machineExport = $null
+        $machineOutputFiles = $null
+        Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label "Post-MachineExport"
 
         # Advanced Hunting (optional)
         if ($IncludeAdvancedHunting) {
@@ -1234,6 +1242,9 @@ try {
                 }
                 Write-Output "  Saved Advanced Hunting cache to $(Split-Path -Leaf $advancedHuntingExport.OutputFile)"
             }
+            $advancedHuntingExport = $null
+            Invoke-FullGarbageCollection
+            Write-MemoryUsage -Label "Post-AdvancedHuntingExport"
         }
         else {
             Write-Output "Skipping Advanced Hunting export (IncludeAdvancedHunting = false)"
@@ -1241,10 +1252,6 @@ try {
     }
 
     Write-MemoryUsage -Label "Post-MdeExport"
-    $bulkExport = $null
-    $vulnStore = $null
-    $machineExport = $null
-    $machineOutputFiles = $null
     $advancedHuntingExport = $null
     $mdeHeaders = $null
     Invoke-FullGarbageCollection
@@ -1279,13 +1286,17 @@ try {
     else {
         # Step 1: Read machine and Advanced Hunting data
         $machines = Read-MachineData -Path $tempExports -AsNormalizationTuple
+        Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-MachineRead"
-        Compress-NormalizationMachineLookup -Machines $machines | Out-Null
+
+        # The normalization-reader path already returns compact tuple entries.
         Write-MemoryUsage -Label "Post-MachineLookupCompression"
         $advancedHuntingBundle = Read-AdvancedHuntingBundle -Path $tempExports -IncludeDeviceUsers
-        Write-MemoryUsage -Label "Post-AdvancedHuntingBundle"
         $advancedHuntingData = [hashtable]$advancedHuntingBundle.AdvancedHuntingData
         $advancedHuntingDeviceUsers = [hashtable]$advancedHuntingBundle.DeviceUsers
+        $advancedHuntingBundle = $null
+        Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label "Post-AdvancedHuntingBundle"
         Write-MemoryUsage -Label "Post-NormalizationInputs"
 
         # Step 2: Normalize data while the working set is still lean

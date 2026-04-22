@@ -738,7 +738,13 @@ function Get-VulnPropertyValue {
         return $value
     }
 
-    $property = $InputObject.PSObject.Properties[$Name]
+    $psProperties = $InputObject.PSObject.Properties
+    if ($null -eq $psProperties) { return $null }
+
+    $propertyMatches = $psProperties.Match($Name)
+    if ($null -eq $propertyMatches -or $propertyMatches.Count -eq 0) { return $null }
+
+    $property = $propertyMatches[0]
     if ($null -eq $property) { return $null }
     if ($property.Value -is [Newtonsoft.Json.Linq.JValue]) { return $property.Value.Value }
     if ($property.Value -is [Newtonsoft.Json.Linq.JToken]) {
@@ -773,7 +779,11 @@ function Test-VulnPropertyPresence {
         return $InputObject.Contains($Name)
     }
 
-    return ($null -ne $InputObject.PSObject.Properties[$Name])
+    $psProperties = $InputObject.PSObject.Properties
+    if ($null -eq $psProperties) { return $false }
+
+    $propertyMatches = $psProperties.Match($Name)
+    return ($null -ne $propertyMatches -and $propertyMatches.Count -gt 0)
 }
 
 function Convert-VulnObjectToCompactJson {

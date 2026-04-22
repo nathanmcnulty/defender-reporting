@@ -933,7 +933,13 @@ function Get-VulnPropertyValue {
         return $value
     }
 
-    $property = $InputObject.PSObject.Properties[$Name]
+    $psProperties = $InputObject.PSObject.Properties
+    if ($null -eq $psProperties) { return $null }
+
+    $propertyMatches = $psProperties.Match($Name)
+    if ($null -eq $propertyMatches -or $propertyMatches.Count -eq 0) { return $null }
+
+    $property = $propertyMatches[0]
     if ($null -eq $property) { return $null }
     if ($property.Value -is [Newtonsoft.Json.Linq.JValue]) { return $property.Value.Value }
     if ($property.Value -is [Newtonsoft.Json.Linq.JToken]) {
@@ -968,7 +974,11 @@ function Test-VulnPropertyPresence {
         return $InputObject.Contains($Name)
     }
 
-    return ($null -ne $InputObject.PSObject.Properties[$Name])
+    $psProperties = $InputObject.PSObject.Properties
+    if ($null -eq $psProperties) { return $false }
+
+    $propertyMatches = $psProperties.Match($Name)
+    return ($null -ne $propertyMatches -and $propertyMatches.Count -gt 0)
 }
 
 function Convert-VulnObjectToCompactJson {
@@ -4145,8 +4155,8 @@ function Test-VulnCurrentFile {
     [void](New-Item -Path $validationPartitionRoot -ItemType Directory -Force)
     try {
         try {
-            foreach ($row in Read-VulnNdjsonRecordsFromPath -Path $Path) {
-                $id = [string](Get-VulnPropertyValue -InputObject $row -Name 'Id')
+            Read-VulnNdjsonRecordsFromPath -Path $Path | ForEach-Object {
+                $id = [string](Get-VulnPropertyValue -InputObject $_ -Name 'Id')
                 if ([string]::IsNullOrWhiteSpace($id)) {
                     throw 'Current vulnerability store contains a row without Id.'
                 }
@@ -4502,8 +4512,8 @@ function Get-VulnStoreLatestSnapshotDate {
 
     $currentPath = Get-VulnCurrentPath -BasePath $BasePath
     if (Test-Path -Path $currentPath) {
-        foreach ($record in Read-VulnNdjsonRecordsFromPath -Path $currentPath) {
-            $lastSeen = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $record -Name 'LastSeenTimestamp')
+        Read-VulnNdjsonRecordsFromPath -Path $currentPath | ForEach-Object {
+            $lastSeen = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $_ -Name 'LastSeenTimestamp')
             if (-not [string]::IsNullOrWhiteSpace($lastSeen)) {
                 $maxDate = Get-MaxVulnDate -Primary $maxDate -Secondary $lastSeen
             }
@@ -7240,10 +7250,52 @@ function ConvertTo-AdvancedHuntingBundleStringArray {
     )
 
     if ($null -eq $Value) {
-        return @()
+        return ,([string[]]@())
     }
 
-    $values = [System.Collections.Generic.List[string]]::new()
+    if ($Value -is [string]) {
+        if ([string]::IsNullOrWhiteSpace($Value)) {
+            return ,([string[]]@())
+        }
+
+        return ,([string[]]@($Value))
+    }
+
+    if ($Value -is [string[]]) {
+        $requiresFiltering = $false
+        foreach ($text in $Value) {
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                $requiresFiltering = $true
+                break
+            }
+        }
+
+        if (-not $requiresFiltering) {
+            return ,$Value
+        }
+
+        $values = [System.Collections.Generic.List[string]]::new($Value.Length)
+        foreach ($item in $Value) {
+            $text = [string]$item
+            if (-not [string]::IsNullOrWhiteSpace($text)) {
+                $values.Add($text)
+            }
+        }
+
+        return ,([string[]]$values.ToArray())
+    }
+
+    $values = $null
+    if ($Value -is [System.Array]) {
+        $values = [System.Collections.Generic.List[string]]::new($Value.Length)
+    }
+    elseif ($Value -is [System.Collections.ICollection]) {
+        $values = [System.Collections.Generic.List[string]]::new($Value.Count)
+    }
+    else {
+        $values = [System.Collections.Generic.List[string]]::new()
+    }
+
     if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
         foreach ($item in $Value) {
             if ($null -eq $item) { continue }
@@ -7260,7 +7312,7 @@ function ConvertTo-AdvancedHuntingBundleStringArray {
         }
     }
 
-    return [string[]]$values.ToArray()
+    return ,([string[]]$values.ToArray())
 }
 
 function ConvertTo-AdvancedHuntingBundleDescriptionValue {
@@ -7280,7 +7332,7 @@ function ConvertTo-AdvancedHuntingBundleDescriptionValue {
         return $Value
     }
 
-    $parts = @(ConvertTo-AdvancedHuntingBundleStringArray -Value $Value)
+    $parts = ConvertTo-AdvancedHuntingBundleStringArray -Value $Value
     if ($parts.Count -eq 0) {
         return $null
     }
@@ -7431,7 +7483,7 @@ function ConvertTo-AdvancedHuntingBundleLoggedOnUserList {
     $values = [System.Collections.Generic.List[string]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     Add-AdvancedHuntingBundleLoggedOnUserValue -Value $Value -Values $values -Seen $seen
-    return [string[]]$values.ToArray()
+    return ,([string[]]$values.ToArray())
 }
 
 function Read-AdvancedHuntingBundle {
@@ -7516,9 +7568,9 @@ function Read-AdvancedHuntingBundle {
                             continue
                         }
 
-                        $loggedOnUsers = @(ConvertTo-AdvancedHuntingBundleLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
+                        $loggedOnUsers = ConvertTo-AdvancedHuntingBundleLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value
                         if ($loggedOnUsers.Count -gt 0) {
-                            $deviceUsers[$deviceId] = @($loggedOnUsers)
+                            $deviceUsers[$deviceId] = $loggedOnUsers
                         }
                         continue
                     }
@@ -7528,12 +7580,12 @@ function Read-AdvancedHuntingBundle {
                         $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
                         $rawDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
                         $rawAffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
-                        $affectedSoftware = @(ConvertTo-AdvancedHuntingBundleStringArray -Value $rawAffectedSoftware)
+                        $affectedSoftware = ConvertTo-AdvancedHuntingBundleStringArray -Value $rawAffectedSoftware
                         $ahData[$cveId] = @{
                             PublishedDate = Convert-ToYmdDate -DateValue $pdRaw
                             VulnerabilityDescription = ConvertTo-AdvancedHuntingBundleDescriptionValue -Value $rawDescription
                             EpssScore = $record.PSObject.Properties['EpssScore']?.Value
-                            AffectedSoftware = if ($affectedSoftware.Count -gt 0) { @($affectedSoftware) } else { $null }
+                            AffectedSoftware = if ($affectedSoftware.Count -gt 0) { $affectedSoftware } else { $null }
                             IsExploitAvailable = ConvertTo-AdvancedHuntingBundleNullableBoolean -Value $record.PSObject.Properties['IsExploitAvailable']?.Value
                         }
                     }
@@ -7584,28 +7636,7 @@ function Read-AdvancedHuntingData {
             $Value
         )
 
-        if ($null -eq $Value) {
-            return @()
-        }
-
-        $values = [System.Collections.Generic.List[string]]::new()
-        if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
-            foreach ($item in $Value) {
-                if ($null -eq $item) { continue }
-                $text = [string]$item
-                if (-not [string]::IsNullOrWhiteSpace($text)) {
-                    $values.Add($text)
-                }
-            }
-        }
-        else {
-            $text = [string]$Value
-            if (-not [string]::IsNullOrWhiteSpace($text)) {
-                $values.Add($text)
-            }
-        }
-
-        return [string[]]$values.ToArray()
+        return ,(ConvertTo-AdvancedHuntingBundleStringArray -Value $Value)
     }
 
     function ConvertTo-AdvancedHuntingDescriptionValue {
@@ -7625,7 +7656,7 @@ function Read-AdvancedHuntingData {
             return $Value
         }
 
-        $parts = @(ConvertTo-AdvancedHuntingStringArray -Value $Value)
+        $parts = ConvertTo-AdvancedHuntingStringArray -Value $Value
         if ($parts.Count -eq 0) {
             return $null
         }
@@ -7703,12 +7734,12 @@ function Read-AdvancedHuntingData {
                         $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
                         $rawDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
                         $rawAffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
-                        $affectedSoftware = @(ConvertTo-AdvancedHuntingStringArray -Value $rawAffectedSoftware)
+                        $affectedSoftware = ConvertTo-AdvancedHuntingStringArray -Value $rawAffectedSoftware
                         $ahData[$cveId] = @{
                             PublishedDate = Convert-ToYmdDate -DateValue $pdRaw
                             VulnerabilityDescription = ConvertTo-AdvancedHuntingDescriptionValue -Value $rawDescription
                             EpssScore = $record.PSObject.Properties['EpssScore']?.Value
-                            AffectedSoftware = if ($affectedSoftware.Count -gt 0) { @($affectedSoftware) } else { $null }
+                            AffectedSoftware = if ($affectedSoftware.Count -gt 0) { $affectedSoftware } else { $null }
                             IsExploitAvailable = ConvertTo-AdvancedHuntingNullableBoolean -Value $record.PSObject.Properties['IsExploitAvailable']?.Value
                         }
                     }
@@ -16504,6 +16535,10 @@ try {
         Write-Output "Updating vulnerability current/history store..."
         $vulnStore = Publish-VulnStoreFromBulkSnapshot -BasePath $tempExports -RemoveSnapshotFiles
         Write-Output "  Saved vulnerability current/history store with $($vulnStore.CurrentRows) current row(s) across $($vulnStore.HistoryYears) history period file(s)"
+        $bulkExport = $null
+        $vulnStore = $null
+        Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label "Post-VulnStorePublish"
 
         # Machine data
         Write-Output 'Exporting machine data from MDE API...'
@@ -16513,6 +16548,10 @@ try {
         }
         $machineOutputFiles = @($machineExport.OutputFiles | ForEach-Object { Split-Path -Leaf $_ })
         Write-Output "  Saved machine current/history store to $($machineOutputFiles -join ' and ')"
+        $machineExport = $null
+        $machineOutputFiles = $null
+        Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label "Post-MachineExport"
 
         # Advanced Hunting (optional)
         if ($IncludeAdvancedHunting) {
@@ -16527,6 +16566,9 @@ try {
                 }
                 Write-Output "  Saved Advanced Hunting cache to $(Split-Path -Leaf $advancedHuntingExport.OutputFile)"
             }
+            $advancedHuntingExport = $null
+            Invoke-FullGarbageCollection
+            Write-MemoryUsage -Label "Post-AdvancedHuntingExport"
         }
         else {
             Write-Output "Skipping Advanced Hunting export (IncludeAdvancedHunting = false)"
@@ -16534,10 +16576,6 @@ try {
     }
 
     Write-MemoryUsage -Label "Post-MdeExport"
-    $bulkExport = $null
-    $vulnStore = $null
-    $machineExport = $null
-    $machineOutputFiles = $null
     $advancedHuntingExport = $null
     $mdeHeaders = $null
     Invoke-FullGarbageCollection
@@ -16572,13 +16610,17 @@ try {
     else {
         # Step 1: Read machine and Advanced Hunting data
         $machines = Read-MachineData -Path $tempExports -AsNormalizationTuple
+        Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-MachineRead"
-        Compress-NormalizationMachineLookup -Machines $machines | Out-Null
+
+        # The normalization-reader path already returns compact tuple entries.
         Write-MemoryUsage -Label "Post-MachineLookupCompression"
         $advancedHuntingBundle = Read-AdvancedHuntingBundle -Path $tempExports -IncludeDeviceUsers
-        Write-MemoryUsage -Label "Post-AdvancedHuntingBundle"
         $advancedHuntingData = [hashtable]$advancedHuntingBundle.AdvancedHuntingData
         $advancedHuntingDeviceUsers = [hashtable]$advancedHuntingBundle.DeviceUsers
+        $advancedHuntingBundle = $null
+        Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label "Post-AdvancedHuntingBundle"
         Write-MemoryUsage -Label "Post-NormalizationInputs"
 
         # Step 2: Normalize data while the working set is still lean
