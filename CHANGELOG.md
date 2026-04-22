@@ -6,12 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Azure Automation memory hardening and Stage D normalization tuning
 
+#### Added
+- `tests/New-SyntheticLegacyVulnSnapshotSet.ps1` to reconstruct deterministic legacy `VulnExport_<group>_<date>.json.gz` files from a raw canonical synthetic dataset without mutating the source path.
+- `tests/Invoke-LargeImportCoverage.ps1` to automate the raw sidecar-free replay lane, local legacy vulnerability import validation, and Azure existing-export dataset prep in one command.
+
 #### Changed
 - Azure Automation machine refresh now stages current-machine snapshots and machine-history changes through streamed files instead of rebuilding the full in-memory store during publication.
 - Runbook normalization instrumentation now captures the major Stage D memory checkpoints so Azure benchmark runs can isolate hot phases more reliably.
 - Stage D machine normalization now carries a compact tuple form through the hot path before expanding the lookup structure consumed by payload generation.
 - Azure Automation now opportunistically forces garbage collection at safe Stage C and Stage D boundaries to trade some runtime for lower peak memory pressure in the runbook path.
 - Test documentation now distinguishes completed-dataset replay benchmarks from raw sidecar-free replay and live fresh-export validation so large import hot paths are reviewed explicitly.
+- Large fresh-import evaluation can now stage deterministic legacy vulnerability snapshots alongside raw machine and Advanced Hunting replay files for `UseExistingExportsOnly=true` Azure Automation runs.
 
 #### Fixed
 - Replaced whole-file vulnerability current-file duplicate validation with a partition-bounded path so large fresh exports no longer allocate one global duplicate-id set.
