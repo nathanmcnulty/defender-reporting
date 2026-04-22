@@ -1267,6 +1267,89 @@ function Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs {
     Assert-True ($filteredResult[1] -eq 'fabrikam:browser') 'Expected Advanced Hunting bundle string normalization to preserve later non-empty values in order.'
 }
 
+function Test-ReadMachineDataTupleModeMatchesCompressedMachineLookup {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-tuple-reader-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        Write-NdjsonRecordsFile -Path (Get-MachineCurrentPath -BasePath $tempRoot) -Records @(
+            [PSCustomObject]@{
+                id = 'device-live'
+                computerDnsName = 'device-live.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = '10.0.0.1'
+                lastExternalIpAddress = '203.0.113.10'
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'High'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-20'
+                firstSeen = '2026-03-10'
+            }
+            [PSCustomObject]@{
+                id = 'device-sparse'
+                computerDnsName = 'device-sparse.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = $null
+                lastExternalIpAddress = $null
+                healthStatus = $null
+                riskScore = $null
+                exposureLevel = $null
+                deviceValue = $null
+                managedBy = $null
+                isAadJoined = $null
+                lastSeen = $null
+                firstSeen = $null
+            }
+            [PSCustomObject]@{
+                id = 'device-removed'
+                removed = $true
+                observedOn = '2026-03-20'
+                stateHash = 'removed'
+            }
+        )
+
+        $standardMachines = Read-MachineData -Path $tempRoot
+        $compressedMachines = @{}
+        foreach ($deviceId in @($standardMachines.Keys)) {
+            $compressedMachines[$deviceId] = $standardMachines[$deviceId]
+        }
+        Compress-NormalizationMachineLookup -Machines $compressedMachines | Out-Null
+
+        $tupleMachines = Read-MachineData -Path $tempRoot -AsNormalizationTuple
+
+        Assert-True ($tupleMachines.Count -eq $compressedMachines.Count) 'Expected tuple-mode machine loading to preserve the same machine count as the compressed machine lookup path.'
+        Assert-True ($tupleMachines.ContainsKey('device-live')) 'Expected tuple-mode machine loading to preserve populated machines.'
+        Assert-True (-not $tupleMachines.ContainsKey('device-sparse')) 'Expected tuple-mode machine loading to drop machines whose normalization tuple is entirely empty.'
+        Assert-True (-not $tupleMachines.ContainsKey('device-removed')) 'Expected tuple-mode machine loading to drop removed machines from the current lookup.'
+
+        $expectedTuple = [object[]]$compressedMachines['device-live']
+        $actualTuple = [object[]]$tupleMachines['device-live']
+        Assert-True ($actualTuple -is [System.Array]) 'Expected tuple-mode machine loading to materialize array-backed normalization tuples.'
+        Assert-True ($actualTuple.Length -eq 10) 'Expected tuple-mode machine loading to preserve the 10-slot normalization tuple shape.'
+
+        for ($tupleIndex = 0; $tupleIndex -lt $expectedTuple.Length; $tupleIndex++) {
+            Assert-True ($actualTuple[$tupleIndex] -eq $expectedTuple[$tupleIndex]) "Expected tuple-mode machine loading to preserve tuple slot $tupleIndex."
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-WriteBase64FileContentMatchesReferenceOutput {
     [CmdletBinding()]
     param()
@@ -1609,6 +1692,83 @@ function Test-StreamingDashboardAuditReusesCachedPayloadSignatureSet {
         Assert-True ($secondAudit.SemanticParity.PayloadSignatureCacheUsed -eq $true) 'Expected the repeated forced streaming audit to reuse the cached payload signature set.'
         Assert-True ([double]$secondAudit.SemanticParity.SourceSignatureElapsedSeconds -lt [double]$firstAudit.SemanticParity.SourceSignatureElapsedSeconds) 'Expected cached source signature reuse to reduce the source signature phase time on the repeated forced streaming audit.'
         Assert-True ([double]$secondAudit.SemanticParity.PayloadSignatureElapsedSeconds -lt [double]$firstAudit.SemanticParity.PayloadSignatureElapsedSeconds) 'Expected cached payload signature reuse to reduce the payload signature phase time on the repeated forced streaming audit.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-DashboardAuditBootstrapsSyntheticLargePayloadCacheWithTupleMachines {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-audit-synthetic-bootstrap-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+    $vulnOutputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $htmlPath = Join-Path $tempRoot 'dashboard.html'
+
+    try {
+        . (Join-Path $repoRoot 'build\Import-ValidationHelpers.ps1')
+
+        $row = Get-TestVulnRow -Id 'synthetic-bootstrap-001' -CveId 'CVE-2026-0521' -SnapshotDate '2026-03-20' -Version '6.0.0'
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($row)
+
+        $machines = @(
+            [PSCustomObject]@{
+                id = 'device-001'
+                computerDnsName = 'device01.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows 11'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = '10.0.0.21'
+                lastExternalIpAddress = ''
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'Medium'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-20'
+                firstSeen = '2026-02-01'
+            }
+        )
+
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), ($machines | ConvertTo-Json -Compress -Depth 20), [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'AdvancedHunting_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'synthetic-manifest.json'), (([ordered]@{
+            actualCurrentRows = 100000
+            actualHistoryRows = 0
+        }) | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
+
+        $normalizationMachines = Read-MachineData -Path $tempRoot -AsNormalizationTuple
+        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $vulnOutputPath -PayloadOutputPath $payloadPath -Machines $normalizationMachines -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers @{} -AdvancedHuntingInventoryData @{} -NvdCveData @{} -SkipObservedWindowMerge
+
+        $dashboardConfigJson = ([ordered]@{ payloadUrl = 'payload.json.gz' } | ConvertTo-Json -Compress)
+        $dashboardHtml = @(
+            '<!DOCTYPE html>'
+            '<html lang="en">'
+            '<head><meta charset="utf-8"><title>Synthetic Bootstrap Fixture</title></head>'
+            '<body>'
+            '<script id="dataFormat" type="application/json">external-compressed</script>'
+            ('<script id="dashboardConfig" type="application/json">' + $dashboardConfigJson + '</script>')
+            '</body>'
+            '</html>'
+        ) -join [Environment]::NewLine
+        [System.IO.File]::WriteAllText($htmlPath, $dashboardHtml, [System.Text.UTF8Encoding]::new($false))
+
+        $payloadCacheEntryBeforeAudit = Get-NormalizedPayloadCacheEntry -BasePath $tempRoot -SkipObservedWindowMerge
+        $audit = Get-DashboardAuditResult -ResolvedHtmlPath $htmlPath -ResolvedExportsPath $tempRoot
+        $payloadCacheEntryAfterAudit = Get-NormalizedPayloadCacheEntry -BasePath $tempRoot -SkipObservedWindowMerge
+
+        Assert-True ($null -eq $payloadCacheEntryBeforeAudit) 'Expected synthetic large-dataset validation to start without a normalized payload cache entry.'
+        Assert-True ($normalizedResult.VulnCount -eq 1) 'Expected the synthetic bootstrap fixture to generate exactly one normalized vulnerability row.'
+        Assert-True ($audit.RowComparison.Match -eq $true) 'Expected dashboard audit to preserve semantic parity after bootstrapping a synthetic large-dataset payload cache from tuple-backed machines.'
+        Assert-True ($null -ne $payloadCacheEntryAfterAudit) 'Expected synthetic large-dataset validation to publish a normalized payload cache entry.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -2105,6 +2265,8 @@ Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity
 Write-Output '  Streaming dashboard source-parity checks passed.'
 Test-StreamingDashboardAuditReusesCachedPayloadSignatureSet
 Write-Output '  Streaming dashboard payload-signature reuse checks passed.'
+Test-DashboardAuditBootstrapsSyntheticLargePayloadCacheWithTupleMachines
+Write-Output '  Dashboard synthetic large-dataset bootstrap checks passed.'
 Test-DashboardValidationUsesStableFallbackDeviceProfile
 Write-Output '  Dashboard validation fallback device profile checks passed.'
 Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff
@@ -2119,6 +2281,8 @@ Test-AdvancedHuntingBundleMatchesDedicatedReaderData
 Write-Output '  Advanced Hunting bundle reader checks passed.'
 Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs
 Write-Output '  Advanced Hunting bundle sparse string-array checks passed.'
+Test-ReadMachineDataTupleModeMatchesCompressedMachineLookup
+Write-Output '  Machine tuple reader checks passed.'
 Test-VulnPropertyHelpersSupportSupportedRowShapes
 Write-Output '  Vulnerability property helper shape checks passed.'
 Test-VulnContentStoreRoundTrip
