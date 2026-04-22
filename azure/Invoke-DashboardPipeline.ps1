@@ -1551,6 +1551,7 @@ function Test-IsExportTransferArtifactName {
 
     return (
         (Test-IsCanonicalExportStoreFileName -Name $normalizedName) -or
+        (Test-IsLegacyVulnSnapshotFileName -Name $normalizedName) -or
         ($normalizedName -eq 'synthetic-manifest.json')
     )
 }
@@ -1591,6 +1592,17 @@ function Get-ExportTransferArtifactNames {
 
     $names = [System.Collections.Generic.List[string]]::new()
     foreach ($name in @(Get-CanonicalExportStoreFileNames -BasePath $BasePath)) {
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $names.Add($name)
+        }
+    }
+
+    foreach ($name in @(
+        Get-ChildItem -Path $BasePath -Filter 'VulnExport_*' -File -ErrorAction SilentlyContinue |
+            Where-Object { Test-IsLegacyVulnSnapshotFileName -Name $_.Name } |
+            Sort-Object Name |
+            ForEach-Object { $_.Name }
+    )) {
         if (-not [string]::IsNullOrWhiteSpace($name)) {
             $names.Add($name)
         }
@@ -16506,9 +16518,19 @@ try {
 
     if ($UseExistingExportsOnly) {
         Write-Output 'Skipping fresh MDE export and reusing downloaded exports.'
-        $hasExistingVulnerabilityData = (Test-VulnStoreExistence -BasePath $tempExports) -or (Test-VulnContentStoreExistence -BasePath $tempExports)
+        $hasExistingLegacyVulnerabilitySnapshots = (@(Get-VulnLegacySnapshotFile -BasePath $tempExports).Count -gt 0)
+        $hasExistingVulnerabilityData = (Test-VulnStoreExistence -BasePath $tempExports) -or (Test-VulnContentStoreExistence -BasePath $tempExports) -or $hasExistingLegacyVulnerabilitySnapshots
         if (-not $hasExistingVulnerabilityData) {
-            throw "UseExistingExportsOnly was specified, but no vulnerability store or content-store sidecars were found in '$tempExports'."
+            throw "UseExistingExportsOnly was specified, but no vulnerability store, content-store sidecars, or legacy vulnerability snapshots were found in '$tempExports'."
+        }
+
+        if ($hasExistingLegacyVulnerabilitySnapshots -and -not (Test-VulnStoreExistence -BasePath $tempExports) -and -not (Test-VulnContentStoreExistence -BasePath $tempExports)) {
+            Write-Output 'Canonicalizing downloaded legacy vulnerability snapshots...'
+            $vulnStore = Publish-VulnStoreFromBulkSnapshot -BasePath $tempExports -RemoveSnapshotFiles
+            Write-Output "  Saved vulnerability current/history store with $($vulnStore.CurrentRows) current row(s) across $($vulnStore.HistoryYears) history period file(s)"
+            $vulnStore = $null
+            Invoke-FullGarbageCollection
+            Write-MemoryUsage -Label "Post-VulnStorePublish"
         }
 
         $machineCurrentPath = Get-MachineCurrentPath -BasePath $tempExports
