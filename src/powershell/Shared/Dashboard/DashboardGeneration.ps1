@@ -2214,6 +2214,17 @@ function Read-MachineData {
     }
 }
 
+function Read-NormalizationMachineLookup {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return (Read-MachineData -Path $Path -AsNormalizationTuple)
+}
+
 function Get-DashboardCacheDirectory {
     [CmdletBinding()]
     [OutputType([string])]

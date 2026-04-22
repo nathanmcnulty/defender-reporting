@@ -11038,6 +11038,17 @@ function Read-MachineData {
     }
 }
 
+function Read-NormalizationMachineLookup {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return (Read-MachineData -Path $Path -AsNormalizationTuple)
+}
+
 function Get-DashboardCacheDirectory {
     [CmdletBinding()]
     [OutputType([string])]
@@ -16631,11 +16642,11 @@ try {
     }
     else {
         # Step 1: Read machine and Advanced Hunting data
-        $machines = Read-MachineData -Path $tempExports -AsNormalizationTuple
+        $machines = Read-NormalizationMachineLookup -Path $tempExports
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-MachineRead"
 
-        # The normalization-reader path already returns compact tuple entries.
+        # The normalization-machine reader already returns compact tuple entries.
         Write-MemoryUsage -Label "Post-MachineLookupCompression"
         $advancedHuntingBundle = Read-AdvancedHuntingBundle -Path $tempExports -IncludeDeviceUsers
         $advancedHuntingData = [hashtable]$advancedHuntingBundle.AdvancedHuntingData
