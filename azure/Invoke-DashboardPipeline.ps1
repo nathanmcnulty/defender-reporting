@@ -12449,7 +12449,7 @@ function Get-GzipLine {
 function Get-OrCreateIndex {
     param($value, $list, $indexMap)
     if ($null -eq $value -or $value -eq '') { return -1 }
-    $key = $value.ToString()
+    $key = if ($value -is [string]) { $value } else { $value.ToString() }
     if (-not $indexMap.ContainsKey($key)) {
         $indexMap[$key] = $list.Count
         $list.Add($key)
@@ -13383,7 +13383,7 @@ function Resolve-NormalizedSeenWindowIndexSet {
     $firstSeen = Get-NormalizationCachedYmdDate -Context $Context -DateValue $FirstSeenValue
     $lastSeen = Get-NormalizationCachedYmdDate -Context $Context -DateValue $LastSeenValue
 
-    if ($firstSeen -and $lastSeen -and [datetime]$firstSeen -gt [datetime]$lastSeen) {
+    if ($firstSeen -and $lastSeen -and $firstSeen -gt $lastSeen) {
         $temp = $firstSeen
         $firstSeen = $lastSeen
         $lastSeen = $temp
@@ -13624,12 +13624,23 @@ function Get-NormalizedRecordLookup {
         -SecurityUpdateAvailable $SecurityUpdateAvailable `
         -Context $Context
 
-    Add-Member -InputObject $contentLookup -NotePropertyName inv -NotePropertyValue (Resolve-NormalizedInventoryLookup `
+    $inventoryLookup = Resolve-NormalizedInventoryLookup `
         -DeviceId $DeviceId `
         -SoftwareVendor $SoftwareVendor `
         -SoftwareName $SoftwareName `
         -SoftwareVersion $SoftwareVersion `
-        -Context $Context) -Force
+        -Context $Context
+
+    $contentLookup = [PSCustomObject]@{
+        sw = $contentLookup.sw
+        cve = $contentLookup.cve
+        ver = $contentLookup.ver
+        upd = $contentLookup.upd
+        ua = $contentLookup.ua
+        dp = $contentLookup.dp
+        rp = $contentLookup.rp
+        inv = $inventoryLookup
+    }
 
     return [PSCustomObject]@{
         DeviceIndex = Add-NormalizedDevice `
