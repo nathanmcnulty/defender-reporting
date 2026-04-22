@@ -1947,7 +1947,7 @@ function Get-DashboardAuditResult {
 
             if ($estimatedLargeRowCount -ge $largeAuditThreshold) {
                 Write-Information '  Building local normalized payload cache for large-dataset validation...' -InformationAction Continue
-                $machines = Read-MachineData -Path $ResolvedExportsPath -AsNormalizationTuple
+                $machines = Read-NormalizationMachineLookup -Path $ResolvedExportsPath
                 $advancedHunting = Read-AdvancedHuntingData -Path $ResolvedExportsPath
                 $advancedHuntingDeviceUsers = Read-AdvancedHuntingDeviceUserMap -Path $ResolvedExportsPath
                 $tempPayloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-validation-payload-' + [System.Guid]::NewGuid().ToString('N') + '.json.gz')
