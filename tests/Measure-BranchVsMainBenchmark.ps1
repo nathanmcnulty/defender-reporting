@@ -90,6 +90,7 @@ $script:FunctionStorageAccountName = $FunctionStorageAccountName
 $script:PollIntervalSeconds = $PollIntervalSeconds
 
 . (Join-Path $PSScriptRoot 'Import-BenchmarkDatasetCatalog.ps1')
+. (Join-Path $PSScriptRoot 'helpers\BenchmarkSeriesTools.ps1')
 
 function Get-HeartbeatTimestampText {
     [CmdletBinding()]
@@ -168,133 +169,6 @@ function Get-TextWithoutAnsiEscape {
     return ([regex]::Replace($Text, "`e\[[0-9;]*m", ''))
 }
 
-function Get-SeriesPercentileValue {
-    [CmdletBinding()]
-    [OutputType([double])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyCollection()]
-        [double[]]$SortedValues,
-
-        [Parameter(Mandatory = $true)]
-        [ValidateRange(0.0, 100.0)]
-        [double]$Percentile
-    )
-
-    if ($SortedValues.Count -eq 0) {
-        return $null
-    }
-
-    if ($SortedValues.Count -eq 1) {
-        return [math]::Round($SortedValues[0], 2)
-    }
-
-    $rank = ($Percentile / 100.0) * ($SortedValues.Count - 1)
-    $lowerIndex = [int][math]::Floor($rank)
-    $upperIndex = [int][math]::Ceiling($rank)
-    if ($lowerIndex -eq $upperIndex) {
-        return [math]::Round($SortedValues[$lowerIndex], 2)
-    }
-
-    $weight = $rank - $lowerIndex
-    $interpolatedValue = $SortedValues[$lowerIndex] + (($SortedValues[$upperIndex] - $SortedValues[$lowerIndex]) * $weight)
-    return [math]::Round($interpolatedValue, 2)
-}
-
-function Get-NumericSeriesSummary {
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyCollection()]
-        [double[]]$Values
-    )
-
-    $filteredValues = @($Values | Where-Object { $null -ne $_ })
-    if ($filteredValues.Count -eq 0) {
-        return $null
-    }
-
-    $orderedValues = @($filteredValues | Sort-Object)
-    $middleIndex = [math]::Floor($orderedValues.Count / 2)
-    $median = if (($orderedValues.Count % 2) -eq 1) {
-        $orderedValues[$middleIndex]
-    }
-    else {
-        [math]::Round((($orderedValues[$middleIndex - 1] + $orderedValues[$middleIndex]) / 2.0), 2)
-    }
-
-    $average = [double](($orderedValues | Measure-Object -Average).Average)
-    $variance = if ($orderedValues.Count -gt 1) {
-        (($orderedValues | ForEach-Object { [math]::Pow(([double]$_ - $average), 2) } | Measure-Object -Sum).Sum) / ($orderedValues.Count - 1)
-    }
-    else {
-        0.0
-    }
-
-    $percentile05 = Get-SeriesPercentileValue -SortedValues $orderedValues -Percentile 5
-    $percentile95 = Get-SeriesPercentileValue -SortedValues $orderedValues -Percentile 95
-
-    return [PSCustomObject]@{
-        count = $orderedValues.Count
-        min = [math]::Round(($orderedValues | Measure-Object -Minimum).Minimum, 2)
-        max = [math]::Round(($orderedValues | Measure-Object -Maximum).Maximum, 2)
-        average = [math]::Round($average, 2)
-        median = $median
-        standard_deviation = [math]::Round([math]::Sqrt($variance), 2)
-        percentile_05 = $percentile05
-        percentile_95 = $percentile95
-        spread_90 = if ($null -ne $percentile05 -and $null -ne $percentile95) { [math]::Round(($percentile95 - $percentile05), 2) } else { $null }
-    }
-}
-
-function Get-MarkdownStatisticLine {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Label,
-
-        [Parameter(Mandatory = $false)]
-        [AllowNull()]
-        $Summary
-    )
-
-    if ($null -eq $Summary) {
-        return ('- {0}: n/a' -f $Label)
-    }
-
-    return ('- {0}: min `{1:N2}s`, p05-p95 `{2:N2}s`-`{3:N2}s`, median `{4:N2}s`, avg `{5:N2}s`, max `{6:N2}s`, stdev `{7:N2}s`' -f $Label, [double]$Summary.min, [double]$Summary.percentile_05, [double]$Summary.percentile_95, [double]$Summary.median, [double]$Summary.average, [double]$Summary.max, [double]$Summary.standard_deviation)
-}
-
-function Get-BenchmarkMetricSeriesValues {
-    [CmdletBinding()]
-    [OutputType([double[]])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyCollection()]
-        [object[]]$RunResults,
-
-        [Parameter(Mandatory = $true)]
-        [scriptblock]$Selector
-    )
-
-    $values = [System.Collections.Generic.List[double]]::new()
-    foreach ($runResult in $RunResults) {
-        $value = & $Selector $runResult
-        if ($null -eq $value) {
-            continue
-        }
-
-        $parsedValue = 0.0
-        if ([double]::TryParse([string]$value, [ref]$parsedValue)) {
-            $values.Add($parsedValue) | Out-Null
-        }
-    }
-
-    return @($values)
-}
-
 function Write-AdHocBenchmarkSeriesSummary {
     [CmdletBinding()]
     param(
@@ -327,7 +201,7 @@ function Write-AdHocBenchmarkSeriesSummary {
     $localOnly = [bool](Get-ObjectPropertyValue -InputObject $firstResult -Name 'local_only')
     $persistentLocalWorkflow = [bool](Get-ObjectPropertyValue -InputObject $firstResult -Name 'persistent_local_workflow')
 
-    $summary = [PSCustomObject]@{
+    $summaryProperties = [ordered]@{
         generated_utc = [datetime]::UtcNow.ToString('o')
         benchmark_mode = [string](Get-ObjectPropertyValue -InputObject $firstResult -Name 'benchmark_mode')
         benchmark_dataset_id = [string](Get-ObjectPropertyValue -InputObject $datasetDefinition -Name 'id')
@@ -337,77 +211,15 @@ function Write-AdHocBenchmarkSeriesSummary {
         persistent_local_workflow = $persistentLocalWorkflow
         current_baseline_name = [string]$currentBaseline
         result_paths = @($resultPaths)
-        local_elapsed_seconds = Get-NumericSeriesSummary -Values (Get-BenchmarkMetricSeriesValues -RunResults $runResults -Selector {
-            param($result)
-            $current = Get-ObjectPropertyValue -InputObject $result -Name 'current'
-            $local = Get-ObjectPropertyValue -InputObject $current -Name 'local'
-            Get-ObjectPropertyValue -InputObject $local -Name 'elapsed_seconds'
-        })
-        runbook_elapsed_seconds = if ($localOnly) { $null } else { Get-NumericSeriesSummary -Values (Get-BenchmarkMetricSeriesValues -RunResults $runResults -Selector {
-            param($result)
-            $current = Get-ObjectPropertyValue -InputObject $result -Name 'current'
-            $runbook = Get-ObjectPropertyValue -InputObject $current -Name 'runbook'
-            Get-ObjectPropertyValue -InputObject $runbook -Name 'elapsed_seconds'
-        }) }
-        function_active_elapsed_seconds = if ($localOnly) { $null } else { Get-NumericSeriesSummary -Values (Get-BenchmarkMetricSeriesValues -RunResults $runResults -Selector {
-            param($result)
-            $current = Get-ObjectPropertyValue -InputObject $result -Name 'current'
-            $functionApp = Get-ObjectPropertyValue -InputObject $current -Name 'function_app'
-            Get-ObjectPropertyValue -InputObject $functionApp -Name 'active_elapsed_seconds'
-        }) }
-        function_end_to_end_elapsed_seconds = if ($localOnly) { $null } else { Get-NumericSeriesSummary -Values (Get-BenchmarkMetricSeriesValues -RunResults $runResults -Selector {
-            param($result)
-            $current = Get-ObjectPropertyValue -InputObject $result -Name 'current'
-            $functionApp = Get-ObjectPropertyValue -InputObject $current -Name 'function_app'
-            Get-ObjectPropertyValue -InputObject $functionApp -Name 'end_to_end_elapsed_seconds'
-        }) }
-        function_pickup_delay_seconds = if ($localOnly) { $null } else { Get-NumericSeriesSummary -Values (Get-BenchmarkMetricSeriesValues -RunResults $runResults -Selector {
-            param($result)
-            $current = Get-ObjectPropertyValue -InputObject $result -Name 'current'
-            $functionApp = Get-ObjectPropertyValue -InputObject $current -Name 'function_app'
-            Get-ObjectPropertyValue -InputObject $functionApp -Name 'pickup_delay_seconds'
-        }) }
-        persistent_reuse_elapsed_seconds = if ($persistentLocalWorkflow) { Get-NumericSeriesSummary -Values (Get-BenchmarkMetricSeriesValues -RunResults $runResults -Selector {
-            param($result)
-            $current = Get-ObjectPropertyValue -InputObject $result -Name 'current'
-            $localPersistentCache = Get-ObjectPropertyValue -InputObject $current -Name 'local_persistent_cache'
-            $reuse = Get-ObjectPropertyValue -InputObject $localPersistentCache -Name 'reuse_after_payload_eviction'
-            Get-ObjectPropertyValue -InputObject $reuse -Name 'elapsed_seconds'
-        }) } else { $null }
     }
 
-    $summaryPath = Join-Path $resultsDirectory 'series-summary.json'
-    $summary | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $summaryPath -Encoding utf8
-
-    $summaryLines = [System.Collections.Generic.List[string]]::new()
-    $summaryLines.Add('# Benchmark Series Summary') | Out-Null
-    $summaryLines.Add('') | Out-Null
-    $summaryLines.Add(('- Benchmark mode: `{0}`' -f [string]$summary.benchmark_mode)) | Out-Null
-    if (-not [string]::IsNullOrWhiteSpace([string]$summary.current_baseline_name)) {
-        $summaryLines.Add(('- Baseline: `{0}`' -f [string]$summary.current_baseline_name)) | Out-Null
-    }
-    if (-not [string]::IsNullOrWhiteSpace([string]$summary.benchmark_dataset_id)) {
-        $summaryLines.Add(('- Dataset: `{0}`' -f [string]$summary.benchmark_dataset_id)) | Out-Null
-    }
-    if (-not [string]::IsNullOrWhiteSpace([string]$summary.benchmark_dataset_path)) {
-        $summaryLines.Add(('- Dataset path: `{0}`' -f [string]$summary.benchmark_dataset_path)) | Out-Null
-    }
-    $summaryLines.Add(('- Iterations: `{0}`' -f $summary.iteration_count)) | Out-Null
-    $summaryLines.Add(('- Results root: `{0}`' -f $resultsDirectory)) | Out-Null
-    $summaryLines.Add('') | Out-Null
-    $summaryLines.Add((Get-MarkdownStatisticLine -Label 'Local elapsed' -Summary $summary.local_elapsed_seconds)) | Out-Null
-    if (-not $localOnly) {
-        $summaryLines.Add((Get-MarkdownStatisticLine -Label 'Runbook elapsed' -Summary $summary.runbook_elapsed_seconds)) | Out-Null
-        $summaryLines.Add((Get-MarkdownStatisticLine -Label 'Function active elapsed' -Summary $summary.function_active_elapsed_seconds)) | Out-Null
-        $summaryLines.Add((Get-MarkdownStatisticLine -Label 'Function end-to-end elapsed' -Summary $summary.function_end_to_end_elapsed_seconds)) | Out-Null
-        $summaryLines.Add((Get-MarkdownStatisticLine -Label 'Function pickup delay' -Summary $summary.function_pickup_delay_seconds)) | Out-Null
-    }
-    if ($persistentLocalWorkflow) {
-        $summaryLines.Add((Get-MarkdownStatisticLine -Label 'Persistent local reuse elapsed' -Summary $summary.persistent_reuse_elapsed_seconds)) | Out-Null
+    $metricSummary = Get-BenchmarkSeriesMetricSummary -RunResults @($runResults) -LocalOnly $localOnly -IncludePersistentLocalWorkflow $persistentLocalWorkflow
+    foreach ($property in $metricSummary.PSObject.Properties) {
+        $summaryProperties[$property.Name] = $property.Value
     }
 
-    $summaryMarkdownPath = Join-Path $resultsDirectory 'series-summary.md'
-    [System.IO.File]::WriteAllLines($summaryMarkdownPath, $summaryLines, [System.Text.UTF8Encoding]::new($false))
+    $summary = [PSCustomObject]$summaryProperties
+    [void](Write-BenchmarkSeriesSummaryOutput -ResultsRoot $resultsDirectory -Summary $summary)
 }
 
 function Get-LocalDiagnosticTimingSummary {
