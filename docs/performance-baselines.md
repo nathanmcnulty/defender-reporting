@@ -4,6 +4,13 @@ This repository keeps the merge-tracked performance baseline as documentation in
 
 Use `.local\benchmark-history\benchmark-history.jsonl` for local longitudinal tracking across repeated benchmark captures. Only update this document after the dataset and command path are durable enough to serve as a merge-tracked baseline.
 
+Performance acceptance should record which benchmark lane was used:
+- completed-dataset replay
+- raw sidecar-free replay
+- live fresh export
+
+Do not compare those lanes as if they were interchangeable. Replay benchmarks are useful for steady-state normalization and packaging cost, while live fresh-export runs are the only coverage for Stage C import behavior and large MDE download/publish hot paths.
+
 The raw result JSON files from the April 5, 2026 capture remain local-only under `.local/`. The April 20, 2026 ad hoc hosted review captures remain local-only under `.local/perf-triage/`, and the April 20, 2026 durable benchmark series remains local-only under `.local/benchmark-series/benchmark-medium-v1-20260420-004103/`.
 
 ## Recorded baselines
@@ -69,4 +76,13 @@ Durable benchmark series:
 ```powershell
 pwsh -NoProfile -File .\tests\New-BenchmarkDataset.ps1 -DatasetId benchmark-medium-v1
 pwsh -NoProfile -File .\tests\Invoke-BenchmarkSeries.ps1 -BenchmarkDatasetId benchmark-medium-v1 -Iterations 3 -IncludePersistentLocalWorkflow
+```
+
+Import-path spot checks:
+
+```powershell
+pwsh -NoProfile -File .\tests\Generate-SyntheticLargeExports.ps1 -OutputPath .\.local\large-datasets\synthetic-raw -IncludeRawRows -AllowLargeDataset
+pwsh -NoProfile -File .\tests\New-SyntheticLiveExport.ps1 -SourcePath .\.local\large-datasets\synthetic-raw -OutputPath .\.local\large-datasets\synthetic-raw-live -SkipContentStoreSidecars -Force
+pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -SkipSyntheticGeneration -SyntheticOutputPath .\.local\large-datasets\synthetic-raw-live -Validate
+pwsh -NoProfile -File .\tests\Measure-RunbookOnlyAzureBenchmark.ps1 -UseExistingExportsOnly:$false
 ```

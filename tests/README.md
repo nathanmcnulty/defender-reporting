@@ -92,6 +92,60 @@ Defaults:
 
 `-SkipContentStoreSidecars` keeps the output in raw-export form so downstream validation paths can rebuild sidecars on demand.
 
+## Large import coverage
+
+Large-dataset review now needs three separate lanes. Do not rely on completed, content-store-ready datasets alone.
+
+### 1. Replay a completed dataset
+
+Use this lane for steady-state normalization, packaging, and dashboard generation against a fully prepared export set.
+
+Examples:
+
+```powershell
+pwsh -NoProfile -File .\tests\Measure-RunbookOnlyAzureBenchmark.ps1
+
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+pwsh -NoProfile -File .\tests\Measure-BranchVsMainBenchmark.ps1 -CurrentOnly -DatasetPath .\exports-synthetic-live -ResultsOutputPath (Join-Path $PWD ('.local\current-baseline-live-' + $stamp + '.json'))
+```
+
+### 2. Replay a raw large dataset without sidecars
+
+Use this lane when you want to catch hot paths hidden by already-materialized content-store artifacts. This is the preferred synthetic path for large import-like validation of Machines, Advanced Hunting, and canonical vulnerability current/history rows.
+
+Recommended workflow:
+
+```powershell
+pwsh -NoProfile -File .\tests\Generate-SyntheticLargeExports.ps1 -OutputPath .\.local\large-datasets\synthetic-raw -IncludeRawRows -AllowLargeDataset
+
+pwsh -NoProfile -File .\tests\New-SyntheticLiveExport.ps1 -SourcePath .\.local\large-datasets\synthetic-raw -OutputPath .\.local\large-datasets\synthetic-raw-live -SkipContentStoreSidecars -Force
+
+pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -SkipSyntheticGeneration -SyntheticOutputPath .\.local\large-datasets\synthetic-raw-live -Validate
+```
+
+If you need Azure replay against that raw dataset, seed it into storage through `Measure-BranchVsMainBenchmark.ps1 -CurrentOnly -DatasetPath <raw-live-path>` so the benchmark harness stages the same files into the `exports` container before the runbook starts.
+
+### 3. Run a live fresh-export Azure Automation job
+
+Use this lane to exercise the real Stage C import path, including bulk vulnerability snapshot download, machine export refresh, and Advanced Hunting export refresh. This is the only supported large-scale path for fresh vulnerability snapshot import today.
+
+Example:
+
+```powershell
+pwsh -NoProfile -File .\tests\Measure-RunbookOnlyAzureBenchmark.ps1 -UseExistingExportsOnly:$false
+```
+
+Important notes:
+- `Measure-RunbookOnlyAzureBenchmark.ps1` defaults to `UseExistingExportsOnly = true` unless you explicitly pass `-UseExistingExportsOnly:$false`.
+- `New-SyntheticLiveExport.ps1 -SkipContentStoreSidecars` forces sidecar rebuild and canonical raw-row replay, but it does not generate large synthetic legacy `VulnExport_*.json` snapshot sets.
+- Large fresh vulnerability snapshot import is therefore validated today through live Azure Automation runs, not through a fully synthetic legacy-snapshot replay.
+
+Recommended acceptance process for large import changes:
+- one replay benchmark against a completed dataset
+- one replay benchmark against a raw sidecar-free synthetic dataset
+- one live Azure Automation fresh-export run
+- record which lane each captured result belongs to so replay and fresh-import numbers are not compared as if they covered the same path
+
 ## Hot phase review
 
 Review the local generator and validation hot phases with:

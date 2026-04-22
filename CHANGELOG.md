@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file.
 - Azure Automation machine refresh now stages current-machine snapshots and machine-history changes through streamed files instead of rebuilding the full in-memory store during publication.
 - Runbook normalization instrumentation now captures the major Stage D memory checkpoints so Azure benchmark runs can isolate hot phases more reliably.
 - Stage D machine normalization now carries a compact tuple form through the hot path before expanding the lookup structure consumed by payload generation.
+- Azure Automation now opportunistically forces garbage collection at safe Stage C and Stage D boundaries to trade some runtime for lower peak memory pressure in the runbook path.
+- Test documentation now distinguishes completed-dataset replay benchmarks from raw sidecar-free replay and live fresh-export validation so large import hot paths are reviewed explicitly.
 
 #### Fixed
 - Replaced whole-file vulnerability current-file duplicate validation with a partition-bounded path so large fresh exports no longer allocate one global duplicate-id set.
@@ -21,6 +23,7 @@ All notable changes to this project will be documented in this file.
 - `build/Invoke-RegressionValidation.ps1` passed on the merged Stage C base plus the restored Stage D experiment.
 - Azure Automation fresh-export validation completed successfully after the Stage C store hardening changes.
 - The recorded `50K` device / `1.5M` row Azure Automation stress benchmark for the Stage D tuple path reduced the instrumented Stage D peak from `670.6 MB` to `645.1 MB` and improved elapsed time from `570.43 s` to `510.76 s` versus the instrumentation-only baseline.
+- The later runbook-only GC hardening runs reduced the large Azure Automation replay peak GC heap to roughly `145 MB to 147 MB`, with working-set pressure generally below the pre-GC replay path.
 
 ## 2026-04-05
 

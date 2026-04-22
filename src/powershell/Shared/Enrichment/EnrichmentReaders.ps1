@@ -35,10 +35,52 @@ function ConvertTo-AdvancedHuntingBundleStringArray {
     )
 
     if ($null -eq $Value) {
-        return @()
+        return ,([string[]]@())
     }
 
-    $values = [System.Collections.Generic.List[string]]::new()
+    if ($Value -is [string]) {
+        if ([string]::IsNullOrWhiteSpace($Value)) {
+            return ,([string[]]@())
+        }
+
+        return ,([string[]]@($Value))
+    }
+
+    if ($Value -is [string[]]) {
+        $requiresFiltering = $false
+        foreach ($text in $Value) {
+            if ([string]::IsNullOrWhiteSpace($text)) {
+                $requiresFiltering = $true
+                break
+            }
+        }
+
+        if (-not $requiresFiltering) {
+            return ,$Value
+        }
+
+        $values = [System.Collections.Generic.List[string]]::new($Value.Length)
+        foreach ($item in $Value) {
+            $text = [string]$item
+            if (-not [string]::IsNullOrWhiteSpace($text)) {
+                $values.Add($text)
+            }
+        }
+
+        return ,([string[]]$values.ToArray())
+    }
+
+    $values = $null
+    if ($Value -is [System.Array]) {
+        $values = [System.Collections.Generic.List[string]]::new($Value.Length)
+    }
+    elseif ($Value -is [System.Collections.ICollection]) {
+        $values = [System.Collections.Generic.List[string]]::new($Value.Count)
+    }
+    else {
+        $values = [System.Collections.Generic.List[string]]::new()
+    }
+
     if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
         foreach ($item in $Value) {
             if ($null -eq $item) { continue }
@@ -55,7 +97,7 @@ function ConvertTo-AdvancedHuntingBundleStringArray {
         }
     }
 
-    return [string[]]$values.ToArray()
+    return ,([string[]]$values.ToArray())
 }
 
 function ConvertTo-AdvancedHuntingBundleDescriptionValue {
@@ -75,7 +117,7 @@ function ConvertTo-AdvancedHuntingBundleDescriptionValue {
         return $Value
     }
 
-    $parts = @(ConvertTo-AdvancedHuntingBundleStringArray -Value $Value)
+    $parts = ConvertTo-AdvancedHuntingBundleStringArray -Value $Value
     if ($parts.Count -eq 0) {
         return $null
     }
@@ -226,7 +268,7 @@ function ConvertTo-AdvancedHuntingBundleLoggedOnUserList {
     $values = [System.Collections.Generic.List[string]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     Add-AdvancedHuntingBundleLoggedOnUserValue -Value $Value -Values $values -Seen $seen
-    return [string[]]$values.ToArray()
+    return ,([string[]]$values.ToArray())
 }
 
 function Read-AdvancedHuntingBundle {
@@ -311,9 +353,9 @@ function Read-AdvancedHuntingBundle {
                             continue
                         }
 
-                        $loggedOnUsers = @(ConvertTo-AdvancedHuntingBundleLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
+                        $loggedOnUsers = ConvertTo-AdvancedHuntingBundleLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value
                         if ($loggedOnUsers.Count -gt 0) {
-                            $deviceUsers[$deviceId] = @($loggedOnUsers)
+                            $deviceUsers[$deviceId] = $loggedOnUsers
                         }
                         continue
                     }
@@ -323,12 +365,12 @@ function Read-AdvancedHuntingBundle {
                         $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
                         $rawDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
                         $rawAffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
-                        $affectedSoftware = @(ConvertTo-AdvancedHuntingBundleStringArray -Value $rawAffectedSoftware)
+                        $affectedSoftware = ConvertTo-AdvancedHuntingBundleStringArray -Value $rawAffectedSoftware
                         $ahData[$cveId] = @{
                             PublishedDate = Convert-ToYmdDate -DateValue $pdRaw
                             VulnerabilityDescription = ConvertTo-AdvancedHuntingBundleDescriptionValue -Value $rawDescription
                             EpssScore = $record.PSObject.Properties['EpssScore']?.Value
-                            AffectedSoftware = if ($affectedSoftware.Count -gt 0) { @($affectedSoftware) } else { $null }
+                            AffectedSoftware = if ($affectedSoftware.Count -gt 0) { $affectedSoftware } else { $null }
                             IsExploitAvailable = ConvertTo-AdvancedHuntingBundleNullableBoolean -Value $record.PSObject.Properties['IsExploitAvailable']?.Value
                         }
                     }
@@ -379,28 +421,7 @@ function Read-AdvancedHuntingData {
             $Value
         )
 
-        if ($null -eq $Value) {
-            return @()
-        }
-
-        $values = [System.Collections.Generic.List[string]]::new()
-        if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
-            foreach ($item in $Value) {
-                if ($null -eq $item) { continue }
-                $text = [string]$item
-                if (-not [string]::IsNullOrWhiteSpace($text)) {
-                    $values.Add($text)
-                }
-            }
-        }
-        else {
-            $text = [string]$Value
-            if (-not [string]::IsNullOrWhiteSpace($text)) {
-                $values.Add($text)
-            }
-        }
-
-        return [string[]]$values.ToArray()
+        return ,(ConvertTo-AdvancedHuntingBundleStringArray -Value $Value)
     }
 
     function ConvertTo-AdvancedHuntingDescriptionValue {
@@ -420,7 +441,7 @@ function Read-AdvancedHuntingData {
             return $Value
         }
 
-        $parts = @(ConvertTo-AdvancedHuntingStringArray -Value $Value)
+        $parts = ConvertTo-AdvancedHuntingStringArray -Value $Value
         if ($parts.Count -eq 0) {
             return $null
         }
@@ -498,12 +519,12 @@ function Read-AdvancedHuntingData {
                         $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
                         $rawDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
                         $rawAffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
-                        $affectedSoftware = @(ConvertTo-AdvancedHuntingStringArray -Value $rawAffectedSoftware)
+                        $affectedSoftware = ConvertTo-AdvancedHuntingStringArray -Value $rawAffectedSoftware
                         $ahData[$cveId] = @{
                             PublishedDate = Convert-ToYmdDate -DateValue $pdRaw
                             VulnerabilityDescription = ConvertTo-AdvancedHuntingDescriptionValue -Value $rawDescription
                             EpssScore = $record.PSObject.Properties['EpssScore']?.Value
-                            AffectedSoftware = if ($affectedSoftware.Count -gt 0) { @($affectedSoftware) } else { $null }
+                            AffectedSoftware = if ($affectedSoftware.Count -gt 0) { $affectedSoftware } else { $null }
                             IsExploitAvailable = ConvertTo-AdvancedHuntingNullableBoolean -Value $record.PSObject.Properties['IsExploitAvailable']?.Value
                         }
                     }
