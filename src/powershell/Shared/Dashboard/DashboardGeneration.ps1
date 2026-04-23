@@ -4407,8 +4407,12 @@ function Add-NormalizedCve {
             if ($ahData.ContainsKey('IsExploitAvailable')) {
                 $isExploitAvailable = $ahData.IsExploitAvailable
             }
-            if ($ahData.AffectedSoftware) {
-                $affSoftwareIndices = Resolve-NormalizedLookupIndexList -Values $ahData.AffectedSoftware -List $lookups.affSoftware -IndexMap $affSoftwareIndex
+            if ($ahData.AffectedSoftware -and @($ahData.AffectedSoftware).Count -gt 0) {
+                $affSoftwareIndices = [System.Collections.Generic.List[int]]::new()
+                foreach ($sw in @($ahData.AffectedSoftware)) {
+                    $asIdx = Get-OrCreateIndex -value $sw -list $lookups.affSoftware -indexMap $affSoftwareIndex
+                    if ($asIdx -ge 0) { $affSoftwareIndices.Add($asIdx) }
+                }
             }
         }
 
