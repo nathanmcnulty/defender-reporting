@@ -4820,8 +4820,8 @@ function Get-NormalizedRecordLookup {
         -RecommendedSecurityUpdateId $RecommendedSecurityUpdateId `
         -RecommendedSecurityUpdateUrl $RecommendedSecurityUpdateUrl `
         -SoftwareVersion $SoftwareVersion `
-        -DiskPaths @($DiskPaths) `
-        -RegistryPaths @($RegistryPaths) `
+        -DiskPaths $DiskPaths `
+        -RegistryPaths $RegistryPaths `
         -SecurityUpdateAvailable $SecurityUpdateAvailable `
         -Context $Context
 
@@ -5038,8 +5038,8 @@ function Write-NormalizedSourceRow {
         -RecommendedSecurityUpdateId $RecommendedSecurityUpdateId `
         -RecommendedSecurityUpdateUrl $RecommendedSecurityUpdateUrl `
         -SoftwareVersion $SoftwareVersion `
-        -DiskPaths @($DiskPaths) `
-        -RegistryPaths @($RegistryPaths) `
+        -DiskPaths $DiskPaths `
+        -RegistryPaths $RegistryPaths `
         -SecurityUpdateAvailable $SecurityUpdateAvailable `
         -Context $Context
 
