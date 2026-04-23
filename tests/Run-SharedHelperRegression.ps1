@@ -773,6 +773,45 @@ function Test-AddNormalizedCveUsesStableSeverityIndexLookup {
     Assert-True ($context.Lookups.cves[$unknownCveIndex].sv -eq -1) 'Expected unknown severity CVEs to preserve the fallback lookup index.'
 }
 
+function Test-GetNormalizedRecordLookupHandlesScalarPathInputs {
+    [CmdletBinding()]
+    param()
+
+    $context = Get-NormalizationContext
+
+    $recordLookup = Get-NormalizedRecordLookup `
+        -DeviceId 'device-001' `
+        -DeviceName 'device-001.contoso.com' `
+        -GroupName 'Pilot' `
+        -OsPlatform 'Windows10' `
+        -OsVersion '10.0.26100' `
+        -MachineTags @('Pilot') `
+        -SoftwareVendor 'contoso' `
+        -SoftwareName 'legacy_agent' `
+        -RecommendationReference '' `
+        -CveId 'CVE-2026-1004' `
+        -CvssScore '6.5' `
+        -SeverityLevel 'Medium' `
+        -ExploitabilityLevel 'High' `
+        -CveUrl 'https://example.test/CVE-2026-1004' `
+        -CveBatchTitle 'baseline' `
+        -RecommendedSecurityUpdate '' `
+        -RecommendedSecurityUpdateId '' `
+        -RecommendedSecurityUpdateUrl '' `
+        -SoftwareVersion '6.0.0' `
+        -DiskPaths 'C:\Windows\System32\kernel32.dll' `
+        -RegistryPaths 'HKLM\Software\Microsoft\Windows' `
+        -SecurityUpdateAvailable $false `
+        -Context $context
+
+    Assert-True ($recordLookup.ContentLookup.dp.Count -eq 1) 'Expected scalar disk path input to resolve to a single normalized lookup index.'
+    Assert-True ($recordLookup.ContentLookup.dp[0] -eq 0) 'Expected scalar disk path input to create lookup index 0.'
+    Assert-True ($recordLookup.ContentLookup.rp.Count -eq 1) 'Expected scalar registry path input to resolve to a single normalized lookup index.'
+    Assert-True ($recordLookup.ContentLookup.rp[0] -eq 0) 'Expected scalar registry path input to create lookup index 0.'
+    Assert-True ($context.Lookups.diskPaths.Count -eq 1) 'Expected scalar disk path input to materialize one disk path lookup.'
+    Assert-True ($context.Lookups.regPaths.Count -eq 1) 'Expected scalar registry path input to materialize one registry path lookup.'
+}
+
 function Test-ConvertToNormalizedDataUsesStableDeviceIdFallback {
     [CmdletBinding()]
     param()
@@ -2405,6 +2444,8 @@ Test-ResolveNormalizedInventoryLookupSkipsEmptyInventoryData
 Write-Output '  Inventory lookup normalization checks passed.'
 Test-AddNormalizedCveUsesStableSeverityIndexLookup
 Write-Output '  CVE severity lookup checks passed.'
+Test-GetNormalizedRecordLookupHandlesScalarPathInputs
+Write-Output '  Scalar path lookup checks passed.'
 Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
 Write-Output '  Stable device fallback identity checks passed.'
 Test-ConvertToNormalizedDataWritesExpectedRowCount
