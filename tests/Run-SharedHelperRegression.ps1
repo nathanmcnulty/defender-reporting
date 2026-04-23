@@ -69,6 +69,33 @@ function Get-TestVulnRow {
     }
 }
 
+function Get-TestMachineRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Id
+    )
+
+    return [PSCustomObject]@{
+        id                    = $Id
+        computerDnsName       = ($Id + '.contoso.com')
+        rbacGroupName         = 'Servers'
+        osPlatform            = 'Windows'
+        osVersion             = '10.0.22631'
+        machineTags           = @('Prod')
+        lastIpAddress         = '10.0.0.10'
+        lastExternalIpAddress = '52.0.0.10'
+        healthStatus          = 'Active'
+        riskScore             = 'Medium'
+        exposureLevel         = 'High'
+        deviceValue           = 'Normal'
+        managedBy             = 'Intune'
+        isAadJoined           = $true
+        lastSeen              = '2026-04-22T00:00:00Z'
+        firstSeen             = '2026-04-01T00:00:00Z'
+    }
+}
+
 function Get-TestQuarterlyHistoryDocument {
     [CmdletBinding()]
     param(
@@ -242,6 +269,43 @@ function Test-LocalExportArtifactCleanup {
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot '.dashboard-cache'))) 'Expected transient dashboard cache directory to be removed.'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot '.vuln-content-store-staging-123'))) 'Expected transient content-store staging directory to be removed.'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot '.synthetic-progress.json'))) 'Expected transient synthetic progress file to be removed.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-store-init-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $expectedObservedOn = Get-Date -Format 'yyyy-MM-dd'
+        Write-NdjsonRecordsFile -Path (Get-MachineCurrentPath -BasePath $tempRoot) -Records @(
+            (Get-TestMachineRecord -Id 'machine-001'),
+            [PSCustomObject]@{
+                id = 'machine-002'
+                removed = $true
+            }
+        )
+
+        $store = Initialize-MachineHistoryStore -Path $tempRoot
+        $currentRecord = $store.CurrentRecords['machine-001']
+        $periodKey = Get-QuarterPeriodKeyFromDate -Date $expectedObservedOn
+        $historyRecords = @($store.HistoryRecordsByPeriod[$periodKey])
+
+        Assert-True ($store.CurrentRecords.Count -eq 1) 'Expected removal records to be excluded from the current machine map.'
+        Assert-True ($null -ne $currentRecord) 'Expected the surviving machine record to remain in the current machine map.'
+        Assert-True ([string]$currentRecord.observedOn -eq $expectedObservedOn) 'Expected current machine records without observedOn to be backfilled once during initialization.'
+        Assert-True ([string]$currentRecord.stateHash -eq [string](Get-MachineStateHash -Machine $currentRecord)) 'Expected current machine records without stateHash to be backfilled during initialization.'
+        Assert-True ($historyRecords.Count -eq 1) 'Expected current machine records to seed history when no history store exists yet.'
+        Assert-True ([string]$historyRecords[0].id -eq 'machine-001') 'Expected seeded history to include the surviving machine record.'
+        Assert-True ([string]$historyRecords[0].observedOn -eq $expectedObservedOn) 'Expected seeded history rows to preserve the backfilled observedOn value.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -2213,6 +2277,8 @@ Test-VulnContentStoreExistenceNeedsRef
 Write-Output '  Content-store existence checks passed.'
 Test-LocalExportArtifactCleanup
 Write-Output '  Local export artifact cleanup checks passed.'
+Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata
+Write-Output '  Machine store initialization checks passed.'
 Test-BulkSnapshotImportSmoke
 Write-Output '  Bulk snapshot import smoke checks passed.'
 Test-BulkSnapshotImportSingleSnapshot

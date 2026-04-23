@@ -1013,6 +1013,42 @@ function Get-MachineHistoryRemovePaths {
     return [string[]]@($removePaths)
 }
 
+function Add-InitializedMachineRecordToCurrentMap {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$CurrentRecords,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [psobject]$Record,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DefaultObservedOn
+    )
+
+    if ($null -eq $Record) { return }
+
+    $properties = $Record.PSObject.Properties
+    $machineId = [string]$properties['id']?.Value
+    if ([string]::IsNullOrWhiteSpace($machineId)) { return }
+
+    if ($properties['removed']?.Value -eq $true) {
+        $CurrentRecords.Remove($machineId)
+        return
+    }
+
+    if ($null -eq $properties['stateHash']) {
+        $properties.Add([System.Management.Automation.PSNoteProperty]::new('stateHash', (Get-MachineStateHash -Machine $Record)))
+    }
+
+    if ($null -eq $properties['observedOn']) {
+        $properties.Add([System.Management.Automation.PSNoteProperty]::new('observedOn', $DefaultObservedOn))
+    }
+
+    $CurrentRecords[$machineId] = $Record
+}
+
 function Initialize-MachineHistoryStore {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -1033,6 +1069,7 @@ function Initialize-MachineHistoryStore {
     $migratedLegacy = $false
     $historyRecordsByPeriod = @{}
     $historyRecordKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $defaultObservedOn = Get-Date -Format 'yyyy-MM-dd'
 
     foreach ($sourcePath in $historySourcePaths) {
         foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
@@ -1042,34 +1079,12 @@ function Initialize-MachineHistoryStore {
 
     if ($null -ne $currentReadPath) {
         foreach ($record in Read-MachineRecordsFromFile -Path $currentReadPath) {
-            if (-not $record.id) { continue }
-            if ($record.PSObject.Properties['removed']?.Value -eq $true) {
-                $currentRecords.Remove($record.id)
-                continue
-            }
-            if (-not $record.PSObject.Properties['stateHash']) {
-                Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
-            }
-            if (-not $record.PSObject.Properties['observedOn']) {
-                Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
-            }
-            $currentRecords[$record.id] = $record
+            Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
         }
     } elseif ($historySourcePaths.Count -gt 0) {
         foreach ($sourcePath in $historySourcePaths) {
             foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
-                if (-not $record.id) { continue }
-                if ($record.PSObject.Properties['removed']?.Value -eq $true) {
-                    $currentRecords.Remove($record.id)
-                    continue
-                }
-                if (-not $record.PSObject.Properties['stateHash']) {
-                    Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
-                }
-                if (-not $record.PSObject.Properties['observedOn']) {
-                    Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
-                }
-                $currentRecords[$record.id] = $record
+                Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
             }
         }
     }
@@ -1095,12 +1110,6 @@ function Initialize-MachineHistoryStore {
 
     if (($historyRecordsByPeriod.Count -eq 0) -and $currentRecords.Count -gt 0) {
         foreach ($record in $currentRecords.Values) {
-            if (-not $record.PSObject.Properties['stateHash']) {
-                Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
-            }
-            if (-not $record.PSObject.Properties['observedOn']) {
-                Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
-            }
             Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $record
         }
     }
