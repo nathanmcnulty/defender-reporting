@@ -292,7 +292,6 @@ function Invoke-BoundedRunspacePool {
                     AsyncResult = $powershell.BeginInvoke()
                 })
         }
-
         $parallelResults = [System.Collections.Generic.List[object]]::new()
         foreach ($pendingInvocation in $pendingInvocations) {
             try {
@@ -314,6 +313,157 @@ function Invoke-BoundedRunspacePool {
         $runspacePool.Close()
         $runspacePool.Dispose()
     }
+}
+
+function Get-HttpHeaderStringValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        $Headers,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Names
+    )
+
+    if ($null -eq $Headers) {
+        return ''
+    }
+
+    $headerEntries = @()
+    try {
+        $headerEntries = @($Headers.GetEnumerator())
+    }
+    catch {
+        $headerEntries = @()
+    }
+
+    foreach ($name in $Names) {
+        foreach ($entry in $headerEntries) {
+            if (-not [string]::Equals([string]$entry.Key, $name, [System.StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+
+            foreach ($value in @($entry.Value)) {
+                $text = [string]$value
+                if (-not [string]::IsNullOrWhiteSpace($text)) {
+                    return $text
+                }
+            }
+        }
+
+        try {
+            foreach ($value in @($Headers[$name])) {
+                $text = [string]$value
+                if (-not [string]::IsNullOrWhiteSpace($text)) {
+                    return $text
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Could not read HTTP header '$name': $_"
+        }
+    }
+
+    return ''
+}
+
+function Get-HttpRetryDelayOverride {
+    [CmdletBinding()]
+    [OutputType([Nullable[int]])]
+    param(
+        [Parameter(Mandatory = $false)]
+        $Headers,
+
+        [Parameter(Mandatory = $false)]
+        [datetimeoffset]$ReferenceTime = [datetimeoffset]::UtcNow
+    )
+
+    $retryAfterSecondsText = Get-HttpHeaderStringValue -Headers $Headers -Names @('Retry-After')
+    if (-not [string]::IsNullOrWhiteSpace($retryAfterSecondsText)) {
+        $retryAfterSeconds = 0
+        if ([int]::TryParse($retryAfterSecondsText, [ref]$retryAfterSeconds) -and $retryAfterSeconds -ge 0) {
+            return [Math]::Max(0, $retryAfterSeconds * 1000)
+        }
+
+        $retryAfterTimestamp = [datetimeoffset]::MinValue
+        if (
+            [datetimeoffset]::TryParseExact(
+                $retryAfterSecondsText,
+                'r',
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::AssumeUniversal,
+                [ref]$retryAfterTimestamp
+            )
+        ) {
+            $delayMilliseconds = [int][Math]::Ceiling(($retryAfterTimestamp.ToUniversalTime() - $ReferenceTime.ToUniversalTime()).TotalMilliseconds)
+            return [Math]::Max(0, $delayMilliseconds)
+        }
+    }
+
+    $retryAfterMillisecondsText = Get-HttpHeaderStringValue -Headers $Headers -Names @('retry-after-ms', 'x-ms-retry-after-ms')
+    if (-not [string]::IsNullOrWhiteSpace($retryAfterMillisecondsText)) {
+        $retryAfterMilliseconds = 0
+        if ([int]::TryParse($retryAfterMillisecondsText, [ref]$retryAfterMilliseconds) -and $retryAfterMilliseconds -ge 0) {
+            return $retryAfterMilliseconds
+        }
+    }
+
+    return $null
+}
+
+function Get-SanitizedUriForLog {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$Uri
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Uri)) {
+        return ''
+    }
+
+    $absoluteUri = $null
+    if ([System.Uri]::TryCreate($Uri, [System.UriKind]::Absolute, [ref]$absoluteUri)) {
+        if ($absoluteUri.IsFile) {
+            return $absoluteUri.LocalPath
+        }
+
+        return $absoluteUri.GetLeftPart([System.UriPartial]::Path)
+    }
+
+    return $Uri
+}
+
+function Test-IsTransientTransportException {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [System.Exception]$Exception
+    )
+
+    if ($null -eq $Exception) {
+        return $false
+    }
+
+    if ($Exception -is [System.TimeoutException] -or $Exception.InnerException -is [System.TimeoutException]) {
+        return $true
+    }
+
+    $messageText = @(
+        [string]$Exception.Message
+        [string]$Exception.InnerException?.Message
+    ) -join "`n"
+
+    $transientPattern = 'ResponseEnded|response ended prematurely|An error occurred while sending the request|The underlying connection was closed|The request was canceled|timed out|A connection attempt failed|An existing connection was forcibly closed|connection reset|temporarily unavailable'
+    if ($Exception -is [System.Net.Http.HttpRequestException]) {
+        return ($messageText -match $transientPattern)
+    }
+
+    return ($messageText -match $transientPattern)
 }
 
 function Invoke-RestMethodWithRetry {
@@ -345,11 +495,15 @@ function Invoke-RestMethodWithRetry {
 
         [Parameter(Mandatory = $false)]
         [ValidateRange(1, 3600)]
-        [int]$TimeoutSec
+        [int]$TimeoutSec,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$RetryTransientTransportFailures
     )
 
     $attempt = 0
     $delay = $InitialDelayMs
+    $requestUriForLog = Get-SanitizedUriForLog -Uri $Uri
 
     while ($true) {
         try {
@@ -371,30 +525,36 @@ function Invoke-RestMethodWithRetry {
                 $statusCode = [int]$_.Exception.Response.StatusCode
             }
 
-            $retryable = $statusCode -in @(429, 500, 502, 503, 504)
+            $retryable = $statusCode -in @(408, 429, 500, 502, 503, 504)
+            if (-not $retryable -and $RetryTransientTransportFailures) {
+                $retryable = Test-IsTransientTransportException -Exception $_.Exception
+            }
+
             if (-not $retryable -or $attempt -ge $MaxRetries) {
                 throw
             }
 
-            # Respect Retry-After header for 429 responses
-            $retryAfter = $null
+            $waitMs = $delay
             try {
                 if ($_.Exception.Response -and $_.Exception.Response.Headers) {
-                    $retryAfter = $_.Exception.Response.Headers['Retry-After']
+                    $retryDelayMilliseconds = Get-HttpRetryDelayOverride -Headers $_.Exception.Response.Headers
+                    if ($null -ne $retryDelayMilliseconds) {
+                        $waitMs = $retryDelayMilliseconds
+                    }
                 }
             }
             catch {
-                Write-Verbose "Could not read Retry-After header: $_"
+                Write-Verbose "Could not read retry delay headers: $_"
             }
 
-            $waitMs = if ($retryAfter -and [int]::TryParse($retryAfter, [ref]$null)) {
-                [int]$retryAfter * 1000
+            $failureLabel = if ($null -ne $statusCode) {
+                "HTTP $statusCode"
             }
             else {
-                $delay
+                $_.Exception.GetType().Name
             }
 
-            Write-Warning "API call failed (attempt $attempt/$MaxRetries, HTTP $statusCode): $($_.Exception.Message). Retrying in $([math]::Round($waitMs / 1000, 1))s..."
+            Write-Warning ("API call failed for {0} (attempt {1}/{2}, {3}). Retrying in {4}s..." -f $requestUriForLog, $attempt, $MaxRetries, $failureLabel, [math]::Round($waitMs / 1000, 1))
             Start-Sleep -Milliseconds $waitMs
             $delay = [int]($delay * $BackoffMultiplier)
         }
@@ -433,7 +593,10 @@ function Invoke-WebRequestWithRetry {
 
         [Parameter(Mandatory = $false)]
         [ValidateRange(1, 3600)]
-        [int]$TimeoutSec
+        [int]$TimeoutSec,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$RetryTransientTransportFailures
     )
 
     $attempt = 0
@@ -444,6 +607,7 @@ function Invoke-WebRequestWithRetry {
     else {
         'HTTP request'
     }
+    $requestUriForLog = Get-SanitizedUriForLog -Uri $Uri
 
     while ($true) {
         try {
@@ -466,29 +630,36 @@ function Invoke-WebRequestWithRetry {
                 $statusCode = [int]$_.Exception.Response.StatusCode
             }
 
-            $retryable = $statusCode -in @(429, 500, 502, 503, 504)
+            $retryable = $statusCode -in @(408, 429, 500, 502, 503, 504)
+            if (-not $retryable -and $RetryTransientTransportFailures) {
+                $retryable = Test-IsTransientTransportException -Exception $_.Exception
+            }
+
             if (-not $retryable -or $attempt -ge $MaxRetries) {
                 throw
             }
 
-            $retryAfter = $null
+            $waitMs = $delay
             try {
                 if ($_.Exception.Response -and $_.Exception.Response.Headers) {
-                    $retryAfter = $_.Exception.Response.Headers['Retry-After']
+                    $retryDelayMilliseconds = Get-HttpRetryDelayOverride -Headers $_.Exception.Response.Headers
+                    if ($null -ne $retryDelayMilliseconds) {
+                        $waitMs = $retryDelayMilliseconds
+                    }
                 }
             }
             catch {
-                Write-Verbose "Could not read Retry-After header: $_"
+                Write-Verbose "Could not read retry delay headers: $_"
             }
 
-            $waitMs = if ($retryAfter -and [int]::TryParse($retryAfter, [ref]$null)) {
-                [int]$retryAfter * 1000
+            $failureLabel = if ($null -ne $statusCode) {
+                "HTTP $statusCode"
             }
             else {
-                $delay
+                $_.Exception.GetType().Name
             }
 
-            Write-Warning "$requestLabel failed (attempt $attempt/$MaxRetries, HTTP $statusCode): $($_.Exception.Message). Retrying in $([math]::Round($waitMs / 1000, 1))s..."
+            Write-Warning ("{0} failed for {1} (attempt {2}/{3}, {4}). Retrying in {5}s..." -f $requestLabel, $requestUriForLog, $attempt, $MaxRetries, $failureLabel, [math]::Round($waitMs / 1000, 1))
             Start-Sleep -Milliseconds $waitMs
             $delay = [int]($delay * $BackoffMultiplier)
         }
@@ -1377,6 +1548,7 @@ function Test-IsTransientExportArtifactName {
     return (
         ($normalizedName -like '.dashboard-cache/*') -or
         ($normalizedName -match '(^|/)\.vuln-content-store-staging-[^/]+(?:/|$)') -or
+        ($normalizedName -match '(^|/)\.VulnExport_\d+_\d{4}-\d{2}-\d{2}(?:_part_\d+)?\.json(?:\.gz)?\.partial$') -or
         ($normalizedName -in @(
             '.synthetic-progress.json',
             '.synthetic-progress.json.gz',
@@ -1527,7 +1699,7 @@ function Test-IsLegacyVulnSnapshotFileName {
         [string]$Name
     )
 
-    return ($Name -match '^VulnExport_\d+_\d{4}-\d{2}-\d{2}\.json(?:\.gz)?$')
+    return ($Name -match '^VulnExport_\d+_\d{4}-\d{2}-\d{2}(?:_part_\d+)?\.json(?:\.gz)?$')
 }
 
 function Get-VulnSnapshotDateFromName {

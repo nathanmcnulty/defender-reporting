@@ -379,6 +379,388 @@ function Test-BulkSnapshotImportSingleSnapshot {
     }
 }
 
+function Test-BulkSnapshotImportMultipartSnapshot {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('bulk-snapshot-import-multipart-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        @(
+            @{
+                Name = 'VulnExport_1_2026-01-01_part_0.json'
+                Rows = @(
+                    (Get-TestVulnRow -Id 'multipart-001' -CveId 'CVE-2026-1001' -SnapshotDate '2026-01-01' -Version '1.0.0')
+                )
+            }
+            @{
+                Name = 'VulnExport_1_2026-01-01_part_1.json'
+                Rows = @(
+                    (Get-TestVulnRow -Id 'multipart-002' -CveId 'CVE-2026-1002' -SnapshotDate '2026-01-01' -Version '1.0.0')
+                )
+            }
+            @{
+                Name = 'VulnExport_1_2026-01-02.json'
+                Rows = @(
+                    (Get-TestVulnRow -Id 'multipart-003' -CveId 'CVE-2026-1003' -SnapshotDate '2026-01-02' -Version '1.0.1')
+                )
+            }
+        ) | ForEach-Object {
+            $path = Join-Path $tempRoot $_.Name
+            $lines = @($_.Rows | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 8 })
+            [System.IO.File]::WriteAllLines($path, $lines, [System.Text.UTF8Encoding]::new($false))
+        }
+
+        Assert-True (Test-IsLegacyVulnSnapshotFileName -Name 'VulnExport_1_2026-01-01_part_0.json.gz') 'Expected multipart legacy snapshot names to be recognized.'
+        Assert-True (Test-IsLegacyVulnSnapshotFileName -Name 'VulnExport_1_2026-01-02.json.gz') 'Expected legacy single-part snapshot names to remain recognized.'
+
+        $publishResult = Publish-VulnStoreFromBulkSnapshot -BasePath $tempRoot -RemoveSnapshotFiles
+        $storeRows = @(Read-VulnStoreRow -BasePath $tempRoot)
+        $currentRows = @($storeRows | Where-Object { (Get-VulnPropertyValue -InputObject $_ -Name 'Id') -eq 'multipart-003' })
+        $historyRows = @($storeRows | Where-Object { (Get-VulnPropertyValue -InputObject $_ -Name 'Id') -in @('multipart-001', 'multipart-002') })
+
+        Assert-True ((Test-Path -LiteralPath (Get-VulnCurrentPath -BasePath $tempRoot) -PathType Leaf)) 'Canonical vuln current file was not materialized for multipart snapshots.'
+        Assert-True ((Test-Path -LiteralPath (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -PathType Leaf)) 'Canonical quarterly vuln history file was not materialized for multipart snapshots.'
+        Assert-True (@(Get-VulnLegacySnapshotFile -BasePath $tempRoot).Count -eq 0) 'Multipart vulnerability snapshots were not removed after publishing.'
+        Assert-True ($publishResult.DownloadedFiles -eq 3) 'Expected all multipart snapshot files to be counted during publish.'
+        Assert-True ($publishResult.CurrentRows -eq 1) 'Expected multipart import to leave one current row for the latest snapshot date.'
+        Assert-True ($publishResult.HistoryYears -eq 1) 'Expected multipart import to create one history period.'
+        Assert-True ($storeRows.Count -eq 3) 'Expected multipart import to preserve all rows across current and history.'
+        Assert-True ($currentRows.Count -eq 1) 'Expected latest multipart snapshot import to retain one current row.'
+        Assert-True ($historyRows.Count -eq 2) 'Expected prior multipart snapshot rows to be preserved in history.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-HttpRetryDelayHelperBehavior {
+    [CmdletBinding()]
+    param()
+
+    $fixedNow = [datetimeoffset]'2026-01-01T00:00:00Z'
+    $retryAfterDate = $fixedNow.AddSeconds(9).ToString('r', [System.Globalization.CultureInfo]::InvariantCulture)
+
+    Assert-True ((Get-HttpRetryDelayOverride -Headers @{ 'Retry-After' = '7' } -ReferenceTime $fixedNow) -eq 7000) 'Expected Retry-After integer seconds to convert to milliseconds.'
+    Assert-True ((Get-HttpRetryDelayOverride -Headers @{ 'Retry-After' = $retryAfterDate } -ReferenceTime $fixedNow) -eq 9000) 'Expected Retry-After HTTP-date values to convert to milliseconds.'
+    Assert-True ((Get-HttpRetryDelayOverride -Headers @{ 'x-ms-retry-after-ms' = '250' }) -eq 250) 'Expected retry-after-ms headers to convert directly to milliseconds.'
+    Assert-True ($null -eq (Get-HttpRetryDelayOverride -Headers @{} -ReferenceTime $fixedNow)) 'Expected the retry delay helper to return no override when no retry headers are present.'
+}
+
+function Test-WebRequestWithRetryTransientTransportBehavior {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('webrequest-transient-retry-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $outputFile = Join-Path $tempRoot 'download.bin'
+        $script:TransientWebRequestAttempts = 0
+        $script:TransientWebRequestSleeps = [System.Collections.Generic.List[int]]::new()
+
+        Set-Item -Path Function:Invoke-WebRequest -Value {
+            param(
+                [string]$Uri,
+                [string]$Method,
+                [hashtable]$Headers,
+                [string]$OutFile,
+                [string]$InFile,
+                [string]$ContentType,
+                [int]$TimeoutSec,
+                [string]$ErrorAction
+            )
+
+            $null = $Uri, $Method, $Headers, $InFile, $ContentType, $TimeoutSec, $ErrorAction
+
+            $script:TransientWebRequestAttempts++
+            if ($script:TransientWebRequestAttempts -eq 1) {
+                throw [System.Net.WebException]::new('The operation has timed out', [System.Net.WebExceptionStatus]::Timeout)
+            }
+
+            [System.IO.File]::WriteAllText($OutFile, 'ok', [System.Text.UTF8Encoding]::new($false))
+            return [PSCustomObject]@{ StatusCode = 200 }
+        }
+
+        Set-Item -Path Function:Start-Sleep -Value {
+            param([int]$Milliseconds)
+
+            $script:TransientWebRequestSleeps.Add($Milliseconds)
+        }
+
+        $null = Invoke-WebRequestWithRetry -Uri 'https://example.invalid/blob/data.json.gz?sig=secret' -OutFile $outputFile -MaxRetries 3 -InitialDelayMs 1500 -RetryTransientTransportFailures
+
+        Assert-True ($script:TransientWebRequestAttempts -eq 2) 'Expected transport retries to rerun Invoke-WebRequest after a timeout.'
+        Assert-True ($script:TransientWebRequestSleeps.Count -eq 1 -and $script:TransientWebRequestSleeps[0] -eq 1500) 'Expected the first transport retry to use the configured fallback delay.'
+        Assert-True ((Test-Path -LiteralPath $outputFile -PathType Leaf)) 'Expected transport retry to eventually materialize the requested download file.'
+    }
+    finally {
+        Remove-Item -Path Function:Invoke-WebRequest -ErrorAction SilentlyContinue
+        Remove-Item -Path Function:Start-Sleep -ErrorAction SilentlyContinue
+        Remove-Variable -Name TransientWebRequestAttempts -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name TransientWebRequestSleeps -Scope Script -ErrorAction SilentlyContinue
+
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-BulkVulnerabilitySnapshotDownloadMultipartNameUniqueness {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('bulk-download-multipart-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    $originalRestMethod = (Get-Command -Name Invoke-RestMethodWithRetry -CommandType Function).ScriptBlock
+    $originalWebRequest = (Get-Command -Name Invoke-WebRequestWithRetry -CommandType Function).ScriptBlock
+
+    try {
+        $script:MockMultipartExportFiles = @(
+            'https://example.invalid/flat-va/2026-01-01/org/json/_RbacGroupId=1/part-000.c000.json.gz'
+            'https://example.invalid/flat-va/2026-01-01/org/json/_RbacGroupId=1/part-000.c001.json.gz'
+            'https://example.invalid/flat-va/2026-01-02/org/json/_RbacGroupId=1/part-001.c000.json.gz'
+        )
+
+        Set-Item -Path Function:Invoke-RestMethodWithRetry -Value {
+            param(
+                [string]$Uri,
+                [string]$Method,
+                [hashtable]$Headers,
+                [object]$Body,
+                [string]$ContentType,
+                [int]$MaxRetries,
+                [int]$InitialDelayMs,
+                [double]$BackoffMultiplier,
+                [int]$TimeoutSec,
+                [switch]$RetryTransientTransportFailures
+            )
+
+            $null = $Uri, $Method, $Headers, $Body, $ContentType, $MaxRetries, $InitialDelayMs, $BackoffMultiplier, $TimeoutSec, $RetryTransientTransportFailures
+
+            return [PSCustomObject]@{
+                exportFiles = @($script:MockMultipartExportFiles)
+            }
+        }
+
+        Set-Item -Path Function:Invoke-WebRequestWithRetry -Value {
+            param(
+                [string]$Uri,
+                [string]$Method,
+                [hashtable]$Headers,
+                [string]$OutFile,
+                [string]$InFile,
+                [string]$ContentType,
+                [int]$MaxRetries,
+                [int]$InitialDelayMs,
+                [double]$BackoffMultiplier,
+                [int]$TimeoutSec,
+                [switch]$RetryTransientTransportFailures
+            )
+
+            $null = $Method, $Headers, $InFile, $ContentType, $MaxRetries, $InitialDelayMs, $BackoffMultiplier, $TimeoutSec, $RetryTransientTransportFailures
+
+            [System.IO.File]::WriteAllText($OutFile, $Uri, [System.Text.UTF8Encoding]::new($false))
+        }
+
+        $result = Invoke-MdeBulkVulnerabilitySnapshotDownload -Headers @{} -OutputPath $tempRoot -ExportUrl 'https://example.invalid/api/machines/SoftwareVulnerabilitiesExport'
+        $downloadedNames = @($result.DownloadedFiles | ForEach-Object { Split-Path -Leaf $_ })
+
+        Assert-True ($result.ExportFileCount -eq 3) 'Expected mocked multipart download to surface three export files.'
+        Assert-True ($downloadedNames.Count -eq 3) 'Expected mocked multipart download to emit three local files.'
+        Assert-True (@($downloadedNames | Sort-Object -Unique).Count -eq 3) 'Expected multipart download filenames to remain unique.'
+        Assert-True ('VulnExport_1_2026-01-01_part_0.json.gz' -in $downloadedNames) 'Expected first multipart file name to include part_0.'
+        Assert-True ('VulnExport_1_2026-01-01_part_1.json.gz' -in $downloadedNames) 'Expected second multipart file name to include part_1.'
+        Assert-True ('VulnExport_1_2026-01-02_part_0.json.gz' -in $downloadedNames) 'Expected next snapshot date to reset the multipart counter.'
+    }
+    finally {
+        Set-Item -Path Function:Invoke-RestMethodWithRetry -Value $originalRestMethod
+        Set-Item -Path Function:Invoke-WebRequestWithRetry -Value $originalWebRequest
+        Remove-Variable -Name MockMultipartExportFiles -Scope Script -ErrorAction SilentlyContinue
+
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-BulkVulnerabilitySnapshotDownloadStagingBehavior {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('bulk-download-staging-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    $originalRestMethod = (Get-Command -Name Invoke-RestMethodWithRetry -CommandType Function).ScriptBlock
+    $originalWebRequest = (Get-Command -Name Invoke-WebRequestWithRetry -CommandType Function).ScriptBlock
+
+    try {
+        $script:CapturedBulkExportUri = ''
+        $script:CapturedBulkExportMaxRetries = 0
+        $script:CapturedBulkExportTimeoutSec = 0
+        $script:CapturedDownloadOutFiles = [System.Collections.Generic.List[string]]::new()
+        $script:CapturedDownloadMaxRetries = 0
+        $script:CapturedDownloadTimeoutSec = 0
+
+        Set-Item -Path Function:Invoke-RestMethodWithRetry -Value {
+            param(
+                [string]$Uri,
+                [string]$Method,
+                [hashtable]$Headers,
+                [object]$Body,
+                [string]$ContentType,
+                [int]$MaxRetries,
+                [int]$InitialDelayMs,
+                [double]$BackoffMultiplier,
+                [int]$TimeoutSec,
+                [switch]$RetryTransientTransportFailures
+            )
+
+            $null = $Method, $Headers, $Body, $ContentType, $InitialDelayMs, $BackoffMultiplier, $RetryTransientTransportFailures
+
+            $script:CapturedBulkExportUri = $Uri
+            $script:CapturedBulkExportMaxRetries = $MaxRetries
+            $script:CapturedBulkExportTimeoutSec = $TimeoutSec
+
+            return [PSCustomObject]@{
+                exportFiles = @('https://example.invalid/flat-va/2026-01-01/org/json/_RbacGroupId=1/part-000.c000.json.gz?sig=secret')
+            }
+        }
+
+        Set-Item -Path Function:Invoke-WebRequestWithRetry -Value {
+            param(
+                [string]$Uri,
+                [string]$Method,
+                [hashtable]$Headers,
+                [string]$OutFile,
+                [string]$InFile,
+                [string]$ContentType,
+                [int]$MaxRetries,
+                [int]$InitialDelayMs,
+                [double]$BackoffMultiplier,
+                [int]$TimeoutSec,
+                [switch]$RetryTransientTransportFailures
+            )
+
+            $null = $Uri, $Method, $Headers, $InFile, $ContentType, $InitialDelayMs, $BackoffMultiplier, $RetryTransientTransportFailures
+
+            $script:CapturedDownloadOutFiles.Add($OutFile)
+            $script:CapturedDownloadMaxRetries = $MaxRetries
+            $script:CapturedDownloadTimeoutSec = $TimeoutSec
+            [System.IO.File]::WriteAllText($OutFile, 'payload', [System.Text.UTF8Encoding]::new($false))
+        }
+
+        $result = Invoke-MdeBulkVulnerabilitySnapshotDownload -Headers @{} -OutputPath $tempRoot -ExportUrl 'https://example.invalid/api/machines/SoftwareVulnerabilitiesExport'
+        $finalPath = Join-Path $tempRoot 'VulnExport_1_2026-01-01_part_0.json.gz'
+        $stagingPath = Join-Path $tempRoot '.VulnExport_1_2026-01-01_part_0.json.gz.partial'
+
+        Assert-True ($script:CapturedBulkExportUri -eq 'https://example.invalid/api/machines/SoftwareVulnerabilitiesExport?sasValidHours=6') 'Expected bulk export requests to request the maximum supported SAS lifetime.'
+        Assert-True ($script:CapturedBulkExportMaxRetries -eq 4) 'Expected bulk export metadata fetches to use the tighter retry budget.'
+        Assert-True ($script:CapturedBulkExportTimeoutSec -eq 600) 'Expected bulk export metadata fetches to use the configured timeout.'
+        Assert-True ($script:CapturedDownloadOutFiles.Count -eq 1) 'Expected exactly one staged bulk snapshot download.'
+        Assert-True ((Split-Path -Path $script:CapturedDownloadOutFiles[0] -Leaf) -eq '.VulnExport_1_2026-01-01_part_0.json.gz.partial') 'Expected bulk snapshot downloads to stage into transient partial files.'
+        Assert-True ($script:CapturedDownloadMaxRetries -eq 6) 'Expected bulk snapshot downloads to use the higher download retry budget.'
+        Assert-True ($script:CapturedDownloadTimeoutSec -eq 1800) 'Expected bulk snapshot downloads to use the longer download timeout.'
+        Assert-True ((Test-IsTransientExportArtifactName -Name '.VulnExport_1_2026-01-01_part_0.json.gz.partial') -eq $true) 'Expected staged download files to be classified as transient export artifacts.'
+        Assert-True ((Test-Path -LiteralPath $finalPath -PathType Leaf)) 'Expected the staged vulnerability snapshot to be renamed into the final export file.'
+        Assert-True (-not (Test-Path -LiteralPath $stagingPath -PathType Leaf)) 'Expected staging files to be removed after a successful download.'
+        Assert-True ($result.DownloadedFiles.Count -eq 1 -and $result.DownloadedFiles[0] -eq $finalPath) 'Expected the downloader to report only the finalized export file.'
+    }
+    finally {
+        Set-Item -Path Function:Invoke-RestMethodWithRetry -Value $originalRestMethod
+        Set-Item -Path Function:Invoke-WebRequestWithRetry -Value $originalWebRequest
+        Remove-Variable -Name CapturedBulkExportUri -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name CapturedBulkExportMaxRetries -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name CapturedBulkExportTimeoutSec -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name CapturedDownloadOutFiles -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name CapturedDownloadMaxRetries -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name CapturedDownloadTimeoutSec -Scope Script -ErrorAction SilentlyContinue
+
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-BulkVulnerabilitySnapshotDownloadCleanupBehavior {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('bulk-download-staging-failure-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    $originalRestMethod = (Get-Command -Name Invoke-RestMethodWithRetry -CommandType Function).ScriptBlock
+    $originalWebRequest = (Get-Command -Name Invoke-WebRequestWithRetry -CommandType Function).ScriptBlock
+
+    try {
+        Set-Item -Path Function:Invoke-RestMethodWithRetry -Value {
+            param(
+                [string]$Uri,
+                [string]$Method,
+                [hashtable]$Headers,
+                [object]$Body,
+                [string]$ContentType,
+                [int]$MaxRetries,
+                [int]$InitialDelayMs,
+                [double]$BackoffMultiplier,
+                [int]$TimeoutSec,
+                [switch]$RetryTransientTransportFailures
+            )
+
+            $null = $Uri, $Method, $Headers, $Body, $ContentType, $MaxRetries, $InitialDelayMs, $BackoffMultiplier, $TimeoutSec, $RetryTransientTransportFailures
+
+            return [PSCustomObject]@{
+                exportFiles = @('https://example.invalid/flat-va/2026-01-01/org/json/_RbacGroupId=1/part-000.c000.json.gz?sig=secret')
+            }
+        }
+
+        Set-Item -Path Function:Invoke-WebRequestWithRetry -Value {
+            param(
+                [string]$Uri,
+                [string]$Method,
+                [hashtable]$Headers,
+                [string]$OutFile,
+                [string]$InFile,
+                [string]$ContentType,
+                [int]$MaxRetries,
+                [int]$InitialDelayMs,
+                [double]$BackoffMultiplier,
+                [int]$TimeoutSec,
+                [switch]$RetryTransientTransportFailures
+            )
+
+            $null = $Uri, $Method, $Headers, $InFile, $ContentType, $MaxRetries, $InitialDelayMs, $BackoffMultiplier, $TimeoutSec, $RetryTransientTransportFailures
+
+            [System.IO.File]::WriteAllText($OutFile, 'partial', [System.Text.UTF8Encoding]::new($false))
+            throw [System.TimeoutException]::new('The download timed out')
+        }
+
+        $downloadFailure = $null
+        try {
+            $null = Invoke-MdeBulkVulnerabilitySnapshotDownload -Headers @{} -OutputPath $tempRoot -ExportUrl 'https://example.invalid/api/machines/SoftwareVulnerabilitiesExport'
+        }
+        catch {
+            $downloadFailure = $_
+        }
+
+        Assert-True ($null -ne $downloadFailure) 'Expected staged bulk snapshot downloads to surface failures when the download never completes.'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot '.VulnExport_1_2026-01-01_part_0.json.gz.partial') -PathType Leaf)) 'Expected failed staged downloads to remove their partial files.'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot 'VulnExport_1_2026-01-01_part_0.json.gz') -PathType Leaf)) 'Expected failed staged downloads to avoid leaving behind a finalized snapshot file.'
+    }
+    finally {
+        Set-Item -Path Function:Invoke-RestMethodWithRetry -Value $originalRestMethod
+        Set-Item -Path Function:Invoke-WebRequestWithRetry -Value $originalWebRequest
+
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-VulnCurrentFileRejectsDuplicateId {
     [CmdletBinding()]
     param()
@@ -2425,6 +2807,18 @@ Test-BulkSnapshotImportSmoke
 Write-Output '  Bulk snapshot import smoke checks passed.'
 Test-BulkSnapshotImportSingleSnapshot
 Write-Output '  Single-snapshot vulnerability import checks passed.'
+Test-BulkSnapshotImportMultipartSnapshot
+Write-Output '  Multipart vulnerability import checks passed.'
+Test-HttpRetryDelayHelperBehavior
+Write-Output '  Retry delay helper checks passed.'
+Test-WebRequestWithRetryTransientTransportBehavior
+Write-Output '  Web request transient transport retry checks passed.'
+Test-BulkVulnerabilitySnapshotDownloadMultipartNameUniqueness
+Write-Output '  Multipart vulnerability download naming checks passed.'
+Test-BulkVulnerabilitySnapshotDownloadStagingBehavior
+Write-Output '  Multipart vulnerability download staging checks passed.'
+Test-BulkVulnerabilitySnapshotDownloadCleanupBehavior
+Write-Output '  Multipart vulnerability failed-download cleanup checks passed.'
 Test-VulnCurrentFileRejectsDuplicateId
 Write-Output '  Current-file duplicate Id checks passed.'
 Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore
