@@ -5991,6 +5991,42 @@ function Get-MachineHistoryRemovePaths {
     return [string[]]@($removePaths)
 }
 
+function Add-InitializedMachineRecordToCurrentMap {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$CurrentRecords,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [psobject]$Record,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DefaultObservedOn
+    )
+
+    if ($null -eq $Record) { return }
+
+    $properties = $Record.PSObject.Properties
+    $machineId = [string]$properties['id']?.Value
+    if ([string]::IsNullOrWhiteSpace($machineId)) { return }
+
+    if ($properties['removed']?.Value -eq $true) {
+        $CurrentRecords.Remove($machineId)
+        return
+    }
+
+    if ($null -eq $properties['stateHash']) {
+        $properties.Add([System.Management.Automation.PSNoteProperty]::new('stateHash', (Get-MachineStateHash -Machine $Record)))
+    }
+
+    if ($null -eq $properties['observedOn']) {
+        $properties.Add([System.Management.Automation.PSNoteProperty]::new('observedOn', $DefaultObservedOn))
+    }
+
+    $CurrentRecords[$machineId] = $Record
+}
+
 function Initialize-MachineHistoryStore {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -6011,6 +6047,7 @@ function Initialize-MachineHistoryStore {
     $migratedLegacy = $false
     $historyRecordsByPeriod = @{}
     $historyRecordKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $defaultObservedOn = Get-Date -Format 'yyyy-MM-dd'
 
     foreach ($sourcePath in $historySourcePaths) {
         foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
@@ -6020,34 +6057,12 @@ function Initialize-MachineHistoryStore {
 
     if ($null -ne $currentReadPath) {
         foreach ($record in Read-MachineRecordsFromFile -Path $currentReadPath) {
-            if (-not $record.id) { continue }
-            if ($record.PSObject.Properties['removed']?.Value -eq $true) {
-                $currentRecords.Remove($record.id)
-                continue
-            }
-            if (-not $record.PSObject.Properties['stateHash']) {
-                Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
-            }
-            if (-not $record.PSObject.Properties['observedOn']) {
-                Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
-            }
-            $currentRecords[$record.id] = $record
+            Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
         }
     } elseif ($historySourcePaths.Count -gt 0) {
         foreach ($sourcePath in $historySourcePaths) {
             foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
-                if (-not $record.id) { continue }
-                if ($record.PSObject.Properties['removed']?.Value -eq $true) {
-                    $currentRecords.Remove($record.id)
-                    continue
-                }
-                if (-not $record.PSObject.Properties['stateHash']) {
-                    Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
-                }
-                if (-not $record.PSObject.Properties['observedOn']) {
-                    Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
-                }
-                $currentRecords[$record.id] = $record
+                Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
             }
         }
     }
@@ -6073,12 +6088,6 @@ function Initialize-MachineHistoryStore {
 
     if (($historyRecordsByPeriod.Count -eq 0) -and $currentRecords.Count -gt 0) {
         foreach ($record in $currentRecords.Values) {
-            if (-not $record.PSObject.Properties['stateHash']) {
-                Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue (Get-MachineStateHash -Machine $record)
-            }
-            if (-not $record.PSObject.Properties['observedOn']) {
-                Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd')
-            }
             Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $record
         }
     }
@@ -12659,6 +12668,14 @@ function Get-NormalizationContext {
     [OutputType([pscustomobject])]
     param()
 
+    $severityIndexByName = @{
+        Critical = 0
+        High = 1
+        Medium = 2
+        Low = 3
+        None = 4
+    }
+
     return [PSCustomObject]@{
         Lookups = @{
             vendors = [System.Collections.Generic.List[string]]::new()
@@ -12703,6 +12720,7 @@ function Get-NormalizationContext {
         AdvancedHuntingDeviceUsers = @{}
         AdvancedHuntingInventoryData = @{}
         NvdCveData = @{}
+        SeverityIndexByName = $severityIndexByName
         HasNoTags = $false
     }
 }
@@ -13235,35 +13253,6 @@ function Add-NormalizedDevice {
     )
 
     $lookups = $Context.Lookups
-
-    function Get-NormalizationMachinePropertyValue {
-        [CmdletBinding()]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            [object]$Machine,
-
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            [object[]]$MachineTuple,
-
-            [Parameter(Mandatory = $true)]
-            [string]$PropertyName,
-
-            [Parameter(Mandatory = $false)]
-            [int]$TupleIndex = -1
-        )
-
-        if ($null -ne $MachineTuple -and $TupleIndex -ge 0) {
-            return $MachineTuple[$TupleIndex]
-        }
-
-        if ($null -eq $Machine -or $null -ne $MachineTuple) {
-            return $null
-        }
-
-        return $Machine.PSObject.Properties[$PropertyName]?.Value
-    }
     $deviceIndex = $Context.Indexes.devices
     $groupIndex = $Context.Indexes.groups
     $platformIndex = $Context.Indexes.platforms
@@ -13283,7 +13272,7 @@ function Add-NormalizedDevice {
 
     if (-not $deviceIndex.ContainsKey($deviceKey)) {
         $machine = if (-not [string]::IsNullOrWhiteSpace($DeviceId)) { $Context.Machines[$DeviceId] } else { $null }
-        $machineTuple = if ($machine -is [System.Array] -and $machine.Length -ge 10) { [object[]]$machine } else { $null }
+        $machineTuple = if ($machine -is [System.Array] -and $machine.Length -ge 10) { $machine } else { $null }
         $machineUsers = [string[]]@()
         if ($null -ne $Context.AdvancedHuntingDeviceUsers -and -not [string]::IsNullOrWhiteSpace($DeviceId)) {
             $rawMachineUsers = $Context.AdvancedHuntingDeviceUsers[[string]$DeviceId]
@@ -13317,18 +13306,18 @@ function Add-NormalizedDevice {
 
         $machineInfo = $null
         if ($machine -or $machineUsers.Count -gt 0) {
-            $machineLastSeen = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'lastSeen' -TupleIndex 8
-            $machineFirstSeen = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'firstSeen' -TupleIndex 9
+            $machineLastSeen = if ($machineTuple) { $machineTuple[8] } elseif ($machine) { $machine.PSObject.Properties['lastSeen']?.Value } else { $null }
+            $machineFirstSeen = if ($machineTuple) { $machineTuple[9] } elseif ($machine) { $machine.PSObject.Properties['firstSeen']?.Value } else { $null }
             $machineInfo = [PSCustomObject]@{
-                ip = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'lastIpAddress' -TupleIndex 0
-                eip = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'lastExternalIpAddress' -TupleIndex 1
+                ip = if ($machineTuple) { $machineTuple[0] } elseif ($machine) { $machine.PSObject.Properties['lastIpAddress']?.Value } else { $null }
+                eip = if ($machineTuple) { $machineTuple[1] } elseif ($machine) { $machine.PSObject.Properties['lastExternalIpAddress']?.Value } else { $null }
                 u = if ($machineUsers.Count -gt 0) { @($machineUsers) } else { $null }
-                hs = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'healthStatus' -TupleIndex 2
-                rs = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'riskScore' -TupleIndex 3
-                el = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'exposureLevel' -TupleIndex 4
-                dv = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'deviceValue' -TupleIndex 5
-                mb = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'managedBy' -TupleIndex 6
-                aad = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'isAadJoined' -TupleIndex 7
+                hs = if ($machineTuple) { $machineTuple[2] } elseif ($machine) { $machine.PSObject.Properties['healthStatus']?.Value } else { $null }
+                rs = if ($machineTuple) { $machineTuple[3] } elseif ($machine) { $machine.PSObject.Properties['riskScore']?.Value } else { $null }
+                el = if ($machineTuple) { $machineTuple[4] } elseif ($machine) { $machine.PSObject.Properties['exposureLevel']?.Value } else { $null }
+                dv = if ($machineTuple) { $machineTuple[5] } elseif ($machine) { $machine.PSObject.Properties['deviceValue']?.Value } else { $null }
+                mb = if ($machineTuple) { $machineTuple[6] } elseif ($machine) { $machine.PSObject.Properties['managedBy']?.Value } else { $null }
+                aad = if ($machineTuple) { $machineTuple[7] } elseif ($machine) { $machine.PSObject.Properties['isAadJoined']?.Value } else { $null }
                 ls = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineLastSeen
                 fs = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineFirstSeen
             }
@@ -13336,10 +13325,10 @@ function Add-NormalizedDevice {
 
         $lookups.devices.Add([PSCustomObject]@{
             id = $DeviceId
-            n = if ($DeviceName) { $DeviceName } elseif ($machine -and -not $machineTuple) { Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'computerDnsName' } else { '(no machine data)' }
+            n = if ($DeviceName) { $DeviceName } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['computerDnsName']?.Value } else { '(no machine data)' }
             g = $groupIdx
             o = $platIdx
-            ov = if ($OsVersion) { $OsVersion } elseif ($machine -and -not $machineTuple) { Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'osVersion' } else { $null }
+            ov = if ($OsVersion) { $OsVersion } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['osVersion']?.Value } else { $null }
             t = $tagIndices
             m = $machineInfo
         })
@@ -13393,30 +13382,31 @@ function Add-NormalizedCve {
     $cveIndex = $Context.Indexes.cves
     $affSoftwareIndex = $Context.Indexes.affSoftware
     $batchTitleIndex = $Context.Indexes.batchTitles
+    $severityIndexByName = $Context.SeverityIndexByName
 
-    $sevIdx = switch ($SeverityLevel) {
-        'Critical' { 0 }
-        'High' { 1 }
-        'Medium' { 2 }
-        'Low' { 3 }
-        'None' { 4 }
-        default { -1 }
-    }
-
-    $expIdx = Get-OrCreateIndex -value $ExploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
+    $cveIdText = [string]$CveId
+    $severityLevelText = [string]$SeverityLevel
+    $exploitabilityLevelText = [string]$ExploitabilityLevel
 
     $cveKey = @(
-        [string]$CveId
+        $cveIdText
         [string]$CvssScore
-        [string]$SeverityLevel
-        [string]$ExploitabilityLevel
+        $severityLevelText
+        $exploitabilityLevelText
         [string]$CveUrl
         [string]$CveBatchTitle
     ) -join '|'
 
     if (-not $cveIndex.ContainsKey($cveKey)) {
-        $ahData = $Context.AdvancedHuntingData[[string]$CveId]
-        $nvdData = $Context.NvdCveData[[string]$CveId]
+        $sevIdx = if ($severityIndexByName.ContainsKey($severityLevelText)) {
+            [int]$severityIndexByName[$severityLevelText]
+        } else {
+            -1
+        }
+
+        $expIdx = Get-OrCreateIndex -value $ExploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
+        $ahData = $Context.AdvancedHuntingData[$cveIdText]
+        $nvdData = $Context.NvdCveData[$cveIdText]
         $publishedDate = $null
         $vulnDescription = $null
         $epssScore = $null
@@ -13492,12 +13482,12 @@ function Resolve-NormalizedLookupIndexList {
         [hashtable]$IndexMap
     )
 
-    if ($null -eq $Values -or @($Values).Count -eq 0) {
+    if ($null -eq $Values -or $Values.Count -eq 0) {
         return $null
     }
 
     $indices = [System.Collections.Generic.List[int]]::new()
-    foreach ($value in @($Values)) {
+    foreach ($value in $Values) {
         if ($null -eq $value) { continue }
         $index = Get-OrCreateIndex -value $value -list $List -indexMap $IndexMap
         if ($index -ge 0) {
@@ -13536,6 +13526,11 @@ function Resolve-NormalizedInventoryLookup {
         [pscustomobject]$Context
     )
 
+    $inventoryData = $Context.AdvancedHuntingInventoryData
+    if ($null -eq $inventoryData -or $inventoryData.Count -eq 0) {
+        return -1
+    }
+
     $inventoryKey = Get-AdvancedHuntingInventoryMatchKey `
         -DeviceId ([string]$DeviceId) `
         -SoftwareVendor ([string]($SoftwareVendor ?? '')) `
@@ -13545,7 +13540,7 @@ function Resolve-NormalizedInventoryLookup {
         return -1
     }
 
-    $inventoryRecord = $Context.AdvancedHuntingInventoryData[$inventoryKey]
+    $inventoryRecord = $inventoryData[$inventoryKey]
     if ($null -eq $inventoryRecord) {
         return -1
     }
@@ -13837,8 +13832,8 @@ function Get-NormalizedRecordLookup {
         -RecommendedSecurityUpdateId $RecommendedSecurityUpdateId `
         -RecommendedSecurityUpdateUrl $RecommendedSecurityUpdateUrl `
         -SoftwareVersion $SoftwareVersion `
-        -DiskPaths @($DiskPaths) `
-        -RegistryPaths @($RegistryPaths) `
+        -DiskPaths $DiskPaths `
+        -RegistryPaths $RegistryPaths `
         -SecurityUpdateAvailable $SecurityUpdateAvailable `
         -Context $Context
 
@@ -14055,8 +14050,8 @@ function Write-NormalizedSourceRow {
         -RecommendedSecurityUpdateId $RecommendedSecurityUpdateId `
         -RecommendedSecurityUpdateUrl $RecommendedSecurityUpdateUrl `
         -SoftwareVersion $SoftwareVersion `
-        -DiskPaths @($DiskPaths) `
-        -RegistryPaths @($RegistryPaths) `
+        -DiskPaths $DiskPaths `
+        -RegistryPaths $RegistryPaths `
         -SecurityUpdateAvailable $SecurityUpdateAvailable `
         -Context $Context
 
