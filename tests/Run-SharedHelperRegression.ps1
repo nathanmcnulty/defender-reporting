@@ -758,6 +758,21 @@ function Test-ResolveNormalizedInventoryLookupSkipsEmptyInventoryData {
     Assert-True ([string]$context.Lookups.inventory[0].cpe -eq 'cpe:/a:contoso:legacy_agent:6.0.0') 'Expected populated inventory lookup to preserve ProductCodeCpe.'
 }
 
+function Test-AddNormalizedCveUsesStableSeverityIndexLookup {
+    [CmdletBinding()]
+    param()
+
+    $context = Get-NormalizationContext
+
+    $highCveIndex = Add-NormalizedCve -CveId 'CVE-2026-1001' -CvssScore '9.0' -SeverityLevel 'High' -ExploitabilityLevel 'High' -CveUrl 'https://example.test/CVE-2026-1001' -CveBatchTitle 'baseline' -Context $context
+    $noneCveIndex = Add-NormalizedCve -CveId 'CVE-2026-1002' -CvssScore '0.0' -SeverityLevel 'None' -ExploitabilityLevel 'Unproven' -CveUrl 'https://example.test/CVE-2026-1002' -CveBatchTitle 'baseline' -Context $context
+    $unknownCveIndex = Add-NormalizedCve -CveId 'CVE-2026-1003' -CvssScore '5.0' -SeverityLevel 'Unexpected' -ExploitabilityLevel 'ProofOfConcept' -CveUrl 'https://example.test/CVE-2026-1003' -CveBatchTitle 'baseline' -Context $context
+
+    Assert-True ($context.Lookups.cves[$highCveIndex].sv -eq 1) 'Expected High severity CVEs to serialize severity lookup index 1.'
+    Assert-True ($context.Lookups.cves[$noneCveIndex].sv -eq 4) 'Expected None severity CVEs to serialize severity lookup index 4.'
+    Assert-True ($context.Lookups.cves[$unknownCveIndex].sv -eq -1) 'Expected unknown severity CVEs to preserve the fallback lookup index.'
+}
+
 function Test-ConvertToNormalizedDataUsesStableDeviceIdFallback {
     [CmdletBinding()]
     param()
@@ -2388,6 +2403,8 @@ Test-ResolveNormalizedLookupIndexListHandlesScalarAndCollectionValues
 Write-Output '  Lookup index list normalization checks passed.'
 Test-ResolveNormalizedInventoryLookupSkipsEmptyInventoryData
 Write-Output '  Inventory lookup normalization checks passed.'
+Test-AddNormalizedCveUsesStableSeverityIndexLookup
+Write-Output '  CVE severity lookup checks passed.'
 Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
 Write-Output '  Stable device fallback identity checks passed.'
 Test-ConvertToNormalizedDataWritesExpectedRowCount

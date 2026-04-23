@@ -3656,6 +3656,14 @@ function Get-NormalizationContext {
     [OutputType([pscustomobject])]
     param()
 
+    $severityIndexByName = @{
+        Critical = 0
+        High = 1
+        Medium = 2
+        Low = 3
+        None = 4
+    }
+
     return [PSCustomObject]@{
         Lookups = @{
             vendors = [System.Collections.Generic.List[string]]::new()
@@ -3700,6 +3708,7 @@ function Get-NormalizationContext {
         AdvancedHuntingDeviceUsers = @{}
         AdvancedHuntingInventoryData = @{}
         NvdCveData = @{}
+        SeverityIndexByName = $severityIndexByName
         HasNoTags = $false
     }
 }
@@ -4361,6 +4370,7 @@ function Add-NormalizedCve {
     $cveIndex = $Context.Indexes.cves
     $affSoftwareIndex = $Context.Indexes.affSoftware
     $batchTitleIndex = $Context.Indexes.batchTitles
+    $severityIndexByName = $Context.SeverityIndexByName
 
     $cveIdText = [string]$CveId
     $severityLevelText = [string]$SeverityLevel
@@ -4376,13 +4386,10 @@ function Add-NormalizedCve {
     ) -join '|'
 
     if (-not $cveIndex.ContainsKey($cveKey)) {
-        $sevIdx = switch ($severityLevelText) {
-            'Critical' { 0 }
-            'High' { 1 }
-            'Medium' { 2 }
-            'Low' { 3 }
-            'None' { 4 }
-            default { -1 }
+        $sevIdx = if ($severityIndexByName.ContainsKey($severityLevelText)) {
+            [int]$severityIndexByName[$severityLevelText]
+        } else {
+            -1
         }
 
         $expIdx = Get-OrCreateIndex -value $ExploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
