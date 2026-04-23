@@ -704,6 +704,26 @@ function Test-ReadNormalizedVulnStoreRow {
     }
 }
 
+function Test-ResolveNormalizedLookupIndexListHandlesScalarAndCollectionValues {
+    [CmdletBinding()]
+    param()
+
+    $lookupList = [System.Collections.Generic.List[string]]::new()
+    $indexMap = @{}
+
+    $singleValueIndices = Resolve-NormalizedLookupIndexList -Values 'C:\Windows\System32\kernel32.dll' -List $lookupList -IndexMap $indexMap
+    $mixedValueIndices = Resolve-NormalizedLookupIndexList -Values @('C:\Windows\System32\kernel32.dll', $null, 'HKLM\Software\Microsoft\Windows') -List $lookupList -IndexMap $indexMap
+    $emptyValueIndices = Resolve-NormalizedLookupIndexList -Values @() -List $lookupList -IndexMap $indexMap
+
+    Assert-True ($singleValueIndices.Count -eq 1) 'Expected scalar lookup input to resolve to a single lookup index.'
+    Assert-True ($singleValueIndices[0] -eq 0) 'Expected the first scalar lookup input to create lookup index 0.'
+    Assert-True ($mixedValueIndices.Count -eq 2) 'Expected mixed lookup input to skip nulls and keep two resolved values.'
+    Assert-True ($mixedValueIndices[0] -eq 0) 'Expected repeated lookup values to reuse the existing lookup index.'
+    Assert-True ($mixedValueIndices[1] -eq 1) 'Expected a new lookup value to receive the next lookup index.'
+    Assert-True ($lookupList.Count -eq 2) 'Expected lookup storage to contain only the two unique non-null values.'
+    Assert-True ($null -eq $emptyValueIndices) 'Expected empty lookup input to return no indices.'
+}
+
 function Test-ConvertToNormalizedDataUsesStableDeviceIdFallback {
     [CmdletBinding()]
     param()
@@ -2330,6 +2350,8 @@ Test-MergeVulnObservedWindowRows
 Write-Output '  Vulnerability observation merge checks passed.'
 Test-ReadNormalizedVulnStoreRow
 Write-Output '  Normalized vulnerability store reader checks passed.'
+Test-ResolveNormalizedLookupIndexListHandlesScalarAndCollectionValues
+Write-Output '  Lookup index list normalization checks passed.'
 Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
 Write-Output '  Stable device fallback identity checks passed.'
 Test-ConvertToNormalizedDataWritesExpectedRowCount

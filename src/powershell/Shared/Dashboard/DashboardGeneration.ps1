@@ -4463,12 +4463,12 @@ function Resolve-NormalizedLookupIndexList {
         [hashtable]$IndexMap
     )
 
-    if ($null -eq $Values -or @($Values).Count -eq 0) {
+    if ($null -eq $Values -or $Values.Count -eq 0) {
         return $null
     }
 
     $indices = [System.Collections.Generic.List[int]]::new()
-    foreach ($value in @($Values)) {
+    foreach ($value in $Values) {
         if ($null -eq $value) { continue }
         $index = Get-OrCreateIndex -value $value -list $List -indexMap $IndexMap
         if ($index -ge 0) {
