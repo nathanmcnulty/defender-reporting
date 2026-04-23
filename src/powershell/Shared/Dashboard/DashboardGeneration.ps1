@@ -2273,6 +2273,49 @@ function Get-FileSha256Hex {
     }
 }
 
+function Get-FileSetFingerprint {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Version,
+
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo[]]$Files,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$MetadataLines,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('FullName', 'Name')]
+        [string]$FileIdentityProperty = 'FullName'
+    )
+
+    $uniqueFiles = @($Files | Where-Object { $null -ne $_ } | Sort-Object FullName -Unique)
+    if ($uniqueFiles.Count -eq 0) {
+        return $null
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.AppendLine($Version)
+    foreach ($line in @($MetadataLines)) {
+        [void]$builder.AppendLine([string]$line)
+    }
+
+    foreach ($file in $uniqueFiles) {
+        $hash = Get-FileSha256Hex -Path $file.FullName
+        $fileIdentity = if ($FileIdentityProperty -eq 'Name') { $file.Name } else { $file.FullName }
+        [void]$builder.Append($fileIdentity).Append('|')
+        [void]$builder.Append($file.Length).Append('|')
+        [void]$builder.Append($file.LastWriteTimeUtc.Ticks).Append('|')
+        [void]$builder.AppendLine($hash)
+    }
+
+    $fingerprintBytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
+    $fingerprintHash = [System.Security.Cryptography.SHA256]::HashData($fingerprintBytes)
+    return ([System.BitConverter]::ToString($fingerprintHash)).Replace('-', '').ToLowerInvariant()
+}
+
 function Sync-VulnContentStoreSidecar {
     [CmdletBinding()]
     [OutputType([bool])]
@@ -2349,21 +2392,10 @@ function Get-VulnObservedWindowCacheFingerprint {
         return $null
     }
 
-    $builder = [System.Text.StringBuilder]::new()
-    [void]$builder.AppendLine('observed-window-cache-v2')
-    [void]$builder.AppendLine(('AllowedGapDays=' + $AllowedGapDays))
-    [void]$builder.AppendLine(('CacheShape=' + $(if ($contentStoreExists) { 'compact-ref-array-v1' } else { 'row-object-v1' })))
-    foreach ($file in @($sourceFiles | Sort-Object FullName -Unique)) {
-        $hash = Get-FileSha256Hex -Path $file.FullName
-        [void]$builder.Append($file.Name).Append('|')
-        [void]$builder.Append($file.Length).Append('|')
-        [void]$builder.Append($file.LastWriteTimeUtc.Ticks).Append('|')
-        [void]$builder.AppendLine($hash)
-    }
-
-    $fingerprintBytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
-    $fingerprintHash = [System.Security.Cryptography.SHA256]::HashData($fingerprintBytes)
-    return ([System.BitConverter]::ToString($fingerprintHash)).Replace('-', '').ToLowerInvariant()
+    return (Get-FileSetFingerprint -Version 'observed-window-cache-v2' -Files @($sourceFiles) -MetadataLines @(
+            ('AllowedGapDays=' + $AllowedGapDays)
+            ('CacheShape=' + $(if ($contentStoreExists) { 'compact-ref-array-v1' } else { 'row-object-v1' }))
+        ) -FileIdentityProperty Name)
 }
 
 function Get-VulnObservedWindowCachePath {
@@ -2835,20 +2867,9 @@ function Get-NormalizedVulnColumnCacheFingerprint {
             return $null
         }
 
-        $builder = [System.Text.StringBuilder]::new()
-        [void]$builder.AppendLine('dashboard-vuln-column-cache-v1')
-        [void]$builder.AppendLine(('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true)))
-        foreach ($file in @($files | Sort-Object FullName -Unique)) {
-            $hash = Get-FileSha256Hex -Path $file.FullName
-            [void]$builder.Append($file.FullName).Append('|')
-            [void]$builder.Append($file.Length).Append('|')
-            [void]$builder.Append($file.LastWriteTimeUtc.Ticks).Append('|')
-            [void]$builder.AppendLine($hash)
-        }
-
-    $fingerprintBytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
-    $fingerprintHash = [System.Security.Cryptography.SHA256]::HashData($fingerprintBytes)
-    return ([System.BitConverter]::ToString($fingerprintHash)).Replace('-', '').ToLowerInvariant()
+        return (Get-FileSetFingerprint -Version 'dashboard-vuln-column-cache-v1' -Files @($files) -MetadataLines @(
+                ('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true))
+            ))
 }
 
 function Get-NormalizedVulnColumnCacheDirectoryPath {
@@ -3087,20 +3108,9 @@ function Get-DashboardPayloadCacheFingerprint {
         return $null
     }
 
-    $builder = [System.Text.StringBuilder]::new()
-    [void]$builder.AppendLine('dashboard-payload-cache-v5')
-    [void]$builder.AppendLine(('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true)))
-    foreach ($file in @($files | Sort-Object FullName -Unique)) {
-        $hash = Get-FileSha256Hex -Path $file.FullName
-        [void]$builder.Append($file.FullName).Append('|')
-        [void]$builder.Append($file.Length).Append('|')
-        [void]$builder.Append($file.LastWriteTimeUtc.Ticks).Append('|')
-        [void]$builder.AppendLine($hash)
-    }
-
-    $fingerprintBytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
-    $fingerprintHash = [System.Security.Cryptography.SHA256]::HashData($fingerprintBytes)
-    return ([System.BitConverter]::ToString($fingerprintHash)).Replace('-', '').ToLowerInvariant()
+    return (Get-FileSetFingerprint -Version 'dashboard-payload-cache-v5' -Files @($files) -MetadataLines @(
+            ('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true))
+        ))
 }
 
 function Get-NormalizedPayloadCachePath {
