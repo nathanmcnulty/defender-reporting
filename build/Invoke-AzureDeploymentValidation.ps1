@@ -1117,6 +1117,79 @@ function Get-FunctionExecutionActivity {
     }
 }
 
+function Get-FunctionMetricSummary {
+    [CmdletBinding()]
+    [OutputType([object])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResourceId,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$StartTimeUtc,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$EndTimeUtc
+    )
+
+    $metrics = Invoke-AzCliJson -Arguments @(
+        'monitor', 'metrics', 'list',
+        '--resource', $ResourceId,
+        '--start-time', $StartTimeUtc.ToString('o'),
+        '--end-time', $EndTimeUtc.ToString('o'),
+        '--interval', 'PT1M',
+        '--aggregation', 'Average', 'Maximum', 'Total',
+        '--metrics', 'MemoryWorkingSet', 'AverageMemoryWorkingSet', 'CpuPercentage', 'OnDemandFunctionExecutionUnits',
+        '-o', 'json'
+    )
+
+    $peakWorkingSetMb = 0.0
+    $averageWorkingSetMb = 0.0
+    $peakCpuPercentage = 0.0
+    $executionUnits = 0.0
+
+    foreach ($metric in @($metrics.value)) {
+        $metricName = [string]$metric.name.value
+        $dataPoints = @($metric.timeseries | ForEach-Object { $_.data })
+        foreach ($dataPoint in $dataPoints) {
+            switch ($metricName) {
+                'MemoryWorkingSet' {
+                    if ($null -ne $dataPoint.maximum) {
+                        $peakWorkingSetMb = [math]::Max($peakWorkingSetMb, ([double]$dataPoint.maximum / 1MB))
+                    }
+                    elseif ($null -ne $dataPoint.average) {
+                        $peakWorkingSetMb = [math]::Max($peakWorkingSetMb, ([double]$dataPoint.average / 1MB))
+                    }
+                }
+                'AverageMemoryWorkingSet' {
+                    if ($null -ne $dataPoint.average) {
+                        $averageWorkingSetMb = [math]::Max($averageWorkingSetMb, ([double]$dataPoint.average / 1MB))
+                    }
+                }
+                'CpuPercentage' {
+                    if ($null -ne $dataPoint.maximum) {
+                        $peakCpuPercentage = [math]::Max($peakCpuPercentage, [double]$dataPoint.maximum)
+                    }
+                    elseif ($null -ne $dataPoint.average) {
+                        $peakCpuPercentage = [math]::Max($peakCpuPercentage, [double]$dataPoint.average)
+                    }
+                }
+                'OnDemandFunctionExecutionUnits' {
+                    if ($null -ne $dataPoint.total) {
+                        $executionUnits += [double]$dataPoint.total
+                    }
+                }
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        peak_working_set_mb = [math]::Round($peakWorkingSetMb, 1)
+        average_working_set_mb = [math]::Round($averageWorkingSetMb, 1)
+        peak_cpu_percentage = [math]::Round($peakCpuPercentage, 1)
+        execution_units = [math]::Round($executionUnits, 2)
+    }
+}
+
 function Get-FunctionTraceAccessState {
     [CmdletBinding()]
     [OutputType([string])]
@@ -1270,6 +1343,7 @@ function Invoke-FunctionExecutionValidation {
         $waitStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $lastHeartbeatSecond = -60
         $executionActivity = $null
+        $metricSummary = $null
         $lastExecutionMetricPollUtc = [datetime]::MinValue
         $latestPipelineStatus = $null
         $latestPipelineStatusBlobUtc = $null
@@ -1285,6 +1359,7 @@ function Invoke-FunctionExecutionValidation {
 
             if ($nowUtc -ge $lastExecutionMetricPollUtc.AddSeconds(60)) {
                 $executionActivity = Get-FunctionExecutionActivity -ResourceId $functionResourceId -StartTimeUtc $invokeStartedUtc.AddMinutes(-1) -EndTimeUtc $nowUtc
+                $metricSummary = Get-FunctionMetricSummary -ResourceId $functionResourceId -StartTimeUtc $invokeStartedUtc.AddMinutes(-1) -EndTimeUtc $nowUtc
                 $lastExecutionMetricPollUtc = $nowUtc
             }
 
@@ -1333,9 +1408,27 @@ function Invoke-FunctionExecutionValidation {
                 else {
                     'none'
                 }
+                $peakWorkingSetText = if ($null -ne $metricSummary -and $metricSummary.PSObject.Properties['peak_working_set_mb']) {
+                    [string]([double]$metricSummary.peak_working_set_mb)
+                }
+                else {
+                    'n/a'
+                }
+                $averageWorkingSetText = if ($null -ne $metricSummary -and $metricSummary.PSObject.Properties['average_working_set_mb']) {
+                    [string]([double]$metricSummary.average_working_set_mb)
+                }
+                else {
+                    'n/a'
+                }
+                $executionUnitsText = if ($null -ne $metricSummary -and $metricSummary.PSObject.Properties['execution_units']) {
+                    [string]([double]$metricSummary.execution_units)
+                }
+                else {
+                    'n/a'
+                }
                 $pipelineStatusText = Get-FunctionExecutionStatusSummaryText -StatusDocument $latestPipelineStatus
 
-                Write-ValidationLogLine -Message ("Function execution heartbeat: {0}s elapsed; terminalStatus={1}; dashboardBlob={2}; executionCount={3}; latestExecutionMetric={4}; traceAccess={5}; pipelineStatus={6}; lastTrace={7}" -f $elapsedWholeSeconds, $terminalText, $blobText, $executionCount, $executionTimestampText, $traceAccessState, $pipelineStatusText, $lastTraceMessage)
+                Write-ValidationLogLine -Message ("Function execution heartbeat: {0}s elapsed; terminalStatus={1}; dashboardBlob={2}; executionCount={3}; latestExecutionMetric={4}; peakWorkingSetMb={5}; averageWorkingSetMb={6}; executionUnits={7}; traceAccess={8}; pipelineStatus={9}; lastTrace={10}" -f $elapsedWholeSeconds, $terminalText, $blobText, $executionCount, $executionTimestampText, $peakWorkingSetText, $averageWorkingSetText, $executionUnitsText, $traceAccessState, $pipelineStatusText, $lastTraceMessage)
                 $lastHeartbeatSecond = $elapsedWholeSeconds
             }
 
@@ -1343,6 +1436,7 @@ function Invoke-FunctionExecutionValidation {
         }
 
         $executionActivity = Get-FunctionExecutionActivity -ResourceId $functionResourceId -StartTimeUtc $invokeStartedUtc.AddMinutes(-1) -EndTimeUtc ([datetime]::UtcNow)
+        $metricSummary = Get-FunctionMetricSummary -ResourceId $functionResourceId -StartTimeUtc $invokeStartedUtc.AddMinutes(-1) -EndTimeUtc ([datetime]::UtcNow)
 
         if ($terminalStatus -eq 'Failed') {
             throw 'Function App trace reported pipeline failure.'
@@ -1401,6 +1495,7 @@ function Invoke-FunctionExecutionValidation {
             traceAccessState = $traceAccessState
             executionCount = if ($null -ne $executionActivity -and $executionActivity.PSObject.Properties['total_count']) { [int]$executionActivity.total_count } else { 0 }
             latestExecutionMetricUtc = if ($null -ne $executionActivity -and $executionActivity.PSObject.Properties['latest_timestamp_utc'] -and $null -ne $executionActivity.latest_timestamp_utc) { ([datetime]$executionActivity.latest_timestamp_utc).ToString('o') } else { $null }
+            hostedMetrics = $metricSummary
             pipelineStatus = $latestPipelineStatus
             recentTraceEvents = @($events | Select-Object -Last 12)
         }

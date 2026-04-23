@@ -169,6 +169,31 @@ function Get-TextWithoutAnsiEscape {
     return ([regex]::Replace($Text, "`e\[[0-9;]*m", ''))
 }
 
+function Test-ScriptParameterSupport {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ParameterName
+    )
+
+    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $command = Get-Command -Name $ScriptPath -ErrorAction Stop
+        return $command.Parameters.ContainsKey($ParameterName)
+    }
+    catch {
+        Write-Verbose ("Unable to inspect parameters for {0}: {1}" -f $ScriptPath, $_.Exception.Message)
+        return $false
+    }
+}
+
 function Write-AdHocBenchmarkSeriesSummary {
     [CmdletBinding()]
     param(
@@ -1755,9 +1780,12 @@ function Start-LocalBenchmark {
         '-File', $scriptPath,
         '-SkipSyntheticGeneration',
         '-SyntheticOutputPath', $localDatasetPath,
-        '-DashboardOutputPath', $dashboardPath,
-        '-DiagnosticPhaseLogPath', $phaseLogPath
+        '-DashboardOutputPath', $dashboardPath
     )
+
+    if (Test-ScriptParameterSupport -ScriptPath $scriptPath -ParameterName 'DiagnosticPhaseLogPath') {
+        $argumentList += @('-DiagnosticPhaseLogPath', $phaseLogPath)
+    }
 
     $process = Start-Process -FilePath 'pwsh' -ArgumentList $argumentList -WorkingDirectory $RepoPath -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
     return [ordered]@{
