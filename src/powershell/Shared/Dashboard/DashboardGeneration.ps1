@@ -4507,6 +4507,11 @@ function Resolve-NormalizedInventoryLookup {
         [pscustomobject]$Context
     )
 
+    $inventoryData = $Context.AdvancedHuntingInventoryData
+    if ($null -eq $inventoryData -or $inventoryData.Count -eq 0) {
+        return -1
+    }
+
     $inventoryKey = Get-AdvancedHuntingInventoryMatchKey `
         -DeviceId ([string]$DeviceId) `
         -SoftwareVendor ([string]($SoftwareVendor ?? '')) `
@@ -4516,7 +4521,7 @@ function Resolve-NormalizedInventoryLookup {
         return -1
     }
 
-    $inventoryRecord = $Context.AdvancedHuntingInventoryData[$inventoryKey]
+    $inventoryRecord = $inventoryData[$inventoryKey]
     if ($null -eq $inventoryRecord) {
         return -1
     }

@@ -724,6 +724,40 @@ function Test-ResolveNormalizedLookupIndexListHandlesScalarAndCollectionValues {
     Assert-True ($null -eq $emptyValueIndices) 'Expected empty lookup input to return no indices.'
 }
 
+function Test-ResolveNormalizedInventoryLookupSkipsEmptyInventoryData {
+    [CmdletBinding()]
+    param()
+
+    $context = Get-NormalizationContext
+    $emptyInventoryIndex = Resolve-NormalizedInventoryLookup `
+        -DeviceId 'device-001' `
+        -SoftwareVendor 'contoso' `
+        -SoftwareName 'legacy_agent' `
+        -SoftwareVersion '6.0.0' `
+        -Context $context
+
+    $inventoryKey = Get-AdvancedHuntingInventoryMatchKey -DeviceId 'device-001' -SoftwareVendor 'contoso' -SoftwareName 'legacy_agent' -SoftwareVersion '6.0.0'
+    $context.AdvancedHuntingInventoryData = @{
+        $inventoryKey = [PSCustomObject]@{
+            ProductCodeCpe = 'cpe:/a:contoso:legacy_agent:6.0.0'
+            EndOfSupportStatus = 'supported'
+            EndOfSupportDate = '2027-10-01'
+        }
+    }
+
+    $populatedInventoryIndex = Resolve-NormalizedInventoryLookup `
+        -DeviceId 'device-001' `
+        -SoftwareVendor 'contoso' `
+        -SoftwareName 'legacy_agent' `
+        -SoftwareVersion '6.0.0' `
+        -Context $context
+
+    Assert-True ($emptyInventoryIndex -eq -1) 'Expected empty inventory data to skip normalized inventory lookup creation.'
+    Assert-True ($context.Lookups.inventory.Count -eq 1) 'Expected only the populated inventory lookup to materialize in the lookup table.'
+    Assert-True ($populatedInventoryIndex -eq 0) 'Expected populated inventory data to create the first normalized inventory lookup.'
+    Assert-True ([string]$context.Lookups.inventory[0].cpe -eq 'cpe:/a:contoso:legacy_agent:6.0.0') 'Expected populated inventory lookup to preserve ProductCodeCpe.'
+}
+
 function Test-ConvertToNormalizedDataUsesStableDeviceIdFallback {
     [CmdletBinding()]
     param()
@@ -2352,6 +2386,8 @@ Test-ReadNormalizedVulnStoreRow
 Write-Output '  Normalized vulnerability store reader checks passed.'
 Test-ResolveNormalizedLookupIndexListHandlesScalarAndCollectionValues
 Write-Output '  Lookup index list normalization checks passed.'
+Test-ResolveNormalizedInventoryLookupSkipsEmptyInventoryData
+Write-Output '  Inventory lookup normalization checks passed.'
 Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
 Write-Output '  Stable device fallback identity checks passed.'
 Test-ConvertToNormalizedDataWritesExpectedRowCount
