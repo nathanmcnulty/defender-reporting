@@ -90,6 +90,7 @@ $script:FunctionStorageAccountName = $FunctionStorageAccountName
 $script:PollIntervalSeconds = $PollIntervalSeconds
 
 . (Join-Path $PSScriptRoot 'Import-BenchmarkDatasetCatalog.ps1')
+. (Join-Path $PSScriptRoot 'helpers\BenchmarkSeriesTools.ps1')
 
 function Get-HeartbeatTimestampText {
     [CmdletBinding()]
@@ -168,6 +169,187 @@ function Get-TextWithoutAnsiEscape {
     return ([regex]::Replace($Text, "`e\[[0-9;]*m", ''))
 }
 
+function Test-ScriptParameterSupport {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ScriptPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ParameterName
+    )
+
+    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $command = Get-Command -Name $ScriptPath -ErrorAction Stop
+        return $command.Parameters.ContainsKey($ParameterName)
+    }
+    catch {
+        Write-Verbose ("Unable to inspect parameters for {0}: {1}" -f $ScriptPath, $_.Exception.Message)
+        return $false
+    }
+}
+
+function Write-AdHocBenchmarkSeriesSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResultPath
+    )
+
+    $resultLeaf = Split-Path -Path $ResultPath -Leaf
+    if ($resultLeaf -notlike 'run-*.json') {
+        return
+    }
+
+    $resultsDirectory = Split-Path -Path $ResultPath -Parent
+    $resultFiles = @(Get-ChildItem -LiteralPath $resultsDirectory -Filter 'run-*.json' -File | Sort-Object Name)
+    if ($resultFiles.Count -eq 0) {
+        return
+    }
+
+    $runResults = [System.Collections.Generic.List[object]]::new()
+    $resultPaths = [System.Collections.Generic.List[string]]::new()
+    foreach ($resultFile in $resultFiles) {
+        $runResults.Add((Get-Content -LiteralPath $resultFile.FullName -Raw | ConvertFrom-Json -Depth 50)) | Out-Null
+        $resultPaths.Add($resultFile.FullName) | Out-Null
+    }
+
+    $firstResult = $runResults[0]
+    $dataset = Get-ObjectPropertyValue -InputObject $firstResult -Name 'dataset'
+    $datasetDefinition = Get-ObjectPropertyValue -InputObject $dataset -Name 'definition'
+    $currentBaseline = Get-ObjectPropertyValue -InputObject (Get-ObjectPropertyValue -InputObject $firstResult -Name 'current') -Name 'baseline'
+    $localOnly = [bool](Get-ObjectPropertyValue -InputObject $firstResult -Name 'local_only')
+    $persistentLocalWorkflow = [bool](Get-ObjectPropertyValue -InputObject $firstResult -Name 'persistent_local_workflow')
+
+    $summaryProperties = [ordered]@{
+        generated_utc = [datetime]::UtcNow.ToString('o')
+        benchmark_mode = [string](Get-ObjectPropertyValue -InputObject $firstResult -Name 'benchmark_mode')
+        benchmark_dataset_id = [string](Get-ObjectPropertyValue -InputObject $datasetDefinition -Name 'id')
+        benchmark_dataset_path = [string](Get-ObjectPropertyValue -InputObject $dataset -Name 'path')
+        iteration_count = $runResults.Count
+        local_only = $localOnly
+        persistent_local_workflow = $persistentLocalWorkflow
+        current_baseline_name = [string]$currentBaseline
+        result_paths = @($resultPaths)
+    }
+
+    $metricSummary = Get-BenchmarkSeriesMetricSummary -RunResults @($runResults) -LocalOnly $localOnly -IncludePersistentLocalWorkflow $persistentLocalWorkflow
+    foreach ($property in $metricSummary.PSObject.Properties) {
+        $summaryProperties[$property.Name] = $property.Value
+    }
+
+    $summary = [PSCustomObject]$summaryProperties
+    [void](Write-BenchmarkSeriesSummaryOutput -ResultsRoot $resultsDirectory -Summary $summary)
+}
+
+function Get-LocalDiagnosticTimingSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    $phaseByName = [ordered]@{}
+    $pipelineStartUtc = $null
+    $pipelineEndUtc = $null
+
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        $parts = @([string]$line -split "`t")
+        if ($parts.Count -lt 3) {
+            continue
+        }
+
+        $timestampUtc = ConvertTo-UtcDateTime -Value $parts[0]
+        if ($null -eq $timestampUtc) {
+            continue
+        }
+
+        $eventType = [string]$parts[1]
+        $name = [string]$parts[2]
+        $status = if ($parts.Count -ge 4) { [string]$parts[3] } else { $null }
+
+        switch ($eventType) {
+            'pipeline-start' {
+                if ($null -eq $pipelineStartUtc) {
+                    $pipelineStartUtc = $timestampUtc
+                }
+            }
+            'pipeline-end' {
+                $pipelineEndUtc = $timestampUtc
+            }
+            'phase-start' {
+                if (-not $phaseByName.Contains($name)) {
+                    $phaseByName[$name] = [ordered]@{
+                        name = $name
+                        start_utc = $null
+                        end_utc = $null
+                        status = $null
+                    }
+                }
+
+                if ($null -eq $phaseByName[$name].start_utc) {
+                    $phaseByName[$name].start_utc = $timestampUtc
+                }
+            }
+            'phase-end' {
+                if (-not $phaseByName.Contains($name)) {
+                    $phaseByName[$name] = [ordered]@{
+                        name = $name
+                        start_utc = $null
+                        end_utc = $null
+                        status = $null
+                    }
+                }
+
+                $phaseByName[$name].end_utc = $timestampUtc
+                $phaseByName[$name].status = $status
+            }
+        }
+    }
+
+    $phaseSummaries = @(
+        foreach ($phaseEntry in $phaseByName.Values) {
+            $elapsedSeconds = if ($null -ne $phaseEntry.start_utc -and $null -ne $phaseEntry.end_utc) {
+                [math]::Round((New-TimeSpan -Start $phaseEntry.start_utc -End $phaseEntry.end_utc).TotalSeconds, 2)
+            }
+            else {
+                $null
+            }
+
+            [PSCustomObject]@{
+                name = [string]$phaseEntry.name
+                status = if ([string]::IsNullOrWhiteSpace([string]$phaseEntry.status)) { 'unknown' } else { [string]$phaseEntry.status }
+                elapsedSeconds = $elapsedSeconds
+            }
+        }
+    )
+
+    return [PSCustomObject]@{
+        path = $Path
+        phase_summaries = $phaseSummaries
+        pipeline_elapsed_seconds = if ($null -ne $pipelineStartUtc -and $null -ne $pipelineEndUtc) {
+            [math]::Round((New-TimeSpan -Start $pipelineStartUtc -End $pipelineEndUtc).TotalSeconds, 2)
+        }
+        else {
+            $null
+        }
+    }
+}
+
 function Get-LocalPhaseSummaryFromLog {
     [CmdletBinding()]
     [OutputType([object[]])]
@@ -224,11 +406,29 @@ function Get-LocalBenchmarkLogSummary {
     [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$StdoutPath
+        [string]$StdoutPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$DiagnosticLogPath
     )
 
     $phaseSummary = [ordered]@{}
-    foreach ($phase in @(Get-LocalPhaseSummaryFromLog -Path $StdoutPath)) {
+    $diagnosticTimingSummary = if ([string]::IsNullOrWhiteSpace($DiagnosticLogPath)) {
+        $null
+    }
+    else {
+        Get-LocalDiagnosticTimingSummary -Path $DiagnosticLogPath
+    }
+
+    $phaseEntries = if ($null -ne $diagnosticTimingSummary -and @($diagnosticTimingSummary.phase_summaries).Count -gt 0) {
+        @($diagnosticTimingSummary.phase_summaries)
+    }
+    else {
+        @(Get-LocalPhaseSummaryFromLog -Path $StdoutPath)
+    }
+
+    foreach ($phase in $phaseEntries) {
         if ($null -ne $phase.elapsedSeconds) {
             $phaseSummary[[string]$phase.name] = [double]$phase.elapsedSeconds
         }
@@ -243,9 +443,61 @@ function Get-LocalBenchmarkLogSummary {
 
     return [PSCustomObject]@{
         phase_elapsed_seconds = [PSCustomObject]$phaseSummary
+        phase_timing_source = if ($null -ne $diagnosticTimingSummary -and @($diagnosticTimingSummary.phase_summaries).Count -gt 0) { 'diagnostic-log' } else { 'stdout' }
+        pipeline_elapsed_seconds = if ($null -ne $diagnosticTimingSummary) { $diagnosticTimingSummary.pipeline_elapsed_seconds } else { $null }
         used_cached_payload = ($stdoutText -match 'Reusing cached normalized payload')
         used_cached_vuln_columns = ($stdoutText -match 'Reusing cached normalized vuln columns')
         published_cached_vuln_columns = ($stdoutText -match 'Cached normalized vuln columns as')
+    }
+}
+
+function Get-LocalBenchmarkProcessReport {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DatasetPath
+    )
+
+    $reportPath = Join-Path -Path $DatasetPath -ChildPath 'stress-validation-report.json'
+    if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        path = $reportPath
+        report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -Depth 50
+    }
+}
+
+function Get-LocalBenchmarkProcessTimingSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $ProcessReport
+    )
+
+    if ($null -eq $ProcessReport -or $null -eq $ProcessReport.report) {
+        return $null
+    }
+
+    $generationTiming = Get-ObjectPropertyValue -InputObject $ProcessReport.report -Name 'generationTiming'
+    if ($null -eq $generationTiming) {
+        return $null
+    }
+
+    $phaseTimings = Get-ObjectPropertyValue -InputObject $generationTiming -Name 'phaseTimings'
+    if ($null -eq $phaseTimings) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        phase_elapsed_seconds = $phaseTimings
+        phase_timing_source = 'process-report'
+        pipeline_elapsed_seconds = Get-ObjectPropertyValue -InputObject $generationTiming -Name 'pipelineElapsedSeconds'
+        wrapper_overhead_seconds = Get-ObjectPropertyValue -InputObject $generationTiming -Name 'wrapperOverheadSeconds'
     }
 }
 
@@ -1399,6 +1651,22 @@ function Get-AvailableMemoryGB {
     return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
 }
 
+function Get-PreBenchmarkEnvironmentSnapshot {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    return [PSCustomObject]@{
+        captured_utc = [datetime]::UtcNow.ToString('o')
+        logical_cpu_count = [int][System.Environment]::ProcessorCount
+        available_memory_gb = Get-AvailableMemoryGB
+        free_disk_gb = [math]::Round(((Get-FreeDiskByteCount -Path $Path) / 1GB), 2)
+    }
+}
+
 function Get-ProcessTree {
     [CmdletBinding()]
     [OutputType([System.Diagnostics.Process[]])]
@@ -1497,8 +1765,10 @@ function Start-LocalBenchmark {
     $stdoutPath = Join-Path -Path $OutputDirectory -ChildPath ($Name + '.local.stdout.log')
     $stderrPath = Join-Path -Path $OutputDirectory -ChildPath ($Name + '.local.stderr.log')
     $dashboardPath = Join-Path -Path $OutputDirectory -ChildPath ($Name + '.local.html')
+    $phaseLogPath = Join-Path -Path $OutputDirectory -ChildPath ($Name + '.local.phase.log')
+    $processReportPath = Join-Path -Path $OutputDirectory -ChildPath ($Name + '.local.report.json')
 
-    foreach ($path in @($stdoutPath, $stderrPath, $dashboardPath)) {
+    foreach ($path in @($stdoutPath, $stderrPath, $dashboardPath, $phaseLogPath, $processReportPath)) {
         if (Test-Path -LiteralPath $path) {
             Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -1513,16 +1783,23 @@ function Start-LocalBenchmark {
         '-DashboardOutputPath', $dashboardPath
     )
 
+    if (Test-ScriptParameterSupport -ScriptPath $scriptPath -ParameterName 'DiagnosticPhaseLogPath') {
+        $argumentList += @('-DiagnosticPhaseLogPath', $phaseLogPath)
+    }
+
     $process = Start-Process -FilePath 'pwsh' -ArgumentList $argumentList -WorkingDirectory $RepoPath -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
     return [ordered]@{
         name = $Name
         repoPath = $RepoPath
         sourceDatasetPath = $BenchmarkDatasetPath
         datasetPath = $localDatasetPath
+        environmentSnapshot = Get-PreBenchmarkEnvironmentSnapshot -Path $OutputDirectory
         process = $process
         stdoutPath = $stdoutPath
         stderrPath = $stderrPath
         dashboardPath = $dashboardPath
+        phaseLogPath = $phaseLogPath
+        processReportPath = $processReportPath
         stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         samples = [System.Collections.Generic.List[object]]::new()
         peakRssBytes = [int64]0
@@ -1608,25 +1885,54 @@ function Get-LocalBenchmarkResult {
         [switch]$KeepDatasetPath
     )
 
-    $logSummary = Get-LocalBenchmarkLogSummary -StdoutPath $State.stdoutPath
+    $processReport = Get-LocalBenchmarkProcessReport -DatasetPath $State.datasetPath
+    if ($null -ne $processReport -and $State.Contains('processReportPath') -and -not [string]::IsNullOrWhiteSpace([string]$State.processReportPath)) {
+        Copy-Item -LiteralPath $processReport.path -Destination $State.processReportPath -Force
+    }
+    $processTimingSummary = Get-LocalBenchmarkProcessTimingSummary -ProcessReport $processReport
+    $logSummary = Get-LocalBenchmarkLogSummary -StdoutPath $State.stdoutPath -DiagnosticLogPath $State.phaseLogPath
+    $elapsedSeconds = if ($null -ne $processReport -and $processReport.report.PSObject.Properties['elapsedSeconds']) {
+        [math]::Round([double]$processReport.report.elapsedSeconds, 2)
+    }
+    elseif ($null -ne $logSummary.pipeline_elapsed_seconds) {
+        [math]::Round([double]$logSummary.pipeline_elapsed_seconds, 2)
+    }
+    else {
+        [math]::Round($State.stopwatch.Elapsed.TotalSeconds, 2)
+    }
+    $elapsedTimingSource = if ($null -ne $processReport -and $processReport.report.PSObject.Properties['elapsedSeconds']) {
+        'process-report'
+    }
+    elseif ($null -ne $logSummary.pipeline_elapsed_seconds) {
+        'diagnostic-log'
+    }
+    else {
+        'poll-stopwatch'
+    }
 
     $result = [PSCustomObject]@{
         status = if ($State.exitCode -eq 0) { 'Completed' } else { 'Failed' }
-        elapsed_seconds = [math]::Round($State.stopwatch.Elapsed.TotalSeconds, 2)
+        elapsed_seconds = $elapsedSeconds
+        elapsed_timing_source = $elapsedTimingSource
         peak_tree_rss_bytes = $State.peakRssBytes
         peak_tree_rss_gb = [math]::Round(($State.peakRssBytes / 1GB), 3)
         peak_tree_rss_at_seconds = $State.peakRssAtSeconds
         peak_tree_private_bytes = $State.peakPrivateBytes
         peak_tree_private_gb = [math]::Round(($State.peakPrivateBytes / 1GB), 3)
         peak_tree_private_at_seconds = $State.peakPrivateAtSeconds
-        rows_per_second = if ($State.stopwatch.Elapsed.TotalSeconds -gt 0) { [math]::Round(($TotalRows / $State.stopwatch.Elapsed.TotalSeconds), 0) } else { 0 }
+        rows_per_second = if ($elapsedSeconds -gt 0) { [math]::Round(($TotalRows / $elapsedSeconds), 0) } else { 0 }
         sample_count = $State.samples.Count
         dashboard_bytes = if (Test-Path -LiteralPath $State.dashboardPath -PathType Leaf) { (Get-Item -LiteralPath $State.dashboardPath).Length } else { 0 }
         dashboard_mb = if (Test-Path -LiteralPath $State.dashboardPath -PathType Leaf) { [math]::Round(((Get-Item -LiteralPath $State.dashboardPath).Length / 1MB), 2) } else { 0 }
-        phase_elapsed_seconds = $logSummary.phase_elapsed_seconds
+        phase_elapsed_seconds = if ($null -ne $processTimingSummary) { $processTimingSummary.phase_elapsed_seconds } else { $logSummary.phase_elapsed_seconds }
+        phase_timing_source = if ($null -ne $processTimingSummary) { $processTimingSummary.phase_timing_source } else { $logSummary.phase_timing_source }
+        wrapper_overhead_seconds = if ($null -ne $processTimingSummary) { $processTimingSummary.wrapper_overhead_seconds } else { $null }
         used_cached_payload = [bool]$logSummary.used_cached_payload
         used_cached_vuln_columns = [bool]$logSummary.used_cached_vuln_columns
         published_cached_vuln_columns = [bool]$logSummary.published_cached_vuln_columns
+        environment_snapshot = $State.environmentSnapshot
+        process_report_path = if ($null -ne $processReport -and $State.Contains('processReportPath')) { $State.processReportPath } else { $null }
+        phase_log_path = if (Test-Path -LiteralPath $State.phaseLogPath -PathType Leaf) { $State.phaseLogPath } else { $null }
         stdout_path = $State.stdoutPath
         stderr_path = $State.stderrPath
         dashboard_path = $State.dashboardPath
@@ -1691,6 +1997,95 @@ function Get-PhaseElapsedSecondsValue {
     }
 
     return [double]$phaseProperty.Value
+}
+
+function Get-PhaseElapsedSecondsDeltaSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $CurrentResult,
+
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $MainResult
+    )
+
+    $phaseNames = [System.Collections.Generic.List[string]]::new()
+    foreach ($phaseContainer in @(
+        (Get-ObjectPropertyValue -InputObject $CurrentResult -Name 'phase_elapsed_seconds'),
+        (Get-ObjectPropertyValue -InputObject $MainResult -Name 'phase_elapsed_seconds')
+    )) {
+        if ($null -eq $phaseContainer) {
+            continue
+        }
+
+        foreach ($phaseProperty in $phaseContainer.PSObject.Properties) {
+            $phaseName = [string]$phaseProperty.Name
+            if (-not $phaseNames.Contains($phaseName)) {
+                $phaseNames.Add($phaseName) | Out-Null
+            }
+        }
+    }
+
+    $deltaByName = [ordered]@{}
+    foreach ($phaseName in $phaseNames) {
+        $currentPhaseSeconds = Get-PhaseElapsedSecondsValue -Result $CurrentResult -PhaseName $phaseName
+        $mainPhaseSeconds = Get-PhaseElapsedSecondsValue -Result $MainResult -PhaseName $phaseName
+        if ($null -eq $currentPhaseSeconds -or $null -eq $mainPhaseSeconds) {
+            continue
+        }
+
+        $deltaByName[$phaseName] = [math]::Round(($currentPhaseSeconds - $mainPhaseSeconds), 2)
+    }
+
+    if ($deltaByName.Count -eq 0) {
+        return $null
+    }
+
+    return [PSCustomObject]$deltaByName
+}
+
+function Get-EnvironmentSnapshotDeltaSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $CurrentResult,
+
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $MainResult
+    )
+
+    $currentEnvironmentSnapshot = Get-ObjectPropertyValue -InputObject $CurrentResult -Name 'environment_snapshot'
+    $mainEnvironmentSnapshot = Get-ObjectPropertyValue -InputObject $MainResult -Name 'environment_snapshot'
+    if ($null -eq $currentEnvironmentSnapshot -or $null -eq $mainEnvironmentSnapshot) {
+        return $null
+    }
+
+    return [PSCustomObject]@{
+        available_memory_gb_delta = if ($null -ne $currentEnvironmentSnapshot.available_memory_gb -and $null -ne $mainEnvironmentSnapshot.available_memory_gb) {
+            [math]::Round(([double]$currentEnvironmentSnapshot.available_memory_gb - [double]$mainEnvironmentSnapshot.available_memory_gb), 2)
+        }
+        else {
+            $null
+        }
+        free_disk_gb_delta = if ($null -ne $currentEnvironmentSnapshot.free_disk_gb -and $null -ne $mainEnvironmentSnapshot.free_disk_gb) {
+            [math]::Round(([double]$currentEnvironmentSnapshot.free_disk_gb - [double]$mainEnvironmentSnapshot.free_disk_gb), 2)
+        }
+        else {
+            $null
+        }
+        logical_cpu_count_delta = if ($null -ne $currentEnvironmentSnapshot.logical_cpu_count -and $null -ne $mainEnvironmentSnapshot.logical_cpu_count) {
+            [int]$currentEnvironmentSnapshot.logical_cpu_count - [int]$mainEnvironmentSnapshot.logical_cpu_count
+        }
+        else {
+            $null
+        }
+    }
 }
 
 function Invoke-LocalPersistentCacheWorkflow {
@@ -2268,6 +2663,8 @@ function Get-ComparisonBlock {
             elapsed_seconds_delta = [math]::Round(($Current.local.elapsed_seconds - $Main.local.elapsed_seconds), 2)
             peak_rss_gb_delta = [math]::Round(($Current.local.peak_tree_rss_gb - $Main.local.peak_tree_rss_gb), 3)
             peak_private_gb_delta = [math]::Round(($Current.local.peak_tree_private_gb - $Main.local.peak_tree_private_gb), 3)
+            phase_elapsed_seconds_delta = Get-PhaseElapsedSecondsDeltaSummary -CurrentResult $Current.local -MainResult $Main.local
+            environment_snapshot_delta = Get-EnvironmentSnapshotDeltaSummary -CurrentResult $Current.local -MainResult $Main.local
         }
         local_persistent_cache = if ($Current.PSObject.Properties['local_persistent_cache'] -and $Main.PSObject.Properties['local_persistent_cache'] -and $null -ne $Current.local_persistent_cache -and $null -ne $Main.local_persistent_cache) {
             [PSCustomObject]@{
@@ -2465,6 +2862,7 @@ $result = [PSCustomObject]@{
 }
 
 $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $resolvedResultsOutputPath -Encoding utf8
+Write-AdHocBenchmarkSeriesSummary -ResultPath $resolvedResultsOutputPath
 
 Write-Host ''
 Write-Host ('Benchmark report: {0}' -f $resolvedResultsOutputPath) -ForegroundColor Green

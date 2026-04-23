@@ -126,6 +126,7 @@ function Invoke-RepoScript {
 }
 
 function Reset-DirectoryPath {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal test helper recreates temporary directories in a controlled script flow.')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]

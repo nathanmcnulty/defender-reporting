@@ -69,6 +69,33 @@ function Get-TestVulnRow {
     }
 }
 
+function Get-TestMachineRecord {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Id
+    )
+
+    return [PSCustomObject]@{
+        id                    = $Id
+        computerDnsName       = ($Id + '.contoso.com')
+        rbacGroupName         = 'Servers'
+        osPlatform            = 'Windows'
+        osVersion             = '10.0.22631'
+        machineTags           = @('Prod')
+        lastIpAddress         = '10.0.0.10'
+        lastExternalIpAddress = '52.0.0.10'
+        healthStatus          = 'Active'
+        riskScore             = 'Medium'
+        exposureLevel         = 'High'
+        deviceValue           = 'Normal'
+        managedBy             = 'Intune'
+        isAadJoined           = $true
+        lastSeen              = '2026-04-22T00:00:00Z'
+        firstSeen             = '2026-04-01T00:00:00Z'
+    }
+}
+
 function Get-TestQuarterlyHistoryDocument {
     [CmdletBinding()]
     param(
@@ -100,6 +127,7 @@ function Get-TestQuarterlyHistoryDocument {
 }
 
 function Test-VulnPropertyHelpersSupportSupportedRowShapes {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally refers to multiple supported row shapes.')]
     [CmdletBinding()]
     param()
 
@@ -242,6 +270,44 @@ function Test-LocalExportArtifactCleanup {
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot '.dashboard-cache'))) 'Expected transient dashboard cache directory to be removed.'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot '.vuln-content-store-staging-123'))) 'Expected transient content-store staging directory to be removed.'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot '.synthetic-progress.json'))) 'Expected transient synthetic progress file to be removed.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally refers to current records and metadata fields as a set.')]
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-store-init-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $expectedObservedOn = Get-Date -Format 'yyyy-MM-dd'
+        Write-NdjsonRecordsFile -Path (Get-MachineCurrentPath -BasePath $tempRoot) -Records @(
+            (Get-TestMachineRecord -Id 'machine-001'),
+            [PSCustomObject]@{
+                id = 'machine-002'
+                removed = $true
+            }
+        )
+
+        $store = Initialize-MachineHistoryStore -Path $tempRoot
+        $currentRecord = $store.CurrentRecords['machine-001']
+        $periodKey = Get-QuarterPeriodKeyFromDate -Date $expectedObservedOn
+        $historyRecords = @($store.HistoryRecordsByPeriod[$periodKey])
+
+        Assert-True ($store.CurrentRecords.Count -eq 1) 'Expected removal records to be excluded from the current machine map.'
+        Assert-True ($null -ne $currentRecord) 'Expected the surviving machine record to remain in the current machine map.'
+        Assert-True ([string]$currentRecord.observedOn -eq $expectedObservedOn) 'Expected current machine records without observedOn to be backfilled once during initialization.'
+        Assert-True ([string]$currentRecord.stateHash -eq [string](Get-MachineStateHash -Machine $currentRecord)) 'Expected current machine records without stateHash to be backfilled during initialization.'
+        Assert-True ($historyRecords.Count -eq 1) 'Expected current machine records to seed history when no history store exists yet.'
+        Assert-True ([string]$historyRecords[0].id -eq 'machine-001') 'Expected seeded history to include the surviving machine record.'
+        Assert-True ([string]$historyRecords[0].observedOn -eq $expectedObservedOn) 'Expected seeded history rows to preserve the backfilled observedOn value.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -640,6 +706,116 @@ function Test-ReadNormalizedVulnStoreRow {
     }
 }
 
+function Test-ResolveNormalizedLookupIndexListHandlesScalarAndCollectionValues {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally covers both scalar and collection values.')]
+    [CmdletBinding()]
+    param()
+
+    $lookupList = [System.Collections.Generic.List[string]]::new()
+    $indexMap = @{}
+
+    $singleValueIndices = Resolve-NormalizedLookupIndexList -Values 'C:\Windows\System32\kernel32.dll' -List $lookupList -IndexMap $indexMap
+    $mixedValueIndices = Resolve-NormalizedLookupIndexList -Values @('C:\Windows\System32\kernel32.dll', $null, 'HKLM\Software\Microsoft\Windows') -List $lookupList -IndexMap $indexMap
+    $emptyValueIndices = Resolve-NormalizedLookupIndexList -Values @() -List $lookupList -IndexMap $indexMap
+
+    Assert-True ($singleValueIndices.Count -eq 1) 'Expected scalar lookup input to resolve to a single lookup index.'
+    Assert-True ($singleValueIndices[0] -eq 0) 'Expected the first scalar lookup input to create lookup index 0.'
+    Assert-True ($mixedValueIndices.Count -eq 2) 'Expected mixed lookup input to skip nulls and keep two resolved values.'
+    Assert-True ($mixedValueIndices[0] -eq 0) 'Expected repeated lookup values to reuse the existing lookup index.'
+    Assert-True ($mixedValueIndices[1] -eq 1) 'Expected a new lookup value to receive the next lookup index.'
+    Assert-True ($lookupList.Count -eq 2) 'Expected lookup storage to contain only the two unique non-null values.'
+    Assert-True ($null -eq $emptyValueIndices) 'Expected empty lookup input to return no indices.'
+}
+
+function Test-ResolveNormalizedInventoryLookupSkipsEmptyInventoryData {
+    [CmdletBinding()]
+    param()
+
+    $context = Get-NormalizationContext
+    $emptyInventoryIndex = Resolve-NormalizedInventoryLookup `
+        -DeviceId 'device-001' `
+        -SoftwareVendor 'contoso' `
+        -SoftwareName 'legacy_agent' `
+        -SoftwareVersion '6.0.0' `
+        -Context $context
+
+    $inventoryKey = Get-AdvancedHuntingInventoryMatchKey -DeviceId 'device-001' -SoftwareVendor 'contoso' -SoftwareName 'legacy_agent' -SoftwareVersion '6.0.0'
+    $context.AdvancedHuntingInventoryData = @{
+        $inventoryKey = [PSCustomObject]@{
+            ProductCodeCpe = 'cpe:/a:contoso:legacy_agent:6.0.0'
+            EndOfSupportStatus = 'supported'
+            EndOfSupportDate = '2027-10-01'
+        }
+    }
+
+    $populatedInventoryIndex = Resolve-NormalizedInventoryLookup `
+        -DeviceId 'device-001' `
+        -SoftwareVendor 'contoso' `
+        -SoftwareName 'legacy_agent' `
+        -SoftwareVersion '6.0.0' `
+        -Context $context
+
+    Assert-True ($emptyInventoryIndex -eq -1) 'Expected empty inventory data to skip normalized inventory lookup creation.'
+    Assert-True ($context.Lookups.inventory.Count -eq 1) 'Expected only the populated inventory lookup to materialize in the lookup table.'
+    Assert-True ($populatedInventoryIndex -eq 0) 'Expected populated inventory data to create the first normalized inventory lookup.'
+    Assert-True ([string]$context.Lookups.inventory[0].cpe -eq 'cpe:/a:contoso:legacy_agent:6.0.0') 'Expected populated inventory lookup to preserve ProductCodeCpe.'
+}
+
+function Test-AddNormalizedCveUsesStableSeverityIndexLookup {
+    [CmdletBinding()]
+    param()
+
+    $context = Get-NormalizationContext
+
+    $highCveIndex = Add-NormalizedCve -CveId 'CVE-2026-1001' -CvssScore '9.0' -SeverityLevel 'High' -ExploitabilityLevel 'High' -CveUrl 'https://example.test/CVE-2026-1001' -CveBatchTitle 'baseline' -Context $context
+    $noneCveIndex = Add-NormalizedCve -CveId 'CVE-2026-1002' -CvssScore '0.0' -SeverityLevel 'None' -ExploitabilityLevel 'Unproven' -CveUrl 'https://example.test/CVE-2026-1002' -CveBatchTitle 'baseline' -Context $context
+    $unknownCveIndex = Add-NormalizedCve -CveId 'CVE-2026-1003' -CvssScore '5.0' -SeverityLevel 'Unexpected' -ExploitabilityLevel 'ProofOfConcept' -CveUrl 'https://example.test/CVE-2026-1003' -CveBatchTitle 'baseline' -Context $context
+
+    Assert-True ($context.Lookups.cves[$highCveIndex].sv -eq 1) 'Expected High severity CVEs to serialize severity lookup index 1.'
+    Assert-True ($context.Lookups.cves[$noneCveIndex].sv -eq 4) 'Expected None severity CVEs to serialize severity lookup index 4.'
+    Assert-True ($context.Lookups.cves[$unknownCveIndex].sv -eq -1) 'Expected unknown severity CVEs to preserve the fallback lookup index.'
+}
+
+function Test-GetNormalizedRecordLookupHandlesScalarPathInputs {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally refers to multiple path inputs.')]
+    [CmdletBinding()]
+    param()
+
+    $context = Get-NormalizationContext
+
+    $recordLookup = Get-NormalizedRecordLookup `
+        -DeviceId 'device-001' `
+        -DeviceName 'device-001.contoso.com' `
+        -GroupName 'Pilot' `
+        -OsPlatform 'Windows10' `
+        -OsVersion '10.0.26100' `
+        -MachineTags @('Pilot') `
+        -SoftwareVendor 'contoso' `
+        -SoftwareName 'legacy_agent' `
+        -RecommendationReference '' `
+        -CveId 'CVE-2026-1004' `
+        -CvssScore '6.5' `
+        -SeverityLevel 'Medium' `
+        -ExploitabilityLevel 'High' `
+        -CveUrl 'https://example.test/CVE-2026-1004' `
+        -CveBatchTitle 'baseline' `
+        -RecommendedSecurityUpdate '' `
+        -RecommendedSecurityUpdateId '' `
+        -RecommendedSecurityUpdateUrl '' `
+        -SoftwareVersion '6.0.0' `
+        -DiskPaths 'C:\Windows\System32\kernel32.dll' `
+        -RegistryPaths 'HKLM\Software\Microsoft\Windows' `
+        -SecurityUpdateAvailable $false `
+        -Context $context
+
+    Assert-True ($recordLookup.ContentLookup.dp.Count -eq 1) 'Expected scalar disk path input to resolve to a single normalized lookup index.'
+    Assert-True ($recordLookup.ContentLookup.dp[0] -eq 0) 'Expected scalar disk path input to create lookup index 0.'
+    Assert-True ($recordLookup.ContentLookup.rp.Count -eq 1) 'Expected scalar registry path input to resolve to a single normalized lookup index.'
+    Assert-True ($recordLookup.ContentLookup.rp[0] -eq 0) 'Expected scalar registry path input to create lookup index 0.'
+    Assert-True ($context.Lookups.diskPaths.Count -eq 1) 'Expected scalar disk path input to materialize one disk path lookup.'
+    Assert-True ($context.Lookups.regPaths.Count -eq 1) 'Expected scalar registry path input to materialize one registry path lookup.'
+}
+
 function Test-ConvertToNormalizedDataUsesStableDeviceIdFallback {
     [CmdletBinding()]
     param()
@@ -880,6 +1056,35 @@ function Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose {
         Assert-True ((Get-CompressedPayloadVulnCount -Path $payloadPath) -eq $result.VulnCount) 'Expected consuming payload mode to keep the payload row count aligned with processed vulnerabilities.'
         Assert-True ($payload.lookups.devices.Count -eq 1) 'Expected consuming payload mode to still serialize device lookups into the payload.'
         Assert-True ($payload.lookups.cves.Count -eq 1) 'Expected consuming payload mode to still serialize CVE lookups into the payload.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-repeat-cve-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+
+    try {
+        $firstRow = Get-TestVulnRow -Id 'repeat-cve-001' -CveId 'CVE-2026-0155' -SnapshotDate '2026-03-20' -Version '1.0.0'
+        $secondRow = Get-TestVulnRow -Id 'repeat-cve-002' -CveId 'CVE-2026-0155' -SnapshotDate '2026-03-21' -Version '1.0.1'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($firstRow, $secondRow)
+
+        $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -PayloadOutputPath $payloadPath -Machines @{} -AdvancedHuntingData @{}
+        $payload = Read-GzipTextFile -Path $payloadPath | ConvertFrom-Json -Depth 100
+
+        Assert-True ($result.VulnCount -eq 2) 'Expected repeated-CVE regression test to preserve both vulnerability rows.'
+        Assert-True ($result.CveCount -eq 1) 'Expected repeated rows sharing the same CVE definition to reuse a single CVE lookup.'
+        Assert-True ($payload.lookups.cves.Count -eq 1) 'Expected the payload to materialize only one CVE lookup for repeated CVE rows.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -1248,6 +1453,7 @@ function Test-AdvancedHuntingBundleMatchesDedicatedReaderData {
 }
 
 function Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally refers to multiple sparse inputs.')]
     [CmdletBinding()]
     param()
 
@@ -2213,6 +2419,8 @@ Test-VulnContentStoreExistenceNeedsRef
 Write-Output '  Content-store existence checks passed.'
 Test-LocalExportArtifactCleanup
 Write-Output '  Local export artifact cleanup checks passed.'
+Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata
+Write-Output '  Machine store initialization checks passed.'
 Test-BulkSnapshotImportSmoke
 Write-Output '  Bulk snapshot import smoke checks passed.'
 Test-BulkSnapshotImportSingleSnapshot
@@ -2235,6 +2443,14 @@ Test-MergeVulnObservedWindowRows
 Write-Output '  Vulnerability observation merge checks passed.'
 Test-ReadNormalizedVulnStoreRow
 Write-Output '  Normalized vulnerability store reader checks passed.'
+Test-ResolveNormalizedLookupIndexListHandlesScalarAndCollectionValues
+Write-Output '  Lookup index list normalization checks passed.'
+Test-ResolveNormalizedInventoryLookupSkipsEmptyInventoryData
+Write-Output '  Inventory lookup normalization checks passed.'
+Test-AddNormalizedCveUsesStableSeverityIndexLookup
+Write-Output '  CVE severity lookup checks passed.'
+Test-GetNormalizedRecordLookupHandlesScalarPathInputs
+Write-Output '  Scalar path lookup checks passed.'
 Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
 Write-Output '  Stable device fallback identity checks passed.'
 Test-ConvertToNormalizedDataWritesExpectedRowCount
@@ -2245,6 +2461,8 @@ Test-ConvertToNormalizedDataPreservesOptionalNvdFallback
 Write-Output '  Optional NVD fallback normalization checks passed.'
 Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose
 Write-Output '  Consuming payload-close lookup checks passed.'
+Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup
+Write-Output '  Repeated CVE lookup deduplication checks passed.'
 Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
 Write-Output '  Advanced Hunting device-user normalization checks passed.'
 Test-WriteCombinedPayloadGzipPreservesColumnPayload

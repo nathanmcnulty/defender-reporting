@@ -60,6 +60,7 @@ function Get-HistoryRowsReadPath {
 }
 
 function Invoke-SourceVulnRows {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Internal helper streams multiple vulnerability rows by design.')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -131,6 +132,8 @@ function Resolve-SnapshotDateList {
         $HistoryRowCount.Value = 0
         Invoke-SourceVulnRows -BasePath $BasePath -Process {
             param($Row, [string]$Kind)
+
+            [void]$Row
 
             if ($Kind -eq 'current') {
                 $CurrentRowCount.Value++
@@ -232,6 +235,7 @@ function Test-RowActiveOnSnapshotDate {
 }
 
 function New-GzipWriterState {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper stages gzip output writers for this synthetic data generator.')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -338,6 +342,8 @@ $resolvedSnapshotDates = Resolve-SnapshotDateList `
     -HistoryRowCount ([ref]$historyRowCount) `
     -DistinctLastSeenDateCount ([ref]$distinctLastSeenDateCount)
 
+$progressUpdateIntervalRows = $ProgressIntervalRows
+
 if ($resolvedSnapshotDates.Count -eq 0) {
     throw "No snapshot dates were selected from '$resolvedSourcePath'."
 }
@@ -359,6 +365,8 @@ try {
     Invoke-SourceVulnRows -BasePath $resolvedSourcePath -Process {
         param($Row, [string]$Kind)
 
+        [void]$Kind
+
         $sourceRowsProcessed++
         $groupId = Get-LegacySnapshotGroupId -Row $Row
         foreach ($snapshotDate in $resolvedSnapshotDates) {
@@ -373,7 +381,7 @@ try {
             [void]$groupsPerSnapshotDate[$snapshotDate].Add($groupId)
         }
 
-        if (($sourceRowsProcessed % $ProgressIntervalRows) -eq 0) {
+        if (($sourceRowsProcessed % $progressUpdateIntervalRows) -eq 0) {
             Write-Host ('[{0}] Processed {1} source rows in {2}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'), $sourceRowsProcessed, $generationStopwatch.Elapsed.ToString('hh\:mm\:ss'))
         }
     }
