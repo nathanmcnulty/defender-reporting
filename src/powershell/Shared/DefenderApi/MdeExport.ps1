@@ -138,6 +138,67 @@ function Get-MdeHeaderCollection {
     }
 }
 
+function Resolve-UriQueryParameterValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    $absoluteUri = $null
+    if (-not [System.Uri]::TryCreate($Uri, [System.UriKind]::Absolute, [ref]$absoluteUri)) {
+        return $Uri
+    }
+
+    $uriBuilder = [System.UriBuilder]::new($absoluteUri)
+    $queryEntries = [System.Collections.Generic.List[string]]::new()
+    foreach ($queryEntry in @($uriBuilder.Query.TrimStart('?').Split('&', [System.StringSplitOptions]::RemoveEmptyEntries))) {
+        $key = [System.Uri]::UnescapeDataString(($queryEntry.Split('=', 2))[0])
+        if ($key -ieq $Name) {
+            continue
+        }
+
+        $queryEntries.Add($queryEntry)
+    }
+
+    $queryEntries.Add(("{0}={1}" -f [System.Uri]::EscapeDataString($Name), [System.Uri]::EscapeDataString($Value)))
+    $uriBuilder.Query = [string]::Join('&', $queryEntries)
+    return $uriBuilder.Uri.AbsoluteUri
+}
+
+function Get-MdeBulkVulnerabilityExportRequestUri {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ExportUrl,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 6)]
+        [int]$SasValidHours = 6
+    )
+
+    return (Resolve-UriQueryParameterValue -Uri $ExportUrl -Name 'sasValidHours' -Value ([string]$SasValidHours))
+}
+
+function Get-VulnSnapshotStagingPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputFile
+    )
+
+    return (Join-Path -Path (Split-Path -Path $OutputFile -Parent) -ChildPath ('.' + (Split-Path -Path $OutputFile -Leaf) + '.partial'))
+}
+
 function Invoke-MdeBulkVulnerabilitySnapshotDownload {
     [CmdletBinding()]
     param(
@@ -151,13 +212,15 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
         [string]$ExportUrl
     )
 
-    $response = Invoke-RestMethodWithRetry -Uri $ExportUrl -Headers $Headers -Method Get
+    $resolvedExportUrl = Get-MdeBulkVulnerabilityExportRequestUri -ExportUrl $ExportUrl
+    $response = Invoke-RestMethodWithRetry -Uri $resolvedExportUrl -Headers $Headers -Method Get -MaxRetries 4 -InitialDelayMs 5000 -TimeoutSec 600 -RetryTransientTransportFailures
     $exportFiles = @($response.exportFiles)
     if ($exportFiles.Count -eq 0) {
         throw 'Bulk vulnerability export returned no files.'
     }
 
     $downloadedFiles = [System.Collections.Generic.List[string]]::new()
+    $partIndexBySnapshotKey = @{}
     foreach ($fileUrl in $exportFiles) {
         if ($fileUrl -match '/collection/([^/?]+)/.*%3DgroupId%3D([^&%? ]+)') {
             $date = $Matches[1]
@@ -168,11 +231,46 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
             $groupId = [System.Uri]::UnescapeDataString($Matches[2])
         }
         else {
-            throw "Unexpected export URL format. Cannot extract date and groupId from: $fileUrl"
+            throw "Unexpected export URL format. Cannot extract date and groupId from: $(Get-SanitizedUriForLog -Uri $fileUrl)"
         }
 
-        $outputFile = Join-Path $OutputPath "VulnExport_${groupId}_${date}.json.gz"
-        Invoke-WebRequestWithRetry -Uri $fileUrl -OutFile $outputFile
+        $snapshotKey = "${groupId}|${date}"
+        $partIndex = if ($partIndexBySnapshotKey.ContainsKey($snapshotKey)) {
+            [int]$partIndexBySnapshotKey[$snapshotKey]
+        }
+        else {
+            0
+        }
+        $partIndexBySnapshotKey[$snapshotKey] = ($partIndex + 1)
+
+        $outputFile = Join-Path $OutputPath ("VulnExport_{0}_{1}_part_{2}.json.gz" -f $groupId, $date, $partIndex)
+        $stagingOutputFile = Get-VulnSnapshotStagingPath -OutputFile $outputFile
+        if (Test-Path -LiteralPath $stagingOutputFile -PathType Leaf) {
+            Remove-Item -LiteralPath $stagingOutputFile -Force -ErrorAction SilentlyContinue
+        }
+
+        try {
+            Invoke-WebRequestWithRetry -Uri $fileUrl -OutFile $stagingOutputFile -MaxRetries 6 -InitialDelayMs 2000 -TimeoutSec 1800 -RetryTransientTransportFailures
+
+            $stagingFile = Get-Item -LiteralPath $stagingOutputFile -ErrorAction Stop
+            if ($stagingFile.Length -le 0) {
+                throw "Downloaded file is empty: $(Get-SanitizedUriForLog -Uri $fileUrl)"
+            }
+
+            if (Test-Path -LiteralPath $outputFile -PathType Leaf) {
+                Remove-Item -LiteralPath $outputFile -Force -ErrorAction SilentlyContinue
+            }
+
+            [System.IO.File]::Move($stagingOutputFile, $outputFile)
+        }
+        catch {
+            if (Test-Path -LiteralPath $stagingOutputFile -PathType Leaf) {
+                Remove-Item -LiteralPath $stagingOutputFile -Force -ErrorAction SilentlyContinue
+            }
+
+            throw
+        }
+
         $downloadedFiles.Add($outputFile)
     }
 
