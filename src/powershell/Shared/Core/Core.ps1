@@ -368,6 +368,17 @@ function Get-HttpHeaderStringValue {
     return ''
 }
 
+function ConvertTo-BoundedRetryDelayMillisecondsValue {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [long]$DelayMilliseconds
+    )
+
+    return [int][Math]::Min([long][int]::MaxValue, [Math]::Max(0L, $DelayMilliseconds))
+}
+
 function Get-HttpRetryDelayOverride {
     [CmdletBinding()]
     [OutputType([Nullable[int]])]
@@ -381,9 +392,9 @@ function Get-HttpRetryDelayOverride {
 
     $retryAfterSecondsText = Get-HttpHeaderStringValue -Headers $Headers -Names @('Retry-After')
     if (-not [string]::IsNullOrWhiteSpace($retryAfterSecondsText)) {
-        $retryAfterSeconds = 0
-        if ([int]::TryParse($retryAfterSecondsText, [ref]$retryAfterSeconds) -and $retryAfterSeconds -ge 0) {
-            return [Math]::Max(0, $retryAfterSeconds * 1000)
+        $retryAfterSeconds = 0L
+        if ([long]::TryParse($retryAfterSecondsText, [ref]$retryAfterSeconds) -and $retryAfterSeconds -ge 0) {
+            return (ConvertTo-BoundedRetryDelayMillisecondsValue -DelayMilliseconds ($retryAfterSeconds * 1000L))
         }
 
         $retryAfterTimestamp = [datetimeoffset]::MinValue
@@ -396,16 +407,16 @@ function Get-HttpRetryDelayOverride {
                 [ref]$retryAfterTimestamp
             )
         ) {
-            $delayMilliseconds = [int][Math]::Ceiling(($retryAfterTimestamp.ToUniversalTime() - $ReferenceTime.ToUniversalTime()).TotalMilliseconds)
-            return [Math]::Max(0, $delayMilliseconds)
+            $delayMilliseconds = [long][Math]::Ceiling(($retryAfterTimestamp.ToUniversalTime() - $ReferenceTime.ToUniversalTime()).TotalMilliseconds)
+            return (ConvertTo-BoundedRetryDelayMillisecondsValue -DelayMilliseconds $delayMilliseconds)
         }
     }
 
     $retryAfterMillisecondsText = Get-HttpHeaderStringValue -Headers $Headers -Names @('retry-after-ms', 'x-ms-retry-after-ms')
     if (-not [string]::IsNullOrWhiteSpace($retryAfterMillisecondsText)) {
-        $retryAfterMilliseconds = 0
-        if ([int]::TryParse($retryAfterMillisecondsText, [ref]$retryAfterMilliseconds) -and $retryAfterMilliseconds -ge 0) {
-            return $retryAfterMilliseconds
+        $retryAfterMilliseconds = 0L
+        if ([long]::TryParse($retryAfterMillisecondsText, [ref]$retryAfterMilliseconds) -and $retryAfterMilliseconds -ge 0) {
+            return (ConvertTo-BoundedRetryDelayMillisecondsValue -DelayMilliseconds $retryAfterMilliseconds)
         }
     }
 

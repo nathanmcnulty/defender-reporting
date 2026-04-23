@@ -447,6 +447,8 @@ function Test-HttpRetryDelayHelperBehavior {
     Assert-True ((Get-HttpRetryDelayOverride -Headers @{ 'Retry-After' = '7' } -ReferenceTime $fixedNow) -eq 7000) 'Expected Retry-After integer seconds to convert to milliseconds.'
     Assert-True ((Get-HttpRetryDelayOverride -Headers @{ 'Retry-After' = $retryAfterDate } -ReferenceTime $fixedNow) -eq 9000) 'Expected Retry-After HTTP-date values to convert to milliseconds.'
     Assert-True ((Get-HttpRetryDelayOverride -Headers @{ 'x-ms-retry-after-ms' = '250' }) -eq 250) 'Expected retry-after-ms headers to convert directly to milliseconds.'
+    Assert-True ((Get-HttpRetryDelayOverride -Headers @{ 'Retry-After' = '2147484' } -ReferenceTime $fixedNow) -eq [int]::MaxValue) 'Expected oversized Retry-After second values to clamp to the maximum supported sleep interval.'
+    Assert-True ((Get-HttpRetryDelayOverride -Headers @{ 'x-ms-retry-after-ms' = '21474836470' }) -eq [int]::MaxValue) 'Expected oversized retry-after-ms header values to clamp to the maximum supported sleep interval.'
     Assert-True ($null -eq (Get-HttpRetryDelayOverride -Headers @{} -ReferenceTime $fixedNow)) 'Expected the retry delay helper to return no override when no retry headers are present.'
 }
 
