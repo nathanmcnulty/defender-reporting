@@ -5101,6 +5101,101 @@ function Get-MachineJsonElementScalarValue {
     }
 }
 
+function Get-MachineJsonElementStringArrayValue {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Text.Json.JsonElement]$Element,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    $property = [System.Text.Json.JsonElement]::new()
+    if (-not $Element.TryGetProperty($Name, [ref]$property)) {
+        return [string[]]@()
+    }
+
+    switch ($property.ValueKind) {
+        ([System.Text.Json.JsonValueKind]::Undefined) { return [string[]]@() }
+        ([System.Text.Json.JsonValueKind]::Null) { return [string[]]@() }
+        ([System.Text.Json.JsonValueKind]::String) { return (Get-NormalizedMachineTag -Tags $property.GetString()) }
+        ([System.Text.Json.JsonValueKind]::Array) {
+            $tagList = [System.Collections.Generic.List[string]]::new()
+            foreach ($item in $property.EnumerateArray()) {
+                $tagValue = switch ($item.ValueKind) {
+                    ([System.Text.Json.JsonValueKind]::String) { $item.GetString() }
+                    ([System.Text.Json.JsonValueKind]::Null) { $null }
+                    ([System.Text.Json.JsonValueKind]::Undefined) { $null }
+                    default { $item.GetRawText() }
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace([string]$tagValue)) {
+                    $tagList.Add([string]$tagValue) | Out-Null
+                }
+            }
+
+            return (Get-NormalizedMachineTag -Tags @($tagList))
+        }
+        default { return (Get-NormalizedMachineTag -Tags (Get-MachineJsonElementScalarValue -Element $Element -Name $Name)) }
+    }
+}
+
+function ConvertFrom-MachineJsonElementToCompactMachineRecord {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Text.Json.JsonElement]$MachineElement
+    )
+
+    $machineId = [string](Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'id')
+    if ([string]::IsNullOrWhiteSpace($machineId)) {
+        return $null
+    }
+
+    $observedOn = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'observedOn'
+    $stateHash = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'stateHash'
+    if ((Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'removed') -eq $true) {
+        return [PSCustomObject]@{
+            id = $machineId
+            observedOn = $observedOn
+            removed = $true
+            stateHash = $stateHash
+        }
+    }
+
+    $record = [PSCustomObject]@{
+        id                    = $machineId
+        computerDnsName       = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'computerDnsName'
+        rbacGroupName         = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'rbacGroupName'
+        osPlatform            = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'osPlatform'
+        osVersion             = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'osVersion'
+        machineTags           = Get-MachineJsonElementStringArrayValue -Element $MachineElement -Name 'machineTags'
+        lastIpAddress         = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'lastIpAddress'
+        lastExternalIpAddress = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'lastExternalIpAddress'
+        healthStatus          = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'healthStatus'
+        riskScore             = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'riskScore'
+        exposureLevel         = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'exposureLevel'
+        deviceValue           = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'deviceValue'
+        managedBy             = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'managedBy'
+        isAadJoined           = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'isAadJoined'
+        lastSeen              = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'lastSeen'
+        firstSeen             = Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'firstSeen'
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$stateHash)) {
+        Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$observedOn)) {
+        Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn
+    }
+
+    return $record
+}
+
 function ConvertFrom-MachineJsonElementToNormalizationEntry {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -5156,75 +5251,69 @@ function Read-MachineNormalizationEntriesFromFile {
         [string]$Path
     )
 
-    $fileMode = Get-JsonFileMode -Path $Path
-    if ($fileMode -eq 'Empty') {
-        return
-    }
-
-    if ($fileMode -eq 'Array') {
-        $rawContent = Read-TextFileContent -Path $Path
-        if ([string]::IsNullOrWhiteSpace($rawContent)) {
+    $readContext = Open-JsonFileReadContext -Path $Path
+    try {
+        if ($readContext.Mode -eq 'Empty') {
             return
         }
 
-        $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawContent)
-        $rawContent = $null
-        try {
-            if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
+        if ($readContext.Mode -eq 'Array') {
+            $rawContent = Read-JsonFileRemainingContent -Context $readContext
+            if ([string]::IsNullOrWhiteSpace($rawContent)) {
                 return
             }
 
-            foreach ($machineElement in $jsonDocument.RootElement.EnumerateArray()) {
-                $entry = ConvertFrom-MachineJsonElementToNormalizationEntry -MachineElement $machineElement
+            $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawContent)
+            $rawContent = $null
+            try {
+                if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
+                    return
+                }
+
+                foreach ($machineElement in $jsonDocument.RootElement.EnumerateArray()) {
+                    $entry = ConvertFrom-MachineJsonElementToNormalizationEntry -MachineElement $machineElement
+                    if ($null -ne $entry) {
+                        $entry
+                    }
+                }
+            }
+            finally {
+                $jsonDocument.Dispose()
+            }
+
+            return
+        }
+
+        $isFirstLine = [ref]$true
+        while (-not $readContext.Reader.EndOfStream) {
+            $line = Read-JsonFileLine -Context $readContext -IsFirstLine $isFirstLine
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+            $jsonDocument = $null
+            try {
+                $jsonDocument = [System.Text.Json.JsonDocument]::Parse($line)
+            }
+            catch {
+                Write-Warning "Failed to parse machine line in $(Split-Path -Leaf $Path): $_"
+                continue
+            }
+
+            try {
+                $entry = ConvertFrom-MachineJsonElementToNormalizationEntry -MachineElement $jsonDocument.RootElement
                 if ($null -ne $entry) {
                     $entry
                 }
             }
-        }
-        finally {
-            $jsonDocument.Dispose()
-        }
-
-        return
-    }
-
-    $fileStream = [System.IO.File]::OpenRead($Path)
-    try {
-        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
-            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
-        } else { $fileStream }
-        try {
-            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
-            try {
-                while (-not $reader.EndOfStream) {
-                    $line = $reader.ReadLine()
-                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-
-                    $jsonDocument = $null
-                    try {
-                        $jsonDocument = [System.Text.Json.JsonDocument]::Parse($line)
-                    }
-                    catch {
-                        Write-Warning "Failed to parse machine line in $(Split-Path -Leaf $Path): $_"
-                        continue
-                    }
-
-                    try {
-                        $entry = ConvertFrom-MachineJsonElementToNormalizationEntry -MachineElement $jsonDocument.RootElement
-                        if ($null -ne $entry) {
-                            $entry
-                        }
-                    }
-                    finally {
-                        $jsonDocument.Dispose()
-                    }
+            finally {
+                if ($null -ne $jsonDocument) {
+                    $jsonDocument.Dispose()
                 }
             }
-            finally { $reader.Dispose() }
         }
-        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
     }
-    finally { $fileStream.Dispose() }
+    finally {
+        Close-JsonFileReadContext -Context $readContext
+    }
 }
 
 function Get-NormalizedMachineTag {
@@ -5485,38 +5574,145 @@ function Read-TextFileContent {
     return (Get-Content -Path $Path -Raw)
 }
 
-function Get-JsonFileMode {
+function Open-JsonFileReadContext {
     [CmdletBinding()]
-    [OutputType([string])]
+    [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
     )
 
-    $fileStream = [System.IO.File]::OpenRead($Path)
+    $fileStream = $null
+    $contentStream = $null
+    $reader = $null
     try {
+        $fileStream = [System.IO.File]::OpenRead($Path)
         $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
             [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
-        } else { $fileStream }
-        try {
-            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.Encoding]::UTF8, $true)
-            try {
-                while (-not $reader.EndOfStream) {
-                    $charValue = $reader.Read()
-                    if ($charValue -lt 0) { break }
-                    $char = [char]$charValue
-                    if (-not [char]::IsWhiteSpace($char)) {
-                        if ($char -eq '[') { return 'Array' }
-                        return 'Ndjson'
-                    }
-                }
-                return 'Empty'
-            }
-            finally { $reader.Dispose() }
         }
-        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
+        else {
+            $fileStream
+        }
+
+        $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.Encoding]::UTF8, $true)
+        $mode = 'Empty'
+        $firstContentText = $null
+        while (-not $reader.EndOfStream) {
+            $charValue = $reader.Read()
+            if ($charValue -lt 0) {
+                break
+            }
+
+            $char = [char]$charValue
+            if (-not [char]::IsWhiteSpace($char)) {
+                $mode = if ($char -eq '[') { 'Array' } else { 'Ndjson' }
+                $firstContentText = [string]$char
+                break
+            }
+        }
+
+        $context = [PSCustomObject]@{
+            Path = $Path
+            Mode = $mode
+            Reader = $reader
+            ContentStream = $contentStream
+            FileStream = $fileStream
+            FirstContentText = $firstContentText
+        }
+
+        $reader = $null
+        $contentStream = $null
+        $fileStream = $null
+        return $context
     }
-    finally { $fileStream.Dispose() }
+    finally {
+        if ($null -ne $reader) {
+            $reader.Dispose()
+        }
+        elseif ($null -ne $contentStream -and $contentStream -ne $fileStream) {
+            $contentStream.Dispose()
+        }
+
+        if ($null -ne $fileStream) {
+            $fileStream.Dispose()
+        }
+    }
+}
+
+function Close-JsonFileReadContext {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Context
+    )
+
+    if ($null -eq $Context) {
+        return
+    }
+
+    $reader = $Context.PSObject.Properties['Reader']?.Value
+    if ($null -ne $reader) {
+        $reader.Dispose()
+        return
+    }
+
+    $contentStream = $Context.PSObject.Properties['ContentStream']?.Value
+    $fileStream = $Context.PSObject.Properties['FileStream']?.Value
+    if ($null -ne $contentStream -and $contentStream -ne $fileStream) {
+        $contentStream.Dispose()
+    }
+
+    if ($null -ne $fileStream) {
+        $fileStream.Dispose()
+    }
+}
+
+function Read-JsonFileRemainingContent {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Context
+    )
+
+    if ($null -eq $Context -or $Context.Mode -eq 'Empty') {
+        return $null
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    if (-not [string]::IsNullOrEmpty([string]$Context.FirstContentText)) {
+        [void]$builder.Append([string]$Context.FirstContentText)
+    }
+
+    [void]$builder.Append($Context.Reader.ReadToEnd())
+    return $builder.ToString()
+}
+
+function Read-JsonFileLine {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Context,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$IsFirstLine
+    )
+
+    $line = $Context.Reader.ReadLine()
+    if ($null -eq $line) {
+        return $null
+    }
+
+    if ($IsFirstLine.Value) {
+        $IsFirstLine.Value = $false
+        if (-not [string]::IsNullOrEmpty([string]$Context.FirstContentText)) {
+            return ([string]$Context.FirstContentText + $line)
+        }
+    }
+
+    return $line
 }
 
 function Read-MachineRecordsFromFile {
@@ -5526,82 +5722,69 @@ function Read-MachineRecordsFromFile {
         [string]$Path
     )
 
-    $fileMode = Get-JsonFileMode -Path $Path
-    if ($fileMode -eq 'Empty') {
-        return
-    }
-
-    if ($fileMode -eq 'Array') {
-        $rawContent = Read-TextFileContent -Path $Path
-        $machineList = $rawContent | ConvertFrom-Json
-        $rawContent = $null
-        if ($null -eq $machineList) { return }
-        if ($machineList -isnot [System.Array]) { $machineList = @($machineList) }
-
-        foreach ($machine in $machineList) {
-            if ($null -eq $machine) { continue }
-            if ($machine.PSObject.Properties['removed']?.Value -eq $true) {
-                ([PSCustomObject]@{
-                    id = $machine.PSObject.Properties['id']?.Value
-                    observedOn = $machine.PSObject.Properties['observedOn']?.Value
-                    removed = $true
-                    stateHash = $machine.PSObject.Properties['stateHash']?.Value
-                })
-                continue
-            }
-            $record = ConvertTo-CompactMachineRecord -Machine $machine
-            $stateHash = $machine.PSObject.Properties['stateHash']?.Value
-            $observedOn = $machine.PSObject.Properties['observedOn']?.Value
-            if ($stateHash) { Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash }
-            if ($observedOn) { Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn }
-            $record
+    $readContext = Open-JsonFileReadContext -Path $Path
+    try {
+        if ($readContext.Mode -eq 'Empty') {
+            return
         }
 
-        return
-    }
+        if ($readContext.Mode -eq 'Array') {
+            $rawContent = Read-JsonFileRemainingContent -Context $readContext
+            if ([string]::IsNullOrWhiteSpace($rawContent)) {
+                return
+            }
 
-    $fileStream = [System.IO.File]::OpenRead($Path)
-    try {
-        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
-            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
-        } else { $fileStream }
-        try {
-            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
+            $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawContent)
+            $rawContent = $null
             try {
-                while (-not $reader.EndOfStream) {
-                    $line = $reader.ReadLine()
-                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                    try {
-                        $machine = $line | ConvertFrom-Json
-                    }
-                    catch {
-                        Write-Warning "Failed to parse machine line in $(Split-Path -Leaf $Path): $_"
-                        continue
-                    }
+                if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
+                    return
+                }
 
-                    if ($null -eq $machine) { continue }
-                    if ($machine.PSObject.Properties['removed']?.Value -eq $true) {
-                        ([PSCustomObject]@{
-                            id = $machine.PSObject.Properties['id']?.Value
-                            observedOn = $machine.PSObject.Properties['observedOn']?.Value
-                            removed = $true
-                            stateHash = $machine.PSObject.Properties['stateHash']?.Value
-                        })
-                        continue
+                foreach ($machineElement in $jsonDocument.RootElement.EnumerateArray()) {
+                    $record = ConvertFrom-MachineJsonElementToCompactMachineRecord -MachineElement $machineElement
+                    if ($null -ne $record) {
+                        $record
                     }
-                    $record = ConvertTo-CompactMachineRecord -Machine $machine
-                    $stateHash = $machine.PSObject.Properties['stateHash']?.Value
-                    $observedOn = $machine.PSObject.Properties['observedOn']?.Value
-                    if ($stateHash) { Add-Member -InputObject $record -NotePropertyName stateHash -NotePropertyValue $stateHash }
-                    if ($observedOn) { Add-Member -InputObject $record -NotePropertyName observedOn -NotePropertyValue $observedOn }
+                }
+            }
+            finally {
+                $jsonDocument.Dispose()
+            }
+
+            return
+        }
+
+        $isFirstLine = [ref]$true
+        while (-not $readContext.Reader.EndOfStream) {
+            $line = Read-JsonFileLine -Context $readContext -IsFirstLine $isFirstLine
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+            $jsonDocument = $null
+            try {
+                $jsonDocument = [System.Text.Json.JsonDocument]::Parse($line)
+            }
+            catch {
+                Write-Warning "Failed to parse machine line in $(Split-Path -Leaf $Path): $_"
+                continue
+            }
+
+            try {
+                $record = ConvertFrom-MachineJsonElementToCompactMachineRecord -MachineElement $jsonDocument.RootElement
+                if ($null -ne $record) {
                     $record
                 }
             }
-            finally { $reader.Dispose() }
+            finally {
+                if ($null -ne $jsonDocument) {
+                    $jsonDocument.Dispose()
+                }
+            }
         }
-        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
     }
-    finally { $fileStream.Dispose() }
+    finally {
+        Close-JsonFileReadContext -Context $readContext
+    }
 }
 
 function Get-MachineStateHash {
@@ -6124,52 +6307,48 @@ function Read-AdvancedHuntingRecordsFromFile {
         [string]$Path
     )
 
-    $fileMode = Get-JsonFileMode -Path $Path
-    if ($fileMode -eq 'Empty') {
-        return
-    }
-
-    if ($fileMode -eq 'Array') {
-        $rawContent = Read-TextFileContent -Path $Path
-        $records = $rawContent | ConvertFrom-Json
-        $rawContent = $null
-        if ($null -eq $records) { return }
-        if ($records -isnot [System.Array]) { $records = @($records) }
-
-        foreach ($record in $records) {
-            if ($null -ne $record) {
-                $record
-            }
+    $readContext = Open-JsonFileReadContext -Path $Path
+    try {
+        if ($readContext.Mode -eq 'Empty') {
+            return
         }
 
-        return
-    }
+        if ($readContext.Mode -eq 'Array') {
+            $rawContent = Read-JsonFileRemainingContent -Context $readContext
+            if ([string]::IsNullOrWhiteSpace($rawContent)) {
+                return
+            }
 
-    $fileStream = [System.IO.File]::OpenRead($Path)
-    try {
-        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
-            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
-        } else { $fileStream }
-        try {
-            $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
-            try {
-                while (-not $reader.EndOfStream) {
-                    $line = $reader.ReadLine()
-                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                    try {
-                        $record = $line | ConvertFrom-Json
-                        if ($null -ne $record) { $record }
-                    }
-                    catch {
-                        Write-Warning "Failed to parse Advanced Hunting line in $(Split-Path -Leaf $Path): $_"
-                    }
+            $records = $rawContent | ConvertFrom-Json
+            $rawContent = $null
+            if ($null -eq $records) { return }
+            if ($records -isnot [System.Array]) { $records = @($records) }
+
+            foreach ($record in $records) {
+                if ($null -ne $record) {
+                    $record
                 }
             }
-            finally { $reader.Dispose() }
+
+            return
         }
-        finally { if ($contentStream -ne $fileStream) { $contentStream.Dispose() } }
+
+        $isFirstLine = [ref]$true
+        while (-not $readContext.Reader.EndOfStream) {
+            $line = Read-JsonFileLine -Context $readContext -IsFirstLine $isFirstLine
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            try {
+                $record = $line | ConvertFrom-Json
+                if ($null -ne $record) { $record }
+            }
+            catch {
+                Write-Warning "Failed to parse Advanced Hunting line in $(Split-Path -Leaf $Path): $_"
+            }
+        }
     }
-    finally { $fileStream.Dispose() }
+    finally {
+        Close-JsonFileReadContext -Context $readContext
+    }
 }
 
 function Initialize-AdvancedHuntingStore {
@@ -11097,6 +11276,49 @@ function Get-FileSha256Hex {
     }
 }
 
+function Get-FileSetFingerprint {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Version,
+
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo[]]$Files,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$MetadataLines,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('FullName', 'Name')]
+        [string]$FileIdentityProperty = 'FullName'
+    )
+
+    $uniqueFiles = @($Files | Where-Object { $null -ne $_ } | Sort-Object FullName -Unique)
+    if ($uniqueFiles.Count -eq 0) {
+        return $null
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.AppendLine($Version)
+    foreach ($line in @($MetadataLines)) {
+        [void]$builder.AppendLine([string]$line)
+    }
+
+    foreach ($file in $uniqueFiles) {
+        $hash = Get-FileSha256Hex -Path $file.FullName
+        $fileIdentity = if ($FileIdentityProperty -eq 'Name') { $file.Name } else { $file.FullName }
+        [void]$builder.Append($fileIdentity).Append('|')
+        [void]$builder.Append($file.Length).Append('|')
+        [void]$builder.Append($file.LastWriteTimeUtc.Ticks).Append('|')
+        [void]$builder.AppendLine($hash)
+    }
+
+    $fingerprintBytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
+    $fingerprintHash = [System.Security.Cryptography.SHA256]::HashData($fingerprintBytes)
+    return ([System.BitConverter]::ToString($fingerprintHash)).Replace('-', '').ToLowerInvariant()
+}
+
 function Sync-VulnContentStoreSidecar {
     [CmdletBinding()]
     [OutputType([bool])]
@@ -11173,21 +11395,10 @@ function Get-VulnObservedWindowCacheFingerprint {
         return $null
     }
 
-    $builder = [System.Text.StringBuilder]::new()
-    [void]$builder.AppendLine('observed-window-cache-v2')
-    [void]$builder.AppendLine(('AllowedGapDays=' + $AllowedGapDays))
-    [void]$builder.AppendLine(('CacheShape=' + $(if ($contentStoreExists) { 'compact-ref-array-v1' } else { 'row-object-v1' })))
-    foreach ($file in @($sourceFiles | Sort-Object FullName -Unique)) {
-        $hash = Get-FileSha256Hex -Path $file.FullName
-        [void]$builder.Append($file.Name).Append('|')
-        [void]$builder.Append($file.Length).Append('|')
-        [void]$builder.Append($file.LastWriteTimeUtc.Ticks).Append('|')
-        [void]$builder.AppendLine($hash)
-    }
-
-    $fingerprintBytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
-    $fingerprintHash = [System.Security.Cryptography.SHA256]::HashData($fingerprintBytes)
-    return ([System.BitConverter]::ToString($fingerprintHash)).Replace('-', '').ToLowerInvariant()
+    return (Get-FileSetFingerprint -Version 'observed-window-cache-v2' -Files @($sourceFiles) -MetadataLines @(
+            ('AllowedGapDays=' + $AllowedGapDays)
+            ('CacheShape=' + $(if ($contentStoreExists) { 'compact-ref-array-v1' } else { 'row-object-v1' }))
+        ) -FileIdentityProperty Name)
 }
 
 function Get-VulnObservedWindowCachePath {
@@ -11659,20 +11870,9 @@ function Get-NormalizedVulnColumnCacheFingerprint {
             return $null
         }
 
-        $builder = [System.Text.StringBuilder]::new()
-        [void]$builder.AppendLine('dashboard-vuln-column-cache-v1')
-        [void]$builder.AppendLine(('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true)))
-        foreach ($file in @($files | Sort-Object FullName -Unique)) {
-            $hash = Get-FileSha256Hex -Path $file.FullName
-            [void]$builder.Append($file.FullName).Append('|')
-            [void]$builder.Append($file.Length).Append('|')
-            [void]$builder.Append($file.LastWriteTimeUtc.Ticks).Append('|')
-            [void]$builder.AppendLine($hash)
-        }
-
-    $fingerprintBytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
-    $fingerprintHash = [System.Security.Cryptography.SHA256]::HashData($fingerprintBytes)
-    return ([System.BitConverter]::ToString($fingerprintHash)).Replace('-', '').ToLowerInvariant()
+        return (Get-FileSetFingerprint -Version 'dashboard-vuln-column-cache-v1' -Files @($files) -MetadataLines @(
+                ('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true))
+            ))
 }
 
 function Get-NormalizedVulnColumnCacheDirectoryPath {
@@ -11911,20 +12111,9 @@ function Get-DashboardPayloadCacheFingerprint {
         return $null
     }
 
-    $builder = [System.Text.StringBuilder]::new()
-    [void]$builder.AppendLine('dashboard-payload-cache-v5')
-    [void]$builder.AppendLine(('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true)))
-    foreach ($file in @($files | Sort-Object FullName -Unique)) {
-        $hash = Get-FileSha256Hex -Path $file.FullName
-        [void]$builder.Append($file.FullName).Append('|')
-        [void]$builder.Append($file.Length).Append('|')
-        [void]$builder.Append($file.LastWriteTimeUtc.Ticks).Append('|')
-        [void]$builder.AppendLine($hash)
-    }
-
-    $fingerprintBytes = [System.Text.Encoding]::UTF8.GetBytes($builder.ToString())
-    $fingerprintHash = [System.Security.Cryptography.SHA256]::HashData($fingerprintBytes)
-    return ([System.BitConverter]::ToString($fingerprintHash)).Replace('-', '').ToLowerInvariant()
+    return (Get-FileSetFingerprint -Version 'dashboard-payload-cache-v5' -Files @($files) -MetadataLines @(
+            ('SkipObservedWindowMerge=' + ($SkipObservedWindowMerge -eq $true))
+        ))
 }
 
 function Get-NormalizedPayloadCachePath {
@@ -12449,7 +12638,7 @@ function Get-GzipLine {
 function Get-OrCreateIndex {
     param($value, $list, $indexMap)
     if ($null -eq $value -or $value -eq '') { return -1 }
-    $key = $value.ToString()
+    $key = if ($value -is [string]) { $value } else { $value.ToString() }
     if (-not $indexMap.ContainsKey($key)) {
         $indexMap[$key] = $list.Count
         $list.Add($key)
@@ -13046,6 +13235,35 @@ function Add-NormalizedDevice {
     )
 
     $lookups = $Context.Lookups
+
+    function Get-NormalizationMachinePropertyValue {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [object]$Machine,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [object[]]$MachineTuple,
+
+            [Parameter(Mandatory = $true)]
+            [string]$PropertyName,
+
+            [Parameter(Mandatory = $false)]
+            [int]$TupleIndex = -1
+        )
+
+        if ($null -ne $MachineTuple -and $TupleIndex -ge 0) {
+            return $MachineTuple[$TupleIndex]
+        }
+
+        if ($null -eq $Machine -or $null -ne $MachineTuple) {
+            return $null
+        }
+
+        return $Machine.PSObject.Properties[$PropertyName]?.Value
+    }
     $deviceIndex = $Context.Indexes.devices
     $groupIndex = $Context.Indexes.groups
     $platformIndex = $Context.Indexes.platforms
@@ -13065,7 +13283,7 @@ function Add-NormalizedDevice {
 
     if (-not $deviceIndex.ContainsKey($deviceKey)) {
         $machine = if (-not [string]::IsNullOrWhiteSpace($DeviceId)) { $Context.Machines[$DeviceId] } else { $null }
-        $machineTuple = if ($machine -is [System.Array] -and $machine.Length -ge 10) { $machine } else { $null }
+        $machineTuple = if ($machine -is [System.Array] -and $machine.Length -ge 10) { [object[]]$machine } else { $null }
         $machineUsers = [string[]]@()
         if ($null -ne $Context.AdvancedHuntingDeviceUsers -and -not [string]::IsNullOrWhiteSpace($DeviceId)) {
             $rawMachineUsers = $Context.AdvancedHuntingDeviceUsers[[string]$DeviceId]
@@ -13099,18 +13317,18 @@ function Add-NormalizedDevice {
 
         $machineInfo = $null
         if ($machine -or $machineUsers.Count -gt 0) {
-            $machineLastSeen = if ($machineTuple) { $machineTuple[8] } elseif ($machine) { $machine.PSObject.Properties['lastSeen']?.Value } else { $null }
-            $machineFirstSeen = if ($machineTuple) { $machineTuple[9] } elseif ($machine) { $machine.PSObject.Properties['firstSeen']?.Value } else { $null }
+            $machineLastSeen = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'lastSeen' -TupleIndex 8
+            $machineFirstSeen = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'firstSeen' -TupleIndex 9
             $machineInfo = [PSCustomObject]@{
-                ip = if ($machineTuple) { $machineTuple[0] } elseif ($machine) { $machine.PSObject.Properties['lastIpAddress']?.Value } else { $null }
-                eip = if ($machineTuple) { $machineTuple[1] } elseif ($machine) { $machine.PSObject.Properties['lastExternalIpAddress']?.Value } else { $null }
+                ip = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'lastIpAddress' -TupleIndex 0
+                eip = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'lastExternalIpAddress' -TupleIndex 1
                 u = if ($machineUsers.Count -gt 0) { @($machineUsers) } else { $null }
-                hs = if ($machineTuple) { $machineTuple[2] } elseif ($machine) { $machine.PSObject.Properties['healthStatus']?.Value } else { $null }
-                rs = if ($machineTuple) { $machineTuple[3] } elseif ($machine) { $machine.PSObject.Properties['riskScore']?.Value } else { $null }
-                el = if ($machineTuple) { $machineTuple[4] } elseif ($machine) { $machine.PSObject.Properties['exposureLevel']?.Value } else { $null }
-                dv = if ($machineTuple) { $machineTuple[5] } elseif ($machine) { $machine.PSObject.Properties['deviceValue']?.Value } else { $null }
-                mb = if ($machineTuple) { $machineTuple[6] } elseif ($machine) { $machine.PSObject.Properties['managedBy']?.Value } else { $null }
-                aad = if ($machineTuple) { $machineTuple[7] } elseif ($machine) { $machine.PSObject.Properties['isAadJoined']?.Value } else { $null }
+                hs = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'healthStatus' -TupleIndex 2
+                rs = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'riskScore' -TupleIndex 3
+                el = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'exposureLevel' -TupleIndex 4
+                dv = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'deviceValue' -TupleIndex 5
+                mb = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'managedBy' -TupleIndex 6
+                aad = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'isAadJoined' -TupleIndex 7
                 ls = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineLastSeen
                 fs = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineFirstSeen
             }
@@ -13118,10 +13336,10 @@ function Add-NormalizedDevice {
 
         $lookups.devices.Add([PSCustomObject]@{
             id = $DeviceId
-            n = if ($DeviceName) { $DeviceName } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['computerDnsName']?.Value } else { '(no machine data)' }
+            n = if ($DeviceName) { $DeviceName } elseif ($machine -and -not $machineTuple) { Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'computerDnsName' } else { '(no machine data)' }
             g = $groupIdx
             o = $platIdx
-            ov = if ($OsVersion) { $OsVersion } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['osVersion']?.Value } else { $null }
+            ov = if ($OsVersion) { $OsVersion } elseif ($machine -and -not $machineTuple) { Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'osVersion' } else { $null }
             t = $tagIndices
             m = $machineInfo
         })
@@ -13383,7 +13601,7 @@ function Resolve-NormalizedSeenWindowIndexSet {
     $firstSeen = Get-NormalizationCachedYmdDate -Context $Context -DateValue $FirstSeenValue
     $lastSeen = Get-NormalizationCachedYmdDate -Context $Context -DateValue $LastSeenValue
 
-    if ($firstSeen -and $lastSeen -and [datetime]$firstSeen -gt [datetime]$lastSeen) {
+    if ($firstSeen -and $lastSeen -and $firstSeen -gt $lastSeen) {
         $temp = $firstSeen
         $firstSeen = $lastSeen
         $lastSeen = $temp
@@ -13624,12 +13842,23 @@ function Get-NormalizedRecordLookup {
         -SecurityUpdateAvailable $SecurityUpdateAvailable `
         -Context $Context
 
-    Add-Member -InputObject $contentLookup -NotePropertyName inv -NotePropertyValue (Resolve-NormalizedInventoryLookup `
+    $inventoryLookup = Resolve-NormalizedInventoryLookup `
         -DeviceId $DeviceId `
         -SoftwareVendor $SoftwareVendor `
         -SoftwareName $SoftwareName `
         -SoftwareVersion $SoftwareVersion `
-        -Context $Context) -Force
+        -Context $Context
+
+    $contentLookup = [PSCustomObject]@{
+        sw = $contentLookup.sw
+        cve = $contentLookup.cve
+        ver = $contentLookup.ver
+        upd = $contentLookup.upd
+        ua = $contentLookup.ua
+        dp = $contentLookup.dp
+        rp = $contentLookup.rp
+        inv = $inventoryLookup
+    }
 
     return [PSCustomObject]@{
         DeviceIndex = Add-NormalizedDevice `

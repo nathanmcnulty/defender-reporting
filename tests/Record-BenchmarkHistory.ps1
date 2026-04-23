@@ -215,6 +215,8 @@ function Get-BaselineSummary {
         local_rows_per_second = Get-ObjectPropertyValue -InputObject $local -Name 'rows_per_second'
         local_peak_rss_gb = Get-ObjectPropertyValue -InputObject $local -Name 'peak_tree_rss_gb'
         local_peak_private_gb = Get-ObjectPropertyValue -InputObject $local -Name 'peak_tree_private_gb'
+        local_phase_elapsed_seconds = Get-ObjectPropertyValue -InputObject $local -Name 'phase_elapsed_seconds'
+        local_environment_snapshot = Get-ObjectPropertyValue -InputObject $local -Name 'environment_snapshot'
         runbook_elapsed_seconds = Get-ObjectPropertyValue -InputObject $runbook -Name 'elapsed_seconds'
         runbook_rows_per_second = Get-ObjectPropertyValue -InputObject $runbook -Name 'rows_per_second'
         runbook_peak_working_set_mb = Get-ObjectPropertyValue -InputObject $runbook -Name 'peak_working_set_mb'
@@ -389,6 +391,113 @@ function Format-DeltaValue {
     return ('{0}s ({1})' -f $deltaText, $trend)
 }
 
+function Format-SignedSecondsDeltaValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+
+    $delta = [math]::Round([double]$Value, 2)
+    $deltaText = if ($delta -gt 0) {
+        '+' + ('{0:N2}' -f $delta)
+    }
+    else {
+        ('{0:N2}' -f $delta)
+    }
+
+    $trend = if ($delta -lt 0) {
+        'faster'
+    }
+    elseif ($delta -gt 0) {
+        'slower'
+    }
+    else {
+        'unchanged'
+    }
+
+    return ('{0}s ({1})' -f $deltaText, $trend)
+}
+
+function Format-SignedNumberDeltaValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Suffix = '',
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(0, 6)]
+        [int]$Decimals = 3
+    )
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+
+    $delta = [math]::Round([double]$Value, $Decimals)
+    $format = '{0:N' + $Decimals + '}'
+    $deltaText = if ($delta -gt 0) {
+        '+' + ($format -f $delta)
+    }
+    else {
+        ($format -f $delta)
+    }
+
+    return ($deltaText + $Suffix)
+}
+
+function Format-EnvironmentSnapshotValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Snapshot
+    )
+
+    if ($null -eq $Snapshot) {
+        return 'n/a'
+    }
+
+    return ('{0} CPU | {1:N2} GB free memory | {2:N2} GB free disk' -f [int]$Snapshot.logical_cpu_count, [double]$Snapshot.available_memory_gb, [double]$Snapshot.free_disk_gb)
+}
+
+function Format-PhaseDeltaSummaryValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $PhaseSummary
+    )
+
+    if ($null -eq $PhaseSummary) {
+        return 'n/a'
+    }
+
+    $phaseParts = [System.Collections.Generic.List[string]]::new()
+    foreach ($phaseProperty in $PhaseSummary.PSObject.Properties) {
+        $phaseParts.Add(('{0}: {1}' -f [string]$phaseProperty.Name, (Format-SignedSecondsDeltaValue -Value $phaseProperty.Value))) | Out-Null
+    }
+
+    if ($phaseParts.Count -eq 0) {
+        return 'n/a'
+    }
+
+    return ($phaseParts -join '; ')
+}
+
 function Write-BenchmarkHistorySummary {
     [CmdletBinding()]
     param(
@@ -427,6 +536,7 @@ function Write-BenchmarkHistorySummary {
         $lines.Add(('- Current git: `{0}` @ `{1}` ({2})' -f $Entry.current.repo.branch, $Entry.current.repo.commit_short, $(if ($Entry.current.repo.dirty) { 'dirty' } else { 'clean' }))) | Out-Null
     }
     $lines.Add(('- Local elapsed: {0}' -f (Format-SecondsValue -Value $Entry.current.local_elapsed_seconds))) | Out-Null
+        $lines.Add(('- Local pre-run environment: {0}' -f (Format-EnvironmentSnapshotValue -Snapshot $Entry.current.local_environment_snapshot))) | Out-Null
     $lines.Add(('- Runbook elapsed: {0}' -f (Format-SecondsValue -Value $Entry.current.runbook_elapsed_seconds))) | Out-Null
     $lines.Add(('- Function elapsed: {0} ({1})' -f (Format-SecondsValue -Value $Entry.current.function_elapsed_seconds), $(if ([string]::IsNullOrWhiteSpace([string]$Entry.current.function_timing_basis)) { 'legacy' } else { [string]$Entry.current.function_timing_basis }))) | Out-Null
     if ($null -ne $Entry.current.function_end_to_end_elapsed_seconds) {
@@ -440,6 +550,18 @@ function Write-BenchmarkHistorySummary {
         $lines.Add(('- Tags: `{0}`' -f (@($Entry.tags) -join '`, `'))) | Out-Null
     }
     $lines.Add(('- History file: `{0}`' -f $HistoryPath)) | Out-Null
+
+    if ($null -ne $Entry.comparison -and $null -ne $Entry.comparison.local) {
+        $lines.Add('') | Out-Null
+        $lines.Add('Current vs main baseline') | Out-Null
+        $lines.Add('') | Out-Null
+        $lines.Add(('- Local elapsed delta: {0}' -f (Format-SignedSecondsDeltaValue -Value $Entry.comparison.local.elapsed_seconds_delta))) | Out-Null
+        $lines.Add(('- Local peak RSS / private delta: {0} / {1}' -f (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.peak_rss_gb_delta -Suffix 'GB' -Decimals 3), (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.peak_private_gb_delta -Suffix 'GB' -Decimals 3))) | Out-Null
+        $lines.Add(('- Local phase deltas: {0}' -f (Format-PhaseDeltaSummaryValue -PhaseSummary $Entry.comparison.local.phase_elapsed_seconds_delta))) | Out-Null
+        if ($null -ne $Entry.comparison.local.environment_snapshot_delta) {
+            $lines.Add(('- Local pre-run environment delta: memory {0}, disk {1}, cpu {2}' -f (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.environment_snapshot_delta.available_memory_gb_delta -Suffix 'GB' -Decimals 2), (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.environment_snapshot_delta.free_disk_gb_delta -Suffix 'GB' -Decimals 2), (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.environment_snapshot_delta.logical_cpu_count_delta -Decimals 0))) | Out-Null
+        }
+    }
 
     if ($null -ne $PreviousEntry) {
         $lines.Add('') | Out-Null
