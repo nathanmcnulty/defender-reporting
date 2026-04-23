@@ -4362,29 +4362,32 @@ function Add-NormalizedCve {
     $affSoftwareIndex = $Context.Indexes.affSoftware
     $batchTitleIndex = $Context.Indexes.batchTitles
 
-    $sevIdx = switch ($SeverityLevel) {
-        'Critical' { 0 }
-        'High' { 1 }
-        'Medium' { 2 }
-        'Low' { 3 }
-        'None' { 4 }
-        default { -1 }
-    }
-
-    $expIdx = Get-OrCreateIndex -value $ExploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
+    $cveIdText = [string]$CveId
+    $severityLevelText = [string]$SeverityLevel
+    $exploitabilityLevelText = [string]$ExploitabilityLevel
 
     $cveKey = @(
-        [string]$CveId
+        $cveIdText
         [string]$CvssScore
-        [string]$SeverityLevel
-        [string]$ExploitabilityLevel
+        $severityLevelText
+        $exploitabilityLevelText
         [string]$CveUrl
         [string]$CveBatchTitle
     ) -join '|'
 
     if (-not $cveIndex.ContainsKey($cveKey)) {
-        $ahData = $Context.AdvancedHuntingData[[string]$CveId]
-        $nvdData = $Context.NvdCveData[[string]$CveId]
+        $sevIdx = switch ($severityLevelText) {
+            'Critical' { 0 }
+            'High' { 1 }
+            'Medium' { 2 }
+            'Low' { 3 }
+            'None' { 4 }
+            default { -1 }
+        }
+
+        $expIdx = Get-OrCreateIndex -value $ExploitabilityLevel -list $lookups.exploitLevels -indexMap $exploitIndex
+        $ahData = $Context.AdvancedHuntingData[$cveIdText]
+        $nvdData = $Context.NvdCveData[$cveIdText]
         $publishedDate = $null
         $vulnDescription = $null
         $epssScore = $null

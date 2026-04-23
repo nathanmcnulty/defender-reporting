@@ -952,6 +952,35 @@ function Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose {
     }
 }
 
+function Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-repeat-cve-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+
+    try {
+        $firstRow = Get-TestVulnRow -Id 'repeat-cve-001' -CveId 'CVE-2026-0155' -SnapshotDate '2026-03-20' -Version '1.0.0'
+        $secondRow = Get-TestVulnRow -Id 'repeat-cve-002' -CveId 'CVE-2026-0155' -SnapshotDate '2026-03-21' -Version '1.0.1'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($firstRow, $secondRow)
+
+        $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -PayloadOutputPath $payloadPath -Machines @{} -AdvancedHuntingData @{}
+        $payload = Read-GzipTextFile -Path $payloadPath | ConvertFrom-Json -Depth 100
+
+        Assert-True ($result.VulnCount -eq 2) 'Expected repeated-CVE regression test to preserve both vulnerability rows.'
+        Assert-True ($result.CveCount -eq 1) 'Expected repeated rows sharing the same CVE definition to reuse a single CVE lookup.'
+        Assert-True ($payload.lookups.cves.Count -eq 1) 'Expected the payload to materialize only one CVE lookup for repeated CVE rows.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap {
     [CmdletBinding()]
     param()
@@ -2311,6 +2340,8 @@ Test-ConvertToNormalizedDataPreservesOptionalNvdFallback
 Write-Output '  Optional NVD fallback normalization checks passed.'
 Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose
 Write-Output '  Consuming payload-close lookup checks passed.'
+Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup
+Write-Output '  Repeated CVE lookup deduplication checks passed.'
 Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
 Write-Output '  Advanced Hunting device-user normalization checks passed.'
 Test-WriteCombinedPayloadGzipPreservesColumnPayload
