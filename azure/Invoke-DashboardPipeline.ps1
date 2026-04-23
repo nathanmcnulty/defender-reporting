@@ -487,7 +487,6 @@ function Invoke-BoundedRunspacePool {
                     AsyncResult = $powershell.BeginInvoke()
                 })
         }
-
         $parallelResults = [System.Collections.Generic.List[object]]::new()
         foreach ($pendingInvocation in $pendingInvocations) {
             try {
@@ -509,6 +508,168 @@ function Invoke-BoundedRunspacePool {
         $runspacePool.Close()
         $runspacePool.Dispose()
     }
+}
+
+function Get-HttpHeaderStringValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        $Headers,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Names
+    )
+
+    if ($null -eq $Headers) {
+        return ''
+    }
+
+    $headerEntries = @()
+    try {
+        $headerEntries = @($Headers.GetEnumerator())
+    }
+    catch {
+        $headerEntries = @()
+    }
+
+    foreach ($name in $Names) {
+        foreach ($entry in $headerEntries) {
+            if (-not [string]::Equals([string]$entry.Key, $name, [System.StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+
+            foreach ($value in @($entry.Value)) {
+                $text = [string]$value
+                if (-not [string]::IsNullOrWhiteSpace($text)) {
+                    return $text
+                }
+            }
+        }
+
+        try {
+            foreach ($value in @($Headers[$name])) {
+                $text = [string]$value
+                if (-not [string]::IsNullOrWhiteSpace($text)) {
+                    return $text
+                }
+            }
+        }
+        catch {
+            Write-Verbose "Could not read HTTP header '$name': $_"
+        }
+    }
+
+    return ''
+}
+
+function ConvertTo-BoundedRetryDelayMillisecondsValue {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [long]$DelayMilliseconds
+    )
+
+    return [int][Math]::Min([long][int]::MaxValue, [Math]::Max(0L, $DelayMilliseconds))
+}
+
+function Get-HttpRetryDelayOverride {
+    [CmdletBinding()]
+    [OutputType([Nullable[int]])]
+    param(
+        [Parameter(Mandatory = $false)]
+        $Headers,
+
+        [Parameter(Mandatory = $false)]
+        [datetimeoffset]$ReferenceTime = [datetimeoffset]::UtcNow
+    )
+
+    $retryAfterSecondsText = Get-HttpHeaderStringValue -Headers $Headers -Names @('Retry-After')
+    if (-not [string]::IsNullOrWhiteSpace($retryAfterSecondsText)) {
+        $retryAfterSeconds = 0L
+        if ([long]::TryParse($retryAfterSecondsText, [ref]$retryAfterSeconds) -and $retryAfterSeconds -ge 0) {
+            return (ConvertTo-BoundedRetryDelayMillisecondsValue -DelayMilliseconds ($retryAfterSeconds * 1000L))
+        }
+
+        $retryAfterTimestamp = [datetimeoffset]::MinValue
+        if (
+            [datetimeoffset]::TryParseExact(
+                $retryAfterSecondsText,
+                'r',
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::AssumeUniversal,
+                [ref]$retryAfterTimestamp
+            )
+        ) {
+            $delayMilliseconds = [long][Math]::Ceiling(($retryAfterTimestamp.ToUniversalTime() - $ReferenceTime.ToUniversalTime()).TotalMilliseconds)
+            return (ConvertTo-BoundedRetryDelayMillisecondsValue -DelayMilliseconds $delayMilliseconds)
+        }
+    }
+
+    $retryAfterMillisecondsText = Get-HttpHeaderStringValue -Headers $Headers -Names @('retry-after-ms', 'x-ms-retry-after-ms')
+    if (-not [string]::IsNullOrWhiteSpace($retryAfterMillisecondsText)) {
+        $retryAfterMilliseconds = 0L
+        if ([long]::TryParse($retryAfterMillisecondsText, [ref]$retryAfterMilliseconds) -and $retryAfterMilliseconds -ge 0) {
+            return (ConvertTo-BoundedRetryDelayMillisecondsValue -DelayMilliseconds $retryAfterMilliseconds)
+        }
+    }
+
+    return $null
+}
+
+function Get-SanitizedUriForLog {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$Uri
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Uri)) {
+        return ''
+    }
+
+    $absoluteUri = $null
+    if ([System.Uri]::TryCreate($Uri, [System.UriKind]::Absolute, [ref]$absoluteUri)) {
+        if ($absoluteUri.IsFile) {
+            return $absoluteUri.LocalPath
+        }
+
+        return $absoluteUri.GetLeftPart([System.UriPartial]::Path)
+    }
+
+    return $Uri
+}
+
+function Test-IsTransientTransportException {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [System.Exception]$Exception
+    )
+
+    if ($null -eq $Exception) {
+        return $false
+    }
+
+    if ($Exception -is [System.TimeoutException] -or $Exception.InnerException -is [System.TimeoutException]) {
+        return $true
+    }
+
+    $messageText = @(
+        [string]$Exception.Message
+        [string]$Exception.InnerException?.Message
+    ) -join "`n"
+
+    $transientPattern = 'ResponseEnded|response ended prematurely|An error occurred while sending the request|The underlying connection was closed|The request was canceled|timed out|A connection attempt failed|An existing connection was forcibly closed|connection reset|temporarily unavailable'
+    if ($Exception -is [System.Net.Http.HttpRequestException]) {
+        return ($messageText -match $transientPattern)
+    }
+
+    return ($messageText -match $transientPattern)
 }
 
 function Invoke-RestMethodWithRetry {
@@ -540,11 +701,15 @@ function Invoke-RestMethodWithRetry {
 
         [Parameter(Mandatory = $false)]
         [ValidateRange(1, 3600)]
-        [int]$TimeoutSec
+        [int]$TimeoutSec,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$RetryTransientTransportFailures
     )
 
     $attempt = 0
     $delay = $InitialDelayMs
+    $requestUriForLog = Get-SanitizedUriForLog -Uri $Uri
 
     while ($true) {
         try {
@@ -566,30 +731,36 @@ function Invoke-RestMethodWithRetry {
                 $statusCode = [int]$_.Exception.Response.StatusCode
             }
 
-            $retryable = $statusCode -in @(429, 500, 502, 503, 504)
+            $retryable = $statusCode -in @(408, 429, 500, 502, 503, 504)
+            if (-not $retryable -and $RetryTransientTransportFailures) {
+                $retryable = Test-IsTransientTransportException -Exception $_.Exception
+            }
+
             if (-not $retryable -or $attempt -ge $MaxRetries) {
                 throw
             }
 
-            # Respect Retry-After header for 429 responses
-            $retryAfter = $null
+            $waitMs = $delay
             try {
                 if ($_.Exception.Response -and $_.Exception.Response.Headers) {
-                    $retryAfter = $_.Exception.Response.Headers['Retry-After']
+                    $retryDelayMilliseconds = Get-HttpRetryDelayOverride -Headers $_.Exception.Response.Headers
+                    if ($null -ne $retryDelayMilliseconds) {
+                        $waitMs = $retryDelayMilliseconds
+                    }
                 }
             }
             catch {
-                Write-Verbose "Could not read Retry-After header: $_"
+                Write-Verbose "Could not read retry delay headers: $_"
             }
 
-            $waitMs = if ($retryAfter -and [int]::TryParse($retryAfter, [ref]$null)) {
-                [int]$retryAfter * 1000
+            $failureLabel = if ($null -ne $statusCode) {
+                "HTTP $statusCode"
             }
             else {
-                $delay
+                $_.Exception.GetType().Name
             }
 
-            Write-Warning "API call failed (attempt $attempt/$MaxRetries, HTTP $statusCode): $($_.Exception.Message). Retrying in $([math]::Round($waitMs / 1000, 1))s..."
+            Write-Warning ("API call failed for {0} (attempt {1}/{2}, {3}). Retrying in {4}s..." -f $requestUriForLog, $attempt, $MaxRetries, $failureLabel, [math]::Round($waitMs / 1000, 1))
             Start-Sleep -Milliseconds $waitMs
             $delay = [int]($delay * $BackoffMultiplier)
         }
@@ -628,7 +799,10 @@ function Invoke-WebRequestWithRetry {
 
         [Parameter(Mandatory = $false)]
         [ValidateRange(1, 3600)]
-        [int]$TimeoutSec
+        [int]$TimeoutSec,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$RetryTransientTransportFailures
     )
 
     $attempt = 0
@@ -639,6 +813,7 @@ function Invoke-WebRequestWithRetry {
     else {
         'HTTP request'
     }
+    $requestUriForLog = Get-SanitizedUriForLog -Uri $Uri
 
     while ($true) {
         try {
@@ -661,29 +836,36 @@ function Invoke-WebRequestWithRetry {
                 $statusCode = [int]$_.Exception.Response.StatusCode
             }
 
-            $retryable = $statusCode -in @(429, 500, 502, 503, 504)
+            $retryable = $statusCode -in @(408, 429, 500, 502, 503, 504)
+            if (-not $retryable -and $RetryTransientTransportFailures) {
+                $retryable = Test-IsTransientTransportException -Exception $_.Exception
+            }
+
             if (-not $retryable -or $attempt -ge $MaxRetries) {
                 throw
             }
 
-            $retryAfter = $null
+            $waitMs = $delay
             try {
                 if ($_.Exception.Response -and $_.Exception.Response.Headers) {
-                    $retryAfter = $_.Exception.Response.Headers['Retry-After']
+                    $retryDelayMilliseconds = Get-HttpRetryDelayOverride -Headers $_.Exception.Response.Headers
+                    if ($null -ne $retryDelayMilliseconds) {
+                        $waitMs = $retryDelayMilliseconds
+                    }
                 }
             }
             catch {
-                Write-Verbose "Could not read Retry-After header: $_"
+                Write-Verbose "Could not read retry delay headers: $_"
             }
 
-            $waitMs = if ($retryAfter -and [int]::TryParse($retryAfter, [ref]$null)) {
-                [int]$retryAfter * 1000
+            $failureLabel = if ($null -ne $statusCode) {
+                "HTTP $statusCode"
             }
             else {
-                $delay
+                $_.Exception.GetType().Name
             }
 
-            Write-Warning "$requestLabel failed (attempt $attempt/$MaxRetries, HTTP $statusCode): $($_.Exception.Message). Retrying in $([math]::Round($waitMs / 1000, 1))s..."
+            Write-Warning ("{0} failed for {1} (attempt {2}/{3}, {4}). Retrying in {5}s..." -f $requestLabel, $requestUriForLog, $attempt, $MaxRetries, $failureLabel, [math]::Round($waitMs / 1000, 1))
             Start-Sleep -Milliseconds $waitMs
             $delay = [int]($delay * $BackoffMultiplier)
         }
@@ -1572,6 +1754,7 @@ function Test-IsTransientExportArtifactName {
     return (
         ($normalizedName -like '.dashboard-cache/*') -or
         ($normalizedName -match '(^|/)\.vuln-content-store-staging-[^/]+(?:/|$)') -or
+        ($normalizedName -match '(^|/)\.VulnExport_\d+_\d{4}-\d{2}-\d{2}(?:_part_\d+)?\.json(?:\.gz)?\.partial$') -or
         ($normalizedName -in @(
             '.synthetic-progress.json',
             '.synthetic-progress.json.gz',
@@ -1722,7 +1905,7 @@ function Test-IsLegacyVulnSnapshotFileName {
         [string]$Name
     )
 
-    return ($Name -match '^VulnExport_\d+_\d{4}-\d{2}-\d{2}\.json(?:\.gz)?$')
+    return ($Name -match '^VulnExport_\d+_\d{4}-\d{2}-\d{2}(?:_part_\d+)?\.json(?:\.gz)?$')
 }
 
 function Get-VulnSnapshotDateFromName {
@@ -6594,6 +6777,67 @@ function Get-MdeHeaderCollection {
     }
 }
 
+function Resolve-UriQueryParameterValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Uri,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Value
+    )
+
+    $absoluteUri = $null
+    if (-not [System.Uri]::TryCreate($Uri, [System.UriKind]::Absolute, [ref]$absoluteUri)) {
+        return $Uri
+    }
+
+    $uriBuilder = [System.UriBuilder]::new($absoluteUri)
+    $queryEntries = [System.Collections.Generic.List[string]]::new()
+    foreach ($queryEntry in @($uriBuilder.Query.TrimStart('?').Split('&', [System.StringSplitOptions]::RemoveEmptyEntries))) {
+        $key = [System.Uri]::UnescapeDataString(($queryEntry.Split('=', 2))[0])
+        if ($key -ieq $Name) {
+            continue
+        }
+
+        $queryEntries.Add($queryEntry)
+    }
+
+    $queryEntries.Add(("{0}={1}" -f [System.Uri]::EscapeDataString($Name), [System.Uri]::EscapeDataString($Value)))
+    $uriBuilder.Query = [string]::Join('&', $queryEntries)
+    return $uriBuilder.Uri.AbsoluteUri
+}
+
+function Get-MdeBulkVulnerabilityExportRequestUri {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ExportUrl,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 6)]
+        [int]$SasValidHours = 6
+    )
+
+    return (Resolve-UriQueryParameterValue -Uri $ExportUrl -Name 'sasValidHours' -Value ([string]$SasValidHours))
+}
+
+function Get-VulnSnapshotStagingPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$OutputFile
+    )
+
+    return (Join-Path -Path (Split-Path -Path $OutputFile -Parent) -ChildPath ('.' + (Split-Path -Path $OutputFile -Leaf) + '.partial'))
+}
+
 function Invoke-MdeBulkVulnerabilitySnapshotDownload {
     [CmdletBinding()]
     param(
@@ -6607,13 +6851,15 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
         [string]$ExportUrl
     )
 
-    $response = Invoke-RestMethodWithRetry -Uri $ExportUrl -Headers $Headers -Method Get
+    $resolvedExportUrl = Get-MdeBulkVulnerabilityExportRequestUri -ExportUrl $ExportUrl
+    $response = Invoke-RestMethodWithRetry -Uri $resolvedExportUrl -Headers $Headers -Method Get -MaxRetries 4 -InitialDelayMs 5000 -TimeoutSec 600 -RetryTransientTransportFailures
     $exportFiles = @($response.exportFiles)
     if ($exportFiles.Count -eq 0) {
         throw 'Bulk vulnerability export returned no files.'
     }
 
     $downloadedFiles = [System.Collections.Generic.List[string]]::new()
+    $partIndexBySnapshotKey = @{}
     foreach ($fileUrl in $exportFiles) {
         if ($fileUrl -match '/collection/([^/?]+)/.*%3DgroupId%3D([^&%? ]+)') {
             $date = $Matches[1]
@@ -6624,11 +6870,46 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
             $groupId = [System.Uri]::UnescapeDataString($Matches[2])
         }
         else {
-            throw "Unexpected export URL format. Cannot extract date and groupId from: $fileUrl"
+            throw "Unexpected export URL format. Cannot extract date and groupId from: $(Get-SanitizedUriForLog -Uri $fileUrl)"
         }
 
-        $outputFile = Join-Path $OutputPath "VulnExport_${groupId}_${date}.json.gz"
-        Invoke-WebRequestWithRetry -Uri $fileUrl -OutFile $outputFile
+        $snapshotKey = "${groupId}|${date}"
+        $partIndex = if ($partIndexBySnapshotKey.ContainsKey($snapshotKey)) {
+            [int]$partIndexBySnapshotKey[$snapshotKey]
+        }
+        else {
+            0
+        }
+        $partIndexBySnapshotKey[$snapshotKey] = ($partIndex + 1)
+
+        $outputFile = Join-Path $OutputPath ("VulnExport_{0}_{1}_part_{2}.json.gz" -f $groupId, $date, $partIndex)
+        $stagingOutputFile = Get-VulnSnapshotStagingPath -OutputFile $outputFile
+        if (Test-Path -LiteralPath $stagingOutputFile -PathType Leaf) {
+            Remove-Item -LiteralPath $stagingOutputFile -Force -ErrorAction SilentlyContinue
+        }
+
+        try {
+            Invoke-WebRequestWithRetry -Uri $fileUrl -OutFile $stagingOutputFile -MaxRetries 6 -InitialDelayMs 2000 -TimeoutSec 1800 -RetryTransientTransportFailures
+
+            $stagingFile = Get-Item -LiteralPath $stagingOutputFile -Force -ErrorAction Stop
+            if ($stagingFile.Length -le 0) {
+                throw "Downloaded file is empty: $(Get-SanitizedUriForLog -Uri $fileUrl)"
+            }
+
+            if (Test-Path -LiteralPath $outputFile -PathType Leaf) {
+                Remove-Item -LiteralPath $outputFile -Force -ErrorAction SilentlyContinue
+            }
+
+            [System.IO.File]::Move($stagingOutputFile, $outputFile)
+        }
+        catch {
+            if (Test-Path -LiteralPath $stagingOutputFile -PathType Leaf) {
+                Remove-Item -LiteralPath $stagingOutputFile -Force -ErrorAction SilentlyContinue
+            }
+
+            throw
+        }
+
         $downloadedFiles.Add($outputFile)
     }
 
