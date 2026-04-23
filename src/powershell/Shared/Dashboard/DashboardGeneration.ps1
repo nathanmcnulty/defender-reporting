@@ -5250,8 +5250,8 @@ function Invoke-ContentStoreNormalization {
             -RecommendedSecurityUpdateId ([string]$contentTemplate.rid) `
             -RecommendedSecurityUpdateUrl ([string]$contentTemplate.url) `
             -SoftwareVersion ([string]$contentTemplate.ver) `
-            -DiskPaths @($contentTemplate.dp) `
-            -RegistryPaths @($contentTemplate.rp) `
+            -DiskPaths $contentTemplate.dp `
+            -RegistryPaths $contentTemplate.rp `
             -SecurityUpdateAvailable ($contentTemplate.ua -eq $true) `
             -Context $Context
 
