@@ -13235,35 +13235,6 @@ function Add-NormalizedDevice {
     )
 
     $lookups = $Context.Lookups
-
-    function Get-NormalizationMachinePropertyValue {
-        [CmdletBinding()]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            [object]$Machine,
-
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            [object[]]$MachineTuple,
-
-            [Parameter(Mandatory = $true)]
-            [string]$PropertyName,
-
-            [Parameter(Mandatory = $false)]
-            [int]$TupleIndex = -1
-        )
-
-        if ($null -ne $MachineTuple -and $TupleIndex -ge 0) {
-            return $MachineTuple[$TupleIndex]
-        }
-
-        if ($null -eq $Machine -or $null -ne $MachineTuple) {
-            return $null
-        }
-
-        return $Machine.PSObject.Properties[$PropertyName]?.Value
-    }
     $deviceIndex = $Context.Indexes.devices
     $groupIndex = $Context.Indexes.groups
     $platformIndex = $Context.Indexes.platforms
@@ -13283,7 +13254,7 @@ function Add-NormalizedDevice {
 
     if (-not $deviceIndex.ContainsKey($deviceKey)) {
         $machine = if (-not [string]::IsNullOrWhiteSpace($DeviceId)) { $Context.Machines[$DeviceId] } else { $null }
-        $machineTuple = if ($machine -is [System.Array] -and $machine.Length -ge 10) { [object[]]$machine } else { $null }
+        $machineTuple = if ($machine -is [System.Array] -and $machine.Length -ge 10) { $machine } else { $null }
         $machineUsers = [string[]]@()
         if ($null -ne $Context.AdvancedHuntingDeviceUsers -and -not [string]::IsNullOrWhiteSpace($DeviceId)) {
             $rawMachineUsers = $Context.AdvancedHuntingDeviceUsers[[string]$DeviceId]
@@ -13317,18 +13288,18 @@ function Add-NormalizedDevice {
 
         $machineInfo = $null
         if ($machine -or $machineUsers.Count -gt 0) {
-            $machineLastSeen = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'lastSeen' -TupleIndex 8
-            $machineFirstSeen = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'firstSeen' -TupleIndex 9
+            $machineLastSeen = if ($machineTuple) { $machineTuple[8] } elseif ($machine) { $machine.PSObject.Properties['lastSeen']?.Value } else { $null }
+            $machineFirstSeen = if ($machineTuple) { $machineTuple[9] } elseif ($machine) { $machine.PSObject.Properties['firstSeen']?.Value } else { $null }
             $machineInfo = [PSCustomObject]@{
-                ip = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'lastIpAddress' -TupleIndex 0
-                eip = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'lastExternalIpAddress' -TupleIndex 1
+                ip = if ($machineTuple) { $machineTuple[0] } elseif ($machine) { $machine.PSObject.Properties['lastIpAddress']?.Value } else { $null }
+                eip = if ($machineTuple) { $machineTuple[1] } elseif ($machine) { $machine.PSObject.Properties['lastExternalIpAddress']?.Value } else { $null }
                 u = if ($machineUsers.Count -gt 0) { @($machineUsers) } else { $null }
-                hs = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'healthStatus' -TupleIndex 2
-                rs = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'riskScore' -TupleIndex 3
-                el = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'exposureLevel' -TupleIndex 4
-                dv = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'deviceValue' -TupleIndex 5
-                mb = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'managedBy' -TupleIndex 6
-                aad = Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'isAadJoined' -TupleIndex 7
+                hs = if ($machineTuple) { $machineTuple[2] } elseif ($machine) { $machine.PSObject.Properties['healthStatus']?.Value } else { $null }
+                rs = if ($machineTuple) { $machineTuple[3] } elseif ($machine) { $machine.PSObject.Properties['riskScore']?.Value } else { $null }
+                el = if ($machineTuple) { $machineTuple[4] } elseif ($machine) { $machine.PSObject.Properties['exposureLevel']?.Value } else { $null }
+                dv = if ($machineTuple) { $machineTuple[5] } elseif ($machine) { $machine.PSObject.Properties['deviceValue']?.Value } else { $null }
+                mb = if ($machineTuple) { $machineTuple[6] } elseif ($machine) { $machine.PSObject.Properties['managedBy']?.Value } else { $null }
+                aad = if ($machineTuple) { $machineTuple[7] } elseif ($machine) { $machine.PSObject.Properties['isAadJoined']?.Value } else { $null }
                 ls = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineLastSeen
                 fs = Get-NormalizationCachedYmdDate -Context $Context -DateValue $machineFirstSeen
             }
@@ -13336,10 +13307,10 @@ function Add-NormalizedDevice {
 
         $lookups.devices.Add([PSCustomObject]@{
             id = $DeviceId
-            n = if ($DeviceName) { $DeviceName } elseif ($machine -and -not $machineTuple) { Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'computerDnsName' } else { '(no machine data)' }
+            n = if ($DeviceName) { $DeviceName } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['computerDnsName']?.Value } else { '(no machine data)' }
             g = $groupIdx
             o = $platIdx
-            ov = if ($OsVersion) { $OsVersion } elseif ($machine -and -not $machineTuple) { Get-NormalizationMachinePropertyValue -Machine $machine -MachineTuple $machineTuple -PropertyName 'osVersion' } else { $null }
+            ov = if ($OsVersion) { $OsVersion } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['osVersion']?.Value } else { $null }
             t = $tagIndices
             m = $machineInfo
         })
