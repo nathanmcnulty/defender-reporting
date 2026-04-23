@@ -6880,7 +6880,7 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
         try {
             Invoke-WebRequestWithRetry -Uri $fileUrl -OutFile $stagingOutputFile -MaxRetries 6 -InitialDelayMs 2000 -TimeoutSec 1800 -RetryTransientTransportFailures
 
-            $stagingFile = Get-Item -LiteralPath $stagingOutputFile -ErrorAction Stop
+            $stagingFile = Get-Item -LiteralPath $stagingOutputFile -Force -ErrorAction Stop
             if ($stagingFile.Length -le 0) {
                 throw "Downloaded file is empty: $(Get-SanitizedUriForLog -Uri $fileUrl)"
             }
