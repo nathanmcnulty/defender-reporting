@@ -127,6 +127,43 @@ function Test-PowerShellArtifactRequiresBuild {
     return $false
 }
 
+function Resolve-PowerShellArtifactOutputPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ManifestPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BuildScriptPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$BuildScriptNotFoundMessage = "Build script not found at '{0}'.",
+
+        [Parameter(Mandatory = $false)]
+        [string]$MissingOutputMessage = "Artifact output was not generated at '{0}'."
+    )
+
+    $artifactManifest = Read-PowerShellArtifactManifest -ManifestPath $ManifestPath -RepoRoot $RepoRoot
+    if (-not (Test-Path -LiteralPath $BuildScriptPath -PathType Leaf)) {
+        throw ($BuildScriptNotFoundMessage -f $BuildScriptPath)
+    }
+
+    $requiresBuild = Test-PowerShellArtifactRequiresBuild -ManifestPath $ManifestPath -RepoRoot $RepoRoot -BuildScriptPath $BuildScriptPath
+    if ($requiresBuild) {
+        & $BuildScriptPath
+    }
+
+    if (-not (Test-Path -LiteralPath $artifactManifest.OutputPath -PathType Leaf)) {
+        throw ($MissingOutputMessage -f $artifactManifest.OutputPath)
+    }
+
+    return $artifactManifest.OutputPath
+}
+
 function Build-PowerShellArtifactFromManifest {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
