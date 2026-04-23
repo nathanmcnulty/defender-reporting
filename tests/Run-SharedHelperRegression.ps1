@@ -127,6 +127,7 @@ function Get-TestQuarterlyHistoryDocument {
 }
 
 function Test-VulnPropertyHelpersSupportSupportedRowShapes {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally refers to multiple supported row shapes.')]
     [CmdletBinding()]
     param()
 
@@ -278,6 +279,7 @@ function Test-LocalExportArtifactCleanup {
 }
 
 function Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally refers to current records and metadata fields as a set.')]
     [CmdletBinding()]
     param()
 
@@ -705,6 +707,7 @@ function Test-ReadNormalizedVulnStoreRow {
 }
 
 function Test-ResolveNormalizedLookupIndexListHandlesScalarAndCollectionValues {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally covers both scalar and collection values.')]
     [CmdletBinding()]
     param()
 
@@ -774,6 +777,7 @@ function Test-AddNormalizedCveUsesStableSeverityIndexLookup {
 }
 
 function Test-GetNormalizedRecordLookupHandlesScalarPathInputs {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally refers to multiple path inputs.')]
     [CmdletBinding()]
     param()
 
@@ -1449,6 +1453,7 @@ function Test-AdvancedHuntingBundleMatchesDedicatedReaderData {
 }
 
 function Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally refers to multiple sparse inputs.')]
     [CmdletBinding()]
     param()
 
