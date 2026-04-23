@@ -3838,6 +3838,90 @@ function formatSoftwareName(vendor, product) {
     return `${vendorPart} - ${productPart}`;
 }
 
+function normalizeOsVersionGroupingLabel(osPlatform, osVersion) {
+    const versionText = normalizeRemediationText(osVersion);
+    if (!versionText || versionText === 'Unknown') {
+        return '';
+    }
+
+    const versionParts = versionText
+        .split('.')
+        .map(part => part.trim())
+        .filter(part => /^\d+$/.test(part));
+
+    if (versionParts.length === 0) {
+        return versionText;
+    }
+
+    const normalizedParts = versionParts.slice(0, Math.min(3, versionParts.length));
+    const platformText = normalizeRemediationText(osPlatform).toLowerCase();
+
+    if (!platformText.startsWith('windows')) {
+        while (normalizedParts.length > 1 && normalizedParts[normalizedParts.length - 1] === '0') {
+            normalizedParts.pop();
+        }
+    }
+
+    return normalizedParts.join('.');
+}
+
+function getVersionAwareSoftwareLabel(software, osPlatform, osVersion, splitByVersion) {
+    if (!splitByVersion) {
+        return software;
+    }
+
+    const versionLabel = normalizeOsVersionGroupingLabel(osPlatform, osVersion);
+    if (!versionLabel || !software || software === 'Unknown') {
+        return software;
+    }
+
+    return `${software} (${versionLabel})`;
+}
+
+function getOsFamilyComparisonKey(text) {
+    return normalizeRemediationText(text)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '');
+}
+
+function shouldSplitRemediationByOsVersion(software, osPlatform) {
+    const softwareKey = getOsFamilyComparisonKey(software);
+    const platformKey = getOsFamilyComparisonKey(osPlatform);
+
+    if (!softwareKey || !platformKey) {
+        return false;
+    }
+
+    return softwareKey === platformKey
+        || softwareKey.startsWith(platformKey)
+        || platformKey.startsWith(softwareKey);
+}
+
+function getVersionAwareImpactDisplayName(descriptor, software, osPlatform, osVersion, splitByVersion) {
+    const baseName = getScopedRemediationDisplayTitle(descriptor);
+    if (!splitByVersion) {
+        return baseName;
+    }
+
+    const baseSoftwareLabel = formatSoftwarePart(software)
+        || normalizeRemediationText(descriptor?.softwareLabel)
+        || normalizeRemediationText(descriptor?.scopeLabel)
+        || 'Unknown';
+    const versionedSoftwareLabel = getVersionAwareSoftwareLabel(baseSoftwareLabel, osPlatform, osVersion, true);
+
+    if (!versionedSoftwareLabel || versionedSoftwareLabel === baseSoftwareLabel) {
+        return baseName;
+    }
+
+    const separatorIndex = baseName.indexOf(':');
+    if (separatorIndex >= 0) {
+        const suffix = baseName.slice(separatorIndex + 1).trim();
+        return suffix ? `${versionedSoftwareLabel}: ${suffix}` : versionedSoftwareLabel;
+    }
+
+    return `${versionedSoftwareLabel}: ${baseName}`;
+}
+
 function getPointInTimeReferenceDate(state = filterState) {
     return state.endDate || mostRecentLastSeenDate;
 }
@@ -5018,10 +5102,13 @@ function addRemediationUpdateEntry(updateEntryMap, remediation) {
     if (!existing) {
         updateEntryMap.set(entryKey, {
             referenceText: referenceText || 'Update Details',
-            referenceUrl: referenceUrl || ''
+            referenceUrl: referenceUrl || '',
+            observationCount: 1
         });
         return;
     }
+
+    existing.observationCount = (existing.observationCount || 0) + 1;
 
     if (!existing.referenceUrl && referenceUrl) {
         existing.referenceUrl = referenceUrl;
@@ -5029,8 +5116,27 @@ function addRemediationUpdateEntry(updateEntryMap, remediation) {
 }
 
 function finalizeRemediationUpdateEntries(updateEntryMap) {
-    return Array.from((updateEntryMap || new Map()).values())
+    const entries = Array.from((updateEntryMap || new Map()).values())
         .filter(entry => entry && entry.referenceText)
+        .map(entry => ({
+            referenceText: entry.referenceText,
+            referenceUrl: entry.referenceUrl || '',
+            observationCount: entry.observationCount > 0 ? entry.observationCount : 1
+        }));
+
+    let filteredEntries = entries;
+    const kbEntries = entries.filter(entry => /^KB\d+$/i.test(entry.referenceText || ''));
+    if (entries.length > 1 && kbEntries.length === entries.length) {
+        const sortedByCount = [...entries].sort((a, b) => b.observationCount - a.observationCount);
+        const dominantEntry = sortedByCount[0];
+        const totalObservations = sortedByCount.reduce((sum, entry) => sum + entry.observationCount, 0);
+
+        if (dominantEntry && totalObservations > 0 && (dominantEntry.observationCount / totalObservations) >= 0.9) {
+            filteredEntries = sortedByCount.filter(entry => entry.observationCount === dominantEntry.observationCount);
+        }
+    }
+
+    return filteredEntries
         .sort((a, b) => {
             const referenceCompare = a.referenceText.localeCompare(
                 b.referenceText,
@@ -5047,7 +5153,11 @@ function finalizeRemediationUpdateEntries(updateEntryMap) {
                 undefined,
                 { numeric: true, sensitivity: 'base' }
             );
-        });
+        })
+        .map(entry => ({
+            referenceText: entry.referenceText,
+            referenceUrl: entry.referenceUrl || ''
+        }));
 }
 
 function summarizeRemediationUpdateEntries(updateEntries) {
@@ -5591,6 +5701,8 @@ function getRemediationTableData() {
 
     const remediationMap = {};
     const activeRows = getActiveRowsForCurrentSelection();
+    const remediationDescriptors = new Array(activeRows.length);
+    const versionBucketsByBaseKey = new Map();
 
     const formatCache = new Map();
     const formatPart = (text) => {
@@ -5606,15 +5718,43 @@ function getRemediationTableData() {
     for (let i = 0, len = activeRows.length; i < len; i++) {
         const v = activeRows[i];
         const remediation = buildRemediationDescriptor(v);
+        const vendor = formatPart(v.SoftwareVendor);
+        const software = formatPart(v.SoftwareName);
+        const baseKey = `${vendor}|${software}|${remediation.key}`;
+        const canSplitByOsVersion = shouldSplitRemediationByOsVersion(software, v.OSPlatform);
+        const versionBucket = normalizeOsVersionGroupingLabel(v.OSPlatform, v.OSVersion);
+
+        remediationDescriptors[i] = remediation;
+
+        if (!canSplitByOsVersion || !versionBucket) {
+            continue;
+        }
+
+        let versionBuckets = versionBucketsByBaseKey.get(baseKey);
+        if (!versionBuckets) {
+            versionBuckets = new Set();
+            versionBucketsByBaseKey.set(baseKey, versionBuckets);
+        }
+
+        versionBuckets.add(versionBucket);
+    }
+
+    for (let i = 0, len = activeRows.length; i < len; i++) {
+        const v = activeRows[i];
+        const remediation = remediationDescriptors[i];
         const compactRemediation = getCompactRemediationTitle(remediation);
         const vendor = formatPart(v.SoftwareVendor);
         const software = formatPart(v.SoftwareName);
-        const key = `${vendor}|${software}|${remediation.key}`;
+        const baseKey = `${vendor}|${software}|${remediation.key}`;
+        const splitByVersion = shouldSplitRemediationByOsVersion(software, v.OSPlatform)
+            && (versionBucketsByBaseKey.get(baseKey)?.size || 0) > 1;
+        const softwareLabel = getVersionAwareSoftwareLabel(software, v.OSPlatform, v.OSVersion, splitByVersion);
+        const key = splitByVersion ? `${baseKey}|${softwareLabel}` : baseKey;
 
         if (!remediationMap[key]) {
             remediationMap[key] = {
                 vendor: vendor,
-                software: software,
+                software: softwareLabel,
                 remediationDescriptor: remediation,
                 descriptorObservationMap: new Map(),
                 remediation: compactRemediation,
@@ -5654,7 +5794,10 @@ function getRemediationTableData() {
             data.updateEntries = finalizeRemediationUpdateEntries(data.updateEntryMap);
             data.updateUrl = getSingleRemediationUpdateUrlFromEntries(data.updateEntries) || data.remediationDescriptor.updateUrl;
             data.remediation = getActiveRemediationTableTitle(data.remediationDescriptor);
-            data.modalTitle = getRemediationTitleWithReferenceSuffix(getScopedRemediationDisplayTitle(data.remediationDescriptor), data.updateEntries);
+            const modalBaseTitle = data.software && data.software !== 'Unknown'
+                ? `${data.software}: ${data.remediation}`
+                : getScopedRemediationDisplayTitle(data.remediationDescriptor);
+            data.modalTitle = getRemediationTitleWithReferenceSuffix(modalBaseTitle, data.updateEntries);
             data.remediationHtml = buildRemediationTitleCellHtml(data.remediation);
             const updateDisplay = buildSeparatedRemediationUpdateDisplay(data.remediation, data.remediationDescriptor, data.updateEntries);
             data.updateValue = updateDisplay.value;
@@ -5805,15 +5948,46 @@ function getImpactAnalysisData() {
 
     const remediationMap = {};
     const activeRows = getActiveRowsForCurrentSelection();
-    activeRows.forEach(v => {
+    const remediationDescriptors = new Array(activeRows.length);
+    const versionBucketsByBaseKey = new Map();
+
+    for (let i = 0, len = activeRows.length; i < len; i++) {
+        const v = activeRows[i];
         const remediation = buildRemediationDescriptor(v);
-        const key = remediation.key;
+        const formattedSoftware = formatSoftwarePart(v.SoftwareName);
+        const baseKey = remediation.key;
+        const canSplitByOsVersion = shouldSplitRemediationByOsVersion(formattedSoftware, v.OSPlatform);
+        const versionBucket = normalizeOsVersionGroupingLabel(v.OSPlatform, v.OSVersion);
+
+        remediationDescriptors[i] = remediation;
+
+        if (!canSplitByOsVersion || !versionBucket) {
+            continue;
+        }
+
+        let versionBuckets = versionBucketsByBaseKey.get(baseKey);
+        if (!versionBuckets) {
+            versionBuckets = new Set();
+            versionBucketsByBaseKey.set(baseKey, versionBuckets);
+        }
+
+        versionBuckets.add(versionBucket);
+    }
+
+    activeRows.forEach((v, index) => {
+        const remediation = remediationDescriptors[index];
+        const formattedSoftware = formatSoftwarePart(v.SoftwareName);
+        const baseKey = remediation.key;
+        const splitByVersion = shouldSplitRemediationByOsVersion(formattedSoftware, v.OSPlatform)
+            && (versionBucketsByBaseKey.get(baseKey)?.size || 0) > 1;
+        const impactName = getVersionAwareImpactDisplayName(remediation, formattedSoftware, v.OSPlatform, v.OSVersion, splitByVersion);
+        const key = splitByVersion ? `${baseKey}|${impactName}` : baseKey;
 
         if (!remediationMap[key]) {
             remediationMap[key] = {
                 remediationDescriptor: remediation,
                 descriptorObservationMap: new Map(),
-                name: remediation.title,
+                name: impactName,
                 updateEntryMap: new Map(),
                 devices: new Set(),
                 vulnerabilities: []
@@ -5831,12 +6005,13 @@ function getImpactAnalysisData() {
     const top25 = Object.values(mergedRemediationMap)
         .map(data => ({
             remediationDescriptor: getDominantRemediationDescriptor(data) || data.remediationDescriptor,
+            name: data.name,
             updateEntries: finalizeRemediationUpdateEntries(data.updateEntryMap),
             impact: data.devices.size * new Set(data.vulnerabilities.map(v => v.CveId)).size,
             vulnerabilities: data.vulnerabilities
         }))
         .map(data => {
-            const name = getScopedRemediationDisplayTitle(data.remediationDescriptor);
+            const name = data.name || getScopedRemediationDisplayTitle(data.remediationDescriptor);
             const updateDisplay = buildSeparatedRemediationUpdateDisplay(name, data.remediationDescriptor, data.updateEntries);
             return {
                 name: name,

@@ -1536,16 +1536,36 @@ tbody tr:hover {
 }
 
 .update-details-column {
-    min-width: 15rem;
-    width: 15rem;
+    min-width: 13rem;
+    width: 13rem;
+    max-width: 13rem;
+}
+
+th.update-details-column,
+td.update-details-column {
+    padding-left: 10px;
+    padding-right: 10px;
 }
 
 td.update-details-column .remediation-update-entry-list {
-    display: inline-flex;
+    display: flex;
     align-items: flex-start;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
+    gap: 3px;
     justify-content: flex-start;
-    width: max-content;
+    width: 100%;
+    max-width: 100%;
+}
+
+td.update-details-column .stat-badge,
+td.update-details-column .remediation-link {
+    padding: 2px 6px;
+    font-size: 0.75rem;
+    line-height: 1.1;
+}
+
+td.update-details-column .remediation-link {
+    gap: 3px;
 }
 
 .devices-table tbody tr:last-child td {
