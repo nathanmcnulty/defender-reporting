@@ -238,7 +238,7 @@ function Initialize-ReferenceMetadataLookup {
     }
 }
 
-function Resolve-ReferenceDeviceMetadata {
+function Resolve-ReferenceDeviceContext {
     [CmdletBinding()]
     [OutputType([hashtable])]
     param(
@@ -349,7 +349,7 @@ function Invoke-CurrentSnapshotJsonLines {
         $ref = $refLine | ConvertFrom-Json -Depth 10
         $device = $dictionary.deviceProfiles[[int]$ref[1]]
         $content = $dictionary.contentTemplates[[int]$ref[2]]
-        $referenceMetadata = Resolve-ReferenceDeviceMetadata -DeviceId ([string]$device.id) -GroupName ([string]$device.g)
+        $referenceMetadata = Resolve-ReferenceDeviceContext -DeviceId ([string]$device.id) -GroupName ([string]$device.g)
         $row = [PSCustomObject]@{
             Id = [string]$ref[0]
             DeviceId = [string]$device.id
@@ -608,14 +608,14 @@ foreach ($file in $seedFileNames) {
         -CopiedFileCount ([ref]$copiedFileCount)
 }
 
-Write-Host ('Source latest date: {0}' -f $sourceLatestDate)
-Write-Host ('Target latest date: {0}' -f $resolvedTargetLatestDate)
-Write-Host ('Creating synthetic delta snapshot: +{0} day(s)' -f $script:DateShiftDays)
+Write-Output ('Source latest date: {0}' -f $sourceLatestDate)
+Write-Output ('Target latest date: {0}' -f $resolvedTargetLatestDate)
+Write-Output ('Creating synthetic delta snapshot: +{0} day(s)' -f $script:DateShiftDays)
 
 $machineWriter = $null
 $machineCount = 0
 try {
-    Write-Host 'Shifting machine current snapshot...'
+    Write-Output 'Shifting machine current snapshot...'
     $machineWriter = New-GzipWriterState -Path (Get-MachineCurrentPath -BasePath $resolvedOutputPath)
     foreach ($line in Read-VulnNdjsonLinesFromPath -Path $sourceMachinePath) {
         if ([string]::IsNullOrWhiteSpace($line)) {
@@ -627,7 +627,7 @@ try {
         $machineGroupName = Get-JsonStringPropertyValue -JsonLine $shiftedMachineLine -PropertyName 'rbacGroupName'
         $machineOsVersion = Get-JsonStringPropertyValue -JsonLine $shiftedMachineLine -PropertyName 'osVersion'
         if ([string]::IsNullOrWhiteSpace($machineOsVersion)) {
-            $referenceMetadata = Resolve-ReferenceDeviceMetadata -DeviceId $machineDeviceId -GroupName $machineGroupName
+            $referenceMetadata = Resolve-ReferenceDeviceContext -DeviceId $machineDeviceId -GroupName $machineGroupName
             if (-not [string]::IsNullOrWhiteSpace([string]$referenceMetadata.OSVersion)) {
                 $pattern = '"osVersion"\s*:\s*(?:null|"")'
                 $replacement = '"osVersion":"' + [string]$referenceMetadata.OSVersion + '"'
@@ -646,7 +646,7 @@ finally {
 $snapshotWriterStates = @{}
 $deltaRowCount = 0
 try {
-    Write-Host 'Writing legacy vulnerability snapshot delta files...'
+    Write-Output 'Writing legacy vulnerability snapshot delta files...'
     foreach ($line in Invoke-CurrentSnapshotJsonLines -BasePath $resolvedSourcePath) {
         $shiftedLine = Shift-JsonLineDateFields -JsonLine $line -FieldNames @('FirstSeenTimestamp', 'LastSeenTimestamp')
         $groupId = Get-LegacySnapshotGroupIdFromJsonLine -JsonLine $shiftedLine
@@ -699,9 +699,9 @@ $manifest = [ordered]@{
 
 $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $resolvedOutputPath 'synthetic-manifest.json') -Encoding utf8
 
-Write-Host ''
-Write-Host ('Synthetic delta overlay created at: {0}' -f $resolvedOutputPath) -ForegroundColor Green
-Write-Host ('  Seed files: {0} hard-linked, {1} copied' -f $linkedFileCount, $copiedFileCount)
-Write-Host ('  Shifted machine rows: {0}' -f $machineCount)
-Write-Host ('  Delta snapshot rows: {0}' -f $deltaRowCount)
-Write-Host ('  Delta snapshot files: {0}' -f ($deltaSnapshotFiles -join ', '))
+Write-Output ''
+Write-Output ('Synthetic delta overlay created at: {0}' -f $resolvedOutputPath)
+Write-Output ('  Seed files: {0} hard-linked, {1} copied' -f $linkedFileCount, $copiedFileCount)
+Write-Output ('  Shifted machine rows: {0}' -f $machineCount)
+Write-Output ('  Delta snapshot rows: {0}' -f $deltaRowCount)
+Write-Output ('  Delta snapshot files: {0}' -f ($deltaSnapshotFiles -join ', '))
