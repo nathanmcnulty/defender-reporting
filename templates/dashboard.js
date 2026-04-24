@@ -3840,7 +3840,7 @@ function formatSoftwareName(vendor, product) {
 
 function normalizeOsVersionGroupingLabel(osPlatform, osVersion) {
     const versionText = normalizeRemediationText(osVersion);
-    if (!versionText || versionText === 'Unknown') {
+    if (!versionText) {
         return '';
     }
 

@@ -1124,7 +1124,7 @@ try {
         elseif (($blobName -in $legacyAdvancedHuntingBlobs) -and ($IncludeAdvancedHunting -or $hasAdvancedHuntingCurrentBlob)) {
             $shouldDownload = $false
         }
-        elseif (($blobName -in $legacyVulnerabilityBlobs) -and $hasCanonicalVulnStore) {
+        elseif (($blobName -in $legacyVulnerabilityBlobs) -and $hasCanonicalVulnStore -and -not $UseExistingExportsOnly) {
             $shouldDownload = $false
         }
         elseif ((Test-IsMachineHistorySegmentFileName -Name $blobName) -and $hasMachineCurrentBlob) {
