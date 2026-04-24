@@ -437,6 +437,49 @@ function Test-BulkSnapshotImportMultipartSnapshot {
     }
 }
 
+function Test-BulkSnapshotImportMergesIntoExistingCanonicalStore {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('bulk-snapshot-import-existing-store-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $initialSnapshotPath = Join-Path $tempRoot 'VulnExport_1_2026-01-01.json'
+        $initialRows = @(
+            (Get-TestVulnRow -Id 'merge-001' -CveId 'CVE-2026-2001' -SnapshotDate '2026-01-01' -Version '1.0.0')
+        )
+        [System.IO.File]::WriteAllLines($initialSnapshotPath, @($initialRows | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 8 }), [System.Text.UTF8Encoding]::new($false))
+
+        $null = Publish-VulnStoreFromBulkSnapshot -BasePath $tempRoot -RemoveSnapshotFiles
+
+        $deltaSnapshotPath = Join-Path $tempRoot 'VulnExport_1_2026-01-02.json'
+        $deltaRows = @(
+            (Get-TestVulnRow -Id 'merge-001' -CveId 'CVE-2026-2001' -SnapshotDate '2026-01-02' -Version '1.0.0')
+            (Get-TestVulnRow -Id 'merge-002' -CveId 'CVE-2026-2002' -SnapshotDate '2026-01-02' -Version '2.0.0')
+        )
+        [System.IO.File]::WriteAllLines($deltaSnapshotPath, @($deltaRows | ForEach-Object { $_ | ConvertTo-Json -Compress -Depth 8 }), [System.Text.UTF8Encoding]::new($false))
+
+        $publishResult = Publish-VulnStoreFromBulkSnapshot -BasePath $tempRoot -RemoveSnapshotFiles
+        $storeRows = @(Read-VulnStoreRow -BasePath $tempRoot)
+        $storeIds = @($storeRows | ForEach-Object { [string](Get-VulnPropertyValue -InputObject $_ -Name 'Id') })
+
+        Assert-True ((Test-Path -LiteralPath (Get-VulnCurrentPath -BasePath $tempRoot) -PathType Leaf)) 'Canonical vuln current file was not preserved when merging into an existing store.'
+        Assert-True (@(Get-ChildItem -Path $tempRoot -Filter 'VulnHistory_*.json.gz' -File -ErrorAction SilentlyContinue).Count -eq 0) 'Merging an unchanged carry-forward snapshot into an existing store should not create history.'
+        Assert-True (@(Get-VulnLegacySnapshotFile -BasePath $tempRoot).Count -eq 0) 'Delta vulnerability snapshots were not removed after merging into an existing store.'
+        Assert-True ($publishResult.CurrentRows -eq 2) 'Expected the existing canonical store merge to retain both current rows from the latest snapshot.'
+        Assert-True ($publishResult.HistoryYears -eq 0) 'Expected the existing canonical store merge to avoid creating history when rows are only carried forward or added.'
+        Assert-True ([string]$publishResult.LatestSnapshotDate -eq '2026-01-02') 'Expected the existing canonical store merge to advance the latest snapshot date.'
+        Assert-True ($storeRows.Count -eq 2) 'Expected the merged existing store to expose exactly the carried-forward and newly added current rows.'
+        Assert-True (('merge-001' -in $storeIds) -and ('merge-002' -in $storeIds)) 'Expected the merged existing store to retain the original row and add the new row.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-HttpRetryDelayHelperBehavior {
     [CmdletBinding()]
     param()
@@ -2811,6 +2854,8 @@ Test-BulkSnapshotImportSingleSnapshot
 Write-Output '  Single-snapshot vulnerability import checks passed.'
 Test-BulkSnapshotImportMultipartSnapshot
 Write-Output '  Multipart vulnerability import checks passed.'
+Test-BulkSnapshotImportMergesIntoExistingCanonicalStore
+Write-Output '  Existing-store vulnerability merge checks passed.'
 Test-HttpRetryDelayHelperBehavior
 Write-Output '  Retry delay helper checks passed.'
 Test-WebRequestWithRetryTransientTransportBehavior

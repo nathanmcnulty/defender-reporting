@@ -386,6 +386,34 @@ function ConvertTo-SyntheticMachineRecord {
     return $machine
 }
 
+function Get-RowProfileFallbackValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $RowProfile,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PropertyName
+    )
+
+    $fallbackRow = if ($RowProfile.CurrentRows.Count -gt 0) {
+        $RowProfile.CurrentRows[0]
+    }
+    elseif ($RowProfile.HistoryEntries.Count -gt 0) {
+        $RowProfile.HistoryEntries[0].Row
+    }
+    else {
+        $null
+    }
+
+    if ($null -eq $fallbackRow) {
+        return ''
+    }
+
+    return [string](Get-RowPropertyValue -Row $fallbackRow -Name $PropertyName)
+}
+
 function ConvertTo-SyntheticRow {
     [CmdletBinding()]
     param(
@@ -1131,6 +1159,23 @@ $writtenHistoryRows = 0
 try {
     foreach ($plan in $plans) {
         $syntheticMachine = ConvertTo-SyntheticMachineRecord -TemplateMachine $plan.MachineTemplate -DeviceId ([string]$plan.DeviceId) -DeviceName ([string]$plan.DeviceName) -ObservedOn $generationDate
+        $templateProfileKey = Get-ProfileKey `
+            -DeviceId ([string](Get-MachineRecordValue -Machine $plan.MachineTemplate -Name 'id')) `
+            -DeviceName ([string](Get-MachineRecordValue -Machine $plan.MachineTemplate -Name 'computerDnsName'))
+        $templateMachineRowProfile = if ($rowProfileMap.ContainsKey($templateProfileKey)) { $rowProfileMap[$templateProfileKey] } else { $null }
+        if ([string]::IsNullOrWhiteSpace([string](Get-MachineRecordValue -Machine $syntheticMachine -Name 'osVersion'))) {
+            $fallbackOsVersion = if ($null -ne $templateMachineRowProfile) {
+                Get-RowProfileFallbackValue -RowProfile $templateMachineRowProfile -PropertyName 'OSVersion'
+            }
+            else {
+                ''
+            }
+            if (-not [string]::IsNullOrWhiteSpace($fallbackOsVersion)) {
+                Add-ObjectProperty -InputObject $syntheticMachine -Name 'osVersion' -Value $fallbackOsVersion
+                Add-ObjectProperty -InputObject $syntheticMachine -Name 'stateHash' -Value (Get-MachineStateHash -Machine $syntheticMachine)
+            }
+        }
+
         Write-GzipJsonRecordLine -WriterState $machineWriter -Record (New-MachineSnapshotRecord -Machine $syntheticMachine -ObservedOn $generationDate)
 
         $planDeviceProfileRow = [PSCustomObject]@{

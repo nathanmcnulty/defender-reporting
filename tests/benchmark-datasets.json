@@ -12,5 +12,19 @@
       "benchmark-medium-v1",
       "durable-baseline"
     ]
+  },
+  {
+    "id": "benchmark-large-50k-v1",
+    "description": "Durable large benchmark seed dataset for Azure replay and delta-snapshot validation.",
+    "preset": "BalancedMediumHeavy",
+    "seed": 20260322,
+    "targetDeviceCount": 50000,
+    "targetTotalVulnRows": 1500000,
+    "sourceRelativePath": "exports",
+    "outputRelativePath": ".local/large-datasets/synthetic-50k-1_5m",
+    "historyTags": [
+      "benchmark-large-50k-v1",
+      "large-seed"
+    ]
   }
 ]
