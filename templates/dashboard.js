@@ -150,9 +150,19 @@ const TABLE_PAGE_SIZE = 100;
 const CARD_PAGE_SIZE = 20;
 const CARD_RENDER_BATCH_SIZE = 50;
 const configuredPdfPageWarningThreshold = Number(dashboardConfig.pdfExportPageWarningThreshold);
+const configuredReportDataWarmupRowLimit = Number(dashboardConfig.reportDataWarmupRowLimit);
+const configuredReportDataWarmupMode = typeof dashboardConfig.reportDataWarmupMode === 'string'
+    ? dashboardConfig.reportDataWarmupMode.toLowerCase()
+    : 'auto';
 const PDF_EXPORT_PAGE_WARNING_THRESHOLD = Number.isFinite(configuredPdfPageWarningThreshold) && configuredPdfPageWarningThreshold > 0
     ? Math.floor(configuredPdfPageWarningThreshold)
     : 100;
+const REPORT_DATA_WARMUP_ROW_LIMIT = Number.isFinite(configuredReportDataWarmupRowLimit) && configuredReportDataWarmupRowLimit >= 0
+    ? Math.floor(configuredReportDataWarmupRowLimit)
+    : 100000;
+const REPORT_DATA_WARMUP_MODE = ['always', 'auto', 'never'].includes(configuredReportDataWarmupMode)
+    ? configuredReportDataWarmupMode
+    : 'auto';
 const PDF_PAGE_COUNT_TIMEOUT_MS = 10000;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
 const FACET_SEARCH_MIN_OPTIONS = 8;
@@ -223,6 +233,14 @@ const REPORT_IDS = [
     'devices-by-remediation',
     'remediations-by-device'
 ];
+const DEFERRED_VISIBLE_REPORT_IDS = new Set(REPORT_IDS.filter(reportId => reportId !== 'active-vulnerabilities'));
+const REPORT_LABELS = {
+    'active-vulnerabilities': 'Active Vulnerabilities',
+    'remediation-activity': 'Remediation Activity',
+    'impact-analysis': 'Impact Analysis',
+    'devices-by-remediation': 'Devices by Remediation',
+    'remediations-by-device': 'Remediations by Device'
+};
 const REMEDIATION_SCOPE_REPORT_IDS = ['devices-by-remediation', 'remediations-by-device'];
 const REMEDIATION_REPORT_MODE_RANGE = 'range';
 const REMEDIATION_REPORT_MODE_SNAPSHOT = 'snapshot';
@@ -233,6 +251,9 @@ let activeReportId = 'active-vulnerabilities';
 let remediationReportMode = REMEDIATION_REPORT_MODE_SNAPSHOT;
 const initializedReports = new Set();
 const dirtyReports = new Set(REPORT_IDS);
+let deferredVisibleReportRenderHandle = null;
+let deferredVisibleReportRenderReportId = '';
+let deferredVisibleReportRenderOwnsStatus = false;
 
 let filterState = createEmptyFilterState();
 let filterPopoverDraftState = null;
@@ -868,8 +889,33 @@ function cancelReportDataWarmup() {
     reportDataWarmupUsesIdleCallback = false;
 }
 
+function getReportDataWarmupCandidateRowCount() {
+    const cache = getAggregateCache();
+    if (Array.isArray(cache.activeRowsForCurrentSelection)) {
+        return cache.activeRowsForCurrentSelection.length;
+    }
+    return filteredData.length;
+}
+
+function shouldWarmReportData() {
+    if (REPORT_DATA_WARMUP_MODE === 'never') {
+        return false;
+    }
+
+    if (REPORT_DATA_WARMUP_MODE === 'always') {
+        return true;
+    }
+
+    return getReportDataWarmupCandidateRowCount() <= REPORT_DATA_WARMUP_ROW_LIMIT;
+}
+
 function scheduleReportDataWarmup() {
     cancelReportDataWarmup();
+
+    if (!shouldWarmReportData()) {
+        logDebug('Skipping report data warmup for', getReportDataWarmupCandidateRowCount(), 'rows');
+        return;
+    }
 
     const scheduledFilterKey = filterState.key;
     const scheduledMostRecentLastSeenDate = mostRecentLastSeenDate;
@@ -2227,6 +2273,76 @@ function renderActiveReport(force = false) {
     renderReport(activeReportId, force);
 }
 
+function cancelDeferredVisibleReportRender() {
+    if (deferredVisibleReportRenderHandle != null) {
+        clearTimeout(deferredVisibleReportRenderHandle);
+        deferredVisibleReportRenderHandle = null;
+    }
+
+    if (deferredVisibleReportRenderReportId) {
+        const deferredSection = document.getElementById(deferredVisibleReportRenderReportId + '-section');
+        if (deferredSection) {
+            deferredSection.removeAttribute('aria-busy');
+        }
+    }
+
+    if (deferredVisibleReportRenderOwnsStatus) {
+        clearDashboardStatus();
+    }
+
+    deferredVisibleReportRenderReportId = '';
+    deferredVisibleReportRenderOwnsStatus = false;
+}
+
+function shouldDeferVisibleReportRender(reportId, force = false) {
+    if (force) {
+        return false;
+    }
+
+    return DEFERRED_VISIBLE_REPORT_IDS.has(reportId) && !initializedReports.has(reportId);
+}
+
+function scheduleVisibleReportRender(reportId, force = false) {
+    cancelDeferredVisibleReportRender();
+
+    if (!shouldDeferVisibleReportRender(reportId, force)) {
+        renderReport(reportId, force);
+        return;
+    }
+
+    const reportSection = document.getElementById(reportId + '-section');
+    if (reportSection) {
+        reportSection.setAttribute('aria-busy', 'true');
+    }
+
+    deferredVisibleReportRenderReportId = reportId;
+    deferredVisibleReportRenderOwnsStatus = true;
+    setDashboardStatus(`Preparing ${REPORT_LABELS[reportId] || 'report'}...`);
+    deferredVisibleReportRenderHandle = window.setTimeout(() => {
+        deferredVisibleReportRenderHandle = null;
+
+        if (activeReportId !== reportId) {
+            cancelDeferredVisibleReportRender();
+            return;
+        }
+
+        try {
+            renderReport(reportId, force);
+        } finally {
+            const activeSection = document.getElementById(reportId + '-section');
+            if (activeSection) {
+                activeSection.removeAttribute('aria-busy');
+            }
+
+            deferredVisibleReportRenderReportId = '';
+            if (deferredVisibleReportRenderOwnsStatus) {
+                clearDashboardStatus();
+            }
+            deferredVisibleReportRenderOwnsStatus = false;
+        }
+    }, 0);
+}
+
 /**
  * Set up infinite scroll event listeners using window scroll
  */
@@ -2346,7 +2462,7 @@ function handleReportChange() {
     }
 
     updateRemediationReportModeUi(selectedReport);
-    renderReport(selectedReport);
+    scheduleVisibleReportRender(selectedReport);
 }
 
 /**
@@ -3668,6 +3784,7 @@ function matchesFilterState(v, state = filterState) {
  */
 function applyFilters() {
     const _t0 = performance.now();
+    cancelDeferredVisibleReportRender();
     invalidateAggregateCache();
 
     if (!filterState.hasDeviceNames || !filterState.hasRbacGroups || !filterState.hasDeviceTags || !filterState.hasSeverities || !filterState.hasOsPlatforms) {
@@ -3810,6 +3927,15 @@ function updateDataQualitySummary() {
 // UTILITY FUNCTIONS
 // =============================================================================
 
+const formatSoftwarePartCache = new Map();
+const remediationDescriptorCache = new Map();
+const splitRemediationByOsVersionCache = new Map();
+const versionAwareImpactDisplayNameCache = new Map();
+
+function buildMemoCacheKey(parts) {
+    return parts.map(value => value == null ? '' : String(value)).join('\u001f');
+}
+
 /**
  * Format software name from vendor and product
  * @param {string} vendor - The software vendor
@@ -3819,12 +3945,21 @@ function updateDataQualitySummary() {
 function formatSoftwarePart(text) {
     if (!text) return '';
 
-    return String(text)
+    const cacheKey = String(text);
+    const cached = formatSoftwarePartCache.get(cacheKey);
+    if (cached !== undefined) {
+        return cached;
+    }
+
+    const formatted = cacheKey
         .trim()
         .split('_')
         .filter(Boolean)
         .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
         .join(' ');
+
+    formatSoftwarePartCache.set(cacheKey, formatted);
+    return formatted;
 }
 
 function formatSoftwareName(vendor, product) {
@@ -3885,21 +4020,45 @@ function getOsFamilyComparisonKey(text) {
 }
 
 function shouldSplitRemediationByOsVersion(software, osPlatform) {
+    const cacheKey = buildMemoCacheKey([software, osPlatform]);
+    const cached = splitRemediationByOsVersionCache.get(cacheKey);
+    if (cached !== undefined) {
+        return cached;
+    }
+
     const softwareKey = getOsFamilyComparisonKey(software);
     const platformKey = getOsFamilyComparisonKey(osPlatform);
 
     if (!softwareKey || !platformKey) {
+        splitRemediationByOsVersionCache.set(cacheKey, false);
         return false;
     }
 
-    return softwareKey === platformKey
+    const shouldSplit = softwareKey === platformKey
         || softwareKey.startsWith(platformKey)
         || platformKey.startsWith(softwareKey);
+
+    splitRemediationByOsVersionCache.set(cacheKey, shouldSplit);
+    return shouldSplit;
 }
 
 function getVersionAwareImpactDisplayName(descriptor, software, osPlatform, osVersion, splitByVersion) {
+    const cacheKey = buildMemoCacheKey([
+        descriptor?.key,
+        descriptor?.title,
+        software,
+        osPlatform,
+        osVersion,
+        splitByVersion ? '1' : '0'
+    ]);
+    const cached = versionAwareImpactDisplayNameCache.get(cacheKey);
+    if (cached !== undefined) {
+        return cached;
+    }
+
     const baseName = getScopedRemediationDisplayTitle(descriptor);
     if (!splitByVersion) {
+        versionAwareImpactDisplayNameCache.set(cacheKey, baseName);
         return baseName;
     }
 
@@ -3910,16 +4069,21 @@ function getVersionAwareImpactDisplayName(descriptor, software, osPlatform, osVe
     const versionedSoftwareLabel = getVersionAwareSoftwareLabel(baseSoftwareLabel, osPlatform, osVersion, true);
 
     if (!versionedSoftwareLabel || versionedSoftwareLabel === baseSoftwareLabel) {
+        versionAwareImpactDisplayNameCache.set(cacheKey, baseName);
         return baseName;
     }
 
     const separatorIndex = baseName.indexOf(':');
     if (separatorIndex >= 0) {
         const suffix = baseName.slice(separatorIndex + 1).trim();
-        return suffix ? `${versionedSoftwareLabel}: ${suffix}` : versionedSoftwareLabel;
+        const scopedName = suffix ? `${versionedSoftwareLabel}: ${suffix}` : versionedSoftwareLabel;
+        versionAwareImpactDisplayNameCache.set(cacheKey, scopedName);
+        return scopedName;
     }
 
-    return `${versionedSoftwareLabel}: ${baseName}`;
+    const versionAwareName = `${versionedSoftwareLabel}: ${baseName}`;
+    versionAwareImpactDisplayNameCache.set(cacheKey, versionAwareName);
+    return versionAwareName;
 }
 
 function getPointInTimeReferenceDate(state = filterState) {
@@ -4921,6 +5085,22 @@ function getRemediationFamilyKey(recommendationReference, advisoryTitle, updateN
 function buildRemediationDescriptor(v) {
     materializeRow(v);
 
+    const descriptorCacheKey = buildMemoCacheKey([
+        v.SoftwareVendor,
+        v.SoftwareName,
+        v.CveBatchTitle,
+        v.RecommendedSecurityUpdate,
+        v.RecommendedSecurityUpdateId,
+        v.RecommendedSecurityUpdateUrl,
+        v.OSPlatform,
+        v.RecommendationReference,
+        v.CveBatchUrl
+    ]);
+    const cachedDescriptor = remediationDescriptorCache.get(descriptorCacheKey);
+    if (cachedDescriptor) {
+        return cachedDescriptor;
+    }
+
     const rawVendor = normalizeRemediationText(v.SoftwareVendor);
     const rawSoftware = normalizeRemediationText(v.SoftwareName);
     const advisoryTitle = normalizeRemediationText(v.CveBatchTitle);
@@ -5024,6 +5204,7 @@ function buildRemediationDescriptor(v) {
     };
 
     descriptor.displayRank = getRemediationDisplayRank(descriptor);
+    remediationDescriptorCache.set(descriptorCacheKey, descriptor);
 
     return descriptor;
 }
