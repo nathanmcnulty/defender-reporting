@@ -159,7 +159,7 @@ const PDF_EXPORT_PAGE_WARNING_THRESHOLD = Number.isFinite(configuredPdfPageWarni
     : 100;
 const REPORT_DATA_WARMUP_ROW_LIMIT = Number.isFinite(configuredReportDataWarmupRowLimit) && configuredReportDataWarmupRowLimit >= 0
     ? Math.floor(configuredReportDataWarmupRowLimit)
-    : 100000;
+    : 1000;
 const REPORT_DATA_WARMUP_MODE = ['always', 'auto', 'never'].includes(configuredReportDataWarmupMode)
     ? configuredReportDataWarmupMode
     : 'auto';
@@ -1528,6 +1528,7 @@ class VirtualModalTable {
         this.bufferRows = 20;
         this.renderedStart = -1;
         this.renderedEnd = -1;
+        this.renderPending = false;
 
         // Spacer rows for maintaining scroll height
         this.topSpacer = document.createElement('tr');
@@ -1542,7 +1543,15 @@ class VirtualModalTable {
     }
 
     _onScroll() {
-        requestAnimationFrame(() => this.render());
+        if (this.renderPending) {
+            return;
+        }
+
+        this.renderPending = true;
+        requestAnimationFrame(() => {
+            this.renderPending = false;
+            this.render();
+        });
     }
 
     render() {
