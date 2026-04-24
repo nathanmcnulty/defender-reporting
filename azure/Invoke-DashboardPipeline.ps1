@@ -17040,7 +17040,7 @@ try {
             throw "UseExistingExportsOnly was specified, but no vulnerability store, content-store sidecars, or legacy vulnerability snapshots were found in '$tempExports'."
         }
 
-        if ($hasExistingLegacyVulnerabilitySnapshots -and -not (Test-VulnStoreExistence -BasePath $tempExports) -and -not (Test-VulnContentStoreExistence -BasePath $tempExports)) {
+        if ($hasExistingLegacyVulnerabilitySnapshots) {
             Write-Output 'Canonicalizing downloaded legacy vulnerability snapshots...'
             $vulnStore = Publish-VulnStoreFromBulkSnapshot -BasePath $tempExports -RemoveSnapshotFiles
             Write-Output "  Saved vulnerability current/history store with $($vulnStore.CurrentRows) current row(s) across $($vulnStore.HistoryYears) history period file(s)"

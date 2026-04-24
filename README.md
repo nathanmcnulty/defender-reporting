@@ -186,6 +186,8 @@ flowchart TD
 - Run `./build/Invoke-RegressionValidation.ps1` for the deterministic local and PR-aligned preflight path.
 - Run `./tests/Invoke-HotPhaseReview.ps1 -DirectoryPath <dataset>` when you want a local phase-and-memory review before taking changes to the heavier benchmark or Azure paths.
 - Run `./tests/New-BenchmarkDataset.ps1 -DatasetId benchmark-medium-v1` to materialize the standard durable benchmark dataset before recording baseline captures.
+- Run `./tests/New-BenchmarkDataset.ps1 -DatasetId benchmark-large-50k-v1` to register or refresh the reusable 50k-device large Azure seed without regenerating it when the cached dataset already exists.
+- Run `./tests/New-SyntheticSnapshotDelta.ps1 -SourcePath <large-seed> -OutputPath <delta-overlay> -TargetLatestDate <yyyy-MM-dd>` when you want to replay a fresh incoming vulnerability export date on top of an existing large seed for Azure validation.
 - Run `./tests/Invoke-BenchmarkSeries.ps1 -BenchmarkDatasetId benchmark-medium-v1 -Iterations 3 -IncludePersistentLocalWorkflow` when you want the repeatable multi-run benchmark cadence used for durable baseline refreshes.
 - Run `./build/Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` when you want the local command that mirrors the live GitHub Actions export and dashboard generation path.
 - Run `./build/Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName <name> -FunctionAppName <name>` when you want the repo-owned manual validation path that rebuilds locally, redeploys Azure Automation and Function App, and executes both live Azure validation flows.

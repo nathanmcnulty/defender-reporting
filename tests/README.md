@@ -225,6 +225,32 @@ That dataset definition currently maps to:
 - seed: `20260322`
 - output path: `.local\benchmark-datasets\benchmark-medium-v1`
 
+For the larger reusable Azure stress seed, materialize or register the existing 50k-device dataset with:
+
+```powershell
+pwsh -NoProfile -File .\tests\New-BenchmarkDataset.ps1 -DatasetId benchmark-large-50k-v1
+```
+
+That dataset definition maps to:
+- dataset id: `benchmark-large-50k-v1`
+- preset: `BalancedMediumHeavy`
+- target devices: `50,000`
+- target vulnerability rows: `1,500,000`
+- seed: `20260322`
+- output path: `.local\large-datasets\synthetic-50k-1_5m`
+
+When you want to keep the large seed current and exercise the vulnerability-store merge path without regenerating 1.5M rows, create a shifted current-snapshot delta overlay with:
+
+```powershell
+pwsh -NoProfile -File .\tests\New-SyntheticSnapshotDelta.ps1 -SourcePath .\.local\large-datasets\synthetic-50k-1_5m -OutputPath .\.local\large-datasets\synthetic-50k-1_5m-delta-<date> -TargetLatestDate <yyyy-MM-dd>
+```
+
+That command:
+- reuses the large canonical store as the base seed instead of rebuilding it
+- writes a fresh `Machines_Current.json.gz` with shifted observation dates
+- writes a new `VulnExport_<group>_<date>.json.gz` snapshot representing the next full bulk export date
+- is intended for Azure replay paths that merge incoming snapshots into the existing canonical store
+
 Capture a repeatable multi-run benchmark series against the standard dataset with:
 
 ```powershell
@@ -259,5 +285,6 @@ Recommendations:
 - keep raw benchmark outputs under `.local/`
 - use `.local\benchmark-history\benchmark-history.jsonl` plus `.local\benchmark-history\latest-summary.md` for repeated review and Azure acceptance captures that you want to compare over time
 - prefer `benchmark-medium-v1` plus `Invoke-BenchmarkSeries.ps1` when you need the durable, merge-tracked benchmark cadence instead of an ad hoc review capture
+- prefer `benchmark-large-50k-v1` plus `New-SyntheticSnapshotDelta.ps1` when you need a reusable large Azure seed with a fresh incoming snapshot date
 - use the staged local copy behavior in `Measure-BranchVsMainBenchmark.ps1` when benchmarking raw datasets without sidecars
 - use `docs/performance-baselines.md` only for accepted durable datasets that should remain merge-tracked as baseline documentation
