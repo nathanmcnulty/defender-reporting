@@ -17,7 +17,7 @@ on:
       - '.github/workflows/validate-dashboard.yml'
       - '.github/workflows/update-vulnerability-dashboard.yml'
       - '.github/workflows/sync-azure-runbook.yml'
-      - '.github/workflows/release-azure-package.yml'
+      - '.github/workflows/sync-azure-package.yml'
   push:
     branches:
       - main
@@ -32,7 +32,7 @@ on:
       - '.github/workflows/validate-dashboard.yml'
       - '.github/workflows/update-vulnerability-dashboard.yml'
       - '.github/workflows/sync-azure-runbook.yml'
-      - '.github/workflows/release-azure-package.yml'
+      - '.github/workflows/sync-azure-package.yml'
   workflow_dispatch:
 
 permissions:
@@ -60,7 +60,7 @@ jobs:
         run: |
           .\build\Invoke-RegressionValidation.ps1
 
-      - name: Smoke test Azure release package
+      - name: Smoke test Azure package
         shell: pwsh
         run: |
           .\build\Build-AzureReleasePackage.ps1 -OutputPath (Join-Path $PWD '.local\local-reports\validate-dashboard\Azure-validation.zip')

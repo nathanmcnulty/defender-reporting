@@ -1,0 +1,79 @@
+﻿name: Build Azure Package
+
+concurrency:
+  group: sync-azure-package-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Setup-AzureResources.ps1'
+      - 'templates/**'
+      - 'azure/**'
+      - 'build/Build-AzureReleasePackage.ps1'
+      - 'build/Build-SharedHelpers.ps1'
+      - 'build/private/AzureArtifactBuildTools.ps1'
+      - 'build/private/ArtifactManifestTools.ps1'
+      - 'build/manifests/shared-helpers.json'
+      - 'build/azure/**'
+      - 'src/powershell/Shared/**'
+      - 'src/powershell/Provisioning/Azure/**'
+      - '.github/workflows/sync-azure-package.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Install Az.Accounts PowerShell module
+        shell: pwsh
+        run: |
+          Install-Module -Name Az.Accounts -Force -AllowClobber -Scope CurrentUser
+
+      - name: Prepare Azure package metadata
+        id: package
+        shell: pwsh
+        run: |
+          $dateStamp = [datetime]::UtcNow.ToString('yyMMdd')
+          $commitStamp = if ([string]::IsNullOrWhiteSpace($env:GITHUB_SHA)) {
+            (git rev-parse --short=7 HEAD)
+          }
+          else {
+            $env:GITHUB_SHA.Substring(0, 7)
+          }
+
+          $packageBaseName = "Azure-$dateStamp-$commitStamp"
+          $packageName = "$packageBaseName.zip"
+          $packagePath = Join-Path $env:RUNNER_TEMP $packageName
+
+          "artifact_name=$packageBaseName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "package_name=$packageName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "package_path=$packagePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Build Azure package
+        shell: pwsh
+        run: |
+          $packagePath = '${{ steps.package.outputs.package_path }}'
+          .\build\Build-AzureReleasePackage.ps1 -OutputPath $packagePath
+
+      - name: Upload Azure package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ steps.package.outputs.package_path }}
+          if-no-files-found: error
