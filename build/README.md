@@ -10,7 +10,7 @@ This directory contains maintainer-facing build, validation, import, and packagi
 - `../src/powershell/Shared/`: canonical shared helper source organized by domain
 - `../src/powershell/Validation/`: canonical validation helper source organized by domain
 - `azure/`: Azure-specific build sources and build entrypoints
-- `Build-*.ps1`: top-level build scripts for generated helper files and release packaging
+- `Build-*.ps1`: top-level build scripts for generated helper files and Azure package assembly
 - `Import-*.ps1`: dot-sourcing wrappers that rebuild generated helper files when needed
 - `Invoke-*.ps1`: maintainer validation and workflow-aligned execution entrypoints
 
@@ -34,7 +34,7 @@ This directory contains maintainer-facing build, validation, import, and packagi
 # Rebuild locally, redeploy Azure Automation + Function App, and execute both live validation paths
 .\build\Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName aa-defender-reporting -FunctionAppName func-defender-reporting -SkipMdePermissions -FunctionExecutionDatasetPath .\exports
 
-# Build the same Azure release zip used by the release workflow
+# Build the same Azure zip used by the artifact workflow
 .\build\Build-AzureReleasePackage.ps1
 ```
 
