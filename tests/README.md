@@ -60,17 +60,25 @@ Defaults:
 - target vulnerability rows: `1,500,000`
 - output path: `.\exports-synthetic`
 
-Run a full local dashboard generation against that synthetic export set with:
+Run an iterative local dashboard generation against that synthetic export set with:
 
 ```powershell
-pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -Validate
+pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -Validate -ValidationMode artifacts
 ```
 
 That command:
 - regenerates the synthetic exports
 - runs `Generate-VulnerabilityDashboard.ps1` against them
+- validates the generated self-contained and hosted dashboard artifacts
 - writes `synthetic-manifest.json` and `stress-validation-report.json` under `exports-synthetic/`
-- writes `dashboard-audit.json` under `exports-synthetic/` when `-Validate` is set
+
+Reserve the semantic replay for milestone or final local sign-off:
+
+```powershell
+pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -Validate -ValidationMode semantic
+```
+
+That semantic mode additionally writes `dashboard-audit.json` under `exports-synthetic/`.
 
 Supported presets:
 - `DeviceCardinalityFirst`
@@ -141,8 +149,10 @@ pwsh -NoProfile -File .\tests\Generate-SyntheticLargeExports.ps1 -OutputPath .\.
 
 pwsh -NoProfile -File .\tests\New-SyntheticLiveExport.ps1 -SourcePath .\.local\large-datasets\synthetic-raw -OutputPath .\.local\large-datasets\synthetic-raw-live -SkipContentStoreSidecars -Force
 
-pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -SkipSyntheticGeneration -SyntheticOutputPath .\.local\large-datasets\synthetic-raw-live -Validate
+pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -SkipSyntheticGeneration -SyntheticOutputPath .\.local\large-datasets\synthetic-raw-live -Validate -ValidationMode artifacts
 ```
+
+Switch that final command to `-ValidationMode semantic` only when you need the full streaming semantic replay before sign-off.
 
 Standalone legacy vulnerability snapshot materialization from that raw live dataset:
 

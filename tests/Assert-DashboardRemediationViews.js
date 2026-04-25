@@ -728,6 +728,116 @@ module.exports = {
         'Expected impact analysis Patch Ref content to retain collapsed KB references.'
     );
 
+    const osFamilyDisambiguationRows = [
+        createTestRow({
+            DeviceId: 'windows-client',
+            DeviceName: 'windows-client.contoso.com',
+            SoftwareVendor: 'microsoft',
+            SoftwareName: 'windows_11',
+            OSPlatform: 'Windows11',
+            OSVersion: '10.0.26100.1',
+            RecommendationReference: 'va-_-microsoft-_-windows_11',
+            CveId: 'CVE-2026-4100',
+            RecommendedSecurityUpdate: 'April 2026 Security Updates',
+            RecommendedSecurityUpdateId: '',
+            RecommendedSecurityUpdateUrl: '',
+            CveBatchTitle: 'Microsoft April 2026 Security Updates',
+            FirstSeenTimestamp: '2025-11-21',
+            LastSeenTimestamp: '2025-12-01',
+            MachineInfo: {
+                ls: '2025-12-01',
+                ip: '10.0.0.70'
+            }
+        }),
+        createTestRow({
+            DeviceId: 'windows-client-legacy',
+            DeviceName: 'windows-client-legacy.contoso.com',
+            SoftwareVendor: 'microsoft',
+            SoftwareName: 'windows_11',
+            OSPlatform: 'Windows11',
+            OSVersion: '10.0.22631.1',
+            RecommendationReference: 'va-_-microsoft-_-windows_11',
+            CveId: 'CVE-2026-4103',
+            RecommendedSecurityUpdate: 'April 2026 Security Updates',
+            RecommendedSecurityUpdateId: '',
+            RecommendedSecurityUpdateUrl: '',
+            CveBatchTitle: 'Microsoft April 2026 Security Updates',
+            FirstSeenTimestamp: '2025-11-24',
+            LastSeenTimestamp: '2025-12-01',
+            MachineInfo: {
+                ls: '2025-12-01',
+                ip: '10.0.0.73'
+            }
+        }),
+        createTestRow({
+            DeviceId: 'windows-server',
+            DeviceName: 'windows-server.contoso.com',
+            SoftwareVendor: 'microsoft',
+            SoftwareName: 'windows_11',
+            OSPlatform: 'WindowsServer2022',
+            OSVersion: '10.0.20348.1',
+            RecommendationReference: 'va-_-microsoft-_-windows_11',
+            CveId: 'CVE-2026-4101',
+            RecommendedSecurityUpdate: 'April 2026 Security Updates',
+            RecommendedSecurityUpdateId: '',
+            RecommendedSecurityUpdateUrl: '',
+            CveBatchTitle: 'Microsoft April 2026 Security Updates',
+            FirstSeenTimestamp: '2025-11-22',
+            LastSeenTimestamp: '2025-12-01',
+            MachineInfo: {
+                ls: '2025-12-01',
+                ip: '10.0.0.71'
+            }
+        }),
+        createTestRow({
+            DeviceId: 'windows-ubuntu',
+            DeviceName: 'windows-ubuntu.contoso.com',
+            SoftwareVendor: 'microsoft',
+            SoftwareName: 'windows_11',
+            OSPlatform: 'Ubuntu',
+            OSVersion: '24.04.1',
+            RecommendationReference: 'va-_-microsoft-_-windows_11',
+            CveId: 'CVE-2026-4102',
+            RecommendedSecurityUpdate: 'April 2026 Security Updates',
+            RecommendedSecurityUpdateId: '',
+            RecommendedSecurityUpdateUrl: '',
+            CveBatchTitle: 'Microsoft April 2026 Security Updates',
+            FirstSeenTimestamp: '2025-11-23',
+            LastSeenTimestamp: '2025-12-01',
+            MachineInfo: {
+                ls: '2025-12-01',
+                ip: '10.0.0.72'
+            }
+        })
+    ];
+
+    dashboard.applyDerivedVulnerabilityFields(osFamilyDisambiguationRows);
+    dashboard.setDashboardState(historicalRangeState, osFamilyDisambiguationRows, '2025-12-01');
+
+    const osFamilyRows = dashboard.getRemediationTableData();
+    assert.strictEqual(
+        osFamilyRows.map(row => row.software).sort().join('|'),
+        [
+            'Windows 11 (10.0.22631)',
+            'Windows 11 (10.0.26100)',
+            'Windows 11 [Ubuntu]',
+            'Windows 11 [Windows Server 2022]'
+        ].sort().join('|'),
+        'Expected OS-family remediation rows to disambiguate mismatched device platforms instead of collapsing them into one plain software label.'
+    );
+
+    const osFamilyImpact = dashboard.getImpactAnalysisData();
+    assert.strictEqual(
+        osFamilyImpact.top25.map(row => row.name).sort().join('|'),
+        [
+            'Windows 11 (10.0.22631): April 2026 Security Updates',
+            'Windows 11 (10.0.26100): April 2026 Security Updates',
+            'Windows 11 [Ubuntu]: April 2026 Security Updates',
+            'Windows 11 [Windows Server 2022]: April 2026 Security Updates'
+        ].sort().join('|'),
+        'Expected impact analysis to keep the same OS-family disambiguation used by the active remediation table.'
+    );
+
     const appleDescriptor = dashboard.buildRemediationDescriptor(createTestRow({
         SoftwareVendor: 'apple',
         SoftwareName: 'mac_os',

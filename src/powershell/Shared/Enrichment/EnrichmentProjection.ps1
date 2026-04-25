@@ -43,17 +43,78 @@ function New-MachineInfoObject {
         return $null
     }
 
+    $projection = Get-MachineProjection -Machine $Machine
+    if ($null -eq $projection) {
+        return $null
+    }
+
+    return $projection.MachineInfo
+}
+
+function Get-MachineProjection {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Machine
+    )
+
+    if ($null -eq $Machine) {
+        return $null
+    }
+
+    $machineTuple = if ($Machine -is [System.Array]) {
+        ConvertTo-NormalizationMachineTuple -Machine $Machine
+    }
+    else {
+        $null
+    }
+
+    $getScalarValue = {
+        param(
+            [int]$TupleIndex,
+            [string]$PropertyName
+        )
+
+        if ($machineTuple -and $machineTuple.Length -gt $TupleIndex) {
+            return $machineTuple[$TupleIndex]
+        }
+
+        return $Machine.PSObject.Properties[$PropertyName]?.Value
+    }
+
+    $machineTags = if ($machineTuple -and $machineTuple.Length -ge 15) {
+        @(Get-StringArray -Value $machineTuple[14])
+    }
+    elseif ($Machine.PSObject.Properties['machineTags']?.Value) {
+        @(Get-StringArray -Value $Machine.PSObject.Properties['machineTags']?.Value)
+    }
+    else {
+        @()
+    }
+
+    $lastSeen = & $getScalarValue 8 'lastSeen'
+    $firstSeen = & $getScalarValue 9 'firstSeen'
+
     return [PSCustomObject]@{
-        ip = $Machine.lastIpAddress
-        eip = $Machine.lastExternalIpAddress
-        hs = $Machine.healthStatus
-        rs = $Machine.riskScore
-        el = $Machine.exposureLevel
-        dv = $Machine.deviceValue
-        mb = $Machine.managedBy
-        aad = $Machine.isAadJoined
-        ls = Convert-ToYmdDate -DateValue $Machine.lastSeen
-        fs = Convert-ToYmdDate -DateValue $Machine.firstSeen
+        ComputerDnsName = [string](& $getScalarValue 11 'computerDnsName')
+        RbacGroupName = [string](& $getScalarValue 12 'rbacGroupName')
+        OSPlatform = [string](& $getScalarValue 13 'osPlatform')
+        OSVersion = [string](& $getScalarValue 10 'osVersion')
+        MachineTags = @($machineTags)
+        MachineInfo = [PSCustomObject]@{
+            ip = & $getScalarValue 0 'lastIpAddress'
+            eip = & $getScalarValue 1 'lastExternalIpAddress'
+            hs = & $getScalarValue 2 'healthStatus'
+            rs = & $getScalarValue 3 'riskScore'
+            el = & $getScalarValue 4 'exposureLevel'
+            dv = & $getScalarValue 5 'deviceValue'
+            mb = & $getScalarValue 6 'managedBy'
+            aad = & $getScalarValue 7 'isAadJoined'
+            ls = Convert-ToYmdDate -DateValue $lastSeen
+            fs = Convert-ToYmdDate -DateValue $firstSeen
+        }
     }
 }
 

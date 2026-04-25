@@ -1964,16 +1964,29 @@ function Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup {
 
         Assert-True ($tupleMachines.Count -eq $compressedMachines.Count) 'Expected tuple-mode machine loading to preserve the same machine count as the compressed machine lookup path.'
         Assert-True ($tupleMachines.ContainsKey('device-live')) 'Expected tuple-mode machine loading to preserve populated machines.'
-        Assert-True (-not $tupleMachines.ContainsKey('device-sparse')) 'Expected tuple-mode machine loading to drop machines whose normalization tuple is entirely empty.'
+        Assert-True ($tupleMachines.ContainsKey('device-sparse')) 'Expected tuple-mode machine loading to retain sparse machines when extended normalization metadata is present.'
         Assert-True (-not $tupleMachines.ContainsKey('device-removed')) 'Expected tuple-mode machine loading to drop removed machines from the current lookup.'
 
         $expectedTuple = [object[]]$compressedMachines['device-live']
         $actualTuple = [object[]]$tupleMachines['device-live']
         Assert-True ($actualTuple -is [System.Array]) 'Expected tuple-mode machine loading to materialize array-backed normalization tuples.'
-        Assert-True ($actualTuple.Length -eq 10) 'Expected tuple-mode machine loading to preserve the 10-slot normalization tuple shape.'
+        Assert-True ($actualTuple.Length -eq $expectedTuple.Length) 'Expected tuple-mode machine loading to preserve the normalization tuple shape.'
+
+        $expectedSparseTuple = [object[]]$compressedMachines['device-sparse']
+        $actualSparseTuple = [object[]]$tupleMachines['device-sparse']
+        Assert-True ($actualSparseTuple -is [System.Array]) 'Expected tuple-mode machine loading to materialize sparse machines as array-backed normalization tuples.'
+        Assert-True ($actualSparseTuple.Length -eq $expectedSparseTuple.Length) 'Expected tuple-mode machine loading to preserve the sparse normalization tuple shape.'
 
         for ($tupleIndex = 0; $tupleIndex -lt $expectedTuple.Length; $tupleIndex++) {
-            Assert-True ($actualTuple[$tupleIndex] -eq $expectedTuple[$tupleIndex]) "Expected tuple-mode machine loading to preserve tuple slot $tupleIndex."
+            $expectedTupleValue = ConvertTo-Json -InputObject $expectedTuple[$tupleIndex] -Compress -Depth 20
+            $actualTupleValue = ConvertTo-Json -InputObject $actualTuple[$tupleIndex] -Compress -Depth 20
+            Assert-True ($actualTupleValue -eq $expectedTupleValue) "Expected tuple-mode machine loading to preserve tuple slot $tupleIndex."
+        }
+
+        for ($tupleIndex = 0; $tupleIndex -lt $expectedSparseTuple.Length; $tupleIndex++) {
+            $expectedSparseTupleValue = ConvertTo-Json -InputObject $expectedSparseTuple[$tupleIndex] -Compress -Depth 20
+            $actualSparseTupleValue = ConvertTo-Json -InputObject $actualSparseTuple[$tupleIndex] -Compress -Depth 20
+            Assert-True ($actualSparseTupleValue -eq $expectedSparseTupleValue) "Expected tuple-mode machine loading to preserve sparse tuple slot $tupleIndex."
         }
     }
     finally {

@@ -191,19 +191,36 @@ function Get-DefenderApiAccessToken {
     [OutputType([string])]
     param()
 
-    if (-not (Get-Command -Name Get-AzAccessToken -ErrorAction Ignore)) {
-        throw 'Get-AzAccessToken is not available. Install Az.Accounts before running this script.'
+    Write-Verbose 'Getting Microsoft Defender API access token...'
+
+    if (Get-Command -Name Get-AzAccessToken -ErrorAction Ignore) {
+        try {
+            $tokenResponse = Get-AzAccessToken -ResourceUrl 'https://api.securitycenter.microsoft.com' -AsSecureString -ErrorAction Stop
+            $secureStringPointer = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResponse.Token)
+            try {
+                return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($secureStringPointer)
+            }
+            finally {
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($secureStringPointer)
+            }
+        }
+        catch {
+            Write-Warning ("Get-AzAccessToken failed for the Defender API. Falling back to Azure CLI token acquisition if available. {0}" -f $_.Exception.Message)
+        }
     }
 
-    Write-Verbose 'Getting Microsoft Defender API access token...'
-    $tokenResponse = Get-AzAccessToken -ResourceUrl 'https://api.securitycenter.microsoft.com' -AsSecureString
-    $secureStringPointer = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResponse.Token)
-    try {
-        return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($secureStringPointer)
+    $azCommand = Get-Command -Name 'az' -ErrorAction Ignore
+    if ($null -eq $azCommand) {
+        throw 'Unable to acquire a Defender API access token. Get-AzAccessToken failed and Azure CLI is not available.'
     }
-    finally {
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($secureStringPointer)
+
+    $tokenJson = & $azCommand.Source account get-access-token --resource https://api.securitycenter.microsoft.com --output json
+    $tokenResult = $tokenJson | ConvertFrom-Json -Depth 10
+    if ($null -eq $tokenResult -or [string]::IsNullOrWhiteSpace([string]$tokenResult.accessToken)) {
+        throw 'Azure CLI did not return a Defender API access token.'
     }
+
+    return [string]$tokenResult.accessToken
 }
 
 function Get-OutputFileDetail {

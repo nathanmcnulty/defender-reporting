@@ -5202,8 +5202,24 @@ function ConvertTo-NormalizationMachineTuple {
         return $null
     }
 
-    if ($Machine -is [System.Array] -and $Machine.Length -ge 10) {
-        return [object[]]$Machine
+    if ($Machine -is [System.Array]) {
+        $tuple = [object[]]$Machine
+        if ($tuple.Length -ge 15) {
+            return $tuple
+        }
+
+        if ($tuple.Length -ge 10) {
+            $extendedTuple = [System.Collections.Generic.List[object]]::new()
+            foreach ($value in $tuple) {
+                $extendedTuple.Add($value) | Out-Null
+            }
+
+            while ($extendedTuple.Count -lt 15) {
+                $extendedTuple.Add($null) | Out-Null
+            }
+
+            return [object[]]@($extendedTuple)
+        }
     }
 
     $ip = $Machine.PSObject.Properties['lastIpAddress']?.Value
@@ -5216,6 +5232,11 @@ function ConvertTo-NormalizationMachineTuple {
     $isAadJoined = $Machine.PSObject.Properties['isAadJoined']?.Value
     $lastSeen = $Machine.PSObject.Properties['lastSeen']?.Value
     $firstSeen = $Machine.PSObject.Properties['firstSeen']?.Value
+    $osVersion = $Machine.PSObject.Properties['osVersion']?.Value
+    $computerDnsName = $Machine.PSObject.Properties['computerDnsName']?.Value
+    $rbacGroupName = $Machine.PSObject.Properties['rbacGroupName']?.Value
+    $osPlatform = $Machine.PSObject.Properties['osPlatform']?.Value
+    $machineTags = @(Get-NormalizedMachineTag -Tags $Machine.PSObject.Properties['machineTags']?.Value)
 
     if (
         $null -eq $ip -and
@@ -5227,7 +5248,12 @@ function ConvertTo-NormalizationMachineTuple {
         $null -eq $managedBy -and
         $null -eq $isAadJoined -and
         $null -eq $lastSeen -and
-        $null -eq $firstSeen
+        $null -eq $firstSeen -and
+        $null -eq $osVersion -and
+        $null -eq $computerDnsName -and
+        $null -eq $rbacGroupName -and
+        $null -eq $osPlatform -and
+        @($machineTags).Count -eq 0
     ) {
         return $null
     }
@@ -5242,7 +5268,12 @@ function ConvertTo-NormalizationMachineTuple {
         $managedBy,
         $isAadJoined,
         $lastSeen,
-        $firstSeen
+        $firstSeen,
+        $osVersion,
+        $computerDnsName,
+        $rbacGroupName,
+        $osPlatform,
+        @($machineTags)
     )
 }
 
@@ -5409,7 +5440,12 @@ function ConvertFrom-MachineJsonElementToNormalizationEntry {
         (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'managedBy'),
         (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'isAadJoined'),
         (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'lastSeen'),
-        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'firstSeen')
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'firstSeen'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'osVersion'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'computerDnsName'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'rbacGroupName'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'osPlatform'),
+        @(Get-MachineJsonElementStringArrayValue -Element $MachineElement -Name 'machineTags')
     )
 
     $hasTupleValue = $false
@@ -6306,6 +6342,10 @@ function Convert-ToYmdDate {
 
     if ($raw -match '^\d{4}-\d{2}-\d{2}$') {
         return $raw
+    }
+
+    if ($raw.Length -ge 10 -and $raw[4] -eq '-' -and $raw[7] -eq '-') {
+        return $raw.Substring(0, 10)
     }
 
     if ($raw -match '^(\d{1,2})/(\d{1,2})/(\d{4})') {
@@ -7562,17 +7602,78 @@ function New-MachineInfoObject {
         return $null
     }
 
+    $projection = Get-MachineProjection -Machine $Machine
+    if ($null -eq $projection) {
+        return $null
+    }
+
+    return $projection.MachineInfo
+}
+
+function Get-MachineProjection {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Machine
+    )
+
+    if ($null -eq $Machine) {
+        return $null
+    }
+
+    $machineTuple = if ($Machine -is [System.Array]) {
+        ConvertTo-NormalizationMachineTuple -Machine $Machine
+    }
+    else {
+        $null
+    }
+
+    $getScalarValue = {
+        param(
+            [int]$TupleIndex,
+            [string]$PropertyName
+        )
+
+        if ($machineTuple -and $machineTuple.Length -gt $TupleIndex) {
+            return $machineTuple[$TupleIndex]
+        }
+
+        return $Machine.PSObject.Properties[$PropertyName]?.Value
+    }
+
+    $machineTags = if ($machineTuple -and $machineTuple.Length -ge 15) {
+        @(Get-StringArray -Value $machineTuple[14])
+    }
+    elseif ($Machine.PSObject.Properties['machineTags']?.Value) {
+        @(Get-StringArray -Value $Machine.PSObject.Properties['machineTags']?.Value)
+    }
+    else {
+        @()
+    }
+
+    $lastSeen = & $getScalarValue 8 'lastSeen'
+    $firstSeen = & $getScalarValue 9 'firstSeen'
+
     return [PSCustomObject]@{
-        ip = $Machine.lastIpAddress
-        eip = $Machine.lastExternalIpAddress
-        hs = $Machine.healthStatus
-        rs = $Machine.riskScore
-        el = $Machine.exposureLevel
-        dv = $Machine.deviceValue
-        mb = $Machine.managedBy
-        aad = $Machine.isAadJoined
-        ls = Convert-ToYmdDate -DateValue $Machine.lastSeen
-        fs = Convert-ToYmdDate -DateValue $Machine.firstSeen
+        ComputerDnsName = [string](& $getScalarValue 11 'computerDnsName')
+        RbacGroupName = [string](& $getScalarValue 12 'rbacGroupName')
+        OSPlatform = [string](& $getScalarValue 13 'osPlatform')
+        OSVersion = [string](& $getScalarValue 10 'osVersion')
+        MachineTags = @($machineTags)
+        MachineInfo = [PSCustomObject]@{
+            ip = & $getScalarValue 0 'lastIpAddress'
+            eip = & $getScalarValue 1 'lastExternalIpAddress'
+            hs = & $getScalarValue 2 'healthStatus'
+            rs = & $getScalarValue 3 'riskScore'
+            el = & $getScalarValue 4 'exposureLevel'
+            dv = & $getScalarValue 5 'deviceValue'
+            mb = & $getScalarValue 6 'managedBy'
+            aad = & $getScalarValue 7 'isAadJoined'
+            ls = Convert-ToYmdDate -DateValue $lastSeen
+            fs = Convert-ToYmdDate -DateValue $firstSeen
+        }
     }
 }
 
@@ -12624,7 +12725,7 @@ function Get-DashboardSemanticValidationLogicVersion {
     [OutputType([string])]
     param()
 
-    return 'streaming-large-dataset-v2'
+    return 'streaming-large-dataset-v3'
 }
 
 function Set-NormalizedPayloadSemanticValidationAttestation {
@@ -13554,6 +13655,51 @@ function Add-NormalizedDevice {
     if (-not $deviceIndex.ContainsKey($deviceKey)) {
         $machine = if (-not [string]::IsNullOrWhiteSpace($DeviceId)) { $Context.Machines[$DeviceId] } else { $null }
         $machineTuple = if ($machine -is [System.Array] -and $machine.Length -ge 10) { $machine } else { $null }
+        $machineOsVersion = if ($machineTuple -and $machineTuple.Length -ge 11) {
+            [string]$machineTuple[10]
+        }
+        elseif ($machine -and -not $machineTuple) {
+            [string]$machine.PSObject.Properties['osVersion']?.Value
+        }
+        else {
+            $null
+        }
+        $machineDeviceName = if ($machineTuple -and $machineTuple.Length -ge 12) {
+            [string]$machineTuple[11]
+        }
+        elseif ($machine -and -not $machineTuple) {
+            [string]$machine.PSObject.Properties['computerDnsName']?.Value
+        }
+        else {
+            $null
+        }
+        $machineGroupName = if ($machineTuple -and $machineTuple.Length -ge 13) {
+            [string]$machineTuple[12]
+        }
+        elseif ($machine -and -not $machineTuple) {
+            [string]$machine.PSObject.Properties['rbacGroupName']?.Value
+        }
+        else {
+            $null
+        }
+        $machinePlatform = if ($machineTuple -and $machineTuple.Length -ge 14) {
+            [string]$machineTuple[13]
+        }
+        elseif ($machine -and -not $machineTuple) {
+            [string]$machine.PSObject.Properties['osPlatform']?.Value
+        }
+        else {
+            $null
+        }
+        $machineResolvedTags = if ($machineTuple -and $machineTuple.Length -ge 15) {
+            @($machineTuple[14])
+        }
+        elseif ($machine -and -not $machineTuple) {
+            @(Get-NormalizedMachineTag -Tags $machine.PSObject.Properties['machineTags']?.Value)
+        }
+        else {
+            @()
+        }
         $machineUsers = [string[]]@()
         if ($null -ne $Context.AdvancedHuntingDeviceUsers -and -not [string]::IsNullOrWhiteSpace($DeviceId)) {
             $rawMachineUsers = $Context.AdvancedHuntingDeviceUsers[[string]$DeviceId]
@@ -13566,16 +13712,16 @@ function Add-NormalizedDevice {
             }
         }
 
-        $resolvedGroupName = $GroupName
+        $resolvedGroupName = if ($null -ne $machine) { $machineGroupName } else { $GroupName }
         if ([string]::IsNullOrWhiteSpace([string]$resolvedGroupName)) {
             $resolvedGroupName = if ([string]::IsNullOrWhiteSpace([string]$GroupName)) { '(none)' } else { $GroupName }
         }
         $groupIdx = Get-OrCreateIndex -value $resolvedGroupName -list $lookups.groups -indexMap $groupIndex
 
-        $osPlat = $OsPlatform
+        $osPlat = if ($null -ne $machine) { $machinePlatform } else { $OsPlatform }
         $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
 
-        $effectiveTags = if ($MachineTags) { $MachineTags } else { @() }
+        $effectiveTags = if ($null -ne $machine -and @($machineResolvedTags).Count -gt 0) { @($machineResolvedTags) } elseif ($MachineTags) { @($MachineTags) } else { @() }
         $tagIndices = [System.Collections.Generic.List[int]]::new()
         foreach ($tag in $effectiveTags) {
             $tagIdx = Get-OrCreateIndex -value $tag -list $lookups.tags -indexMap $tagIndex
@@ -13606,10 +13752,10 @@ function Add-NormalizedDevice {
 
         $lookups.devices.Add([PSCustomObject]@{
             id = $DeviceId
-            n = if ($DeviceName) { $DeviceName } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['computerDnsName']?.Value } else { '(no machine data)' }
+            n = if ($null -ne $machine) { $machineDeviceName } elseif ($DeviceName) { $DeviceName } else { '(no machine data)' }
             g = $groupIdx
             o = $platIdx
-            ov = if ($OsVersion) { $OsVersion } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['osVersion']?.Value } else { $null }
+            ov = if ($null -ne $machineOsVersion) { $machineOsVersion } elseif ($OsVersion) { $OsVersion } else { $null }
             t = $tagIndices
             m = $machineInfo
         })

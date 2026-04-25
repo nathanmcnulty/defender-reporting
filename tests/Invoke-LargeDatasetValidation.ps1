@@ -57,6 +57,10 @@ param(
     [switch]$Validate,
 
     [Parameter(Mandatory = $false)]
+    [ValidateSet('semantic', 'artifacts')]
+    [string]$ValidationMode = 'semantic',
+
+    [Parameter(Mandatory = $false)]
     [string]$DashboardOutputPath,
 
     [Parameter(Mandatory = $false)]
@@ -81,6 +85,11 @@ $ErrorActionPreference = 'Stop'
 
 if (-not $Validate -and -not [string]::IsNullOrWhiteSpace($ValidationOutputPath)) {
     throw 'ValidationOutputPath requires -Validate.'
+}
+
+$resolvedValidationMode = if ($Validate) { $ValidationMode } else { 'none' }
+if ($resolvedValidationMode -eq 'artifacts' -and -not [string]::IsNullOrWhiteSpace($ValidationOutputPath)) {
+    throw 'ValidationOutputPath is only supported with -ValidationMode semantic.'
 }
 
 function Get-StreamingCount {
@@ -129,6 +138,59 @@ function Get-ValidationAuditSummary {
         comparisonStorage = if ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['ComparisonStorage']) { [string]$semanticParity.ComparisonStorage } else { $null }
         comparisonPayloadSource = if ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['ComparisonPayloadSource']) { [string]$semanticParity.ComparisonPayloadSource } else { $null }
         phaseTimings = if ($Audit.PSObject.Properties['PhaseTimings']) { $Audit.PhaseTimings } elseif ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['PhaseTimings']) { $semanticParity.PhaseTimings } else { $null }
+    }
+}
+
+function Add-PathSuffixBeforeExtensionLocal {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Suffix
+    )
+
+    $extension = [System.IO.Path]::GetExtension($Path)
+    if ([string]::IsNullOrEmpty($extension)) {
+        return ($Path + $Suffix)
+    }
+
+    return ($Path.Substring(0, $Path.Length - $extension.Length) + $Suffix + $extension)
+}
+
+function Invoke-GeneratedArtifactValidation {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SelfContainedPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$HostedPath
+    )
+
+    $validatorScriptPath = Join-Path $PSScriptRoot 'Validate-DashboardGeneratedArtifacts.js'
+    if (-not (Test-Path -LiteralPath $validatorScriptPath -PathType Leaf)) {
+        throw "Artifact validator '$validatorScriptPath' was not found."
+    }
+
+    $nodeCommand = Get-Command -Name 'node' -ErrorAction Stop
+    & $nodeCommand.Source $validatorScriptPath $SelfContainedPath $HostedPath
+
+    $validatorExitCode = [int]$global:LASTEXITCODE
+    if ($validatorExitCode -ne 0) {
+        throw "Generated artifact validation failed with exit code $validatorExitCode."
+    }
+
+    return [PSCustomObject]@{
+        mode = 'generated-artifact-parity'
+        validatorScriptPath = [System.IO.Path]::GetFullPath($validatorScriptPath)
+        selfContainedPath = [System.IO.Path]::GetFullPath($SelfContainedPath)
+        hostedPath = [System.IO.Path]::GetFullPath($HostedPath)
+        hostedAssetsPath = Join-Path (Split-Path -Path (Resolve-Path -LiteralPath $HostedPath).Path -Parent) (([System.IO.Path]::GetFileNameWithoutExtension($HostedPath)) + '.assets')
+        passed = $true
     }
 }
 
@@ -275,6 +337,10 @@ function Write-StressValidationReport {
 
         [Parameter(Mandatory = $false)]
         [AllowEmptyString()]
+        [string]$HostedDashboardOutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
         [string]$ResolvedDiagnosticPhaseLogPath,
 
         [Parameter(Mandatory = $false)]
@@ -318,12 +384,20 @@ function Write-StressValidationReport {
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        $DiagnosticTimingSummary
+        $DiagnosticTimingSummary,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedValidationMode,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $ArtifactValidationSummary
     )
 
     $resolvedDashboardOutputPath = [System.IO.Path]::GetFullPath($DashboardOutputPath)
     $dashboardExists = Test-Path -LiteralPath $DashboardOutputPath -PathType Leaf
     $dashboardBytes = if ($dashboardExists) { (Get-Item -LiteralPath $DashboardOutputPath).Length } else { $null }
+    $resolvedHostedDashboardOutputPath = if ([string]::IsNullOrWhiteSpace($HostedDashboardOutputPath)) { $null } else { [System.IO.Path]::GetFullPath($HostedDashboardOutputPath) }
 
     $report = [PSCustomObject]@{
         preset = $Preset
@@ -332,6 +406,7 @@ function Write-StressValidationReport {
         completedOn = (Get-Date).ToString('o')
         syntheticPath = $SyntheticPath
         dashboardOutputPath = $resolvedDashboardOutputPath
+        hostedDashboardOutputPath = $resolvedHostedDashboardOutputPath
         diagnosticPhaseLogPath = if ([string]::IsNullOrWhiteSpace($ResolvedDiagnosticPhaseLogPath)) { $null } else { [System.IO.Path]::GetFullPath($ResolvedDiagnosticPhaseLogPath) }
         elapsedSeconds = [math]::Round($ElapsedSeconds, 2)
         generationTiming = if ($null -ne $DiagnosticTimingSummary) {
@@ -358,11 +433,13 @@ function Write-StressValidationReport {
         manifest = $Manifest
         validation = [PSCustomObject]@{
             validate = $Validate.IsPresent
+            validationMode = $ResolvedValidationMode
             heartbeatSeconds = $ValidationHeartbeatSeconds
             partitionCompareParallelism = $ValidationPartitionCompareParallelism
             skipObservedWindowMerge = $SkipObservedWindowMerge
             auditPath = if ([string]::IsNullOrWhiteSpace($ResolvedValidationAuditPath)) { $null } else { [System.IO.Path]::GetFullPath($ResolvedValidationAuditPath) }
             auditSummary = Get-ValidationAuditSummary -Audit $Audit
+            artifactSummary = $ArtifactValidationSummary
         }
         error = if ($null -ne $FailureRecord) {
             [PSCustomObject]@{
@@ -432,10 +509,17 @@ else {
     Join-Path ([System.IO.Path]::GetTempPath()) ('stress-dashboard-' + [guid]::NewGuid().ToString('N') + '.html')
 }
 
+$hostedDashboardOutput = if ($resolvedValidationMode -eq 'artifacts') {
+    Add-PathSuffixBeforeExtensionLocal -Path $dashboardOutput -Suffix '.Hosted'
+}
+else {
+    $null
+}
+
 $resolvedValidationOutputPath = if (-not [string]::IsNullOrWhiteSpace($ValidationOutputPath)) {
     [System.IO.Path]::GetFullPath($ValidationOutputPath)
 }
-elseif ($Validate) {
+elseif ($resolvedValidationMode -eq 'semantic') {
     Join-Path $resolvedSyntheticPath 'dashboard-audit.json'
 }
 else {
@@ -477,11 +561,15 @@ $generateArgs = @{
 if ($skipObservedWindowMerge) {
     $generateArgs.SkipObservedWindowMerge = $true
 }
-if ($Validate) {
+if ($resolvedValidationMode -eq 'semantic') {
     $generateArgs.Validate = $true
     if (-not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
         $generateArgs.ValidationOutputPath = $resolvedValidationOutputPath
     }
+}
+elseif ($resolvedValidationMode -eq 'artifacts') {
+    $generateArgs.DualPackage = $true
+    $generateArgs.HostedOutputPath = $hostedDashboardOutput
 }
 if (-not [string]::IsNullOrWhiteSpace($resolvedDiagnosticPhaseLogPath)) {
     $generateArgs.DiagnosticPhaseLogPath = $resolvedDiagnosticPhaseLogPath
@@ -494,6 +582,15 @@ if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
 
 if (Test-Path -LiteralPath $dashboardOutput -PathType Leaf) {
     Remove-Item -LiteralPath $dashboardOutput -Force
+}
+if (-not [string]::IsNullOrWhiteSpace($hostedDashboardOutput) -and (Test-Path -LiteralPath $hostedDashboardOutput -PathType Leaf)) {
+    Remove-Item -LiteralPath $hostedDashboardOutput -Force
+}
+if (-not [string]::IsNullOrWhiteSpace($hostedDashboardOutput)) {
+    $hostedAssetsPath = Join-Path (Split-Path -Path $hostedDashboardOutput -Parent) (([System.IO.Path]::GetFileNameWithoutExtension($hostedDashboardOutput)) + '.assets')
+    if (Test-Path -LiteralPath $hostedAssetsPath -PathType Container) {
+        Remove-Item -LiteralPath $hostedAssetsPath -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 if (-not [string]::IsNullOrWhiteSpace($resolvedDiagnosticPhaseLogPath) -and (Test-Path -LiteralPath $resolvedDiagnosticPhaseLogPath -PathType Leaf)) {
     Remove-Item -LiteralPath $resolvedDiagnosticPhaseLogPath -Force
@@ -510,6 +607,7 @@ $status = 'success'
 $dashboardExitCode = $null
 $failureRecord = $null
 $audit = $null
+$artifactValidationSummary = $null
 $diagnosticTimingSummary = $null
 try {
     $global:LASTEXITCODE = 0
@@ -524,12 +622,19 @@ try {
         throw "Dashboard output '$dashboardOutput' was not created."
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
+    if ($resolvedValidationMode -eq 'semantic' -and -not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
         if (-not (Test-Path -LiteralPath $resolvedValidationOutputPath -PathType Leaf)) {
             throw "Validation audit '$resolvedValidationOutputPath' was not created."
         }
 
         $audit = Get-Content -Path $resolvedValidationOutputPath -Raw | ConvertFrom-Json -Depth 100
+    }
+    elseif ($resolvedValidationMode -eq 'artifacts') {
+        if (-not (Test-Path -LiteralPath $hostedDashboardOutput -PathType Leaf)) {
+            throw "Hosted dashboard output '$hostedDashboardOutput' was not created."
+        }
+
+        $artifactValidationSummary = Invoke-GeneratedArtifactValidation -SelfContainedPath $dashboardOutput -HostedPath $hostedDashboardOutput
     }
 }
 catch {
@@ -546,6 +651,7 @@ finally {
         -Preset $Preset `
         -SyntheticPath $resolvedSyntheticPath `
         -DashboardOutputPath $dashboardOutput `
+        -HostedDashboardOutputPath $hostedDashboardOutput `
         -ResolvedDiagnosticPhaseLogPath $resolvedDiagnosticPhaseLogPath `
         -ResolvedValidationAuditPath $resolvedValidationOutputPath `
         -ElapsedSeconds $stopwatch.Elapsed.TotalSeconds `
@@ -558,7 +664,9 @@ finally {
         -DashboardExitCode $dashboardExitCode `
         -FailureRecord $failureRecord `
         -Audit $audit `
-        -DiagnosticTimingSummary $diagnosticTimingSummary
+        -DiagnosticTimingSummary $diagnosticTimingSummary `
+        -ResolvedValidationMode $resolvedValidationMode `
+        -ArtifactValidationSummary $artifactValidationSummary
 }
 
 $dashboardItem = Get-Item -LiteralPath $dashboardOutput
@@ -567,11 +675,18 @@ Write-Output ''
 Write-Output 'Stress validation completed.'
 Write-Output ("  Synthetic path: {0}" -f $resolvedSyntheticPath)
 Write-Output ("  Dashboard output: {0}" -f ([System.IO.Path]::GetFullPath($dashboardOutput)))
+if (-not [string]::IsNullOrWhiteSpace($hostedDashboardOutput)) {
+    Write-Output ("  Hosted dashboard output: {0}" -f ([System.IO.Path]::GetFullPath($hostedDashboardOutput)))
+}
 if (-not [string]::IsNullOrWhiteSpace($resolvedDiagnosticPhaseLogPath)) {
     Write-Output ("  Diagnostic phase log: {0}" -f $resolvedDiagnosticPhaseLogPath)
 }
-if (-not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
+Write-Output ("  Validation mode: {0}" -f $resolvedValidationMode)
+if ($resolvedValidationMode -eq 'semantic' -and -not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
     Write-Output ("  Validation audit: {0}" -f $resolvedValidationOutputPath)
+}
+elseif ($resolvedValidationMode -eq 'artifacts') {
+    Write-Output '  Artifact validation: passed.'
 }
 Write-Output ("  Elapsed: {0} seconds" -f ([math]::Round($stopwatch.Elapsed.TotalSeconds, 2)))
 Write-Output ("  Devices: {0}" -f $machineCount)
