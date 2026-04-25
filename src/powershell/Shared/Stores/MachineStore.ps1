@@ -41,8 +41,24 @@ function ConvertTo-NormalizationMachineTuple {
         return $null
     }
 
-    if ($Machine -is [System.Array] -and $Machine.Length -ge 10) {
-        return [object[]]$Machine
+    if ($Machine -is [System.Array]) {
+        $tuple = [object[]]$Machine
+        if ($tuple.Length -ge 15) {
+            return $tuple
+        }
+
+        if ($tuple.Length -ge 10) {
+            $extendedTuple = [System.Collections.Generic.List[object]]::new()
+            foreach ($value in $tuple) {
+                $extendedTuple.Add($value) | Out-Null
+            }
+
+            while ($extendedTuple.Count -lt 15) {
+                $extendedTuple.Add($null) | Out-Null
+            }
+
+            return [object[]]@($extendedTuple)
+        }
     }
 
     $ip = $Machine.PSObject.Properties['lastIpAddress']?.Value
@@ -55,6 +71,11 @@ function ConvertTo-NormalizationMachineTuple {
     $isAadJoined = $Machine.PSObject.Properties['isAadJoined']?.Value
     $lastSeen = $Machine.PSObject.Properties['lastSeen']?.Value
     $firstSeen = $Machine.PSObject.Properties['firstSeen']?.Value
+    $osVersion = $Machine.PSObject.Properties['osVersion']?.Value
+    $computerDnsName = $Machine.PSObject.Properties['computerDnsName']?.Value
+    $rbacGroupName = $Machine.PSObject.Properties['rbacGroupName']?.Value
+    $osPlatform = $Machine.PSObject.Properties['osPlatform']?.Value
+    $machineTags = @(Get-NormalizedMachineTag -Tags $Machine.PSObject.Properties['machineTags']?.Value)
 
     if (
         $null -eq $ip -and
@@ -66,7 +87,12 @@ function ConvertTo-NormalizationMachineTuple {
         $null -eq $managedBy -and
         $null -eq $isAadJoined -and
         $null -eq $lastSeen -and
-        $null -eq $firstSeen
+        $null -eq $firstSeen -and
+        $null -eq $osVersion -and
+        $null -eq $computerDnsName -and
+        $null -eq $rbacGroupName -and
+        $null -eq $osPlatform -and
+        @($machineTags).Count -eq 0
     ) {
         return $null
     }
@@ -81,7 +107,12 @@ function ConvertTo-NormalizationMachineTuple {
         $managedBy,
         $isAadJoined,
         $lastSeen,
-        $firstSeen
+        $firstSeen,
+        $osVersion,
+        $computerDnsName,
+        $rbacGroupName,
+        $osPlatform,
+        @($machineTags)
     )
 }
 
@@ -248,7 +279,12 @@ function ConvertFrom-MachineJsonElementToNormalizationEntry {
         (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'managedBy'),
         (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'isAadJoined'),
         (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'lastSeen'),
-        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'firstSeen')
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'firstSeen'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'osVersion'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'computerDnsName'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'rbacGroupName'),
+        (Get-MachineJsonElementScalarValue -Element $MachineElement -Name 'osPlatform'),
+        @(Get-MachineJsonElementStringArrayValue -Element $MachineElement -Name 'machineTags')
     )
 
     $hasTupleValue = $false
@@ -1145,6 +1181,10 @@ function Convert-ToYmdDate {
 
     if ($raw -match '^\d{4}-\d{2}-\d{2}$') {
         return $raw
+    }
+
+    if ($raw.Length -ge 10 -and $raw[4] -eq '-' -and $raw[7] -eq '-') {
+        return $raw.Substring(0, 10)
     }
 
     if ($raw -match '^(\d{1,2})/(\d{1,2})/(\d{4})') {
