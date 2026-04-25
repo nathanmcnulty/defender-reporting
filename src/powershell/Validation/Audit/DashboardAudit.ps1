@@ -401,6 +401,10 @@ function Read-SourceRow {
                 $groupName = if ([string]::IsNullOrWhiteSpace($fallbackGroupName)) { '(none)' } else { $fallbackGroupName }
             }
 
+            $projectedDeviceName = if ($machineProjection) { [string]$machineProjection.ComputerDnsName } else { $null }
+            $projectedOsPlatform = if ($machineProjection) { [string]$machineProjection.OSPlatform } else { $null }
+            $projectedOsVersion = if ($machineProjection) { [string]$machineProjection.OSVersion } else { $null }
+
             $machineTags = if ($machineProjection -and @($machineProjection.MachineTags).Count -gt 0) {
                 @($machineProjection.MachineTags)
             }
@@ -412,10 +416,10 @@ function Read-SourceRow {
             }
 
             $deviceProfiles[$deviceKey] = [PSCustomObject]@{
-                DeviceName = if ($machineProjection) { [string]$machineProjection.ComputerDnsName } elseif ($fallbackDeviceName) { $fallbackDeviceName } else { '(no machine data)' }
+                DeviceName = if (-not [string]::IsNullOrWhiteSpace($projectedDeviceName)) { $projectedDeviceName } elseif (-not [string]::IsNullOrWhiteSpace([string]$fallbackDeviceName)) { $fallbackDeviceName } else { '(no machine data)' }
                 RbacGroupName = $groupName
-                OSPlatform = if ($machineProjection) { [string]$machineProjection.OSPlatform } else { $fallbackPlatform }
-                OSVersion = if ($machineProjection) { [string]$machineProjection.OSVersion } else { $fallbackOsVersion }
+                OSPlatform = if (-not [string]::IsNullOrWhiteSpace($projectedOsPlatform)) { $projectedOsPlatform } else { $fallbackPlatform }
+                OSVersion = if (-not [string]::IsNullOrWhiteSpace($projectedOsVersion)) { $projectedOsVersion } else { $fallbackOsVersion }
                 MachineTags = $machineTags
                 MachineInfo = if ($machineProjection) { $machineProjection.MachineInfo } else { $null }
             }
