@@ -239,13 +239,29 @@ if (-not $SkipDashboardFixtureValidation) {
         }
 
         $fixtureHtmlPath = Join-Path $tempRoot 'fixture-dashboard.html'
+        $fixtureHostedHtmlPath = Join-Path $tempRoot 'fixture-dashboard.Hosted.html'
         Write-Output 'Running dashboard fixture smoke generation...'
         & (Join-Path $repoRoot 'Generate-VulnerabilityDashboard.ps1') `
             -DirectoryPath $fixtureDataPath `
             -OutputPath $fixtureHtmlPath `
+            -HostedOutputPath $fixtureHostedHtmlPath `
+            -DualPackage `
             -ExportMachineData:$false
         if (Test-LastExitCodeFailed) {
             throw 'Generate-VulnerabilityDashboard.ps1 fixture smoke generation failed.'
+        }
+
+        $generatedArtifactsValidatorPath = Join-Path $repoRoot 'tests\Validate-DashboardGeneratedArtifacts.js'
+        $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+        if ($null -eq $nodeCommand) {
+            throw 'Node.js is required to validate generated dashboard artifacts.'
+        }
+
+        Write-Output 'Validating generated dashboard artifacts...'
+        Reset-LastExitCode
+        & $nodeCommand.Source $generatedArtifactsValidatorPath $fixtureHtmlPath $fixtureHostedHtmlPath
+        if (Test-LastExitCodeFailed) {
+            throw 'Generated dashboard artifact validation failed.'
         }
     }
     finally {

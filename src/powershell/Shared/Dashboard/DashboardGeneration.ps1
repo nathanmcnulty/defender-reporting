@@ -3331,7 +3331,7 @@ function Get-DashboardSemanticValidationLogicVersion {
     [OutputType([string])]
     param()
 
-    return 'streaming-large-dataset-v2'
+    return 'streaming-large-dataset-v3'
 }
 
 function Set-NormalizedPayloadSemanticValidationAttestation {
@@ -4261,6 +4261,51 @@ function Add-NormalizedDevice {
     if (-not $deviceIndex.ContainsKey($deviceKey)) {
         $machine = if (-not [string]::IsNullOrWhiteSpace($DeviceId)) { $Context.Machines[$DeviceId] } else { $null }
         $machineTuple = if ($machine -is [System.Array] -and $machine.Length -ge 10) { $machine } else { $null }
+        $machineOsVersion = if ($machineTuple -and $machineTuple.Length -ge 11) {
+            [string]$machineTuple[10]
+        }
+        elseif ($machine -and -not $machineTuple) {
+            [string]$machine.PSObject.Properties['osVersion']?.Value
+        }
+        else {
+            $null
+        }
+        $machineDeviceName = if ($machineTuple -and $machineTuple.Length -ge 12) {
+            [string]$machineTuple[11]
+        }
+        elseif ($machine -and -not $machineTuple) {
+            [string]$machine.PSObject.Properties['computerDnsName']?.Value
+        }
+        else {
+            $null
+        }
+        $machineGroupName = if ($machineTuple -and $machineTuple.Length -ge 13) {
+            [string]$machineTuple[12]
+        }
+        elseif ($machine -and -not $machineTuple) {
+            [string]$machine.PSObject.Properties['rbacGroupName']?.Value
+        }
+        else {
+            $null
+        }
+        $machinePlatform = if ($machineTuple -and $machineTuple.Length -ge 14) {
+            [string]$machineTuple[13]
+        }
+        elseif ($machine -and -not $machineTuple) {
+            [string]$machine.PSObject.Properties['osPlatform']?.Value
+        }
+        else {
+            $null
+        }
+        $machineResolvedTags = if ($machineTuple -and $machineTuple.Length -ge 15) {
+            @($machineTuple[14])
+        }
+        elseif ($machine -and -not $machineTuple) {
+            @(Get-NormalizedMachineTag -Tags $machine.PSObject.Properties['machineTags']?.Value)
+        }
+        else {
+            @()
+        }
         $machineUsers = [string[]]@()
         if ($null -ne $Context.AdvancedHuntingDeviceUsers -and -not [string]::IsNullOrWhiteSpace($DeviceId)) {
             $rawMachineUsers = $Context.AdvancedHuntingDeviceUsers[[string]$DeviceId]
@@ -4273,16 +4318,16 @@ function Add-NormalizedDevice {
             }
         }
 
-        $resolvedGroupName = $GroupName
+        $resolvedGroupName = if ($null -ne $machine) { $machineGroupName } else { $GroupName }
         if ([string]::IsNullOrWhiteSpace([string]$resolvedGroupName)) {
             $resolvedGroupName = if ([string]::IsNullOrWhiteSpace([string]$GroupName)) { '(none)' } else { $GroupName }
         }
         $groupIdx = Get-OrCreateIndex -value $resolvedGroupName -list $lookups.groups -indexMap $groupIndex
 
-        $osPlat = $OsPlatform
+        $osPlat = if ($null -ne $machine) { $machinePlatform } else { $OsPlatform }
         $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
 
-        $effectiveTags = if ($MachineTags) { $MachineTags } else { @() }
+        $effectiveTags = if ($null -ne $machine -and @($machineResolvedTags).Count -gt 0) { @($machineResolvedTags) } elseif ($MachineTags) { @($MachineTags) } else { @() }
         $tagIndices = [System.Collections.Generic.List[int]]::new()
         foreach ($tag in $effectiveTags) {
             $tagIdx = Get-OrCreateIndex -value $tag -list $lookups.tags -indexMap $tagIndex
@@ -4313,10 +4358,10 @@ function Add-NormalizedDevice {
 
         $lookups.devices.Add([PSCustomObject]@{
             id = $DeviceId
-            n = if ($DeviceName) { $DeviceName } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['computerDnsName']?.Value } else { '(no machine data)' }
+            n = if ($null -ne $machine) { $machineDeviceName } elseif ($DeviceName) { $DeviceName } else { '(no machine data)' }
             g = $groupIdx
             o = $platIdx
-            ov = if ($OsVersion) { $OsVersion } elseif ($machine -and -not $machineTuple) { $machine.PSObject.Properties['osVersion']?.Value } else { $null }
+            ov = if ($null -ne $machineOsVersion) { $machineOsVersion } elseif ($OsVersion) { $OsVersion } else { $null }
             t = $tagIndices
             m = $machineInfo
         })

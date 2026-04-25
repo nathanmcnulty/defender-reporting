@@ -395,13 +395,14 @@ function Read-SourceRow {
         }
 
         if (-not $deviceProfiles.ContainsKey($deviceKey)) {
-            $groupName = if ($machine) { [string]$machine.rbacGroupName } else { $fallbackGroupName }
+            $machineProjection = Get-MachineProjection -Machine $machine
+            $groupName = if ($machineProjection) { [string]$machineProjection.RbacGroupName } else { $fallbackGroupName }
             if ([string]::IsNullOrWhiteSpace($groupName)) {
                 $groupName = if ([string]::IsNullOrWhiteSpace($fallbackGroupName)) { '(none)' } else { $fallbackGroupName }
             }
 
-            $machineTags = if ($machine -and @($machine.machineTags).Count -gt 0) {
-                @($machine.machineTags)
+            $machineTags = if ($machineProjection -and @($machineProjection.MachineTags).Count -gt 0) {
+                @($machineProjection.MachineTags)
             }
             elseif (@($fallbackMachineTags).Count -gt 0) {
                 @($fallbackMachineTags)
@@ -411,12 +412,12 @@ function Read-SourceRow {
             }
 
             $deviceProfiles[$deviceKey] = [PSCustomObject]@{
-                DeviceName = if ($machine) { [string]$machine.computerDnsName } elseif ($fallbackDeviceName) { $fallbackDeviceName } else { '(no machine data)' }
+                DeviceName = if ($machineProjection) { [string]$machineProjection.ComputerDnsName } elseif ($fallbackDeviceName) { $fallbackDeviceName } else { '(no machine data)' }
                 RbacGroupName = $groupName
-                OSPlatform = if ($machine) { [string]$machine.osPlatform } else { $fallbackPlatform }
-                OSVersion = if ($machine) { [string]$machine.osVersion } else { $fallbackOsVersion }
+                OSPlatform = if ($machineProjection) { [string]$machineProjection.OSPlatform } else { $fallbackPlatform }
+                OSVersion = if ($machineProjection) { [string]$machineProjection.OSVersion } else { $fallbackOsVersion }
                 MachineTags = $machineTags
-                MachineInfo = New-MachineInfoObject -Machine $machine
+                MachineInfo = if ($machineProjection) { $machineProjection.MachineInfo } else { $null }
             }
         }
         $deviceProfile = $deviceProfiles[$deviceKey]
@@ -1987,7 +1988,7 @@ function Get-DashboardAuditResult {
 
     $auditStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $machineLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $machines = Read-MachineData -Path $ResolvedExportsPath
+    $machines = Read-NormalizationMachineLookup -Path $ResolvedExportsPath
     $machineLoadStopwatch.Stop()
     $machineLoadElapsedSeconds = [math]::Round($machineLoadStopwatch.Elapsed.TotalSeconds, 2)
 
