@@ -4324,7 +4324,7 @@ function Add-NormalizedDevice {
         }
         $groupIdx = Get-OrCreateIndex -value $resolvedGroupName -list $lookups.groups -indexMap $groupIndex
 
-        $osPlat = if ($null -ne $machine) { $machinePlatform } else { $OsPlatform }
+        $osPlat = if (-not [string]::IsNullOrWhiteSpace([string]$machinePlatform)) { $machinePlatform } else { $OsPlatform }
         $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
 
         $effectiveTags = if ($null -ne $machine -and @($machineResolvedTags).Count -gt 0) { @($machineResolvedTags) } elseif ($MachineTags) { @($MachineTags) } else { @() }
@@ -4358,10 +4358,10 @@ function Add-NormalizedDevice {
 
         $lookups.devices.Add([PSCustomObject]@{
             id = $DeviceId
-            n = if ($null -ne $machine) { $machineDeviceName } elseif ($DeviceName) { $DeviceName } else { '(no machine data)' }
+            n = if (-not [string]::IsNullOrWhiteSpace([string]$machineDeviceName)) { $machineDeviceName } elseif (-not [string]::IsNullOrWhiteSpace([string]$DeviceName)) { $DeviceName } else { '(no machine data)' }
             g = $groupIdx
             o = $platIdx
-            ov = if ($null -ne $machineOsVersion) { $machineOsVersion } elseif ($OsVersion) { $OsVersion } else { $null }
+            ov = if (-not [string]::IsNullOrWhiteSpace([string]$machineOsVersion)) { $machineOsVersion } elseif (-not [string]::IsNullOrWhiteSpace([string]$OsVersion)) { $OsVersion } else { $null }
             t = $tagIndices
             m = $machineInfo
         })

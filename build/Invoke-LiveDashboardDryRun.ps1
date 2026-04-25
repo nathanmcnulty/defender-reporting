@@ -214,13 +214,17 @@ function Get-DefenderApiAccessToken {
         throw 'Unable to acquire a Defender API access token. Get-AzAccessToken failed and Azure CLI is not available.'
     }
 
-    $tokenJson = & $azCommand.Source account get-access-token --resource https://api.securitycenter.microsoft.com --output json
-    $tokenResult = $tokenJson | ConvertFrom-Json -Depth 10
-    if ($null -eq $tokenResult -or [string]::IsNullOrWhiteSpace([string]$tokenResult.accessToken)) {
+    $token = & $azCommand.Source account get-access-token --resource https://api.securitycenter.microsoft.com --query accessToken --output tsv --only-show-errors
+    $token = [string]$token
+    if ($null -ne $token) {
+        $token = $token.Trim()
+    }
+
+    if ([string]::IsNullOrWhiteSpace($token)) {
         throw 'Azure CLI did not return a Defender API access token.'
     }
 
-    return [string]$tokenResult.accessToken
+    return $token
 }
 
 function Get-OutputFileDetail {

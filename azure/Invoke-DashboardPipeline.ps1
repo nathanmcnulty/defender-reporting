@@ -7589,6 +7589,58 @@ function Get-StringArray {
     return @([string]$Value)
 }
 
+function Get-NullableProjectionString {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+
+    return $text
+}
+
+function Get-RecordPropertyValueIfPresent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Record,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PropertyName
+    )
+
+    if ($null -eq $Record) {
+        return $null
+    }
+
+    if ($Record -is [System.Collections.IDictionary]) {
+        if ($Record.Contains($PropertyName)) {
+            return $Record[$PropertyName]
+        }
+
+        return $null
+    }
+
+    $property = $Record.PSObject.Properties[$PropertyName]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
 function New-MachineInfoObject {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '')]
     [CmdletBinding()]
@@ -7657,10 +7709,10 @@ function Get-MachineProjection {
     $firstSeen = & $getScalarValue 9 'firstSeen'
 
     return [PSCustomObject]@{
-        ComputerDnsName = [string](& $getScalarValue 11 'computerDnsName')
-        RbacGroupName = [string](& $getScalarValue 12 'rbacGroupName')
-        OSPlatform = [string](& $getScalarValue 13 'osPlatform')
-        OSVersion = [string](& $getScalarValue 10 'osVersion')
+        ComputerDnsName = Get-NullableProjectionString (& $getScalarValue 11 'computerDnsName')
+        RbacGroupName = Get-NullableProjectionString (& $getScalarValue 12 'rbacGroupName')
+        OSPlatform = Get-NullableProjectionString (& $getScalarValue 13 'osPlatform')
+        OSVersion = Get-NullableProjectionString (& $getScalarValue 10 'osVersion')
         MachineTags = @($machineTags)
         MachineInfo = [PSCustomObject]@{
             ip = & $getScalarValue 0 'lastIpAddress'
@@ -7735,13 +7787,14 @@ function Get-SourceCveEnrichment {
 
     $ahRecord = if ($null -ne $AdvancedHunting) { $AdvancedHunting[$CveId] } else { $null }
     $nvdRecord = if ($null -ne $NvdCveData) { $NvdCveData[$CveId] } else { $null }
+    $exploitAvailability = Get-RecordPropertyValueIfPresent -Record $ahRecord -PropertyName 'IsExploitAvailable'
 
     return [PSCustomObject]@{
         PublishedDate = if ($ahRecord -and $ahRecord.PublishedDate) { [string]$ahRecord.PublishedDate } elseif ($nvdRecord) { [string]$nvdRecord.PublishedDate } else { $null }
         VulnerabilityDescription = if ($ahRecord -and $ahRecord.VulnerabilityDescription) { [string]$ahRecord.VulnerabilityDescription } elseif ($nvdRecord) { [string]$nvdRecord.VulnerabilityDescription } else { $null }
         EpssScore = if ($ahRecord) { $ahRecord.EpssScore } else { $null }
         AffectedSoftware = Get-FilteredAffectedSoftware -AdvancedHuntingRecord $ahRecord -VendorSet $VendorSet
-        IsExploitAvailable = if ($ahRecord -is [hashtable] -and $ahRecord.ContainsKey('IsExploitAvailable')) { $ahRecord.IsExploitAvailable } else { $null }
+        IsExploitAvailable = $exploitAvailability
         NvdLastModifiedDate = if ($nvdRecord) { [string]$nvdRecord.LastModifiedDate } else { $null }
         NvdBaseScore = if ($nvdRecord) { $nvdRecord.BaseScore } else { $null }
         NvdBaseSeverity = if ($nvdRecord) { [string]$nvdRecord.BaseSeverity } else { $null }
@@ -13718,7 +13771,7 @@ function Add-NormalizedDevice {
         }
         $groupIdx = Get-OrCreateIndex -value $resolvedGroupName -list $lookups.groups -indexMap $groupIndex
 
-        $osPlat = if ($null -ne $machine) { $machinePlatform } else { $OsPlatform }
+        $osPlat = if (-not [string]::IsNullOrWhiteSpace([string]$machinePlatform)) { $machinePlatform } else { $OsPlatform }
         $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
 
         $effectiveTags = if ($null -ne $machine -and @($machineResolvedTags).Count -gt 0) { @($machineResolvedTags) } elseif ($MachineTags) { @($MachineTags) } else { @() }
@@ -13752,10 +13805,10 @@ function Add-NormalizedDevice {
 
         $lookups.devices.Add([PSCustomObject]@{
             id = $DeviceId
-            n = if ($null -ne $machine) { $machineDeviceName } elseif ($DeviceName) { $DeviceName } else { '(no machine data)' }
+            n = if (-not [string]::IsNullOrWhiteSpace([string]$machineDeviceName)) { $machineDeviceName } elseif (-not [string]::IsNullOrWhiteSpace([string]$DeviceName)) { $DeviceName } else { '(no machine data)' }
             g = $groupIdx
             o = $platIdx
-            ov = if ($null -ne $machineOsVersion) { $machineOsVersion } elseif ($OsVersion) { $OsVersion } else { $null }
+            ov = if (-not [string]::IsNullOrWhiteSpace([string]$machineOsVersion)) { $machineOsVersion } elseif (-not [string]::IsNullOrWhiteSpace([string]$OsVersion)) { $OsVersion } else { $null }
             t = $tagIndices
             m = $machineInfo
         })
