@@ -1504,6 +1504,12 @@ tbody tr:hover {
     background: var(--color-surface-alt);
 }
 
+.devices-table-container.virtualized-table-container {
+    max-height: 28rem;
+    overflow: auto;
+    overscroll-behavior: contain;
+}
+
 @media (max-width: 960px) {
     .remediation-card-header {
         flex-direction: column;

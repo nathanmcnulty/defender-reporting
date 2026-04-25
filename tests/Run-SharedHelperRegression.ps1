@@ -1964,16 +1964,29 @@ function Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup {
 
         Assert-True ($tupleMachines.Count -eq $compressedMachines.Count) 'Expected tuple-mode machine loading to preserve the same machine count as the compressed machine lookup path.'
         Assert-True ($tupleMachines.ContainsKey('device-live')) 'Expected tuple-mode machine loading to preserve populated machines.'
-        Assert-True (-not $tupleMachines.ContainsKey('device-sparse')) 'Expected tuple-mode machine loading to drop machines whose normalization tuple is entirely empty.'
+        Assert-True ($tupleMachines.ContainsKey('device-sparse')) 'Expected tuple-mode machine loading to retain sparse machines when extended normalization metadata is present.'
         Assert-True (-not $tupleMachines.ContainsKey('device-removed')) 'Expected tuple-mode machine loading to drop removed machines from the current lookup.'
 
         $expectedTuple = [object[]]$compressedMachines['device-live']
         $actualTuple = [object[]]$tupleMachines['device-live']
         Assert-True ($actualTuple -is [System.Array]) 'Expected tuple-mode machine loading to materialize array-backed normalization tuples.'
-        Assert-True ($actualTuple.Length -eq 10) 'Expected tuple-mode machine loading to preserve the 10-slot normalization tuple shape.'
+        Assert-True ($actualTuple.Length -eq $expectedTuple.Length) 'Expected tuple-mode machine loading to preserve the normalization tuple shape.'
+
+        $expectedSparseTuple = [object[]]$compressedMachines['device-sparse']
+        $actualSparseTuple = [object[]]$tupleMachines['device-sparse']
+        Assert-True ($actualSparseTuple -is [System.Array]) 'Expected tuple-mode machine loading to materialize sparse machines as array-backed normalization tuples.'
+        Assert-True ($actualSparseTuple.Length -eq $expectedSparseTuple.Length) 'Expected tuple-mode machine loading to preserve the sparse normalization tuple shape.'
 
         for ($tupleIndex = 0; $tupleIndex -lt $expectedTuple.Length; $tupleIndex++) {
-            Assert-True ($actualTuple[$tupleIndex] -eq $expectedTuple[$tupleIndex]) "Expected tuple-mode machine loading to preserve tuple slot $tupleIndex."
+            $expectedTupleValue = ConvertTo-Json -InputObject $expectedTuple[$tupleIndex] -Compress -Depth 20
+            $actualTupleValue = ConvertTo-Json -InputObject $actualTuple[$tupleIndex] -Compress -Depth 20
+            Assert-True ($actualTupleValue -eq $expectedTupleValue) "Expected tuple-mode machine loading to preserve tuple slot $tupleIndex."
+        }
+
+        for ($tupleIndex = 0; $tupleIndex -lt $expectedSparseTuple.Length; $tupleIndex++) {
+            $expectedSparseTupleValue = ConvertTo-Json -InputObject $expectedSparseTuple[$tupleIndex] -Compress -Depth 20
+            $actualSparseTupleValue = ConvertTo-Json -InputObject $actualSparseTuple[$tupleIndex] -Compress -Depth 20
+            Assert-True ($actualSparseTupleValue -eq $expectedSparseTupleValue) "Expected tuple-mode machine loading to preserve sparse tuple slot $tupleIndex."
         }
     }
     finally {
@@ -1981,6 +1994,73 @@ function Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup {
             Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+}
+
+function Test-LegacyMachineTupleFallbackPreservesProjectedRowMetadata {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally describes legacy tuple fallback behavior.')]
+    [CmdletBinding()]
+    param()
+
+    $legacyMachineTuple = [object[]]@(
+        '10.0.0.30',
+        '203.0.113.30',
+        'Active',
+        'Medium',
+        'High',
+        'Normal',
+        'Intune',
+        $true,
+        '2026-04-22T00:00:00Z',
+        '2026-04-01T00:00:00Z'
+    )
+
+    $projection = Get-MachineProjection -Machine $legacyMachineTuple
+    Assert-True ($null -eq $projection.ComputerDnsName) 'Expected legacy tuples without expanded metadata to preserve a null ComputerDnsName projection.'
+    Assert-True ($null -eq $projection.OSPlatform) 'Expected legacy tuples without expanded metadata to preserve a null OSPlatform projection.'
+    Assert-True ($null -eq $projection.OSVersion) 'Expected legacy tuples without expanded metadata to preserve a null OSVersion projection.'
+
+    $context = Get-NormalizationContext
+    $context.Machines['device-legacy'] = $legacyMachineTuple
+
+    $deviceIndex = Add-NormalizedDevice `
+        -DeviceId 'device-legacy' `
+        -DeviceName 'legacy-device.contoso.com' `
+        -GroupName 'Pilot' `
+        -OsPlatform 'Windows11' `
+        -OsVersion '10.0.26100' `
+        -MachineTags @('Pilot') `
+        -Context $context
+
+    $deviceLookup = $context.Lookups.devices[$deviceIndex]
+
+    Assert-True ($deviceLookup.n -eq 'legacy-device.contoso.com') 'Expected Add-NormalizedDevice to fall back to the row DeviceName when a legacy tuple has no ComputerDnsName.'
+    Assert-True ($context.Lookups.groups[$deviceLookup.g] -eq 'Pilot') 'Expected Add-NormalizedDevice to fall back to the row GroupName when a legacy tuple has no RBAC group.'
+    Assert-True ($context.Lookups.platforms[$deviceLookup.o] -eq 'Windows11') 'Expected Add-NormalizedDevice to fall back to the row OSPlatform when a legacy tuple has no platform metadata.'
+    Assert-True ($deviceLookup.ov -eq '10.0.26100') 'Expected Add-NormalizedDevice to fall back to the row OSVersion when a legacy tuple has no OSVersion metadata.'
+    Assert-True ($context.Lookups.tags[$deviceLookup.t[0]] -eq 'Pilot') 'Expected Add-NormalizedDevice to fall back to row machine tags when a legacy tuple has no tag metadata.'
+    Assert-True ($deviceLookup.m.ip -eq '10.0.0.30') 'Expected Add-NormalizedDevice to preserve machine info pulled from the legacy tuple.'
+}
+
+function Test-SourceCveEnrichmentReadsExploitAvailabilityFromObjectRecord {
+    [CmdletBinding()]
+    param()
+
+    $vendorSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    [void]$vendorSet.Add((Get-VendorMatchKey -Vendor 'Contoso'))
+
+    $advancedHunting = @{
+        'CVE-2026-7777' = [PSCustomObject]@{
+            PublishedDate = '2026-04-14'
+            VulnerabilityDescription = 'Example vulnerability description.'
+            EpssScore = 0.0042
+            AffectedSoftware = @('Contoso:Legacy Agent')
+            IsExploitAvailable = $true
+        }
+    }
+
+    $enrichment = Get-SourceCveEnrichment -CveId 'CVE-2026-7777' -AdvancedHunting $advancedHunting -NvdCveData $null -VendorSet $vendorSet
+
+    Assert-True ($enrichment.IsExploitAvailable -eq $true) 'Expected exploit availability to be preserved for PSCustomObject-based Advanced Hunting records.'
 }
 
 function Test-WriteBase64FileContentMatchesReferenceOutput {
@@ -2942,6 +3022,10 @@ Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs
 Write-Output '  Advanced Hunting bundle sparse string-array checks passed.'
 Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup
 Write-Output '  Machine tuple reader checks passed.'
+Test-LegacyMachineTupleFallbackPreservesProjectedRowMetadata
+Write-Output '  Legacy tuple fallback checks passed.'
+Test-SourceCveEnrichmentReadsExploitAvailabilityFromObjectRecord
+Write-Output '  Source enrichment exploit-availability checks passed.'
 Test-VulnPropertyHelpersSupportSupportedRowShapes
 Write-Output '  Vulnerability property helper shape checks passed.'
 Test-VulnContentStoreRoundTrip

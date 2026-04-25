@@ -929,13 +929,18 @@ function Read-SourceCanonicalSignatureStream {
         }
 
         if (-not $deviceProfiles.ContainsKey($deviceKey)) {
-            $groupName = if ($machine) { [string]$machine.rbacGroupName } else { $fallbackGroupName }
+            $machineProjection = Get-MachineProjection -Machine $machine
+            $groupName = if ($machineProjection) { [string]$machineProjection.RbacGroupName } else { $fallbackGroupName }
             if ([string]::IsNullOrWhiteSpace($groupName)) {
                 $groupName = if ([string]::IsNullOrWhiteSpace($fallbackGroupName)) { '(none)' } else { $fallbackGroupName }
             }
 
-            $machineTags = if ($machine -and @($machine.machineTags).Count -gt 0) {
-                @($machine.machineTags)
+            $projectedDeviceName = if ($machineProjection) { [string]$machineProjection.ComputerDnsName } else { $null }
+            $projectedOsPlatform = if ($machineProjection) { [string]$machineProjection.OSPlatform } else { $null }
+            $projectedOsVersion = if ($machineProjection) { [string]$machineProjection.OSVersion } else { $null }
+
+            $machineTags = if ($machineProjection -and @($machineProjection.MachineTags).Count -gt 0) {
+                @($machineProjection.MachineTags)
             }
             elseif (@($fallbackMachineTags).Count -gt 0) {
                 @($fallbackMachineTags)
@@ -945,12 +950,12 @@ function Read-SourceCanonicalSignatureStream {
             }
 
             $deviceProfiles[$deviceKey] = [PSCustomObject]@{
-                DeviceName = if ($machine) { [string]$machine.computerDnsName } elseif ($fallbackDeviceName) { $fallbackDeviceName } else { '(no machine data)' }
+                DeviceName = if (-not [string]::IsNullOrWhiteSpace($projectedDeviceName)) { $projectedDeviceName } elseif (-not [string]::IsNullOrWhiteSpace([string]$fallbackDeviceName)) { $fallbackDeviceName } else { '(no machine data)' }
                 RbacGroupName = $groupName
-                OSPlatform = if ($machine) { [string]$machine.osPlatform } else { $fallbackPlatform }
-                OSVersion = if ($machine) { [string]$machine.osVersion } else { $fallbackOsVersion }
+                OSPlatform = if (-not [string]::IsNullOrWhiteSpace($projectedOsPlatform)) { $projectedOsPlatform } else { $fallbackPlatform }
+                OSVersion = if (-not [string]::IsNullOrWhiteSpace($projectedOsVersion)) { $projectedOsVersion } else { $fallbackOsVersion }
                 MachineTags = $machineTags
-                MachineInfo = New-MachineInfoObject -Machine $machine
+                MachineInfo = if ($machineProjection) { $machineProjection.MachineInfo } else { $null }
             }
         }
 
@@ -1945,7 +1950,7 @@ function Get-StreamingDashboardAuditResult {
             }
             else {
                 $machineLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-                $machines = Read-MachineData -Path $ResolvedExportsPath
+                $machines = Read-NormalizationMachineLookup -Path $ResolvedExportsPath
                 $machineLoadStopwatch.Stop()
                 $machineLoadElapsedSeconds = [math]::Round($machineLoadStopwatch.Elapsed.TotalSeconds, 2)
 
