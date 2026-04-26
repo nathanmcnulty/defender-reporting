@@ -5218,7 +5218,7 @@ function ConvertTo-NormalizationMachineTuple {
                 $extendedTuple.Add($null) | Out-Null
             }
 
-            return [object[]]@($extendedTuple)
+            return $extendedTuple.ToArray()
         }
     }
 

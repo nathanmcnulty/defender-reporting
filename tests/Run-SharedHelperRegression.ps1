@@ -2260,6 +2260,37 @@ function Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup {
     }
 }
 
+function Test-NormalizationMachineTupleExtendsLegacyTuple {
+    [CmdletBinding()]
+    param()
+
+    $legacyTuple = [object[]]@(
+        '10.0.0.30',
+        '203.0.113.30',
+        'Active',
+        'Medium',
+        'High',
+        'Normal',
+        'Intune',
+        $true,
+        '2026-04-22T00:00:00Z',
+        '2026-04-01T00:00:00Z'
+    )
+
+    $normalizationTuple = ConvertTo-NormalizationMachineTuple -Machine $legacyTuple
+
+    Assert-True ($normalizationTuple -is [object[]]) 'Expected legacy machine tuples to normalize as an object[] array.'
+    Assert-True ($normalizationTuple.Count -eq 15) 'Expected legacy machine tuples with 10 elements to be extended to 15 normalization slots.'
+
+    foreach ($index in 0..9) {
+        Assert-True ($normalizationTuple[$index] -eq $legacyTuple[$index]) ("Expected normalization tuple slot {0} to preserve the legacy tuple value." -f $index)
+    }
+
+    foreach ($index in 10..14) {
+        Assert-True ($null -eq $normalizationTuple[$index]) ("Expected normalization tuple slot {0} to be null-padded for legacy tuples without expanded metadata." -f $index)
+    }
+}
+
 function Test-LegacyMachineTupleFallbackPreservesProjectedRowMetadata {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally describes legacy tuple fallback behavior.')]
     [CmdletBinding()]
@@ -3292,6 +3323,8 @@ Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs
 Write-Output '  Advanced Hunting bundle sparse string-array checks passed.'
 Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup
 Write-Output '  Machine tuple reader checks passed.'
+Test-NormalizationMachineTupleExtendsLegacyTuple
+Write-Output '  Machine tuple extension checks passed.'
 Test-LegacyMachineTupleFallbackPreservesProjectedRowMetadata
 Write-Output '  Legacy tuple fallback checks passed.'
 Test-SourceCveEnrichmentReadsExploitAvailabilityFromObjectRecord
