@@ -4290,34 +4290,18 @@ function getVersionAwareSoftwareLabel(software, osPlatform, osVersion, splitByVe
         return software;
     }
 
-    if (splitByVersion) {
+    if (!splitByVersion) {
+        return software;
+    }
+
+    if (shouldSplitRemediationByOsVersion(software, osPlatform)) {
         const versionLabel = normalizeOsVersionGroupingLabel(osPlatform, osVersion);
-        if (!versionLabel) {
-            return software;
+        if (versionLabel) {
+            return `${software} (${versionLabel})`;
         }
-
-        return `${software} (${versionLabel})`;
     }
 
-    if (!isOsFamilySoftwareLabel(software)) {
-        return software;
-    }
-
-    const softwareKey = getOsFamilyComparisonKey(software);
-    const platformKey = getOsFamilyComparisonKey(osPlatform);
-    if (!softwareKey || !platformKey) {
-        return software;
-    }
-
-    const matchesPlatform = softwareKey === platformKey
-        || softwareKey.startsWith(platformKey)
-        || platformKey.startsWith(softwareKey);
-    if (matchesPlatform) {
-        return software;
-    }
-
-    const platformLabel = formatOsPlatformLabel(osPlatform);
-    return platformLabel ? `${software} [${platformLabel}]` : software;
+    return `${software} (version unavailable)`;
 }
 
 function shouldSplitRemediationByOsVersion(software, osPlatform) {
@@ -6232,8 +6216,7 @@ function getRemediationTableData() {
         const vendor = formatPart(v.SoftwareVendor);
         const software = formatPart(v.SoftwareName);
         const baseKey = `${vendor}|${software}|${remediation.key}`;
-        const splitByVersion = shouldSplitRemediationByOsVersion(software, v.OSPlatform)
-            && (versionBucketsByBaseKey.get(baseKey)?.size || 0) > 1;
+        const splitByVersion = (versionBucketsByBaseKey.get(baseKey)?.size || 0) > 1;
         const softwareLabel = getVersionAwareSoftwareLabel(software, v.OSPlatform, v.OSVersion, splitByVersion);
         const key = softwareLabel !== software ? `${baseKey}|${softwareLabel}` : baseKey;
 
@@ -6476,8 +6459,7 @@ function getImpactAnalysisData() {
         const remediation = remediationDescriptors[index];
         const formattedSoftware = remediationFormattedSoftware[index];
         const baseKey = remediationBaseKeys[index];
-        const splitByVersion = remediationCanSplitByOsVersion[index]
-            && (versionBucketsByBaseKey.get(baseKey)?.size || 0) > 1;
+        const splitByVersion = (versionBucketsByBaseKey.get(baseKey)?.size || 0) > 1;
         const baseImpactName = getScopedRemediationDisplayTitle(remediation);
         const impactName = getVersionAwareImpactDisplayName(remediation, formattedSoftware, v.OSPlatform, v.OSVersion, splitByVersion);
         const key = impactName !== baseImpactName ? `${baseKey}|${impactName}` : baseKey;
