@@ -770,6 +770,26 @@ module.exports = {
             }
         }),
         createTestRow({
+            DeviceId: 'windows-client-unknown',
+            DeviceName: 'windows-client-unknown.contoso.com',
+            SoftwareVendor: 'microsoft',
+            SoftwareName: 'windows_11',
+            OSPlatform: 'Windows11',
+            OSVersion: '',
+            RecommendationReference: 'va-_-microsoft-_-windows_11',
+            CveId: 'CVE-2026-4104',
+            RecommendedSecurityUpdate: 'April 2026 Security Updates',
+            RecommendedSecurityUpdateId: '',
+            RecommendedSecurityUpdateUrl: '',
+            CveBatchTitle: 'Microsoft April 2026 Security Updates',
+            FirstSeenTimestamp: '2025-11-25',
+            LastSeenTimestamp: '2025-12-01',
+            MachineInfo: {
+                ls: '2025-12-01',
+                ip: '10.0.0.74'
+            }
+        }),
+        createTestRow({
             DeviceId: 'windows-server',
             DeviceName: 'windows-server.contoso.com',
             SoftwareVendor: 'microsoft',
@@ -820,10 +840,9 @@ module.exports = {
         [
             'Windows 11 (10.0.22631)',
             'Windows 11 (10.0.26100)',
-            'Windows 11 [Ubuntu]',
-            'Windows 11 [Windows Server 2022]'
+            'Windows 11 (version unavailable)'
         ].sort().join('|'),
-        'Expected OS-family remediation rows to disambiguate mismatched device platforms instead of collapsing them into one plain software label.'
+        'Expected OS-family remediation rows to keep versioned Windows releases split while collapsing non-versionable rows into a single fallback bucket instead of emitting plain or cross-platform software labels.'
     );
 
     const osFamilyImpact = dashboard.getImpactAnalysisData();
@@ -832,10 +851,9 @@ module.exports = {
         [
             'Windows 11 (10.0.22631): April 2026 Security Updates',
             'Windows 11 (10.0.26100): April 2026 Security Updates',
-            'Windows 11 [Ubuntu]: April 2026 Security Updates',
-            'Windows 11 [Windows Server 2022]: April 2026 Security Updates'
+            'Windows 11 (version unavailable): April 2026 Security Updates'
         ].sort().join('|'),
-        'Expected impact analysis to keep the same OS-family disambiguation used by the active remediation table.'
+        'Expected impact analysis to reuse the same version-aware fallback bucket instead of surfacing cross-platform software labels.'
     );
 
     const appleDescriptor = dashboard.buildRemediationDescriptor(createTestRow({
