@@ -212,6 +212,10 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
         [string]$ExportUrl
     )
 
+    $emptyDownloadMaxAttempts = 4
+    $emptyDownloadInitialDelayMs = 2000
+    $emptyDownloadBackoffMultiplier = 2.0
+
     $resolvedExportUrl = Get-MdeBulkVulnerabilityExportRequestUri -ExportUrl $ExportUrl
     $response = Invoke-RestMethodWithRetry -Uri $resolvedExportUrl -Headers $Headers -Method Get -MaxRetries 4 -InitialDelayMs 5000 -TimeoutSec 600 -RetryTransientTransportFailures
     $exportFiles = @($response.exportFiles)
@@ -245,30 +249,57 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
 
         $outputFile = Join-Path $OutputPath ("VulnExport_{0}_{1}_part_{2}.json.gz" -f $groupId, $date, $partIndex)
         $stagingOutputFile = Get-VulnSnapshotStagingPath -OutputFile $outputFile
-        if (Test-Path -LiteralPath $stagingOutputFile -PathType Leaf) {
-            Remove-Item -LiteralPath $stagingOutputFile -Force -ErrorAction SilentlyContinue
-        }
+        $downloadAttempt = 0
+        $emptyDownloadDelayMs = $emptyDownloadInitialDelayMs
 
-        try {
-            Invoke-WebRequestWithRetry -Uri $fileUrl -OutFile $stagingOutputFile -MaxRetries 6 -InitialDelayMs 2000 -TimeoutSec 1800 -RetryTransientTransportFailures
-
-            $stagingFile = Get-Item -LiteralPath $stagingOutputFile -Force -ErrorAction Stop
-            if ($stagingFile.Length -le 0) {
-                throw "Downloaded file is empty: $(Get-SanitizedUriForLog -Uri $fileUrl)"
-            }
-
-            if (Test-Path -LiteralPath $outputFile -PathType Leaf) {
-                Remove-Item -LiteralPath $outputFile -Force -ErrorAction SilentlyContinue
-            }
-
-            [System.IO.File]::Move($stagingOutputFile, $outputFile)
-        }
-        catch {
+        while ($true) {
             if (Test-Path -LiteralPath $stagingOutputFile -PathType Leaf) {
                 Remove-Item -LiteralPath $stagingOutputFile -Force -ErrorAction SilentlyContinue
             }
 
-            throw
+            try {
+                $downloadAttempt++
+                Invoke-WebRequestWithRetry -Uri $fileUrl -OutFile $stagingOutputFile -MaxRetries 6 -InitialDelayMs 2000 -TimeoutSec 1800 -RetryTransientTransportFailures
+                $stagingFile = Get-Item -LiteralPath $stagingOutputFile -Force -ErrorAction Stop
+            }
+            catch {
+                if (Test-Path -LiteralPath $stagingOutputFile -PathType Leaf) {
+                    Remove-Item -LiteralPath $stagingOutputFile -Force -ErrorAction SilentlyContinue
+                }
+
+                throw
+            }
+
+            if ($stagingFile.Length -gt 0) {
+                try {
+                    if (Test-Path -LiteralPath $outputFile -PathType Leaf) {
+                        Remove-Item -LiteralPath $outputFile -Force -ErrorAction SilentlyContinue
+                    }
+
+                    [System.IO.File]::Move($stagingOutputFile, $outputFile)
+                }
+                catch {
+                    if (Test-Path -LiteralPath $stagingOutputFile -PathType Leaf) {
+                        Remove-Item -LiteralPath $stagingOutputFile -Force -ErrorAction SilentlyContinue
+                    }
+
+                    throw
+                }
+
+                break
+            }
+
+            if (Test-Path -LiteralPath $stagingOutputFile -PathType Leaf) {
+                Remove-Item -LiteralPath $stagingOutputFile -Force -ErrorAction SilentlyContinue
+            }
+
+            if ($downloadAttempt -ge $emptyDownloadMaxAttempts) {
+                throw "Downloaded file is empty: $(Get-SanitizedUriForLog -Uri $fileUrl)"
+            }
+
+            Write-Warning ("Downloaded file was empty for {0} (attempt {1}/{2}). Retrying in {3}s..." -f (Get-SanitizedUriForLog -Uri $fileUrl), $downloadAttempt, $emptyDownloadMaxAttempts, [math]::Round($emptyDownloadDelayMs / 1000, 1))
+            Start-Sleep -Milliseconds $emptyDownloadDelayMs
+            $emptyDownloadDelayMs = [int]($emptyDownloadDelayMs * $emptyDownloadBackoffMultiplier)
         }
 
         $downloadedFiles.Add($outputFile)
