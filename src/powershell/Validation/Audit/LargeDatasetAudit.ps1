@@ -1772,6 +1772,7 @@ function New-AttestedStreamingDashboardAuditResult {
             Verification = 'Semantic parity was satisfied by a versioned validation attestation.'
             InputMode = if (Sync-VulnContentStoreSidecar -BasePath $ResolvedExportsPath) { 'content-store' } else { 'normalized-vuln-store' }
         }
+        SourceMetadata = if ($PayloadCacheEntry.Manifest.PSObject.Properties['SourceMetadata']) { $PayloadCacheEntry.Manifest.SourceMetadata } else { $null }
         Dashboard = [PSCustomObject]@{
             RowCount = $DashboardPayloadRowCount
             Quality = $PayloadCacheEntry.Manifest.Quality
@@ -2116,6 +2117,7 @@ function Get-StreamingDashboardAuditResult {
             Verification = 'Semantic parity was streamed directly from the current exports.'
             InputMode = if (Sync-VulnContentStoreSidecar -BasePath $ResolvedExportsPath) { 'content-store' } else { 'normalized-vuln-store' }
         }
+        SourceMetadata = if ($PayloadCacheEntry.Manifest.PSObject.Properties['SourceMetadata']) { $PayloadCacheEntry.Manifest.SourceMetadata } else { $null }
         Dashboard = [PSCustomObject]@{
             RowCount = $dashboardPayloadRowCount
             Quality = $PayloadCacheEntry.Manifest.Quality

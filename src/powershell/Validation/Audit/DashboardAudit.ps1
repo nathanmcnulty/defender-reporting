@@ -1955,11 +1955,20 @@ function Get-DashboardAuditResult {
                 $machines = Read-NormalizationMachineLookup -Path $ResolvedExportsPath
                 $advancedHunting = Read-AdvancedHuntingData -Path $ResolvedExportsPath
                 $advancedHuntingDeviceUsers = Read-AdvancedHuntingDeviceUserMap -Path $ResolvedExportsPath
+                $sourceMetadata = Get-DashboardSourceSummary `
+                    -BasePath $ResolvedExportsPath `
+                    -MachineCount $machines.Count `
+                    -AdvancedHuntingCveCount $advancedHunting.Count `
+                    -AdvancedHuntingDeviceUserCount $advancedHuntingDeviceUsers.Count `
+                    -AdvancedHuntingInventoryTupleCount 0 `
+                    -NvdCveCount 0 `
+                    -NormalizationMode 'validation-cache-bootstrap' `
+                    -SkipObservedWindowMerge:$skipObservedWindowMerge
                 $tempPayloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-validation-payload-' + [System.Guid]::NewGuid().ToString('N') + '.json.gz')
                 $tempVulnsPath = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-validation-vulns-' + [System.Guid]::NewGuid().ToString('N') + '.json')
                 try {
                     $normalizedResult = ConvertTo-NormalizedData -DataPath $ResolvedExportsPath -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHunting -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose
-                    $payloadCacheEntry = Publish-NormalizedPayloadCache -BasePath $ResolvedExportsPath -PayloadPath $normalizedResult.PayloadPath -VulnCount $normalizedResult.VulnCount -DeviceCount ([int]$normalizedResult.DeviceCount) -CveCount ([int]$normalizedResult.CveCount) -Quality $normalizedResult.Quality -SkipObservedWindowMerge:$skipObservedWindowMerge
+                    $payloadCacheEntry = Publish-NormalizedPayloadCache -BasePath $ResolvedExportsPath -PayloadPath $normalizedResult.PayloadPath -VulnCount $normalizedResult.VulnCount -DeviceCount ([int]$normalizedResult.DeviceCount) -CveCount ([int]$normalizedResult.CveCount) -Quality $normalizedResult.Quality -SourceMetadata $sourceMetadata -SkipObservedWindowMerge:$skipObservedWindowMerge
                 }
                 finally {
                     if (Test-Path -LiteralPath $tempPayloadPath -PathType Leaf) {
@@ -2055,6 +2064,15 @@ function Get-DashboardAuditResult {
     $baselineAuditElapsedSeconds = $null
     $baselineCoverageElapsedSeconds = $null
     $legacyFixtureRegressionElapsedSeconds = $null
+    $auditSourceMetadata = Get-DashboardSourceSummary `
+        -BasePath $ResolvedExportsPath `
+        -MachineCount $machines.Count `
+        -AdvancedHuntingCveCount $advancedHunting.Count `
+        -AdvancedHuntingDeviceUserCount 0 `
+        -AdvancedHuntingInventoryTupleCount $advancedHuntingInventory.Count `
+        -NvdCveCount $nvdCveData.Count `
+        -NormalizationMode 'full-dashboard-audit' `
+        -SkipObservedWindowMerge:$skipObservedWindowMerge
 
     $result = [PSCustomObject]@{
         GeneratedOn = (Get-Date).ToString('o')
@@ -2068,6 +2086,7 @@ function Get-DashboardAuditResult {
             UniqueVendors = @($sourceResult.VendorSet | Sort-Object)
             InputMode = [string]$sourceResult.InputMode
         }
+        SourceMetadata = $auditSourceMetadata
         Dashboard = [PSCustomObject]@{
             RowCount = $dashboardRows.Count
             Quality = $qualityMeta

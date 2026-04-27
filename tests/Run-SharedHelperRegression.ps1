@@ -209,6 +209,184 @@ function Test-CanonicalLayoutHelper {
     }
 }
 
+function Test-FileSetFingerprintIgnoresTimestampChange {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('file-fingerprint-stability-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $filePath = Join-Path $tempRoot 'source.json.gz'
+        Set-Content -LiteralPath $filePath -Value 'alpha' -NoNewline -Encoding utf8
+
+        $initialFingerprint = Get-FileSetFingerprint -Version 'test-cache-v1' -Files @((Get-Item -LiteralPath $filePath))
+        [System.IO.File]::SetLastWriteTimeUtc($filePath, ([datetime]::UtcNow.AddDays(-7)))
+        $timestampOnlyFingerprint = Get-FileSetFingerprint -Version 'test-cache-v1' -Files @((Get-Item -LiteralPath $filePath))
+
+        Set-Content -LiteralPath $filePath -Value 'bravo' -NoNewline -Encoding utf8
+        $contentChangedFingerprint = Get-FileSetFingerprint -Version 'test-cache-v1' -Files @((Get-Item -LiteralPath $filePath))
+
+        Assert-True ($initialFingerprint -eq $timestampOnlyFingerprint) 'Expected file-set fingerprints to ignore timestamp-only changes when content is unchanged.'
+        Assert-True ($timestampOnlyFingerprint -ne $contentChangedFingerprint) 'Expected file-set fingerprints to change when file content changes.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-NormalizedPayloadCacheRejectsManifestHashMismatch {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('payload-cache-hash-mismatch-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'cache-hash-001' -CveId 'CVE-2026-0801' -SnapshotDate '2026-03-20' -Version '8.0.0'
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+
+        $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+        Write-GzipTextFile -Path $payloadPath -Content '{"lookups":{"devices":[],"cves":[]},"vulnsFormat":"rows-v1","vulns":[]}'
+
+        $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempRoot -PayloadPath $payloadPath -VulnCount 0 -DeviceCount 0 -CveCount 0 -Quality ([PSCustomObject]@{ FirstLastSwappedCount = 0 })
+        Assert-True ($null -ne $cacheEntry) 'Expected normalized payload cache publish to create an entry.'
+        Assert-True ($null -ne (Get-NormalizedPayloadCacheEntry -BasePath $tempRoot)) 'Expected normalized payload cache entry to be reusable before corruption.'
+
+        Set-Content -LiteralPath $cacheEntry.PayloadPath -Value 'corrupt' -NoNewline -Encoding utf8
+        $cacheMiss = Get-NormalizedPayloadCacheEntry -BasePath $tempRoot
+
+        $throwFailure = $null
+        try {
+            $null = Confirm-NormalizedPayloadManifestPayloadSha -Manifest $cacheEntry.Manifest -PayloadPath $cacheEntry.PayloadPath -ThrowOnMismatch
+        }
+        catch {
+            $throwFailure = $_
+        }
+
+        Assert-True ($null -eq $cacheMiss) 'Expected normalized payload cache lookup to reject a payload whose bytes do not match the manifest hash.'
+        Assert-True ($null -ne $throwFailure) 'Expected strict normalized payload manifest confirmation to throw on hash mismatch.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-NormalizedPayloadManifestSourceSummary {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('payload-source-metadata-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        Write-GzipTextFile -Path (Get-MachineCurrentPath -BasePath $tempRoot) -Content '[{"id":"device-001"}]'
+        Write-GzipTextFile -Path (Get-AdvancedHuntingCurrentPath -BasePath $tempRoot) -Content '[{"CveId":"CVE-2026-0802"}]'
+        Write-GzipTextFile -Path (Get-NvdCveCurrentPath -BasePath $tempRoot) -Content '{"records":[{"CveId":"CVE-2026-0802"}]}'
+
+        $sourceMetadata = Get-DashboardSourceSummary `
+            -BasePath $tempRoot `
+            -MachineCount 1 `
+            -AdvancedHuntingCveCount 2 `
+            -AdvancedHuntingDeviceUserCount 3 `
+            -AdvancedHuntingInventoryTupleCount 4 `
+            -NvdCveCount 5 `
+            -NormalizationMode 'regression-test'
+
+        Assert-True ($sourceMetadata.Version -eq 'dashboard-source-metadata-v1') 'Expected source metadata to include a version marker.'
+        Assert-True ($sourceMetadata.MachineData.RecordCount -eq 1) 'Expected source metadata to preserve machine record count.'
+        Assert-True ($sourceMetadata.MachineData.Source.FileCount -eq 1) 'Expected source metadata to include machine source file summary.'
+        Assert-True ($sourceMetadata.AdvancedHunting.CveCount -eq 2) 'Expected source metadata to preserve Advanced Hunting CVE count.'
+        Assert-True ($sourceMetadata.AdvancedHunting.DeviceUserCount -eq 3) 'Expected source metadata to preserve Advanced Hunting device-user count.'
+        Assert-True ($sourceMetadata.AdvancedHunting.InventoryTupleCount -eq 4) 'Expected source metadata to preserve Advanced Hunting inventory tuple count.'
+        Assert-True ($sourceMetadata.NvdCve.RecordCount -eq 5) 'Expected source metadata to preserve NVD CVE count.'
+
+        $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+        Write-GzipTextFile -Path $payloadPath -Content '{"lookups":{"devices":[],"cves":[]},"vulnsFormat":"rows-v1","vulns":[]}'
+
+        $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempRoot -PayloadPath $payloadPath -VulnCount 0 -DeviceCount 1 -CveCount 5 -Quality ([PSCustomObject]@{ FirstLastSwappedCount = 0 }) -SourceMetadata $sourceMetadata
+        Assert-True ($null -ne $cacheEntry.Manifest.SourceMetadata) 'Expected normalized payload manifest to carry source metadata.'
+        Assert-True ($cacheEntry.Manifest.SourceMetadata.AdvancedHunting.DeviceUserCount -eq 3) 'Expected manifest source metadata to retain enrichment counts.'
+
+        $htmlPath = Join-Path $tempRoot 'dashboard.html'
+        Set-Content -LiteralPath $htmlPath -Value '<html></html>' -NoNewline -Encoding utf8
+        $sidecarPath = Write-DashboardValidationSidecar -HtmlPath $htmlPath -PayloadManifest $cacheEntry.Manifest -DashboardPayloadSha256 $cacheEntry.Manifest.PayloadSha256 -DashboardPayloadRowCount 0
+        $sidecar = Get-Content -LiteralPath $sidecarPath -Raw | ConvertFrom-Json -Depth 20
+
+        Assert-True ($null -ne $sidecar.SourceMetadata) 'Expected validation sidecar to copy source metadata from the payload manifest.'
+        Assert-True ($sidecar.SourceMetadata.NvdCve.RecordCount -eq 5) 'Expected validation sidecar source metadata to retain NVD counts.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-SaveJSLibraryFileRefreshesEmptyCache {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('library-cache-empty-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'library.js'
+    $secondOutputPath = Join-Path $tempRoot 'library-second.js'
+    $existingInvokeWebRequestFunction = Get-Command -Name Invoke-WebRequest -CommandType Function -ErrorAction SilentlyContinue
+    $existingInvokeWebRequestScriptBlock = if ($null -ne $existingInvokeWebRequestFunction) { (Get-Item -Path Function:Invoke-WebRequest).ScriptBlock } else { $null }
+
+    try {
+        $script:LibraryCacheRefreshDownloadAttempts = 0
+        function Invoke-WebRequest {
+            [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Regression test shim for Save-JSLibraryFile without network access.')]
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Uri,
+
+                [Parameter(Mandatory = $true)]
+                [string]$OutFile,
+
+                [Parameter(Mandatory = $false)]
+                [int]$TimeoutSec
+            )
+
+            $null = $Uri
+            $null = $TimeoutSec
+            $script:LibraryCacheRefreshDownloadAttempts++
+            [System.IO.File]::WriteAllText($OutFile, ("download-{0}" -f $script:LibraryCacheRefreshDownloadAttempts), [System.Text.UTF8Encoding]::new($false))
+        }
+
+        $null = Save-JSLibraryFile -Url 'https://example.invalid/library.js' -Name 'Test Library' -OutputPath $outputPath -Critical $true -CacheBasePath $tempRoot
+        $cacheDirectory = Join-Path $tempRoot '.dashboard-cache\libraries'
+        $cacheFile = Get-ChildItem -Path $cacheDirectory -File | Select-Object -First 1
+        [System.IO.File]::WriteAllBytes($cacheFile.FullName, [byte[]]@())
+
+        $null = Save-JSLibraryFile -Url 'https://example.invalid/library.js' -Name 'Test Library' -OutputPath $secondOutputPath -Critical $true -CacheBasePath $tempRoot
+        $refreshedContent = Get-Content -LiteralPath $secondOutputPath -Raw
+        $refreshedCacheLength = (Get-Item -LiteralPath $cacheFile.FullName).Length
+
+        Assert-True ($script:LibraryCacheRefreshDownloadAttempts -eq 2) 'Expected an empty cached JavaScript library to be refreshed instead of reused.'
+        Assert-True ($refreshedContent -eq 'download-2') 'Expected refreshed library output to come from the second download attempt.'
+        Assert-True ($refreshedCacheLength -gt 0) 'Expected refreshed JavaScript library cache file to be non-empty.'
+    }
+    finally {
+        if ($null -ne $existingInvokeWebRequestScriptBlock) {
+            Set-Item -Path Function:Invoke-WebRequest -Value $existingInvokeWebRequestScriptBlock
+        }
+        else {
+            Remove-Item -Path Function:Invoke-WebRequest -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Variable -Name LibraryCacheRefreshDownloadAttempts -Scope Script -ErrorAction SilentlyContinue
+
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-VulnContentStoreExistenceNeedsRef {
     [CmdletBinding()]
     param()
@@ -3019,6 +3197,79 @@ function Test-DashboardSplitAssetsGenerationAndValidation {
     }
 }
 
+function Test-DashboardValidateOnlyFailsWhenHostedPayloadMissing {
+    [CmdletBinding()]
+    param()
+
+    $fixturePath = Join-Path $PSScriptRoot 'fixtures\legacy-migration-none-severity'
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-hosted-negative-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $dashboardScriptPath = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Generate-VulnerabilityDashboard.ps1'
+    $outputPath = Join-Path $tempRoot 'dashboard.html'
+    $auditPath = Join-Path $tempRoot 'audit.json'
+    $assetsPath = Join-Path $tempRoot 'dashboard.assets'
+
+    try {
+        Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
+        $null = Publish-VulnStoreFromBulkSnapshot -BasePath $tempRoot -RemoveSnapshotFiles
+
+        & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -SplitAssets | Out-Null
+
+        $payloadAssetPath = Join-Path $assetsPath 'payload.json.gz'
+        Assert-True ((Test-Path -LiteralPath $payloadAssetPath -PathType Leaf)) 'Expected split-assets generation to write a hosted payload before the negative validation step.'
+        Remove-Item -LiteralPath $payloadAssetPath -Force
+
+        & pwsh -NoProfile -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ValidateOnly -ValidationOutputPath $auditPath | Out-Null
+        $validationExitCode = $LASTEXITCODE
+
+        Assert-True ($validationExitCode -ne 0) 'Expected ValidateOnly to fail when a hosted dashboard payload asset is missing.'
+        Assert-True (-not (Test-Path -LiteralPath $auditPath -PathType Leaf)) 'Expected missing hosted payload validation to avoid writing a passing audit artifact.'
+    }
+    finally {
+        $global:LASTEXITCODE = 0
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-PackageOnlyRejectsMismatchedNormalizedPayloadManifest {
+    [CmdletBinding()]
+    param()
+
+    $fixturePath = Join-Path $PSScriptRoot 'fixtures\legacy-migration-none-severity'
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-package-negative-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $dashboardScriptPath = Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'Generate-VulnerabilityDashboard.ps1'
+    $normalizedPayloadPath = Join-Path $tempRoot '.local\payload\dashboard-payload.json.gz'
+    $normalizedManifestPath = Join-Path $tempRoot '.local\payload\dashboard-payload.json'
+    $tamperedPayloadPath = Join-Path $tempRoot '.local\payload\dashboard-payload-tampered.json.gz'
+    $outputPath = Join-Path $tempRoot 'dashboard.html'
+
+    try {
+        Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
+        $null = Publish-VulnStoreFromBulkSnapshot -BasePath $tempRoot -RemoveSnapshotFiles
+
+        & $dashboardScriptPath -DirectoryPath $tempRoot -ExportMachineData:$false -NormalizeOnly -NormalizedPayloadOutputPath $normalizedPayloadPath -NormalizedPayloadManifestOutputPath $normalizedManifestPath | Out-Null
+        Assert-True ((Test-Path -LiteralPath $normalizedPayloadPath -PathType Leaf)) 'Expected NormalizeOnly to materialize a payload for the package-only negative test.'
+        Assert-True ((Test-Path -LiteralPath $normalizedManifestPath -PathType Leaf)) 'Expected NormalizeOnly to materialize a manifest for the package-only negative test.'
+
+        Write-GzipTextFile -Path $tamperedPayloadPath -Content '{"lookups":{"devices":[],"cves":[]},"vulnsFormat":"rows-v1","vulns":[]}'
+
+        & pwsh -NoProfile -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -PackageOnly -NormalizedPayloadInputPath $tamperedPayloadPath -NormalizedPayloadManifestInputPath $normalizedManifestPath | Out-Null
+        $packageExitCode = $LASTEXITCODE
+
+        Assert-True ($packageExitCode -ne 0) 'Expected package-only generation to reject a payload whose bytes do not match the provided manifest.'
+        Assert-True (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) 'Expected package-only manifest mismatch to avoid writing a dashboard.'
+    }
+    finally {
+        $global:LASTEXITCODE = 0
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-DashboardDualPackagingGenerationAndValidation {
     [CmdletBinding()]
     param()
@@ -3217,6 +3468,14 @@ function Test-VulnObservedWindowCacheRoundTrip {
 Write-Output 'Running shared-helper regression checks...'
 Test-CanonicalLayoutHelper
 Write-Output '  Canonical layout helper checks passed.'
+Test-FileSetFingerprintIgnoresTimestampChange
+Write-Output '  File-set fingerprint stability checks passed.'
+Test-NormalizedPayloadCacheRejectsManifestHashMismatch
+Write-Output '  Normalized payload cache integrity checks passed.'
+Test-NormalizedPayloadManifestSourceSummary
+Write-Output '  Normalized payload source metadata checks passed.'
+Test-SaveJSLibraryFileRefreshesEmptyCache
+Write-Output '  JavaScript library cache refresh checks passed.'
 Test-VulnContentStoreExistenceNeedsRef
 Write-Output '  Content-store existence checks passed.'
 Test-LocalExportArtifactCleanup
@@ -3315,6 +3574,10 @@ Test-DashboardValidationPreservesNoneSeverityData
 Write-Output '  Dashboard none-severity validation checks passed.'
 Test-DashboardSplitAssetsGenerationAndValidation
 Write-Output '  Dashboard split-assets generation and validation checks passed.'
+Test-DashboardValidateOnlyFailsWhenHostedPayloadMissing
+Write-Output '  Hosted dashboard missing-payload negative checks passed.'
+Test-PackageOnlyRejectsMismatchedNormalizedPayloadManifest
+Write-Output '  Package-only manifest mismatch negative checks passed.'
 Test-DashboardDualPackagingGenerationAndValidation
 Write-Output '  Dashboard dual packaging generation and validation checks passed.'
 Test-AdvancedHuntingBundleMatchesDedicatedReaderData
