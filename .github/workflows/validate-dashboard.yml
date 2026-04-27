@@ -7,11 +7,14 @@ concurrency:
 on:
   pull_request:
     paths:
-      - '*.ps1'
       - '**/*.ps1'
+      - 'azure/**'
+      - 'build/manifests/**'
       - 'build/PSScriptAnalyzerSettings.psd1'
       - 'build/Validate-DashboardReports.ps1'
+      - 'src/**'
       - 'templates/**'
+      - 'tests/**'
       - 'exports/**'
       - 'VulnerabilityDashboard.html'
       - '.github/workflows/validate-dashboard.yml'
@@ -22,11 +25,14 @@ on:
     branches:
       - main
     paths:
-      - '*.ps1'
       - '**/*.ps1'
+      - 'azure/**'
+      - 'build/manifests/**'
       - 'build/PSScriptAnalyzerSettings.psd1'
       - 'build/Validate-DashboardReports.ps1'
+      - 'src/**'
       - 'templates/**'
+      - 'tests/**'
       - 'exports/**'
       - 'VulnerabilityDashboard.html'
       - '.github/workflows/validate-dashboard.yml'
