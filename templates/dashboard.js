@@ -9087,7 +9087,7 @@ function buildDenseModalDeviceRow(device) {
         '<td title="' + escapeHtml(device.DeviceId || '') + '">' + escapeHtml(formatModalDeviceId(device.DeviceId)) + '</td>' +
         '<td>' + device.cveIds.size + '</td>' +
         '<td>' + escapeHtml(ipAddress) + '</td>' +
-        '<td class="modal-date-col">' + formatDateYMD(device.lastSeen) + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(formatDateYMD(device.lastSeen)) + '</td>' +
         '</tr>';
 }
 
