@@ -2379,16 +2379,15 @@ async function denormalizeWithCaching() {
         if (cached && cached.data && cached.data.length > 0) {
             logDebug('Loaded', cached.data.length, 'records from IndexedDB cache (compressed fingerprint)');
             vulnerabilityData = cached.data;
+            const decompressed = pako.inflate(pendingCompressedBytes, { to: 'string' });
+            const payload = JSON.parse(decompressed);
             if (cached.lookups) {
                 lookups = cached.lookups;
                 logDebug('Restored lookups from IndexedDB cache');
             } else {
-                // Fallback: decompress to get lookups
-                const decompressed = pako.inflate(pendingCompressedBytes, { to: 'string' });
-                const payload = JSON.parse(decompressed);
                 lookups = payload.lookups;
-                rawVulns = payload.vulns;
             }
+            rawVulns = payload.vulns;
             pendingCompressedBytes = null;
             applyDerivedVulnerabilityFields(vulnerabilityData);
             return;
