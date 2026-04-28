@@ -494,6 +494,26 @@ function Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata {
     }
 }
 
+function Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-history-remove-empty-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $publishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $removePaths = @(Get-MachineHistoryRemovePaths -BasePath $tempRoot -PublishedHistoryNames $publishedHistoryNames)
+
+        Assert-True ($removePaths.Count -eq 0) 'Expected empty machine history cleanup inputs to be accepted without removable paths.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-BulkSnapshotImportSmoke {
     [CmdletBinding()]
     param()
@@ -3482,6 +3502,8 @@ Test-LocalExportArtifactCleanup
 Write-Output '  Local export artifact cleanup checks passed.'
 Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata
 Write-Output '  Machine store initialization checks passed.'
+Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet
+Write-Output '  Machine history cleanup empty-set checks passed.'
 Test-BulkSnapshotImportSmoke
 Write-Output '  Bulk snapshot import smoke checks passed.'
 Test-BulkSnapshotImportSingleSnapshot

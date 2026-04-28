@@ -112,6 +112,12 @@ function validateCommonHtml(html, label) {
     ['Critical', 'High', 'Medium', 'Low', 'Report:', 'Export to PDF', 'Dashboard filters'].forEach(text => {
         assertContains(html, text, `${label}: missing required text '${text}'.`);
     });
+
+    assertContains(html, 'class="dashboard-header"', `${label}: missing dashboard header shell.`);
+    assert(
+        !/<h1[\s\S]*report-selector-container[\s\S]*<\/h1>/i.test(html),
+        `${label}: report selector controls should not be nested inside the h1.`
+    );
 }
 
 function validateSelfContained(selfContainedPath) {
