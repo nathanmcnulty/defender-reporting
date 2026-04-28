@@ -9574,9 +9574,16 @@ function Save-JSLibraryFile {
         $safeName = ($Name -replace '[^A-Za-z0-9._-]', '-')
         $cachePath = Join-Path $cacheDirectory ("{0}-{1}{2}" -f $safeName, $urlHash, $extension)
         if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
-            Copy-Item -LiteralPath $cachePath -Destination $OutputPath -Force
-            Write-Information "Reusing cached $Name library" -InformationAction Continue
-            return $OutputPath
+            $cachedLibrary = Get-Item -LiteralPath $cachePath
+            if ($cachedLibrary.Length -le 0) {
+                Write-Warning "Cached $Name library was empty; refreshing."
+                Remove-Item -LiteralPath $cachePath -Force -ErrorAction SilentlyContinue
+            }
+            else {
+                Copy-Item -LiteralPath $cachePath -Destination $OutputPath -Force
+                Write-Information "Reusing cached $Name library" -InformationAction Continue
+                return $OutputPath
+            }
         }
     }
 
@@ -9584,6 +9591,11 @@ function Save-JSLibraryFile {
 
     try {
         Invoke-WebRequest -Uri $Url -OutFile $OutputPath -TimeoutSec 30
+        $downloadedLibrary = Get-Item -LiteralPath $OutputPath -ErrorAction Stop
+        if ($downloadedLibrary.Length -le 0) {
+            throw "$Name library download produced an empty file."
+        }
+
         if ($cachePath) {
             Copy-Item -LiteralPath $OutputPath -Destination $cachePath -Force
         }
@@ -9591,6 +9603,10 @@ function Save-JSLibraryFile {
         return $OutputPath
     }
     catch {
+        if (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
+            Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
+        }
+
         $errorMessage = "Failed to download $Name from $Url`: $_"
         if ($Critical) {
             Write-Error $errorMessage
@@ -11785,7 +11801,6 @@ function Get-FileSetFingerprint {
         $fileIdentity = if ($FileIdentityProperty -eq 'Name') { $file.Name } else { $file.FullName }
         [void]$builder.Append($fileIdentity).Append('|')
         [void]$builder.Append($file.Length).Append('|')
-        [void]$builder.Append($file.LastWriteTimeUtc.Ticks).Append('|')
         [void]$builder.AppendLine($hash)
     }
 
@@ -12259,6 +12274,91 @@ function Get-NvdCveFingerprintSourceFileSet {
     return [System.IO.FileInfo[]]@((Get-Item -LiteralPath $currentPath))
 }
 
+function Get-DashboardSourceFileSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.IO.FileInfo[]]$Files
+    )
+
+    $sourceFiles = @($Files | Where-Object { $null -ne $_ } | Sort-Object FullName)
+    $latestFile = @($sourceFiles | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1)
+    $latestLastWriteTimeUtc = if ($latestFile.Count -gt 0) { $latestFile[0].LastWriteTimeUtc.ToUniversalTime() } else { $null }
+    $ageSeconds = if ($null -ne $latestLastWriteTimeUtc) {
+        [math]::Max(0, [int][math]::Round(((Get-Date).ToUniversalTime() - $latestLastWriteTimeUtc).TotalSeconds, 0))
+    }
+    else {
+        $null
+    }
+
+    return [PSCustomObject]@{
+        Present = ($sourceFiles.Count -gt 0)
+        FileCount = [int]$sourceFiles.Count
+        LatestLastWriteTimeUtc = if ($null -ne $latestLastWriteTimeUtc) { $latestLastWriteTimeUtc.ToString('o') } else { $null }
+        AgeSeconds = $ageSeconds
+        Files = @($sourceFiles | ForEach-Object {
+                [PSCustomObject]@{
+                    Name = $_.Name
+                    Length = [long]$_.Length
+                    LastWriteTimeUtc = $_.LastWriteTimeUtc.ToUniversalTime().ToString('o')
+                }
+            })
+    }
+}
+
+function Get-DashboardSourceSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $false)]
+        [int]$MachineCount = 0,
+
+        [Parameter(Mandatory = $false)]
+        [int]$AdvancedHuntingCveCount = 0,
+
+        [Parameter(Mandatory = $false)]
+        [int]$AdvancedHuntingDeviceUserCount = 0,
+
+        [Parameter(Mandatory = $false)]
+        [int]$AdvancedHuntingInventoryTupleCount = 0,
+
+        [Parameter(Mandatory = $false)]
+        [int]$NvdCveCount = 0,
+
+        [Parameter(Mandatory = $false)]
+        [string]$NormalizationMode = 'unknown',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$SkipObservedWindowMerge
+    )
+
+    return [PSCustomObject]@{
+        Version = 'dashboard-source-metadata-v1'
+        GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
+        NormalizationMode = $NormalizationMode
+        SkipObservedWindowMerge = ($SkipObservedWindowMerge -eq $true)
+        MachineData = [PSCustomObject]@{
+            RecordCount = [int]$MachineCount
+            Source = Get-DashboardSourceFileSummary -Files (Get-MachineFingerprintSourceFileSet -BasePath $BasePath)
+        }
+        AdvancedHunting = [PSCustomObject]@{
+            CveCount = [int]$AdvancedHuntingCveCount
+            DeviceUserCount = [int]$AdvancedHuntingDeviceUserCount
+            InventoryTupleCount = [int]$AdvancedHuntingInventoryTupleCount
+            Source = Get-DashboardSourceFileSummary -Files (Get-AdvancedHuntingFingerprintSourceFileSet -BasePath $BasePath)
+        }
+        NvdCve = [PSCustomObject]@{
+            RecordCount = [int]$NvdCveCount
+            Source = Get-DashboardSourceFileSummary -Files (Get-NvdCveFingerprintSourceFileSet -BasePath $BasePath)
+        }
+    }
+}
+
 function Get-VulnerabilityPayloadFingerprintSourceFileSet {
     [CmdletBinding()]
     [OutputType([System.IO.FileInfo[]])]
@@ -12717,11 +12817,53 @@ function ConvertTo-NormalizedPayloadManifestRecord {
     )
 
     $record = [ordered]@{}
-    foreach ($property in $Manifest.PSObject.Properties) {
-        $record[$property.Name] = $property.Value
+    if ($Manifest -is [System.Collections.IDictionary]) {
+        foreach ($key in $Manifest.Keys) {
+            $record[[string]$key] = $Manifest[$key]
+        }
+    }
+    else {
+        foreach ($property in $Manifest.PSObject.Properties) {
+            $record[$property.Name] = $property.Value
+        }
     }
 
     return $record
+}
+
+function Confirm-NormalizedPayloadManifestPayloadSha {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Manifest,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PayloadPath,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ThrowOnMismatch
+    )
+
+    $manifestRecord = ConvertTo-NormalizedPayloadManifestRecord -Manifest $Manifest
+    $actualPayloadSha256 = Get-FileSha256Hex -Path $PayloadPath
+    $manifestPayloadSha256 = if ($manifestRecord.Contains('PayloadSha256')) { [string]$manifestRecord.PayloadSha256 } else { '' }
+
+    if (
+        -not [string]::IsNullOrWhiteSpace($manifestPayloadSha256) -and
+        -not [System.StringComparer]::OrdinalIgnoreCase.Equals($manifestPayloadSha256, $actualPayloadSha256)
+    ) {
+        $message = "Normalized payload hash mismatch for '$PayloadPath'. Manifest has '$manifestPayloadSha256' but file is '$actualPayloadSha256'."
+        if ($ThrowOnMismatch) {
+            throw $message
+        }
+
+        Write-Warning $message
+        return $null
+    }
+
+    $manifestRecord.PayloadSha256 = $actualPayloadSha256
+    return $manifestRecord
 }
 
 function Export-NormalizedPayloadArtifacts {
@@ -12909,6 +13051,7 @@ function Write-DashboardValidationSidecar {
         DeviceCount = [int]$PayloadManifest.DeviceCount
         CveCount = [int]$PayloadManifest.CveCount
         Quality = $PayloadManifest.Quality
+        SourceMetadata = if ($PayloadManifest.PSObject.Properties['SourceMetadata']) { $PayloadManifest.SourceMetadata } else { $null }
         SkipObservedWindowMerge = [bool]($PayloadManifest.PSObject.Properties['SkipObservedWindowMerge'] -and $PayloadManifest.SkipObservedWindowMerge)
         DashboardPayloadSha256 = $DashboardPayloadSha256
         DashboardPayloadRowCount = $DashboardPayloadRowCount
@@ -13001,10 +13144,17 @@ function Get-NormalizedPayloadCacheEntry {
         return $null
     }
 
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 20
+    $manifest = Read-NormalizedPayloadManifest -Path $manifestPath
     if ([string]$manifest.Fingerprint -ne $fingerprint) {
         return $null
     }
+
+    $manifestRecord = Confirm-NormalizedPayloadManifestPayloadSha -Manifest $manifest -PayloadPath $payloadPath
+    if ($null -eq $manifestRecord) {
+        return $null
+    }
+
+    $manifest = [PSCustomObject]$manifestRecord
 
     Clear-StaleNormalizedPayloadCache -BasePath $BasePath -KeepPaths @($payloadPath, $manifestPath)
     return [PSCustomObject]@{
@@ -13038,6 +13188,9 @@ function Publish-NormalizedPayloadCache {
         [object]$Quality,
 
         [Parameter(Mandatory = $false)]
+        [object]$SourceMetadata,
+
+        [Parameter(Mandatory = $false)]
         [switch]$SkipObservedWindowMerge
     )
 
@@ -13061,6 +13214,7 @@ function Publish-NormalizedPayloadCache {
         DeviceCount = $DeviceCount
         CveCount = $CveCount
         Quality = $Quality
+        SourceMetadata = $SourceMetadata
         SkipObservedWindowMerge = ($SkipObservedWindowMerge -eq $true)
         SemanticValidationAttestation = $null
     }
@@ -17386,6 +17540,15 @@ try {
         $advancedHuntingBundle = Read-AdvancedHuntingBundle -Path $tempExports -IncludeDeviceUsers
         $advancedHuntingData = [hashtable]$advancedHuntingBundle.AdvancedHuntingData
         $advancedHuntingDeviceUsers = [hashtable]$advancedHuntingBundle.DeviceUsers
+        $sourceMetadata = Get-DashboardSourceSummary `
+            -BasePath $tempExports `
+            -MachineCount $machines.Count `
+            -AdvancedHuntingCveCount $advancedHuntingData.Count `
+            -AdvancedHuntingDeviceUserCount $advancedHuntingDeviceUsers.Count `
+            -AdvancedHuntingInventoryTupleCount 0 `
+            -NvdCveCount 0 `
+            -NormalizationMode 'azure-runbook-normalization' `
+            -SkipObservedWindowMerge:$skipObservedWindowMerge
         $advancedHuntingBundle = $null
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-AdvancedHuntingBundle"
@@ -17433,7 +17596,7 @@ try {
         }
         Invoke-FullGarbageCollection
 
-        $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempExports -PayloadPath $tempPayloadPath -VulnCount $vulnCount -DeviceCount $deviceCount -CveCount $cveCount -Quality $normalizedQuality -SkipObservedWindowMerge:$skipObservedWindowMerge
+        $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempExports -PayloadPath $tempPayloadPath -VulnCount $vulnCount -DeviceCount $deviceCount -CveCount $cveCount -Quality $normalizedQuality -SourceMetadata $sourceMetadata -SkipObservedWindowMerge:$skipObservedWindowMerge
         if ($cacheEntry) {
             Write-Output ("  Cached normalized payload as {0}" -f $cacheEntry.Fingerprint.Substring(0, 12))
         }

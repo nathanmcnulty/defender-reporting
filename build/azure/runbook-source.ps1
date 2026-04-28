@@ -1304,6 +1304,15 @@ try {
         $advancedHuntingBundle = Read-AdvancedHuntingBundle -Path $tempExports -IncludeDeviceUsers
         $advancedHuntingData = [hashtable]$advancedHuntingBundle.AdvancedHuntingData
         $advancedHuntingDeviceUsers = [hashtable]$advancedHuntingBundle.DeviceUsers
+        $sourceMetadata = Get-DashboardSourceSummary `
+            -BasePath $tempExports `
+            -MachineCount $machines.Count `
+            -AdvancedHuntingCveCount $advancedHuntingData.Count `
+            -AdvancedHuntingDeviceUserCount $advancedHuntingDeviceUsers.Count `
+            -AdvancedHuntingInventoryTupleCount 0 `
+            -NvdCveCount 0 `
+            -NormalizationMode 'azure-runbook-normalization' `
+            -SkipObservedWindowMerge:$skipObservedWindowMerge
         $advancedHuntingBundle = $null
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-AdvancedHuntingBundle"
@@ -1351,7 +1360,7 @@ try {
         }
         Invoke-FullGarbageCollection
 
-        $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempExports -PayloadPath $tempPayloadPath -VulnCount $vulnCount -DeviceCount $deviceCount -CveCount $cveCount -Quality $normalizedQuality -SkipObservedWindowMerge:$skipObservedWindowMerge
+        $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempExports -PayloadPath $tempPayloadPath -VulnCount $vulnCount -DeviceCount $deviceCount -CveCount $cveCount -Quality $normalizedQuality -SourceMetadata $sourceMetadata -SkipObservedWindowMerge:$skipObservedWindowMerge
         if ($cacheEntry) {
             Write-Output ("  Cached normalized payload as {0}" -f $cacheEntry.Fingerprint.Substring(0, 12))
         }
