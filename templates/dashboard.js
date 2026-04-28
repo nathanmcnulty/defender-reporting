@@ -156,6 +156,8 @@ const configuredReportDataWarmupRowLimit = Number(dashboardConfig.reportDataWarm
 const configuredReportDataWarmupMode = typeof dashboardConfig.reportDataWarmupMode === 'string'
     ? dashboardConfig.reportDataWarmupMode.toLowerCase()
     : 'auto';
+const configuredDenormalizeYieldRowThreshold = Number(dashboardConfig.denormalizeYieldRowThreshold);
+const configuredDenormalizeYieldRowInterval = Number(dashboardConfig.denormalizeYieldRowInterval);
 const PDF_EXPORT_PAGE_WARNING_THRESHOLD = Number.isFinite(configuredPdfPageWarningThreshold) && configuredPdfPageWarningThreshold > 0
     ? Math.floor(configuredPdfPageWarningThreshold)
     : 100;
@@ -165,6 +167,12 @@ const REPORT_DATA_WARMUP_ROW_LIMIT = Number.isFinite(configuredReportDataWarmupR
 const REPORT_DATA_WARMUP_MODE = ['always', 'auto', 'never'].includes(configuredReportDataWarmupMode)
     ? configuredReportDataWarmupMode
     : 'auto';
+const DENORMALIZE_YIELD_ROW_THRESHOLD = Number.isFinite(configuredDenormalizeYieldRowThreshold) && configuredDenormalizeYieldRowThreshold >= 0
+    ? Math.floor(configuredDenormalizeYieldRowThreshold)
+    : 50000;
+const DENORMALIZE_YIELD_ROW_INTERVAL = Number.isFinite(configuredDenormalizeYieldRowInterval) && configuredDenormalizeYieldRowInterval > 0
+    ? Math.floor(configuredDenormalizeYieldRowInterval)
+    : 25000;
 const PDF_PAGE_COUNT_TIMEOUT_MS = 10000;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
 const FACET_SEARCH_MIN_OPTIONS = 8;
@@ -330,7 +338,8 @@ function createEmptyDashboardMetricsState() {
         reports: {},
         counts: {
             applyFilters: 0,
-            renders: 0
+            renders: 0,
+            denormalizeYields: 0
         }
     };
 }
@@ -1943,13 +1952,50 @@ function getLookupRecord(lookup, index) {
  * @param {number} index - Index in the array
  * @returns {Object} Expanded vulnerability object
  */
+function createDenormalizeYieldState(rawCount, options = {}) {
+    const configuredThreshold = Number(options.yieldThreshold);
+    const configuredInterval = Number(options.yieldEveryRows);
+    const threshold = Number.isFinite(configuredThreshold) && configuredThreshold >= 0
+        ? Math.floor(configuredThreshold)
+        : DENORMALIZE_YIELD_ROW_THRESHOLD;
+    const interval = Number.isFinite(configuredInterval) && configuredInterval > 0
+        ? Math.floor(configuredInterval)
+        : DENORMALIZE_YIELD_ROW_INTERVAL;
+    const canUseTimer = typeof window !== 'undefined' && typeof window.setTimeout === 'function';
+    const enabled = options.allowYield === true && canUseTimer && rawCount >= threshold && interval > 0;
+
+    return {
+        enabled,
+        interval,
+        nextYieldAt: interval,
+        yieldCount: 0
+    };
+}
+
+async function maybeYieldDuringDenormalization(state, processedRows, totalRows) {
+    if (!state.enabled || processedRows < state.nextYieldAt) {
+        return;
+    }
+
+    state.yieldCount++;
+    state.nextYieldAt += state.interval;
+
+    if (totalRows > 0) {
+        const percent = Math.min(99, Math.floor((processedRows / totalRows) * 100));
+        setDashboardStatus(`Preparing dashboard rows (${percent}%)...`);
+    }
+
+    await new Promise(resolve => window.setTimeout(resolve, 0));
+}
+
 /**
  * Denormalize all vulnerability records (main-thread fallback)
  */
-function denormalizeAllVulns() {
+async function denormalizeAllVulns(options = {}) {
     const rawCount = getRawVulnCount();
     logDebug('Denormalizing', rawCount, 'records (main thread)...');
     const startTime = performance.now();
+    const yieldState = createDenormalizeYieldState(rawCount, options);
 
     vulnerabilityData = new Array(rawCount);
     let rowCount = 0;
@@ -2021,6 +2067,7 @@ function denormalizeAllVulns() {
         }
         dev._tagValues = dev._tagNames.length > 0 ? dev._tagNames : noTagsArr;
         dev._deviceFilterKey = dev.id || dev.n || '';
+        dev._deviceSearchText = `${dev.n || ''} ${dev.id || ''}`.toLowerCase();
         // RBAC group
         const gVal = (dev.g >= 0 && dev.g < lkGroups.length) ? lkGroups[dev.g] : null;
         dev._rbacGroupName = (gVal && String(gVal).trim() !== '') ? gVal : '(none)';
@@ -2180,14 +2227,20 @@ function denormalizeAllVulns() {
             _remediationDate: hasPatchEvidence ? lastSeen : '',
             _remediationString: getRemediationStrCached(updIdx, cve.bt),
             _deviceFilterKey: device._deviceFilterKey,
+            _deviceSearchText: device._deviceSearchText,
             _normalizedGroup: device._normalizedGroup,
             _tagValues: device._tagValues
         };
+
+        if (yieldState.enabled && (i + 1) >= yieldState.nextYieldAt) {
+            await maybeYieldDuringDenormalization(yieldState, i + 1, rawCount);
+        }
     }
 
     vulnerabilityData.length = rowCount;
 
     // Second pass: assign _environmentFirstSeenDate (uses stored _issueKey)
+    const totalDenormalizeWork = rawCount + vulnerabilityData.length;
     for (let i = 0; i < vulnerabilityData.length; i++) {
         const v = vulnerabilityData[i];
         v._environmentFirstSeenDate = earliestFirstSeenByIssue.get(v._issueKey) || v._firstSeenDate;
@@ -2206,6 +2259,10 @@ function denormalizeAllVulns() {
         if (v._firstSeenDate && v._lastSeenDate && v._firstSeenDate > v._lastSeenDate) {
             qualitySummary.invertedRanges++;
         }
+
+        if (yieldState.enabled && (rawCount + i + 1) >= yieldState.nextYieldAt) {
+            await maybeYieldDuringDenormalization(yieldState, rawCount + i + 1, totalDenormalizeWork);
+        }
     }
 
     qualitySummary.uniqueDevices = qualityDeviceKeys.size;
@@ -2216,6 +2273,11 @@ function denormalizeAllVulns() {
         console.warn('Skipped', skippedInvalidRows, 'vulnerability records with missing lookup references during denormalization.');
     }
     const elapsed = Math.round(performance.now() - startTime);
+    if (yieldState.yieldCount > 0) {
+        dashboardMetrics.counts.denormalizeYields = (dashboardMetrics.counts.denormalizeYields || 0) + yieldState.yieldCount;
+        publishDashboardDiagnostics();
+        logDebug('Denormalization yielded', yieldState.yieldCount, 'time(s) while preparing rows');
+    }
     logDebug('Denormalization complete in', elapsed, 'ms');
 }
 
@@ -2317,16 +2379,15 @@ async function denormalizeWithCaching() {
         if (cached && cached.data && cached.data.length > 0) {
             logDebug('Loaded', cached.data.length, 'records from IndexedDB cache (compressed fingerprint)');
             vulnerabilityData = cached.data;
+            const decompressed = pako.inflate(pendingCompressedBytes, { to: 'string' });
+            const payload = JSON.parse(decompressed);
             if (cached.lookups) {
                 lookups = cached.lookups;
                 logDebug('Restored lookups from IndexedDB cache');
             } else {
-                // Fallback: decompress to get lookups
-                const decompressed = pako.inflate(pendingCompressedBytes, { to: 'string' });
-                const payload = JSON.parse(decompressed);
                 lookups = payload.lookups;
-                rawVulns = payload.vulns;
             }
+            rawVulns = payload.vulns;
             pendingCompressedBytes = null;
             applyDerivedVulnerabilityFields(vulnerabilityData);
             return;
@@ -2365,11 +2426,12 @@ async function denormalizeWithCaching() {
         if (result.rows) {
             // Worker returned fully denormalized rows (non-compressed path)
             vulnerabilityData = result.rows;
+            applyDerivedVulnerabilityFields(vulnerabilityData);
         } else {
             // Decompress-only path: Worker returned lookups + rawVulns, denormalize here
             const decompElapsed = Math.round(performance.now() - startTime);
             console.log('[perf] Worker decompress: ' + decompElapsed + 'ms');
-            denormalizeAllVulns();
+            await denormalizeAllVulns({ allowYield: true });
         }
         const elapsed = Math.round(performance.now() - startTime);
         logDebug('Worker + denormalize complete in', elapsed, 'ms');
@@ -2382,11 +2444,11 @@ async function denormalizeWithCaching() {
             lookups = data.lookups;
             rawVulns = data.vulns;
         }
-        denormalizeAllVulns();
+        await denormalizeAllVulns({ allowYield: true });
     }
 
-    // Derived fields are now computed inline in denormalizeAllVulns();
-    // only call applyDerivedVulnerabilityFields for IndexedDB-cached data (above)
+    // Derived fields are computed inline in denormalizeAllVulns(); Worker rows
+    // and IndexedDB-cached data use applyDerivedVulnerabilityFields above.
 
     // Log counts after data is available
     logDebug('Loaded lookups:', lookups ? Object.keys(lookups) : 'none');
@@ -3029,7 +3091,7 @@ function resetActiveFilterPopoverState() {
 function buildFilterPopoverOptionMarkup(option, index) {
     const checked = isDraftOptionSelected(activeFilterPopoverKey, option.value) ? 'checked' : '';
     const countMarkup = option.count !== null && option.count !== undefined
-        ? `<span class="checkbox-count">${option.count}</span>`
+        ? `<span class="checkbox-count">${escapeHtml(option.count)}</span>`
         : '';
 
     return `
@@ -3760,7 +3822,7 @@ function renderCascadingFilter(containerId, countMap = new Map()) {
             '><label for="', containerId, '_', i,
             '"><span class="checkbox-label-text">', escapeHtml(optionLabel), '</span>');
         if (showCount) {
-            h.push('<span class="checkbox-count">', count, '</span>');
+            h.push('<span class="checkbox-count">', escapeHtml(count), '</span>');
         }
         h.push('</label></div>');
     }
@@ -5503,8 +5565,9 @@ function buildRemediationTitleHtml(text, url) {
         return '-';
     }
 
-    if (url) {
-        return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
+    const safeUrl = getSafeExternalUrl(url);
+    if (safeUrl) {
+        return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
     }
 
     return escapeHtml(text);
@@ -5679,9 +5742,10 @@ function getRemediationTitleWithReferenceSuffix(title, updateEntries) {
 
 function buildRemediationUpdateBadgeHtml(referenceText, referenceUrl, prefix = '') {
     const badgeText = prefix ? `${prefix}${referenceText}` : referenceText;
+    const safeUrl = getSafeExternalUrl(referenceUrl);
 
-    if (referenceUrl) {
-        return `<a href="${escapeHtml(referenceUrl)}" target="_blank" rel="noopener noreferrer" class="stat-badge remediation-update-badge">
+    if (safeUrl) {
+        return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer" class="stat-badge remediation-update-badge">
                  <span>${escapeHtml(badgeText)}</span>
                  <svg class="link-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
@@ -6640,8 +6704,8 @@ function createRemediationRow(rem, index) {
     const row = document.createElement('tr');
     row.dataset.rowIndex = String(index);
     row.innerHTML = `
-        <td>${rem.vendor}</td>
-        <td>${rem.software}</td>
+        <td>${escapeHtml(rem.vendor)}</td>
+        <td>${escapeHtml(rem.software)}</td>
         <td>${rem.remediationHtml}</td>
         <td class="update-details-column">${rem.updateHtml}</td>
         <td>${rem.devices.size}</td>
@@ -6941,7 +7005,7 @@ function createRemediationDetailsRow(data, index) {
     const row = document.createElement('tr');
     row.dataset.rowIndex = String(index);
     row.innerHTML = `
-        <td>${data.date}</td>
+        <td>${escapeHtml(data.date)}</td>
         <td>${data.remediationHtml}</td>
         <td class="update-details-column">${data.updateHtml}</td>
         <td>${data.devices.size}</td>
@@ -7744,7 +7808,7 @@ function generateSeverityTooltipContent(cveIds) {
     if (sortedCveIds.length === 0) return '<div class="severity-tooltip-empty">No valid CVE IDs</div>';
     
     // Return simple comma-separated list
-    return `<div class="severity-tooltip-content">${sortedCveIds.join(', ')}</div>`;
+    return `<div class="severity-tooltip-content">${escapeHtml(sortedCveIds.join(', '))}</div>`;
 }
 
 /**
@@ -7953,7 +8017,7 @@ function appendDevicesByRemediationCard(container, data, index, pendingVirtualTa
     }
 
     if (mostRecentDate) {
-        detailBadges.push(`<span class="stat-badge">Published: ${mostRecentDate}</span>`);
+        detailBadges.push(`<span class="stat-badge">Published: ${escapeHtml(mostRecentDate)}</span>`);
     }
 
     (data.updateEntries || []).filter(entry => entry && entry.referenceText).forEach(entry => {
@@ -8002,7 +8066,7 @@ function appendDevicesByRemediationCard(container, data, index, pendingVirtualTa
         cveBadgesSection += '<div class="cve-badges-container">';
         
         cveList.forEach(cve => {
-            const severityClass = (cve.severity || 'Unknown').toLowerCase();
+            const severityClass = getSeverityClassName(cve.severity);
             
             // Remove CVE- prefix for cleaner display
             const displayId = formatCveDisplayId(cve.id);
@@ -8011,11 +8075,12 @@ function appendDevicesByRemediationCard(container, data, index, pendingVirtualTa
             const tooltipId = `cve-${++cveTooltipIdCounter}`;
             cveTooltipData[tooltipId] = generateCveTooltipContent(cve);
             
-            const badgeHtml = cve.url 
-                ? `<a href="${cve.url}" target="_blank" rel="noopener noreferrer" class="cve-severity-badge ${severityClass}" data-tooltip-id="${tooltipId}">
+                        const safeCveUrl = getSafeExternalUrl(cve.url);
+                        const badgeHtml = safeCveUrl
+                                ? `<a href="${escapeHtml(safeCveUrl)}" target="_blank" rel="noopener noreferrer" class="cve-severity-badge ${severityClass}" data-tooltip-id="${escapeHtml(tooltipId)}">
                      ${escapeHtml(displayId)}
                    </a>`
-                : `<span class="cve-severity-badge ${severityClass}" data-tooltip-id="${tooltipId}">
+                                : `<span class="cve-severity-badge ${severityClass}" data-tooltip-id="${escapeHtml(tooltipId)}">
                      ${escapeHtml(displayId)}
                    </span>`;
             
@@ -8042,7 +8107,7 @@ function appendDevicesByRemediationCard(container, data, index, pendingVirtualTa
     card.innerHTML = `
         <div class="remediation-card-header">
             <div class="remediation-card-title-block">
-                <h3>${headerText}</h3>
+                <h3>${escapeHtml(headerText)}</h3>
                 ${cveDetailsHtml}
             </div>
             <div class="remediation-stats">
@@ -8202,7 +8267,7 @@ function buildRemediationsByDeviceRowHtml(remediations) {
                 <td class="update-details-column">${updateCell}</td>
                 <td>${severityBadges}</td>
                 <td>${cveCount}</td>
-                <td>${publishedDate}</td>
+                <td>${escapeHtml(publishedDate)}</td>
             </tr>
         `;
     }).join('');
@@ -8384,9 +8449,9 @@ function appendRemediationsByDeviceCard(container, data, index) {
     
     const deviceInfoHtml = `
         <div class="cve-details">
-            <span class="stat-badge">IP: ${data.ipAddress}</span>
-            <span class="stat-badge">Group: ${data.rbacGroupName}</span>
-            <span class="stat-badge">Tags: ${tagsDisplay}</span>
+            <span class="stat-badge">IP: ${escapeHtml(data.ipAddress)}</span>
+            <span class="stat-badge">Group: ${escapeHtml(data.rbacGroupName)}</span>
+            <span class="stat-badge">Tags: ${escapeHtml(tagsDisplay)}</span>
         </div>
     `;
     
@@ -8433,7 +8498,7 @@ function appendRemediationsByDeviceCard(container, data, index) {
     
     card.innerHTML = `
         <div class="remediation-card-header">
-            <h3>${headerText}</h3>
+            <h3>${escapeHtml(headerText)}</h3>
             ${deviceInfoHtml}
         </div>
         <div class="cve-badges-section">
@@ -8645,13 +8710,40 @@ function buildEvidenceHtml(v) {
  * @returns {string} Escaped text
  */
 function escapeHtml(text) {
-    if (!text) return '';
-    return text
+    if (text === null || text === undefined) return '';
+    return String(text)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
+}
+
+function getSafeExternalUrl(url) {
+    if (url === null || url === undefined) {
+        return '';
+    }
+
+    const candidate = String(url).trim();
+    if (!candidate) {
+        return '';
+    }
+
+    try {
+        const parsedUrl = new URL(candidate);
+        return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:'
+            ? parsedUrl.href
+            : '';
+    } catch {
+        return '';
+    }
+}
+
+function getSeverityClassName(severity) {
+    const normalized = String(severity || '').trim().toLowerCase();
+    return ['critical', 'high', 'medium', 'low'].includes(normalized)
+        ? normalized
+        : 'unknown';
 }
 
 /**
@@ -8692,9 +8784,10 @@ function buildDeviceBubbleHtml(v) {
  */
 function buildCveLinkHtml(v) {
     materializeRow(v);
-    const cveUrl = v.CveBatchUrl || `https://msrc.microsoft.com/update-guide/vulnerability/${v.CveId}`;
+    const cveUrl = getSafeExternalUrl(v.CveBatchUrl)
+        || getSafeExternalUrl(`https://msrc.microsoft.com/update-guide/vulnerability/${encodeURIComponent(v.CveId || '')}`);
     const displayId = formatCveDisplayId(v.CveId);
-    const severityClass = (v.VulnerabilitySeverityLevel || 'unknown').toLowerCase();
+    const severityClass = getSeverityClassName(v.VulnerabilitySeverityLevel);
     const tooltipId = `modal-cve-${++severityBadgeIdCounter}`;
     const versions = new Set();
     if (v.SoftwareVersion) {
@@ -8887,7 +8980,7 @@ const DENSE_MODAL_DEVICE_THRESHOLD = 2500;
  * Build a detail-row HTML string for showDetails CVE tables
  */
 function buildDetailRow(v, includeEvidenceColumn) {
-    const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
+    const severityClass = getSeverityClassName(v.VulnerabilitySeverityLevel);
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
     const publishedDisplay = formatDateYMD(v.PublishedDate);
     const firstSeenDisplay = getEnvironmentFirstSeenDate(v);
@@ -8895,13 +8988,13 @@ function buildDetailRow(v, includeEvidenceColumn) {
     return '<tr>' +
         buildCveLinkHtml(v) +
         '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
-        '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
-        '<td>' + v.CvssScore + '</td>' +
-        '<td>' + epssDisplay + '</td>' +
-        '<td>' + formatExploitLevel(v.ExploitabilityLevel) + '</td>' +
+        '<td><span class="badge ' + severityClass + '">' + escapeHtml(v.VulnerabilitySeverityLevel) + '</span></td>' +
+        '<td>' + escapeHtml(v.CvssScore) + '</td>' +
+        '<td>' + escapeHtml(epssDisplay) + '</td>' +
+        '<td>' + escapeHtml(formatExploitLevel(v.ExploitabilityLevel)) + '</td>' +
         (includeEvidenceColumn ? buildEvidenceHtml(v) : '') +
-        '<td class="modal-date-col">' + publishedDisplay + '</td>' +
-        '<td class="modal-date-col">' + firstSeenDisplay + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(publishedDisplay) + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(firstSeenDisplay) + '</td>' +
         '</tr>';
 }
 
@@ -8909,7 +9002,7 @@ function buildDetailRow(v, includeEvidenceColumn) {
  * Build a remediation-row HTML string for showRemediationDetails CVE tables
  */
 function buildRemediationRow(v, includeEvidenceColumn) {
-    const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
+    const severityClass = getSeverityClassName(v.VulnerabilitySeverityLevel);
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
     const publishedDisplay = formatDateYMD(v.PublishedDate);
     const firstSeenDisplay = getEnvironmentFirstSeenDate(v);
@@ -8917,12 +9010,12 @@ function buildRemediationRow(v, includeEvidenceColumn) {
     return '<tr>' +
         buildCveLinkHtml(v) +
         '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
-        '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
-        '<td>' + v.CvssScore + '</td>' +
-        '<td>' + epssDisplay + '</td>' +
+        '<td><span class="badge ' + severityClass + '">' + escapeHtml(v.VulnerabilitySeverityLevel) + '</span></td>' +
+        '<td>' + escapeHtml(v.CvssScore) + '</td>' +
+        '<td>' + escapeHtml(epssDisplay) + '</td>' +
         (includeEvidenceColumn ? buildEvidenceHtml(v) : '') +
-        '<td class="modal-date-col">' + publishedDisplay + '</td>' +
-        '<td class="modal-date-col">' + firstSeenDisplay + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(publishedDisplay) + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(firstSeenDisplay) + '</td>' +
         '</tr>';
 }
 
@@ -8994,12 +9087,12 @@ function buildDenseModalDeviceRow(device) {
         '<td title="' + escapeHtml(device.DeviceId || '') + '">' + escapeHtml(formatModalDeviceId(device.DeviceId)) + '</td>' +
         '<td>' + device.cveIds.size + '</td>' +
         '<td>' + escapeHtml(ipAddress) + '</td>' +
-        '<td class="modal-date-col">' + formatDateYMD(device.lastSeen) + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(formatDateYMD(device.lastSeen)) + '</td>' +
         '</tr>';
 }
 
 function buildDenseDetailRow(v, includeEvidenceColumn) {
-    const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
+    const severityClass = getSeverityClassName(v.VulnerabilitySeverityLevel);
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
     const publishedDisplay = formatDateYMD(v.PublishedDate);
     const firstSeenDisplay = getEnvironmentFirstSeenDate(v);
@@ -9009,18 +9102,18 @@ function buildDenseDetailRow(v, includeEvidenceColumn) {
         '<td title="' + escapeHtml(v.DeviceId || '') + '">' + escapeHtml(formatModalDeviceId(v.DeviceId)) + '</td>' +
         buildCveLinkHtml(v) +
         '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
-        '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
-        '<td>' + v.CvssScore + '</td>' +
-        '<td>' + epssDisplay + '</td>' +
-        '<td>' + formatExploitLevel(v.ExploitabilityLevel) + '</td>' +
+        '<td><span class="badge ' + severityClass + '">' + escapeHtml(v.VulnerabilitySeverityLevel) + '</span></td>' +
+        '<td>' + escapeHtml(v.CvssScore) + '</td>' +
+        '<td>' + escapeHtml(epssDisplay) + '</td>' +
+        '<td>' + escapeHtml(formatExploitLevel(v.ExploitabilityLevel)) + '</td>' +
         (includeEvidenceColumn ? buildEvidenceHtml(v) : '') +
-        '<td class="modal-date-col">' + publishedDisplay + '</td>' +
-        '<td class="modal-date-col">' + firstSeenDisplay + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(publishedDisplay) + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(firstSeenDisplay) + '</td>' +
         '</tr>';
 }
 
     function buildDenseRemediationDetailRow(v, includeEvidenceColumn) {
-        const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
+        const severityClass = getSeverityClassName(v.VulnerabilitySeverityLevel);
         const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
         const publishedDisplay = formatDateYMD(v.PublishedDate);
         const firstSeenDisplay = getEnvironmentFirstSeenDate(v);
@@ -9030,12 +9123,12 @@ function buildDenseDetailRow(v, includeEvidenceColumn) {
         '<td title="' + escapeHtml(v.DeviceId || '') + '">' + escapeHtml(formatModalDeviceId(v.DeviceId)) + '</td>' +
         buildCveLinkHtml(v) +
         '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
-        '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
-        '<td>' + v.CvssScore + '</td>' +
-        '<td>' + epssDisplay + '</td>' +
+        '<td><span class="badge ' + severityClass + '">' + escapeHtml(v.VulnerabilitySeverityLevel) + '</span></td>' +
+        '<td>' + escapeHtml(v.CvssScore) + '</td>' +
+        '<td>' + escapeHtml(epssDisplay) + '</td>' +
         (includeEvidenceColumn ? buildEvidenceHtml(v) : '') +
-        '<td class="modal-date-col">' + publishedDisplay + '</td>' +
-        '<td class="modal-date-col">' + firstSeenDisplay + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(publishedDisplay) + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(firstSeenDisplay) + '</td>' +
         '</tr>';
     }
 
@@ -10136,6 +10229,11 @@ function estimateTableBasedPdfPageCount(selectedReport) {
 }
 
 function estimateCardBasedPdfPageCount(selectedReport) {
+    const estimatedFromData = estimateCardBasedPdfPageCountFromData(selectedReport);
+    if (Number.isFinite(estimatedFromData) && estimatedFromData > 0) {
+        return estimatedFromData;
+    }
+
     const activeSection = document.querySelector('.report-section.active');
     const cards = activeSection ? Array.from(activeSection.querySelectorAll('.remediation-card')) : [];
 
@@ -10149,6 +10247,42 @@ function estimateCardBasedPdfPageCount(selectedReport) {
     cards.forEach(card => {
         const rowCount = card.querySelectorAll('.devices-table tbody tr').length;
         const cveBadgeCount = card.querySelectorAll('.cve-severity-badge').length;
+        const supplementalRows = cveBadgeCount > 15
+            ? 2
+            : (cveBadgeCount > 0 ? 1 : 0);
+        const estimatedRows = Math.max(1, rowCount + supplementalRows);
+        pageCount += Math.max(1, Math.ceil(estimatedRows / rowsPerPage));
+    });
+
+    return pageCount;
+}
+
+function estimateCardBasedPdfPageCountFromData(selectedReport) {
+    const reportRows = selectedReport === 'devices-by-remediation'
+        ? devicesByRemediationAllData
+        : selectedReport === 'remediations-by-device'
+            ? remediationsByDeviceAllData
+            : [];
+
+    if (!Array.isArray(reportRows) || reportRows.length === 0) {
+        return null;
+    }
+
+    const rowsPerPage = selectedReport === 'devices-by-remediation' ? 14 : 10;
+    let pageCount = 2;
+
+    reportRows.forEach(row => {
+        let rowCount = 0;
+        let cveBadgeCount = 0;
+
+        if (selectedReport === 'devices-by-remediation') {
+            rowCount = Number(row.deviceCount) || (row.devices instanceof Map ? row.devices.size : 0);
+            cveBadgeCount = Number(row.cveCount) || (row.cveDetails instanceof Map ? row.cveDetails.size : 0);
+        } else {
+            rowCount = Number(row.remediationCount) || (row.remediations instanceof Map ? row.remediations.size : 0);
+            cveBadgeCount = Number(row.cveCount) || 0;
+        }
+
         const supplementalRows = cveBadgeCount > 15
             ? 2
             : (cveBadgeCount > 0 ? 1 : 0);
@@ -10247,6 +10381,12 @@ async function maybeConfirmLargePdfExport(selectedReport, reportName, pdfDoc) {
     );
 }
 
+function ensurePdfReportDataReady(selectedReport) {
+    if (!initializedReports.has(selectedReport) || dirtyReports.has(selectedReport)) {
+        renderReport(selectedReport, true);
+    }
+}
+
 async function exportToPDF() {
     const button = document.querySelector('.export-pdf-btn');
     button.disabled = true;
@@ -10285,13 +10425,25 @@ async function exportToPDF() {
     const selectedReport = selector.value;
     const reportName = selector.options[selector.selectedIndex].text;
     
-    updateProgress(25, 'Expanding data...');
+    updateProgress(25, 'Checking export size...');
+    button.textContent = '📄 Checking size...';
+    ensurePdfReportDataReady(selectedReport);
+    const shouldContinuePreflight = await maybeConfirmLargePdfExport(selectedReport, reportName);
+    if (!shouldContinuePreflight) {
+        setDashboardStatus('PDF export canceled.', 'info');
+        button.disabled = false;
+        button.textContent = '📄 Export to PDF';
+        progressDiv.remove();
+        return;
+    }
+
+    updateProgress(30, 'Expanding data...');
     button.textContent = '📄 Expanding data...';
     
     const wasExpanded = expandReportForPdf(selectedReport);
     await new Promise(resolve => setTimeout(resolve, 100));
     
-    updateProgress(30, 'Generating PDF...');
+    updateProgress(35, 'Generating PDF...');
     button.textContent = '📄 Generating PDF...';
     document.body.classList.add('pdf-export-active');
     
@@ -10395,15 +10547,10 @@ async function exportToPDF() {
         
         docDefinition.content.push(...filterContent);
 
-        updateProgress(80, 'Checking page count...');
+        updateProgress(80, 'Creating PDF...');
         const pdfDoc = pdfMake.createPdf(docDefinition);
-        const shouldContinue = await maybeConfirmLargePdfExport(selectedReport, reportName, pdfDoc);
-        if (!shouldContinue) {
-            setDashboardStatus('PDF export canceled.', 'info');
-            return;
-        }
-        
-        updateProgress(90, 'Creating PDF...');
+
+        updateProgress(90, 'Downloading PDF...');
         pdfDoc.download(fileName);
         updateProgress(100, 'Complete!');
         clearDashboardStatus();

@@ -8,8 +8,8 @@ __CSS_BLOCK__
 </head>
 <body>
     <main class="container" id="dashboardMain">
-        <h1>
-            <span>🛡️ Vulnerability Dashboard</span>
+        <header class="dashboard-header">
+            <h1>🛡️ Vulnerability Dashboard</h1>
             <div class="report-selector-container">
                 <label for="reportSelector">Report:</label>
                 <select id="reportSelector">
@@ -21,7 +21,7 @@ __CSS_BLOCK__
                 </select>
                 <button id="exportPdfButton" type="button" class="export-pdf-btn">📄 Export to PDF</button>
             </div>
-        </h1>
+        </header>
 
         <div id="dashboardStatus" class="dashboard-status" role="status" aria-live="polite" hidden></div>
 
@@ -227,7 +227,6 @@ __DATA_QUALITY_SECTION__
                 <div id="remediationModeSummary" class="report-mode-summary" aria-live="polite"></div>
             </div>
         </div>
-    </div>
 
     </main>
 

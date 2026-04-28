@@ -221,9 +221,17 @@ try {
 (function () {
     var probeId = 'hostedDashboardSmokeProbe';
     var probeTimeoutMilliseconds = __PROBE_TIMEOUT_MS__;
-        var probeCompleted = false;
+    var reportOptions = [
+        ['active-vulnerabilities', 'Active Vulnerabilities'],
+        ['remediation-activity', 'Remediation Activity'],
+        ['impact-analysis', 'Impact Analysis'],
+        ['devices-by-remediation', 'Devices by Remediation'],
+        ['remediations-by-device', 'Remediations by Device']
+    ];
+    var probeCompleted = false;
+    var latestDashboardReadyValidation = null;
 
-        function publishProbe(state, validation, message, payloadRows) {
+    function publishProbe(state, validation, message, payloadRows, runtimeChecks) {
         var existingProbe = document.getElementById(probeId);
         if (existingProbe && existingProbe.getAttribute('data-state') === 'ready') {
             return;
@@ -240,6 +248,9 @@ try {
         }
         if (typeof payloadRows === 'number') {
             probe.setAttribute('data-payload-rows', String(payloadRows));
+        }
+        if (Array.isArray(runtimeChecks) && runtimeChecks.length > 0) {
+            probe.setAttribute('data-runtime-checks', runtimeChecks.join(','));
         }
         probe.textContent = message || state;
 
@@ -277,8 +288,113 @@ try {
         return JSON.parse(configElement.textContent);
     }
 
+    function assertRuntime(condition, message) {
+        if (!condition) {
+            throw new Error(message);
+        }
+    }
+
+    function waitForCondition(description, predicate, timeoutMilliseconds) {
+        var startedAt = Date.now();
+        return new Promise(function (resolve, reject) {
+            function poll() {
+                try {
+                    if (predicate()) {
+                        resolve();
+                        return;
+                    }
+
+                    if ((Date.now() - startedAt) > timeoutMilliseconds) {
+                        reject(new Error('Timed out waiting for ' + description + '.'));
+                        return;
+                    }
+
+                    window.setTimeout(poll, 25);
+                } catch (error) {
+                    reject(error);
+                }
+            }
+
+            poll();
+        });
+    }
+
+    async function waitForDashboardReady() {
+        await waitForCondition('dashboard readiness', function () {
+            var validation = getValidation();
+            return validation && validation.ready === true;
+        }, probeTimeoutMilliseconds);
+
+        return getValidation();
+    }
+
+    async function validateReportSwitching() {
+        var selector = document.getElementById('reportSelector');
+        assertRuntime(selector, 'Report selector was not available for runtime switching.');
+
+        reportOptions.forEach(function (entry) {
+            var option = Array.prototype.find.call(selector.options || [], function (candidate) {
+                return candidate.value === entry[0];
+            });
+            assertRuntime(option, 'Missing report selector option for ' + entry[1] + '.');
+        });
+
+        for (var index = 0; index < reportOptions.length; index++) {
+            var reportId = reportOptions[index][0];
+            var reportLabel = reportOptions[index][1];
+            var expectedSectionId = reportId + '-section';
+            var section = document.getElementById(expectedSectionId);
+            assertRuntime(section, 'Missing report section for ' + reportLabel + '.');
+
+            selector.value = reportId;
+            selector.dispatchEvent(new Event('change', { bubbles: true }));
+
+            await waitForCondition(reportLabel + ' report activation', function () {
+                return section.classList.contains('active') && !section.hasAttribute('aria-busy');
+            }, Math.min(10000, probeTimeoutMilliseconds));
+
+            var activeSections = Array.prototype.slice.call(document.querySelectorAll('.report-section.active'));
+            assertRuntime(activeSections.length === 1, 'Expected exactly one active report section after selecting ' + reportLabel + '.');
+            assertRuntime(activeSections[0].id === expectedSectionId, 'Unexpected active report section after selecting ' + reportLabel + '.');
+
+            var validation = getValidation();
+            assertRuntime(validation && validation.activeReportId === reportId, 'Dashboard validation did not track active report ' + reportLabel + '.');
+        }
+    }
+
+    async function validateFilterPopover() {
+        var severityPill = document.getElementById('filterPillSeverity');
+        var popover = document.getElementById('filterPopover');
+        assertRuntime(severityPill, 'Severity filter pill was not available.');
+        assertRuntime(popover, 'Filter popover shell was not available.');
+
+        severityPill.click();
+        await waitForCondition('severity filter popover to open', function () {
+            return popover.hidden === false
+                && popover.getAttribute('aria-hidden') === 'false'
+                && popover.getAttribute('data-filter-key') === 'filterSeverity';
+        }, Math.min(5000, probeTimeoutMilliseconds));
+
+        assertRuntime(document.getElementById('filterPopoverBody'), 'Filter popover body was not available.');
+        assertRuntime(document.getElementById('filterPopoverApplyButton'), 'Filter popover apply button was not available.');
+
+        var closeButton = document.getElementById('filterPopoverCloseButton');
+        assertRuntime(closeButton, 'Filter popover close button was not available.');
+        closeButton.click();
+
+        await waitForCondition('severity filter popover to close', function () {
+            return popover.hidden === true && popover.getAttribute('aria-hidden') === 'true';
+        }, Math.min(5000, probeTimeoutMilliseconds));
+    }
+
+    async function validateRuntimeInteractions() {
+        await validateReportSwitching();
+        await validateFilterPopover();
+        return ['report-switching', 'filter-popover'];
+    }
+
     async function runHostedAssetProbe() {
-        var validation = getValidation();
+        var validation = await waitForDashboardReady();
         var config = getDashboardConfig();
         if (!validation || validation.deliveryMode !== 'split-assets') {
             throw new Error('Dashboard validation snapshot did not report split-assets mode.');
@@ -303,14 +419,15 @@ try {
             throw new Error('Hosted payload shape was not recognized.');
         }
 
+        var runtimeChecks = await validateRuntimeInteractions();
+
         probeCompleted = true;
-        publishProbe('ready', getValidation() || validation, 'hosted-payload-ready', payloadRows);
+        publishProbe('ready', getValidation() || validation, 'hosted-payload-ready', payloadRows, runtimeChecks);
     }
 
     window.addEventListener('dashboard-ready', function (event) {
         var validation = event.detail && event.detail.validation ? event.detail.validation : getValidation();
-        probeCompleted = true;
-        publishProbe('ready', validation, 'dashboard-ready');
+        latestDashboardReadyValidation = validation;
     });
 
     function startProbe() {
@@ -328,7 +445,7 @@ try {
 
     window.setTimeout(function () {
         if (!probeCompleted) {
-            publishProbe('timeout', getValidation(), 'Timed out waiting for dashboard readiness.');
+            publishProbe('timeout', getValidation() || latestDashboardReadyValidation, 'Timed out waiting for dashboard readiness.');
         }
     }, probeTimeoutMilliseconds);
 })();
@@ -420,8 +537,11 @@ try {
     if ($dom -notmatch 'data-delivery-mode="split-assets"') {
         throw 'Hosted dashboard validation snapshot did not report split-assets delivery mode.'
     }
+    if ($dom -notmatch 'data-runtime-checks="[^"]*report-switching[^"]*filter-popover[^"]*"') {
+        throw 'Hosted dashboard smoke probe did not confirm report switching and filter popover runtime checks.'
+    }
     $payloadRowsMatch = [regex]::Match($dom, 'data-payload-rows="(?<Rows>-?\d+)"')
-    if (-not $payloadRowsMatch.Success -or [int]$payloadRowsMatch.Groups['Rows'].Value -lt 0) {
+    if (-not $payloadRowsMatch.Success -or [int]$payloadRowsMatch.Groups['Rows'].Value -le 0) {
         throw 'Hosted dashboard smoke probe did not confirm a readable hosted payload.'
     }
     Write-Verbose 'Hosted dashboard DOM smoke assertions passed.'

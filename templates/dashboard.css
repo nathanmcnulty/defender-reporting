@@ -118,13 +118,19 @@ body {
 }
 
 /* Header */
-h1 {
-    color: var(--color-primary);
-    margin-bottom: var(--spacing-xl);
-    font-size: var(--font-size-xl);
+.dashboard-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: var(--spacing-md);
+    flex-wrap: wrap;
+    margin-bottom: var(--spacing-xl);
+}
+
+h1 {
+    color: var(--color-primary);
+    margin: 0;
+    font-size: var(--font-size-xl);
 }
 
 .dashboard-status {
@@ -2010,10 +2016,13 @@ td.update-details-column .remediation-link {
         padding: var(--spacing-md);
     }
 
-    h1 {
+    .dashboard-header {
         flex-direction: column;
         align-items: flex-start;
         gap: var(--spacing-sm);
+    }
+
+    h1 {
         font-size: var(--font-size-lg);
     }
 

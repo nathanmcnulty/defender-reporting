@@ -1024,9 +1024,15 @@ function Get-MachineHistoryRemovePaths {
         [Parameter(Mandatory = $true)]
         [string]$BasePath,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
         [System.Collections.Generic.HashSet[string]]$PublishedHistoryNames
     )
+
+    if ($null -eq $PublishedHistoryNames) {
+        $PublishedHistoryNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
 
     $removePaths = [System.Collections.Generic.List[string]]::new()
     foreach ($path in @(
