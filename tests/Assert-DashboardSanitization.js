@@ -3,11 +3,13 @@ const { loadDashboardHarness } = require('./helpers/dashboard-test-harness');
 
 const dashboard = loadDashboardHarness(`
 module.exports = {
+    buildDeviceBubbleHtml,
     buildCveLinkHtml,
     buildRemediationTitleHtml,
     buildRemediationUpdateBadgeHtml,
     buildRemediationsByDeviceRowHtml,
     escapeHtml,
+    generateCveTooltipContent,
     generateSeverityTooltipContent,
     getSafeExternalUrl,
     getSeverityClassName
@@ -80,5 +82,59 @@ const cveHtml = dashboard.buildCveLinkHtml({
 assert.ok(!cveHtml.includes('javascript:alert'));
 assert.ok(!cveHtml.includes('onclick'));
 assert.ok(cveHtml.includes('class="cve-severity-badge unknown"'));
+
+const safePrimaryCveHtml = dashboard.buildCveLinkHtml({
+    CveBatchUrl: 'https://updates.example/cve?name=<script>',
+    CveId: 'CVE-2026-0002',
+    VulnerabilitySeverityLevel: 'High',
+    SoftwareVersion: '2.0',
+    SoftwareVendor: 'Vendor',
+    SoftwareName: 'Product',
+    VulnerabilityDescription: 'Safe description',
+    CvssScore: 7.2,
+    PublishedDate: '2026-04-27',
+    _lastSeenDate: '2026-04-27'
+});
+assert.ok(safePrimaryCveHtml.includes('href="https://updates.example/cve?name=%3Cscript%3E"'));
+assert.ok(!safePrimaryCveHtml.includes('<script>'));
+
+const cveTooltip = dashboard.generateCveTooltipContent({
+    cve: 'CVE-2026-0003<script>',
+    softwareVendor: 'Vendor<img src=x onerror=alert(1)>',
+    softwareName: 'Product<script>',
+    versions: new Set(['1.0<script>']),
+    description: 'Summary: <img src=x onerror=alert(1)>\nImpact: <script>alert(1)</script>',
+    cvssScore: '9.9<script>',
+    severity: 'Critical" onclick="alert(1)',
+    publishedDate: '2026-04-27',
+    firstSeen: '2026-04-27',
+    lastSeen: '2026-04-28'
+});
+assert.ok(!cveTooltip.includes('<script'));
+assert.ok(!cveTooltip.includes('<img'));
+assert.ok(!cveTooltip.includes('onclick="'));
+assert.ok(cveTooltip.includes('&lt;script&gt;'));
+
+const deviceBubble = dashboard.buildDeviceBubbleHtml({
+    DeviceName: 'device<img src=x onerror=alert(1)>',
+    DeviceId: 'id<script>',
+    MachineInfo: {
+        ip: '10.0.0.1<script>',
+        eip: '203.0.113.10<img>',
+        u: ['user@example.com<script>'],
+        hs: 'Healthy<script>',
+        rs: 'High" onclick="alert(1)',
+        el: 'Medium<script>',
+        dv: 'Normal<script>',
+        mb: 'MDE<script>',
+        aad: true,
+        ls: '2026-04-27<script>',
+        fs: '2026-04-01<script>'
+    }
+});
+assert.ok(!deviceBubble.includes('<img'));
+assert.ok(!deviceBubble.includes('<script'));
+assert.ok(!deviceBubble.includes('onclick="'));
+assert.ok(deviceBubble.includes('device&lt;img'));
 
 console.log('Dashboard sanitization assertions passed.');
