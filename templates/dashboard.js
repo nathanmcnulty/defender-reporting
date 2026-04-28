@@ -156,6 +156,8 @@ const configuredReportDataWarmupRowLimit = Number(dashboardConfig.reportDataWarm
 const configuredReportDataWarmupMode = typeof dashboardConfig.reportDataWarmupMode === 'string'
     ? dashboardConfig.reportDataWarmupMode.toLowerCase()
     : 'auto';
+const configuredDenormalizeYieldRowThreshold = Number(dashboardConfig.denormalizeYieldRowThreshold);
+const configuredDenormalizeYieldRowInterval = Number(dashboardConfig.denormalizeYieldRowInterval);
 const PDF_EXPORT_PAGE_WARNING_THRESHOLD = Number.isFinite(configuredPdfPageWarningThreshold) && configuredPdfPageWarningThreshold > 0
     ? Math.floor(configuredPdfPageWarningThreshold)
     : 100;
@@ -165,6 +167,12 @@ const REPORT_DATA_WARMUP_ROW_LIMIT = Number.isFinite(configuredReportDataWarmupR
 const REPORT_DATA_WARMUP_MODE = ['always', 'auto', 'never'].includes(configuredReportDataWarmupMode)
     ? configuredReportDataWarmupMode
     : 'auto';
+const DENORMALIZE_YIELD_ROW_THRESHOLD = Number.isFinite(configuredDenormalizeYieldRowThreshold) && configuredDenormalizeYieldRowThreshold >= 0
+    ? Math.floor(configuredDenormalizeYieldRowThreshold)
+    : 50000;
+const DENORMALIZE_YIELD_ROW_INTERVAL = Number.isFinite(configuredDenormalizeYieldRowInterval) && configuredDenormalizeYieldRowInterval > 0
+    ? Math.floor(configuredDenormalizeYieldRowInterval)
+    : 25000;
 const PDF_PAGE_COUNT_TIMEOUT_MS = 10000;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
 const FACET_SEARCH_MIN_OPTIONS = 8;
@@ -330,7 +338,8 @@ function createEmptyDashboardMetricsState() {
         reports: {},
         counts: {
             applyFilters: 0,
-            renders: 0
+            renders: 0,
+            denormalizeYields: 0
         }
     };
 }
@@ -1943,13 +1952,50 @@ function getLookupRecord(lookup, index) {
  * @param {number} index - Index in the array
  * @returns {Object} Expanded vulnerability object
  */
+function createDenormalizeYieldState(rawCount, options = {}) {
+    const configuredThreshold = Number(options.yieldThreshold);
+    const configuredInterval = Number(options.yieldEveryRows);
+    const threshold = Number.isFinite(configuredThreshold) && configuredThreshold >= 0
+        ? Math.floor(configuredThreshold)
+        : DENORMALIZE_YIELD_ROW_THRESHOLD;
+    const interval = Number.isFinite(configuredInterval) && configuredInterval > 0
+        ? Math.floor(configuredInterval)
+        : DENORMALIZE_YIELD_ROW_INTERVAL;
+    const canUseTimer = typeof window !== 'undefined' && typeof window.setTimeout === 'function';
+    const enabled = options.allowYield === true && canUseTimer && rawCount >= threshold && interval > 0;
+
+    return {
+        enabled,
+        interval,
+        nextYieldAt: interval,
+        yieldCount: 0
+    };
+}
+
+async function maybeYieldDuringDenormalization(state, processedRows, totalRows) {
+    if (!state.enabled || processedRows < state.nextYieldAt) {
+        return;
+    }
+
+    state.yieldCount++;
+    state.nextYieldAt += state.interval;
+
+    if (totalRows > 0) {
+        const percent = Math.min(99, Math.floor((processedRows / totalRows) * 100));
+        setDashboardStatus(`Preparing dashboard rows (${percent}%)...`);
+    }
+
+    await new Promise(resolve => window.setTimeout(resolve, 0));
+}
+
 /**
  * Denormalize all vulnerability records (main-thread fallback)
  */
-function denormalizeAllVulns() {
+async function denormalizeAllVulns(options = {}) {
     const rawCount = getRawVulnCount();
     logDebug('Denormalizing', rawCount, 'records (main thread)...');
     const startTime = performance.now();
+    const yieldState = createDenormalizeYieldState(rawCount, options);
 
     vulnerabilityData = new Array(rawCount);
     let rowCount = 0;
@@ -2183,11 +2229,16 @@ function denormalizeAllVulns() {
             _normalizedGroup: device._normalizedGroup,
             _tagValues: device._tagValues
         };
+
+        if (yieldState.enabled && (i + 1) >= yieldState.nextYieldAt) {
+            await maybeYieldDuringDenormalization(yieldState, i + 1, rawCount);
+        }
     }
 
     vulnerabilityData.length = rowCount;
 
     // Second pass: assign _environmentFirstSeenDate (uses stored _issueKey)
+    const totalDenormalizeWork = rawCount + vulnerabilityData.length;
     for (let i = 0; i < vulnerabilityData.length; i++) {
         const v = vulnerabilityData[i];
         v._environmentFirstSeenDate = earliestFirstSeenByIssue.get(v._issueKey) || v._firstSeenDate;
@@ -2206,6 +2257,10 @@ function denormalizeAllVulns() {
         if (v._firstSeenDate && v._lastSeenDate && v._firstSeenDate > v._lastSeenDate) {
             qualitySummary.invertedRanges++;
         }
+
+        if (yieldState.enabled && (rawCount + i + 1) >= yieldState.nextYieldAt) {
+            await maybeYieldDuringDenormalization(yieldState, rawCount + i + 1, totalDenormalizeWork);
+        }
     }
 
     qualitySummary.uniqueDevices = qualityDeviceKeys.size;
@@ -2216,6 +2271,11 @@ function denormalizeAllVulns() {
         console.warn('Skipped', skippedInvalidRows, 'vulnerability records with missing lookup references during denormalization.');
     }
     const elapsed = Math.round(performance.now() - startTime);
+    if (yieldState.yieldCount > 0) {
+        dashboardMetrics.counts.denormalizeYields = (dashboardMetrics.counts.denormalizeYields || 0) + yieldState.yieldCount;
+        publishDashboardDiagnostics();
+        logDebug('Denormalization yielded', yieldState.yieldCount, 'time(s) while preparing rows');
+    }
     logDebug('Denormalization complete in', elapsed, 'ms');
 }
 
@@ -2369,7 +2429,7 @@ async function denormalizeWithCaching() {
             // Decompress-only path: Worker returned lookups + rawVulns, denormalize here
             const decompElapsed = Math.round(performance.now() - startTime);
             console.log('[perf] Worker decompress: ' + decompElapsed + 'ms');
-            denormalizeAllVulns();
+            await denormalizeAllVulns({ allowYield: true });
         }
         const elapsed = Math.round(performance.now() - startTime);
         logDebug('Worker + denormalize complete in', elapsed, 'ms');
@@ -2382,7 +2442,7 @@ async function denormalizeWithCaching() {
             lookups = data.lookups;
             rawVulns = data.vulns;
         }
-        denormalizeAllVulns();
+        await denormalizeAllVulns({ allowYield: true });
     }
 
     // Derived fields are now computed inline in denormalizeAllVulns();
