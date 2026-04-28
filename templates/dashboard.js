@@ -2067,6 +2067,7 @@ async function denormalizeAllVulns(options = {}) {
         }
         dev._tagValues = dev._tagNames.length > 0 ? dev._tagNames : noTagsArr;
         dev._deviceFilterKey = dev.id || dev.n || '';
+        dev._deviceSearchText = `${dev.n || ''} ${dev.id || ''}`.toLowerCase();
         // RBAC group
         const gVal = (dev.g >= 0 && dev.g < lkGroups.length) ? lkGroups[dev.g] : null;
         dev._rbacGroupName = (gVal && String(gVal).trim() !== '') ? gVal : '(none)';
@@ -2226,6 +2227,7 @@ async function denormalizeAllVulns(options = {}) {
             _remediationDate: hasPatchEvidence ? lastSeen : '',
             _remediationString: getRemediationStrCached(updIdx, cve.bt),
             _deviceFilterKey: device._deviceFilterKey,
+            _deviceSearchText: device._deviceSearchText,
             _normalizedGroup: device._normalizedGroup,
             _tagValues: device._tagValues
         };
@@ -2425,6 +2427,7 @@ async function denormalizeWithCaching() {
         if (result.rows) {
             // Worker returned fully denormalized rows (non-compressed path)
             vulnerabilityData = result.rows;
+            applyDerivedVulnerabilityFields(vulnerabilityData);
         } else {
             // Decompress-only path: Worker returned lookups + rawVulns, denormalize here
             const decompElapsed = Math.round(performance.now() - startTime);
@@ -2445,8 +2448,8 @@ async function denormalizeWithCaching() {
         await denormalizeAllVulns({ allowYield: true });
     }
 
-    // Derived fields are now computed inline in denormalizeAllVulns();
-    // only call applyDerivedVulnerabilityFields for IndexedDB-cached data (above)
+    // Derived fields are computed inline in denormalizeAllVulns(); Worker rows
+    // and IndexedDB-cached data use applyDerivedVulnerabilityFields above.
 
     // Log counts after data is available
     logDebug('Loaded lookups:', lookups ? Object.keys(lookups) : 'none');
@@ -3089,7 +3092,7 @@ function resetActiveFilterPopoverState() {
 function buildFilterPopoverOptionMarkup(option, index) {
     const checked = isDraftOptionSelected(activeFilterPopoverKey, option.value) ? 'checked' : '';
     const countMarkup = option.count !== null && option.count !== undefined
-        ? `<span class="checkbox-count">${option.count}</span>`
+        ? `<span class="checkbox-count">${escapeHtml(option.count)}</span>`
         : '';
 
     return `
@@ -3820,7 +3823,7 @@ function renderCascadingFilter(containerId, countMap = new Map()) {
             '><label for="', containerId, '_', i,
             '"><span class="checkbox-label-text">', escapeHtml(optionLabel), '</span>');
         if (showCount) {
-            h.push('<span class="checkbox-count">', count, '</span>');
+            h.push('<span class="checkbox-count">', escapeHtml(count), '</span>');
         }
         h.push('</label></div>');
     }

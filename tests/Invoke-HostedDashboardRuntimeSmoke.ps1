@@ -541,7 +541,7 @@ try {
         throw 'Hosted dashboard smoke probe did not confirm report switching and filter popover runtime checks.'
     }
     $payloadRowsMatch = [regex]::Match($dom, 'data-payload-rows="(?<Rows>-?\d+)"')
-    if (-not $payloadRowsMatch.Success -or [int]$payloadRowsMatch.Groups['Rows'].Value -lt 0) {
+    if (-not $payloadRowsMatch.Success -or [int]$payloadRowsMatch.Groups['Rows'].Value -le 0) {
         throw 'Hosted dashboard smoke probe did not confirm a readable hosted payload.'
     }
     Write-Verbose 'Hosted dashboard DOM smoke assertions passed.'

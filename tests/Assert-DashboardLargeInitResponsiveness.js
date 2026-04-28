@@ -43,10 +43,12 @@ window.setTimeout = function (callback) {
 };
 
 module.exports = {
+    createEmptyFilterState,
     denormalizeAllVulns,
     getRows: () => vulnerabilityData,
     getYieldCalls: () => yieldCalls,
-    getMetrics: () => dashboardMetrics
+    getMetrics: () => dashboardMetrics,
+    matchesFilterStateNonDate
 };
 `);
 
@@ -56,11 +58,18 @@ module.exports = {
     assert.strictEqual(rows.length, 6, 'Expected all synthetic rows to be denormalized.');
     assert.ok(dashboard.getYieldCalls() >= 3, 'Expected large denormalization to yield cooperatively.');
     assert.strictEqual(rows[0].DeviceId, 'device-1');
+    assert.strictEqual(rows[0]._deviceSearchText, 'Device 1 device-1'.toLowerCase());
     assert.strictEqual(rows[0]._environmentFirstSeenDate, '2026-03-01');
     assert.ok(
         dashboard.getMetrics().counts.denormalizeYields >= 3,
         'Expected denormalization yield count to be recorded in dashboard metrics.'
     );
+
+    const filterState = dashboard.createEmptyFilterState();
+    filterState.deviceSearchNormalized = 'device-1';
+    assert.strictEqual(dashboard.matchesFilterStateNonDate(rows[0], filterState), true);
+    filterState.deviceSearchNormalized = 'missing-device';
+    assert.strictEqual(dashboard.matchesFilterStateNonDate(rows[0], filterState), false);
 
     console.log('Dashboard large initialization responsiveness assertions passed.');
 }
