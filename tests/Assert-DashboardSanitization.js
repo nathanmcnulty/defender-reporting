@@ -4,6 +4,7 @@ const { loadDashboardHarness } = require('./helpers/dashboard-test-harness');
 const dashboard = loadDashboardHarness(`
 module.exports = {
     buildDeviceBubbleHtml,
+    buildDenseModalDeviceRow,
     buildCveLinkHtml,
     buildRemediationTitleHtml,
     buildRemediationUpdateBadgeHtml,
@@ -66,6 +67,17 @@ assert.ok(!rowHtml.includes('<img'));
 assert.ok(!rowHtml.includes('javascript:alert'));
 assert.ok(rowHtml.includes('&lt;img'));
 assert.ok(rowHtml.includes('2026-04-27&lt;script&gt;'));
+
+const denseModalDeviceRow = dashboard.buildDenseModalDeviceRow({
+    DeviceName: 'device<img src=x onerror=alert(1)>',
+    DeviceId: 'device-id<script>',
+    MachineInfo: { ip: '10.0.0.1<script>' },
+    cveIds: new Set(['CVE-2026-0001']),
+    lastSeen: 'not-a-date<script>alert(1)</script>'
+});
+assert.ok(!denseModalDeviceRow.includes('<img'));
+assert.ok(!denseModalDeviceRow.includes('<script'));
+assert.ok(denseModalDeviceRow.includes('not-a-date&lt;script&gt;alert(1)&lt;/script&gt;'));
 
 const cveHtml = dashboard.buildCveLinkHtml({
     CveBatchUrl: 'javascript:alert(1)',
