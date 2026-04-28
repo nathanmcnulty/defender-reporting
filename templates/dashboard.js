@@ -10167,6 +10167,11 @@ function estimateTableBasedPdfPageCount(selectedReport) {
 }
 
 function estimateCardBasedPdfPageCount(selectedReport) {
+    const estimatedFromData = estimateCardBasedPdfPageCountFromData(selectedReport);
+    if (Number.isFinite(estimatedFromData) && estimatedFromData > 0) {
+        return estimatedFromData;
+    }
+
     const activeSection = document.querySelector('.report-section.active');
     const cards = activeSection ? Array.from(activeSection.querySelectorAll('.remediation-card')) : [];
 
@@ -10180,6 +10185,42 @@ function estimateCardBasedPdfPageCount(selectedReport) {
     cards.forEach(card => {
         const rowCount = card.querySelectorAll('.devices-table tbody tr').length;
         const cveBadgeCount = card.querySelectorAll('.cve-severity-badge').length;
+        const supplementalRows = cveBadgeCount > 15
+            ? 2
+            : (cveBadgeCount > 0 ? 1 : 0);
+        const estimatedRows = Math.max(1, rowCount + supplementalRows);
+        pageCount += Math.max(1, Math.ceil(estimatedRows / rowsPerPage));
+    });
+
+    return pageCount;
+}
+
+function estimateCardBasedPdfPageCountFromData(selectedReport) {
+    const reportRows = selectedReport === 'devices-by-remediation'
+        ? devicesByRemediationAllData
+        : selectedReport === 'remediations-by-device'
+            ? remediationsByDeviceAllData
+            : [];
+
+    if (!Array.isArray(reportRows) || reportRows.length === 0) {
+        return null;
+    }
+
+    const rowsPerPage = selectedReport === 'devices-by-remediation' ? 14 : 10;
+    let pageCount = 2;
+
+    reportRows.forEach(row => {
+        let rowCount = 0;
+        let cveBadgeCount = 0;
+
+        if (selectedReport === 'devices-by-remediation') {
+            rowCount = Number(row.deviceCount) || (row.devices instanceof Map ? row.devices.size : 0);
+            cveBadgeCount = Number(row.cveCount) || (row.cveDetails instanceof Map ? row.cveDetails.size : 0);
+        } else {
+            rowCount = Number(row.remediationCount) || (row.remediations instanceof Map ? row.remediations.size : 0);
+            cveBadgeCount = Number(row.cveCount) || 0;
+        }
+
         const supplementalRows = cveBadgeCount > 15
             ? 2
             : (cveBadgeCount > 0 ? 1 : 0);
@@ -10278,6 +10319,12 @@ async function maybeConfirmLargePdfExport(selectedReport, reportName, pdfDoc) {
     );
 }
 
+function ensurePdfReportDataReady(selectedReport) {
+    if (!initializedReports.has(selectedReport) || dirtyReports.has(selectedReport)) {
+        renderReport(selectedReport, true);
+    }
+}
+
 async function exportToPDF() {
     const button = document.querySelector('.export-pdf-btn');
     button.disabled = true;
@@ -10316,13 +10363,25 @@ async function exportToPDF() {
     const selectedReport = selector.value;
     const reportName = selector.options[selector.selectedIndex].text;
     
-    updateProgress(25, 'Expanding data...');
+    updateProgress(25, 'Checking export size...');
+    button.textContent = '📄 Checking size...';
+    ensurePdfReportDataReady(selectedReport);
+    const shouldContinuePreflight = await maybeConfirmLargePdfExport(selectedReport, reportName);
+    if (!shouldContinuePreflight) {
+        setDashboardStatus('PDF export canceled.', 'info');
+        button.disabled = false;
+        button.textContent = '📄 Export to PDF';
+        progressDiv.remove();
+        return;
+    }
+
+    updateProgress(30, 'Expanding data...');
     button.textContent = '📄 Expanding data...';
     
     const wasExpanded = expandReportForPdf(selectedReport);
     await new Promise(resolve => setTimeout(resolve, 100));
     
-    updateProgress(30, 'Generating PDF...');
+    updateProgress(35, 'Generating PDF...');
     button.textContent = '📄 Generating PDF...';
     document.body.classList.add('pdf-export-active');
     
@@ -10426,15 +10485,10 @@ async function exportToPDF() {
         
         docDefinition.content.push(...filterContent);
 
-        updateProgress(80, 'Checking page count...');
+        updateProgress(80, 'Creating PDF...');
         const pdfDoc = pdfMake.createPdf(docDefinition);
-        const shouldContinue = await maybeConfirmLargePdfExport(selectedReport, reportName, pdfDoc);
-        if (!shouldContinue) {
-            setDashboardStatus('PDF export canceled.', 'info');
-            return;
-        }
-        
-        updateProgress(90, 'Creating PDF...');
+
+        updateProgress(90, 'Downloading PDF...');
         pdfDoc.download(fileName);
         updateProgress(100, 'Complete!');
         clearDashboardStatus();
