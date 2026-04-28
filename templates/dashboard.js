@@ -5503,8 +5503,9 @@ function buildRemediationTitleHtml(text, url) {
         return '-';
     }
 
-    if (url) {
-        return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
+    const safeUrl = getSafeExternalUrl(url);
+    if (safeUrl) {
+        return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`;
     }
 
     return escapeHtml(text);
@@ -5679,9 +5680,10 @@ function getRemediationTitleWithReferenceSuffix(title, updateEntries) {
 
 function buildRemediationUpdateBadgeHtml(referenceText, referenceUrl, prefix = '') {
     const badgeText = prefix ? `${prefix}${referenceText}` : referenceText;
+    const safeUrl = getSafeExternalUrl(referenceUrl);
 
-    if (referenceUrl) {
-        return `<a href="${escapeHtml(referenceUrl)}" target="_blank" rel="noopener noreferrer" class="stat-badge remediation-update-badge">
+    if (safeUrl) {
+        return `<a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer" class="stat-badge remediation-update-badge">
                  <span>${escapeHtml(badgeText)}</span>
                  <svg class="link-icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
@@ -6640,8 +6642,8 @@ function createRemediationRow(rem, index) {
     const row = document.createElement('tr');
     row.dataset.rowIndex = String(index);
     row.innerHTML = `
-        <td>${rem.vendor}</td>
-        <td>${rem.software}</td>
+        <td>${escapeHtml(rem.vendor)}</td>
+        <td>${escapeHtml(rem.software)}</td>
         <td>${rem.remediationHtml}</td>
         <td class="update-details-column">${rem.updateHtml}</td>
         <td>${rem.devices.size}</td>
@@ -6941,7 +6943,7 @@ function createRemediationDetailsRow(data, index) {
     const row = document.createElement('tr');
     row.dataset.rowIndex = String(index);
     row.innerHTML = `
-        <td>${data.date}</td>
+        <td>${escapeHtml(data.date)}</td>
         <td>${data.remediationHtml}</td>
         <td class="update-details-column">${data.updateHtml}</td>
         <td>${data.devices.size}</td>
@@ -7744,7 +7746,7 @@ function generateSeverityTooltipContent(cveIds) {
     if (sortedCveIds.length === 0) return '<div class="severity-tooltip-empty">No valid CVE IDs</div>';
     
     // Return simple comma-separated list
-    return `<div class="severity-tooltip-content">${sortedCveIds.join(', ')}</div>`;
+    return `<div class="severity-tooltip-content">${escapeHtml(sortedCveIds.join(', '))}</div>`;
 }
 
 /**
@@ -7953,7 +7955,7 @@ function appendDevicesByRemediationCard(container, data, index, pendingVirtualTa
     }
 
     if (mostRecentDate) {
-        detailBadges.push(`<span class="stat-badge">Published: ${mostRecentDate}</span>`);
+        detailBadges.push(`<span class="stat-badge">Published: ${escapeHtml(mostRecentDate)}</span>`);
     }
 
     (data.updateEntries || []).filter(entry => entry && entry.referenceText).forEach(entry => {
@@ -8002,7 +8004,7 @@ function appendDevicesByRemediationCard(container, data, index, pendingVirtualTa
         cveBadgesSection += '<div class="cve-badges-container">';
         
         cveList.forEach(cve => {
-            const severityClass = (cve.severity || 'Unknown').toLowerCase();
+            const severityClass = getSeverityClassName(cve.severity);
             
             // Remove CVE- prefix for cleaner display
             const displayId = formatCveDisplayId(cve.id);
@@ -8011,11 +8013,12 @@ function appendDevicesByRemediationCard(container, data, index, pendingVirtualTa
             const tooltipId = `cve-${++cveTooltipIdCounter}`;
             cveTooltipData[tooltipId] = generateCveTooltipContent(cve);
             
-            const badgeHtml = cve.url 
-                ? `<a href="${cve.url}" target="_blank" rel="noopener noreferrer" class="cve-severity-badge ${severityClass}" data-tooltip-id="${tooltipId}">
+                        const safeCveUrl = getSafeExternalUrl(cve.url);
+                        const badgeHtml = safeCveUrl
+                                ? `<a href="${escapeHtml(safeCveUrl)}" target="_blank" rel="noopener noreferrer" class="cve-severity-badge ${severityClass}" data-tooltip-id="${escapeHtml(tooltipId)}">
                      ${escapeHtml(displayId)}
                    </a>`
-                : `<span class="cve-severity-badge ${severityClass}" data-tooltip-id="${tooltipId}">
+                                : `<span class="cve-severity-badge ${severityClass}" data-tooltip-id="${escapeHtml(tooltipId)}">
                      ${escapeHtml(displayId)}
                    </span>`;
             
@@ -8042,7 +8045,7 @@ function appendDevicesByRemediationCard(container, data, index, pendingVirtualTa
     card.innerHTML = `
         <div class="remediation-card-header">
             <div class="remediation-card-title-block">
-                <h3>${headerText}</h3>
+                <h3>${escapeHtml(headerText)}</h3>
                 ${cveDetailsHtml}
             </div>
             <div class="remediation-stats">
@@ -8202,7 +8205,7 @@ function buildRemediationsByDeviceRowHtml(remediations) {
                 <td class="update-details-column">${updateCell}</td>
                 <td>${severityBadges}</td>
                 <td>${cveCount}</td>
-                <td>${publishedDate}</td>
+                <td>${escapeHtml(publishedDate)}</td>
             </tr>
         `;
     }).join('');
@@ -8384,9 +8387,9 @@ function appendRemediationsByDeviceCard(container, data, index) {
     
     const deviceInfoHtml = `
         <div class="cve-details">
-            <span class="stat-badge">IP: ${data.ipAddress}</span>
-            <span class="stat-badge">Group: ${data.rbacGroupName}</span>
-            <span class="stat-badge">Tags: ${tagsDisplay}</span>
+            <span class="stat-badge">IP: ${escapeHtml(data.ipAddress)}</span>
+            <span class="stat-badge">Group: ${escapeHtml(data.rbacGroupName)}</span>
+            <span class="stat-badge">Tags: ${escapeHtml(tagsDisplay)}</span>
         </div>
     `;
     
@@ -8433,7 +8436,7 @@ function appendRemediationsByDeviceCard(container, data, index) {
     
     card.innerHTML = `
         <div class="remediation-card-header">
-            <h3>${headerText}</h3>
+            <h3>${escapeHtml(headerText)}</h3>
             ${deviceInfoHtml}
         </div>
         <div class="cve-badges-section">
@@ -8645,13 +8648,40 @@ function buildEvidenceHtml(v) {
  * @returns {string} Escaped text
  */
 function escapeHtml(text) {
-    if (!text) return '';
-    return text
+    if (text === null || text === undefined) return '';
+    return String(text)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
+}
+
+function getSafeExternalUrl(url) {
+    if (url === null || url === undefined) {
+        return '';
+    }
+
+    const candidate = String(url).trim();
+    if (!candidate) {
+        return '';
+    }
+
+    try {
+        const parsedUrl = new URL(candidate);
+        return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:'
+            ? parsedUrl.href
+            : '';
+    } catch {
+        return '';
+    }
+}
+
+function getSeverityClassName(severity) {
+    const normalized = String(severity || '').trim().toLowerCase();
+    return ['critical', 'high', 'medium', 'low'].includes(normalized)
+        ? normalized
+        : 'unknown';
 }
 
 /**
@@ -8692,9 +8722,10 @@ function buildDeviceBubbleHtml(v) {
  */
 function buildCveLinkHtml(v) {
     materializeRow(v);
-    const cveUrl = v.CveBatchUrl || `https://msrc.microsoft.com/update-guide/vulnerability/${v.CveId}`;
+    const cveUrl = getSafeExternalUrl(v.CveBatchUrl)
+        || getSafeExternalUrl(`https://msrc.microsoft.com/update-guide/vulnerability/${encodeURIComponent(v.CveId || '')}`);
     const displayId = formatCveDisplayId(v.CveId);
-    const severityClass = (v.VulnerabilitySeverityLevel || 'unknown').toLowerCase();
+    const severityClass = getSeverityClassName(v.VulnerabilitySeverityLevel);
     const tooltipId = `modal-cve-${++severityBadgeIdCounter}`;
     const versions = new Set();
     if (v.SoftwareVersion) {
@@ -8887,7 +8918,7 @@ const DENSE_MODAL_DEVICE_THRESHOLD = 2500;
  * Build a detail-row HTML string for showDetails CVE tables
  */
 function buildDetailRow(v, includeEvidenceColumn) {
-    const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
+    const severityClass = getSeverityClassName(v.VulnerabilitySeverityLevel);
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
     const publishedDisplay = formatDateYMD(v.PublishedDate);
     const firstSeenDisplay = getEnvironmentFirstSeenDate(v);
@@ -8895,13 +8926,13 @@ function buildDetailRow(v, includeEvidenceColumn) {
     return '<tr>' +
         buildCveLinkHtml(v) +
         '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
-        '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
-        '<td>' + v.CvssScore + '</td>' +
-        '<td>' + epssDisplay + '</td>' +
-        '<td>' + formatExploitLevel(v.ExploitabilityLevel) + '</td>' +
+        '<td><span class="badge ' + severityClass + '">' + escapeHtml(v.VulnerabilitySeverityLevel) + '</span></td>' +
+        '<td>' + escapeHtml(v.CvssScore) + '</td>' +
+        '<td>' + escapeHtml(epssDisplay) + '</td>' +
+        '<td>' + escapeHtml(formatExploitLevel(v.ExploitabilityLevel)) + '</td>' +
         (includeEvidenceColumn ? buildEvidenceHtml(v) : '') +
-        '<td class="modal-date-col">' + publishedDisplay + '</td>' +
-        '<td class="modal-date-col">' + firstSeenDisplay + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(publishedDisplay) + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(firstSeenDisplay) + '</td>' +
         '</tr>';
 }
 
@@ -8909,7 +8940,7 @@ function buildDetailRow(v, includeEvidenceColumn) {
  * Build a remediation-row HTML string for showRemediationDetails CVE tables
  */
 function buildRemediationRow(v, includeEvidenceColumn) {
-    const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
+    const severityClass = getSeverityClassName(v.VulnerabilitySeverityLevel);
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
     const publishedDisplay = formatDateYMD(v.PublishedDate);
     const firstSeenDisplay = getEnvironmentFirstSeenDate(v);
@@ -8917,12 +8948,12 @@ function buildRemediationRow(v, includeEvidenceColumn) {
     return '<tr>' +
         buildCveLinkHtml(v) +
         '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
-        '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
-        '<td>' + v.CvssScore + '</td>' +
-        '<td>' + epssDisplay + '</td>' +
+        '<td><span class="badge ' + severityClass + '">' + escapeHtml(v.VulnerabilitySeverityLevel) + '</span></td>' +
+        '<td>' + escapeHtml(v.CvssScore) + '</td>' +
+        '<td>' + escapeHtml(epssDisplay) + '</td>' +
         (includeEvidenceColumn ? buildEvidenceHtml(v) : '') +
-        '<td class="modal-date-col">' + publishedDisplay + '</td>' +
-        '<td class="modal-date-col">' + firstSeenDisplay + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(publishedDisplay) + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(firstSeenDisplay) + '</td>' +
         '</tr>';
 }
 
@@ -8999,7 +9030,7 @@ function buildDenseModalDeviceRow(device) {
 }
 
 function buildDenseDetailRow(v, includeEvidenceColumn) {
-    const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
+    const severityClass = getSeverityClassName(v.VulnerabilitySeverityLevel);
     const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
     const publishedDisplay = formatDateYMD(v.PublishedDate);
     const firstSeenDisplay = getEnvironmentFirstSeenDate(v);
@@ -9009,18 +9040,18 @@ function buildDenseDetailRow(v, includeEvidenceColumn) {
         '<td title="' + escapeHtml(v.DeviceId || '') + '">' + escapeHtml(formatModalDeviceId(v.DeviceId)) + '</td>' +
         buildCveLinkHtml(v) +
         '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
-        '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
-        '<td>' + v.CvssScore + '</td>' +
-        '<td>' + epssDisplay + '</td>' +
-        '<td>' + formatExploitLevel(v.ExploitabilityLevel) + '</td>' +
+        '<td><span class="badge ' + severityClass + '">' + escapeHtml(v.VulnerabilitySeverityLevel) + '</span></td>' +
+        '<td>' + escapeHtml(v.CvssScore) + '</td>' +
+        '<td>' + escapeHtml(epssDisplay) + '</td>' +
+        '<td>' + escapeHtml(formatExploitLevel(v.ExploitabilityLevel)) + '</td>' +
         (includeEvidenceColumn ? buildEvidenceHtml(v) : '') +
-        '<td class="modal-date-col">' + publishedDisplay + '</td>' +
-        '<td class="modal-date-col">' + firstSeenDisplay + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(publishedDisplay) + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(firstSeenDisplay) + '</td>' +
         '</tr>';
 }
 
     function buildDenseRemediationDetailRow(v, includeEvidenceColumn) {
-        const severityClass = v.VulnerabilitySeverityLevel.toLowerCase();
+        const severityClass = getSeverityClassName(v.VulnerabilitySeverityLevel);
         const epssDisplay = v.EpssScore != null ? v.EpssScore.toFixed(5) : '-';
         const publishedDisplay = formatDateYMD(v.PublishedDate);
         const firstSeenDisplay = getEnvironmentFirstSeenDate(v);
@@ -9030,12 +9061,12 @@ function buildDenseDetailRow(v, includeEvidenceColumn) {
         '<td title="' + escapeHtml(v.DeviceId || '') + '">' + escapeHtml(formatModalDeviceId(v.DeviceId)) + '</td>' +
         buildCveLinkHtml(v) +
         '<td>' + escapeHtml(v.SoftwareVersion) + '</td>' +
-        '<td><span class="badge ' + severityClass + '">' + v.VulnerabilitySeverityLevel + '</span></td>' +
-        '<td>' + v.CvssScore + '</td>' +
-        '<td>' + epssDisplay + '</td>' +
+        '<td><span class="badge ' + severityClass + '">' + escapeHtml(v.VulnerabilitySeverityLevel) + '</span></td>' +
+        '<td>' + escapeHtml(v.CvssScore) + '</td>' +
+        '<td>' + escapeHtml(epssDisplay) + '</td>' +
         (includeEvidenceColumn ? buildEvidenceHtml(v) : '') +
-        '<td class="modal-date-col">' + publishedDisplay + '</td>' +
-        '<td class="modal-date-col">' + firstSeenDisplay + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(publishedDisplay) + '</td>' +
+        '<td class="modal-date-col">' + escapeHtml(firstSeenDisplay) + '</td>' +
         '</tr>';
     }
 
