@@ -95,6 +95,8 @@ function loadDashboardHarness(exportSource, sandboxOverrides = {}) {
             addEventListener() {},
             removeEventListener() {},
             confirm() { return true; },
+            setTimeout,
+            clearTimeout,
             innerHeight: 1080,
             innerWidth: 1920
         },
