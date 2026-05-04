@@ -3521,6 +3521,314 @@ function Read-VulnContentDictionary {
     return (Read-GzipTextFile -Path $Path | ConvertFrom-Json -Depth 20)
 }
 
+function Open-VulnJsonTextReader {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fileStream = $null
+    $contentStream = $null
+    $reader = $null
+    $jsonReader = $null
+    try {
+        $fileStream = [System.IO.File]::OpenRead($Path)
+        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        }
+        else {
+            $fileStream
+        }
+
+        $reader = [System.IO.StreamReader]::new($contentStream, [System.Text.UTF8Encoding]::new($false))
+        $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
+
+        $state = [PSCustomObject]@{
+            Path = $Path
+            FileStream = $fileStream
+            ContentStream = $contentStream
+            Reader = $reader
+            JsonReader = $jsonReader
+        }
+
+        $jsonReader = $null
+        $reader = $null
+        $contentStream = $null
+        $fileStream = $null
+        return $state
+    }
+    finally {
+        if ($jsonReader) {
+            $jsonReader.Close()
+        }
+        elseif ($reader) {
+            $reader.Dispose()
+        }
+        elseif ($contentStream -and $contentStream -ne $fileStream) {
+            $contentStream.Dispose()
+        }
+
+        if ($fileStream) {
+            $fileStream.Dispose()
+        }
+    }
+}
+
+function Close-VulnJsonTextReader {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $State
+    )
+
+    if ($null -eq $State) {
+        return
+    }
+
+    $jsonReader = $State.PSObject.Properties['JsonReader']?.Value
+    if ($null -ne $jsonReader) {
+        $jsonReader.Close()
+        return
+    }
+
+    $reader = $State.PSObject.Properties['Reader']?.Value
+    if ($null -ne $reader) {
+        $reader.Dispose()
+        return
+    }
+
+    $contentStream = $State.PSObject.Properties['ContentStream']?.Value
+    $fileStream = $State.PSObject.Properties['FileStream']?.Value
+    if ($null -ne $contentStream -and $contentStream -ne $fileStream) {
+        $contentStream.Dispose()
+    }
+
+    if ($null -ne $fileStream) {
+        $fileStream.Dispose()
+    }
+}
+
+function Skip-VulnJsonReaderValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader
+    )
+
+    if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartArray -and
+        $Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+        return
+    }
+
+    $depth = 1
+    while ($depth -gt 0 -and $Reader.Read()) {
+        switch ($Reader.TokenType) {
+            ([Newtonsoft.Json.JsonToken]::StartArray) { $depth++ }
+            ([Newtonsoft.Json.JsonToken]::StartObject) { $depth++ }
+            ([Newtonsoft.Json.JsonToken]::EndArray) { $depth-- }
+            ([Newtonsoft.Json.JsonToken]::EndObject) { $depth-- }
+        }
+    }
+}
+
+function Read-VulnContentDictionaryArrayEntries {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Streams multiple dictionary entries by design.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('deviceProfiles', 'contentTemplates')]
+        [string]$PropertyName
+    )
+
+    $readerState = Open-VulnJsonTextReader -Path $Path
+    try {
+        $jsonReader = $readerState.JsonReader
+        if (-not $jsonReader.Read() -or $jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+            throw "Content dictionary '$Path' does not begin with a JSON object."
+        }
+
+        while ($jsonReader.Read()) {
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndObject) {
+                break
+            }
+
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) {
+                continue
+            }
+
+            $currentPropertyName = [string]$jsonReader.Value
+            if (-not $jsonReader.Read()) {
+                throw "Unexpected end of content dictionary '$Path' while reading '$currentPropertyName'."
+            }
+
+            if ($currentPropertyName -ne $PropertyName) {
+                Skip-VulnJsonReaderValue -Reader $jsonReader
+                continue
+            }
+
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartArray) {
+                throw "Content dictionary '$Path' property '$PropertyName' is not a JSON array."
+            }
+
+            while ($jsonReader.Read()) {
+                if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndArray) {
+                    return
+                }
+
+                if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::Null) {
+                    continue
+                }
+
+                if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+                    throw "Content dictionary '$Path' property '$PropertyName' contains an unexpected token '$($jsonReader.TokenType)'."
+                }
+
+                Write-Output -InputObject ([Newtonsoft.Json.Linq.JObject]::Load($jsonReader)) -NoEnumerate
+            }
+
+            throw "Content dictionary '$Path' ended before closing '$PropertyName'."
+        }
+
+        throw "Content dictionary '$Path' is missing '$PropertyName'."
+    }
+    finally {
+        Close-VulnJsonTextReader -State $readerState
+    }
+}
+
+function Read-VulnContentDictionaryExpansionLookups {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Builds reduced lookup arrays for multiple dictionary sections by design.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $deviceProfiles = [System.Collections.Generic.List[object]]::new()
+    foreach ($deviceProfile in @(Read-VulnContentDictionaryArrayEntries -Path $Path -PropertyName 'deviceProfiles')) {
+        $deviceProfiles.Add([PSCustomObject]@{
+                id = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'id')
+                n = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'n')
+                g = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'g')
+                o = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'o')
+                ov = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'ov')
+                t = @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $deviceProfile -Name 't'))
+                ob = ((Get-VulnPropertyValue -InputObject $deviceProfile -Name 'ob') -eq $true)
+            }) | Out-Null
+    }
+
+    $contentTemplates = [System.Collections.Generic.List[object]]::new()
+    foreach ($contentTemplate in @(Read-VulnContentDictionaryArrayEntries -Path $Path -PropertyName 'contentTemplates')) {
+        $contentTemplates.Add([PSCustomObject]@{
+                c = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'c')
+                sv = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sv')
+                sn = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sn')
+                ver = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'ver')
+                sev = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sev')
+                sc = (Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sc')
+                ex = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'ex')
+                rr = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'rr')
+                ru = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'ru')
+                rid = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'rid')
+                url = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'url')
+                ua = ((Get-VulnPropertyValue -InputObject $contentTemplate -Name 'ua') -eq $true)
+                dp = @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $contentTemplate -Name 'dp'))
+                rp = @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $contentTemplate -Name 'rp'))
+                bt = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'bt')
+                bu = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'bu')
+            }) | Out-Null
+    }
+
+    return [PSCustomObject]@{
+        DeviceProfiles = $deviceProfiles.ToArray()
+        ContentTemplates = $contentTemplates.ToArray()
+    }
+}
+
+function Convert-VulnContentRefToRow {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Ref,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$DeviceProfiles,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$ContentTemplates
+    )
+
+    if ($null -eq $Ref -or @($Ref).Count -lt 5) {
+        return $null
+    }
+
+    $device = $DeviceProfiles[[int]$Ref[1]]
+    $content = $ContentTemplates[[int]$Ref[2]]
+
+    return ([PSCustomObject]@{
+            Id = [string]$Ref[0]
+            DeviceId = [string]$device.id
+            DeviceName = [string]$device.n
+            RbacGroupName = [string]$device.g
+            OSPlatform = [string]$device.o
+            OSVersion = [string]$device.ov
+            MachineTags = @($device.t)
+            CveId = [string]$content.c
+            SoftwareVendor = [string]$content.sv
+            SoftwareName = [string]$content.sn
+            SoftwareVersion = [string]$content.ver
+            VulnerabilitySeverityLevel = [string]$content.sev
+            CvssScore = $content.sc
+            ExploitabilityLevel = [string]$content.ex
+            RecommendationReference = [string]$content.rr
+            RecommendedSecurityUpdate = [string]$content.ru
+            RecommendedSecurityUpdateId = [string]$content.rid
+            RecommendedSecurityUpdateUrl = [string]$content.url
+            SecurityUpdateAvailable = ($content.ua -eq $true)
+            FirstSeenTimestamp = [string]$Ref[3]
+            LastSeenTimestamp = [string]$Ref[4]
+            DiskPaths = @($content.dp)
+            RegistryPaths = @($content.rp)
+            CveBatchTitle = [string]$content.bt
+            CveBatchUrl = [string]$content.bu
+            IsOnboarded = ($device.ob -eq $true)
+        })
+}
+
+function Read-VulnContentRefRows {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Streams multiple content reference rows by design.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DictionaryPath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$RefPaths
+    )
+
+    $lookups = Read-VulnContentDictionaryExpansionLookups -Path $DictionaryPath
+
+    foreach ($refPath in @($RefPaths)) {
+        Read-VulnNdjsonLinesFromPath -Path $refPath | ForEach-Object {
+            if ([string]::IsNullOrWhiteSpace($_)) { return }
+
+            $ref = $_ | ConvertFrom-Json -Depth 10
+            $row = Convert-VulnContentRefToRow -Ref $ref -DeviceProfiles $lookups.DeviceProfiles -ContentTemplates $lookups.ContentTemplates
+            if ($null -ne $row) {
+                $row
+            }
+        }
+    }
+}
+
 function Read-VulnContentStoreRow {
     [CmdletBinding()]
     param(
@@ -3528,7 +3836,6 @@ function Read-VulnContentStoreRow {
         [string]$BasePath
     )
 
-    $dictionary = Read-VulnContentDictionary -Path (Get-VulnContentDictionaryPath -BasePath $BasePath)
     $refPaths = [System.Collections.Generic.List[string]]::new()
 
     $currentRefsPath = Get-VulnCurrentRefsPath -BasePath $BasePath
@@ -3540,46 +3847,11 @@ function Read-VulnContentStoreRow {
         $refPaths.Add($historyRefsFile.FullName)
     }
 
-    # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
-    # collecting all ref lines into memory at once.
-    foreach ($refPath in $refPaths) {
-        Read-VulnNdjsonLinesFromPath -Path $refPath | ForEach-Object {
-            if ([string]::IsNullOrWhiteSpace($_)) { return }
-
-            $ref = $_ | ConvertFrom-Json -Depth 10
-            $device = $dictionary.deviceProfiles[[int]$ref[1]]
-            $content = $dictionary.contentTemplates[[int]$ref[2]]
-
-            ([PSCustomObject]@{
-                Id = [string]$ref[0]
-                DeviceId = [string]$device.id
-                DeviceName = [string]$device.n
-                RbacGroupName = [string]$device.g
-                OSPlatform = [string]$device.o
-                OSVersion = [string]$device.ov
-                MachineTags = @($device.t)
-                CveId = [string]$content.c
-                SoftwareVendor = [string]$content.sv
-                SoftwareName = [string]$content.sn
-                SoftwareVersion = [string]$content.ver
-                VulnerabilitySeverityLevel = [string]$content.sev
-                CvssScore = $content.sc
-                ExploitabilityLevel = [string]$content.ex
-                RecommendationReference = [string]$content.rr
-                RecommendedSecurityUpdate = [string]$content.ru
-                RecommendedSecurityUpdateId = [string]$content.rid
-                RecommendedSecurityUpdateUrl = [string]$content.url
-                SecurityUpdateAvailable = ($content.ua -eq $true)
-                FirstSeenTimestamp = [string]$ref[3]
-                LastSeenTimestamp = [string]$ref[4]
-                DiskPaths = @($content.dp)
-                RegistryPaths = @($content.rp)
-                CveBatchTitle = [string]$content.bt
-                CveBatchUrl = [string]$content.bu
-                IsOnboarded = ($device.ob -eq $true)
-            })
-        }
+    if ($refPaths.Count -eq 0) {
+        return
     }
+
+    Read-VulnContentRefRows -DictionaryPath (Get-VulnContentDictionaryPath -BasePath $BasePath) -RefPaths $refPaths.ToArray()
 }
 
 function Publish-VulnContentStoreUnlocked {
