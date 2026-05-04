@@ -1953,6 +1953,52 @@ function Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose {
     }
 }
 
+function Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-content-store-streaming-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+    $originalDictionaryReader = $null
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'content-store-streaming-001' -CveId 'CVE-2026-0152' -SnapshotDate '2026-03-20' -Version '2.0.0'
+        $historyRow = Get-TestVulnRow -Id 'content-store-streaming-002' -CveId 'CVE-2026-0153' -SnapshotDate '2026-03-18' -Version '2.0.1'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        [void](New-Item -Path (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -ItemType File -Force)
+        Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+
+        $originalDictionaryReader = ${function:Read-VulnContentDictionary}
+        Set-Item -Path Function:Read-VulnContentDictionary -Value {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path
+            )
+
+            throw "ConvertTo-NormalizedData should stream the content dictionary during content-store normalization instead of calling Read-VulnContentDictionary for '$Path'."
+        }
+
+        $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -PayloadOutputPath $payloadPath -Machines @{} -AdvancedHuntingData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+
+        Assert-True ($result.VulnCount -eq 2) 'Expected content-store normalization to preserve both current and history rows while bypassing the legacy dictionary reader.'
+        Assert-True ([string]$result.PayloadPath -eq $payloadPath) 'Expected content-store normalization to still write the direct payload output.'
+        Assert-True ((Get-CompressedPayloadVulnCount -Path $payloadPath) -eq $result.VulnCount) 'Expected content-store streaming normalization to keep payload row count aligned with processed rows.'
+    }
+    finally {
+        if ($null -ne $originalDictionaryReader) {
+            Set-Item -Path Function:Read-VulnContentDictionary -Value $originalDictionaryReader
+        }
+
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup {
     [CmdletBinding()]
     param()
@@ -3371,6 +3417,7 @@ function Test-VulnContentStoreRoundTrip {
 
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-content-store-' + [guid]::NewGuid().ToString('N'))
     [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalDictionaryReader = $null
 
     try {
         $currentRow = Get-TestVulnRow -Id 'content-001' -CveId 'CVE-2026-0101' -SnapshotDate '2026-03-20' -Version '1.0.0'
@@ -3383,6 +3430,17 @@ function Test-VulnContentStoreRoundTrip {
         Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
 
         Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+
+        $originalDictionaryReader = ${function:Read-VulnContentDictionary}
+        Set-Item -Path Function:Read-VulnContentDictionary -Value {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path
+            )
+
+            throw "Read-VulnContentStoreRow should stream reduced content lookups instead of calling Read-VulnContentDictionary for '$Path'."
+        }
+
         $roundTripped = @(Read-VulnContentStoreRow -BasePath $tempRoot | Sort-Object Id)
 
         Assert-True ((Test-Path -LiteralPath (Get-VulnContentDictionaryPath -BasePath $tempRoot) -PathType Leaf)) 'Expected vulnerability content dictionary sidecar to be created.'
@@ -3428,6 +3486,10 @@ function Test-VulnContentStoreRoundTrip {
         }
     }
     finally {
+        if ($null -ne $originalDictionaryReader) {
+            Set-Item -Path Function:Read-VulnContentDictionary -Value $originalDictionaryReader
+        }
+
         if (Test-Path -LiteralPath $tempRoot) {
             Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -3440,6 +3502,7 @@ function Test-VulnObservedWindowCacheRoundTrip {
 
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-observed-cache-' + [guid]::NewGuid().ToString('N'))
     [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalDictionaryReader = $null
 
     try {
         $currentRow = Get-TestVulnRow -Id 'merge-001' -CveId 'CVE-2026-0004' -SnapshotDate '2026-03-17' -Version '1.0.0'
@@ -3452,10 +3515,20 @@ function Test-VulnObservedWindowCacheRoundTrip {
         Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow, $otherHistoryRow)
 
         Publish-VulnContentStoreUnlocked -BasePath $tempRoot
-        $expectedRows = @(Write-MergedVulnObservedWindowRows -Source { Read-VulnStoreRow -BasePath $tempRoot } | Sort-Object Id, FirstSeenTimestamp, LastSeenTimestamp)
+        $expectedRows = @(Write-MergedVulnObservedWindowRows -Source { @($currentRow, $historyRow, $otherHistoryRow) } | Sort-Object Id, FirstSeenTimestamp, LastSeenTimestamp)
         $cachePath = Publish-VulnObservedWindowCache -BasePath $tempRoot
 
         Assert-True ((Test-Path -LiteralPath $cachePath -PathType Leaf)) 'Expected observed-window cache to be created.'
+
+        $originalDictionaryReader = ${function:Read-VulnContentDictionary}
+        Set-Item -Path Function:Read-VulnContentDictionary -Value {
+            param(
+                [Parameter(Mandatory = $true)]
+                [string]$Path
+            )
+
+            throw "Get-NormalizationSourceRows should stream reduced content lookups for compact observed-window caches instead of calling Read-VulnContentDictionary for '$Path'."
+        }
 
         # Read the cache through Get-NormalizationSourceRows which auto-detects
         # the compact ref format (T5) or legacy full-record format.
@@ -3479,6 +3552,10 @@ function Test-VulnObservedWindowCacheRoundTrip {
         }
     }
     finally {
+        if ($null -ne $originalDictionaryReader) {
+            Set-Item -Path Function:Read-VulnContentDictionary -Value $originalDictionaryReader
+        }
+
         if (Test-Path -LiteralPath $tempRoot) {
             Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -3564,6 +3641,8 @@ Test-ConvertToNormalizedDataPreservesOptionalNvdFallback
 Write-Output '  Optional NVD fallback normalization checks passed.'
 Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose
 Write-Output '  Consuming payload-close lookup checks passed.'
+Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader
+Write-Output '  Content-store streaming normalization checks passed.'
 Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup
 Write-Output '  Repeated CVE lookup deduplication checks passed.'
 Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
