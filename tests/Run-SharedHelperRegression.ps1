@@ -2028,6 +2028,42 @@ function Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup {
     }
 }
 
+function Test-ConvertToNormalizedDataReportsZeroOnboardedContentStoreDiagnostics {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-zero-onboarded-content-store-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'zero-onboarded-001' -CveId 'CVE-2026-0156' -SnapshotDate '2026-03-20' -Version '4.0.0'
+        $currentRow.IsOnboarded = $false
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+
+        $errorMessage = $null
+        try {
+            $null = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -Machines @{} -AdvancedHuntingData @{} -SkipObservedWindowMerge
+            throw 'Expected zero-onboarded content-store normalization to fail with a diagnostic message.'
+        }
+        catch {
+            $errorMessage = [string]$_.Exception.Message
+        }
+
+        Assert-True ($errorMessage -like "*No onboarded vulnerabilities were produced while normalizing content-store refs*") 'Expected zero-onboarded content-store failures to identify the content-store path.'
+        Assert-True ($errorMessage -like '*device profiles 1 total/0 onboarded*') 'Expected zero-onboarded content-store failures to report device profile counts.'
+        Assert-True ($errorMessage -like '*content templates 1*') 'Expected zero-onboarded content-store failures to report content template counts.'
+        Assert-True ($errorMessage -like '*ob missing or false*') 'Expected zero-onboarded content-store failures to hint at compact onboarding flags.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap {
     [CmdletBinding()]
     param()
@@ -3562,6 +3598,35 @@ function Test-VulnObservedWindowCacheRoundTrip {
     }
 }
 
+function Test-FunctionAppWriteOutputNoEnumeratePreservesJObject {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $functionAppPath = Join-Path $repoRoot 'azure\function-app\ExportAndGenerate\run.ps1'
+    Assert-True ((Test-Path -LiteralPath $functionAppPath -PathType Leaf)) "Expected generated Function App artifact at '$functionAppPath'."
+
+    $artifactText = Get-Content -LiteralPath $functionAppPath -Raw
+    $functionMatch = [regex]::Match($artifactText, '(?s)function Write-Output \{.*?\r?\n\}\r?\n\r?\n\$isPastDue')
+    Assert-True ($functionMatch.Success) 'Expected generated Function App artifact to contain the traced Write-Output override.'
+
+    $functionDefinition = $functionMatch.Value -replace '\r?\n\r?\n\$isPastDue\z', ''
+    $observed = @(& {
+        function Write-PipelineFileTraceLine {
+            param($Message)
+        }
+
+        . ([scriptblock]::Create($functionDefinition))
+
+        $token = [Newtonsoft.Json.Linq.JObject]::Parse('{"ob":true,"id":"device-001"}')
+        @(Write-Output -InputObject $token -NoEnumerate)
+    })
+
+    Assert-True ($observed.Count -eq 1) 'Expected Function App Write-Output -NoEnumerate to emit exactly one object.'
+    Assert-True ($observed[0] -is [Newtonsoft.Json.Linq.JObject]) 'Expected Function App Write-Output -NoEnumerate to preserve JObject identity.'
+    Assert-True ((Get-VulnPropertyValue -InputObject $observed[0] -Name 'ob') -eq $true) 'Expected Function App Write-Output -NoEnumerate to preserve compact boolean properties.'
+}
+
 Write-Output 'Running shared-helper regression checks...'
 Test-CanonicalLayoutHelper
 Write-Output '  Canonical layout helper checks passed.'
@@ -3645,6 +3710,8 @@ Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader
 Write-Output '  Content-store streaming normalization checks passed.'
 Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup
 Write-Output '  Repeated CVE lookup deduplication checks passed.'
+Test-ConvertToNormalizedDataReportsZeroOnboardedContentStoreDiagnostics
+Write-Output '  Zero-onboarded content-store diagnostics checks passed.'
 Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
 Write-Output '  Advanced Hunting device-user normalization checks passed.'
 Test-WriteCombinedPayloadGzipPreservesColumnPayload
@@ -3699,4 +3766,6 @@ Test-VulnContentStoreRoundTrip
 Write-Output '  Vulnerability content store round-trip checks passed.'
 Test-VulnObservedWindowCacheRoundTrip
 Write-Output '  Observed-window cache round-trip checks passed.'
+Test-FunctionAppWriteOutputNoEnumeratePreservesJObject
+Write-Output '  Function App Write-Output -NoEnumerate checks passed.'
 Write-Output 'Shared-helper regression checks passed.'
