@@ -40,6 +40,11 @@ Standard benchmark dataset:
 8. Append the benchmark JSON to `.local` history with `tests/Record-BenchmarkHistory.ps1`.
 9. Record accepted durable baselines in `docs/performance-baselines.md` and keep raw JSON artifacts under `.local/`.
 
+Guardrails:
+- `tests/Invoke-HotPhaseReview.ps1` now defaults to artifact parity review instead of semantic replay.
+- Use `-ValidationMode semantic` only when you are intentionally investigating semantic audit cost or validating semantic changes.
+- Large local semantic runs above the configured row limit require `-AllowLargeSemanticValidation` so they are not started accidentally.
+
 Timing interpretation:
 - Azure Automation already tracks active execution time from job start to job end.
 - Function App benchmark summaries now treat `function_app.elapsed_seconds` as active execution time when the runtime status blob is available.
