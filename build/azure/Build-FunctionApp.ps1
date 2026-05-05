@@ -132,7 +132,7 @@ function Write-Output {
     param(
         [Parameter(ValueFromPipeline = $true, ValueFromRemainingArguments = $true, Position = 0)]
         [AllowNull()]
-        [object[]]$InputObject,
+        $InputObject,
 
         [switch]$NoEnumerate
     )
@@ -144,15 +144,21 @@ function Write-Output {
             return
         }
 
-        if ($null -eq $InputObject -or $InputObject.Count -eq 0) {
+        if (-not $PSBoundParameters.ContainsKey('InputObject')) {
             Write-PipelineFileTraceLine -Message ''
             return
         }
 
-        foreach ($item in $InputObject) {
-            Write-PipelineFileTraceLine -Message $item
-            Microsoft.PowerShell.Utility\Write-Output -InputObject $item
+        if (($InputObject -is [System.Collections.IEnumerable]) -and -not ($InputObject -is [string])) {
+            foreach ($item in $InputObject) {
+                Write-PipelineFileTraceLine -Message $item
+                Microsoft.PowerShell.Utility\Write-Output -InputObject $item
+            }
+            return
         }
+
+        Write-PipelineFileTraceLine -Message $InputObject
+        Microsoft.PowerShell.Utility\Write-Output -InputObject $InputObject
     }
 }
 

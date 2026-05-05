@@ -5329,6 +5329,72 @@ function Test-NormalizedWriterRowCount {
     }
 }
 
+function New-NoOnboardedVulnerabilityMessage {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DataPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SourceKind,
+
+        [Parameter(Mandatory = $false)]
+        [Nullable[int]]$DeviceProfileCount = $null,
+
+        [Parameter(Mandatory = $false)]
+        [Nullable[int]]$OnboardedDeviceProfileCount = $null,
+
+        [Parameter(Mandatory = $false)]
+        [Nullable[int]]$ContentTemplateCount = $null,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$InputLabels = @()
+    )
+
+    $messageParts = [System.Collections.Generic.List[string]]::new()
+    $messageParts.Add(("No onboarded vulnerabilities were produced while normalizing {0} from '{1}'." -f $SourceKind, $DataPath)) | Out-Null
+
+    $diagnosticParts = [System.Collections.Generic.List[string]]::new()
+    if ($null -ne $DeviceProfileCount) {
+        if ($null -ne $OnboardedDeviceProfileCount) {
+            $diagnosticParts.Add(("device profiles {0} total/{1} onboarded" -f ([int]$DeviceProfileCount), ([int]$OnboardedDeviceProfileCount))) | Out-Null
+        }
+        else {
+            $diagnosticParts.Add(("device profiles {0} total" -f ([int]$DeviceProfileCount))) | Out-Null
+        }
+    }
+
+    if ($null -ne $ContentTemplateCount) {
+        $diagnosticParts.Add(("content templates {0}" -f ([int]$ContentTemplateCount))) | Out-Null
+    }
+
+    $effectiveInputLabels = @($InputLabels | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($effectiveInputLabels.Count -gt 0) {
+        $labelPreview = @($effectiveInputLabels | Select-Object -First 3)
+        $labelSummary = if ($effectiveInputLabels.Count -gt $labelPreview.Count) {
+            ("{0} (+{1} more)" -f ($labelPreview -join ', '), ($effectiveInputLabels.Count - $labelPreview.Count))
+        }
+        else {
+            ($labelPreview -join ', ')
+        }
+        $diagnosticParts.Add(("streamed inputs {0} [{1}]" -f $effectiveInputLabels.Count, $labelSummary)) | Out-Null
+    }
+
+    if ($diagnosticParts.Count -gt 0) {
+        $messageParts.Add(("Diagnostics: {0}." -f ($diagnosticParts -join '; '))) | Out-Null
+    }
+
+    if ($SourceKind -eq 'content-store refs') {
+        $messageParts.Add('This usually means the export set is empty, every device profile has ob missing or false, or the content dictionary and ref sidecars are out of sync.') | Out-Null
+    }
+    else {
+        $messageParts.Add('This usually means the export set is empty or every streamed row has IsOnboarded missing or false.') | Out-Null
+    }
+
+    return ($messageParts -join ' ')
+}
+
 function Invoke-ContentStoreNormalization {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -5416,6 +5482,7 @@ function Invoke-ContentStoreNormalization {
     $deviceLookupIndices = $deviceLookupIndices.ToArray()
     $deviceOnboardedFlags = $deviceOnboardedFlags.ToArray()
     $deviceProfileCount = $deviceProfiles.Length
+    $onboardedDeviceProfileCount = @($deviceOnboardedFlags | Where-Object { $_ }).Count
     $deviceProfileIds = $null
 
     foreach ($contentTemplate in @(Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'contentTemplates')) {
@@ -5861,6 +5928,21 @@ function Invoke-ContentStoreNormalization {
     }
 
     Test-NormalizedWriterRowCount -WriterCloseResult $writerCloseResult -ExpectedRowCount $processedCountRef.Value
+
+    if ($processedCountRef.Value -eq 0) {
+        $refLabels = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($refPath in $refPaths) {
+            $refLabels.Add([string]$refPath.Label) | Out-Null
+        }
+
+        throw (New-NoOnboardedVulnerabilityMessage `
+                -DataPath $DataPath `
+                -SourceKind 'content-store refs' `
+                -DeviceProfileCount $deviceProfileCount `
+                -OnboardedDeviceProfileCount $onboardedDeviceProfileCount `
+                -ContentTemplateCount $contentTemplateCount `
+                -InputLabels $refLabels.ToArray())
+    }
 
     if ($null -eq $lookupCountSummary) {
         $lookupCountSummary = Get-NormalizedLookupCountSummary -Lookups $Context.Lookups
@@ -6865,7 +6947,9 @@ function ConvertTo-NormalizedData {
         $lookupCountSummary = Get-NormalizedLookupCountSummary -Lookups $lookups
     }
 
-    if ($processedCount -eq 0) { throw 'No onboarded vulnerabilities found after streaming all export files.' }
+    if ($processedCount -eq 0) {
+        throw (New-NoOnboardedVulnerabilityMessage -DataPath $DataPath -SourceKind 'export files')
+    }
     Write-Information "  Loaded $processedCount onboarded vulnerability records" -InformationAction Continue
 
     $deviceCount = [int]$lookupCountSummary.DeviceCount

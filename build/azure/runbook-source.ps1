@@ -1596,9 +1596,16 @@ try {
     Write-Output "  Completed: $(([datetime]::UtcNow).ToString('yyyy-MM-dd HH:mm:ss')) UTC"
 }
 catch {
+    $failureMessage = if ($null -ne $_.Exception -and -not [string]::IsNullOrWhiteSpace([string]$_.Exception.Message)) {
+        [string]$_.Exception.Message
+    }
+    else {
+        [string]$_
+    }
+
     if (-not [string]::IsNullOrWhiteSpace($StorageAccountName) -and -not [string]::IsNullOrWhiteSpace($storageToken)) {
-        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'failed' -AdditionalProperties @{
-                error = [string]$_
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'failed' -Message $failureMessage -AdditionalProperties @{
+                error = $failureMessage
                 stackTrace = [string]$_.ScriptStackTrace
             })
     }
