@@ -61,6 +61,13 @@ param(
     [string]$ValidationMode = 'semantic',
 
     [Parameter(Mandatory = $false)]
+    [switch]$AllowLargeSemanticValidation,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(100000, 50000000)]
+    [int]$SemanticValidationRowLimit = 1000000,
+
+    [Parameter(Mandatory = $false)]
     [string]$DashboardOutputPath,
 
     [Parameter(Mandatory = $false)]
@@ -549,6 +556,15 @@ else {
         $historyPath = $historyRowsFile.FullName
         $historyRowCount += Get-StreamingCount -Source { Read-VulnNdjsonLinesFromPath -Path $historyPath }
     }
+}
+
+$totalVulnRowCount = ($currentRowCount + $historyRowCount)
+if ($resolvedValidationMode -eq 'semantic' -and $totalVulnRowCount -gt $SemanticValidationRowLimit -and -not $AllowLargeSemanticValidation) {
+    throw ("Semantic large-dataset validation is blocked for datasets above {0:N0} row(s). '{1}' contains {2:N0} row(s). Re-run with -AllowLargeSemanticValidation only when you explicitly want the long semantic replay, or switch to -ValidationMode artifacts." -f $SemanticValidationRowLimit, $resolvedSyntheticPath, $totalVulnRowCount)
+}
+
+if ($resolvedValidationMode -eq 'semantic' -and $totalVulnRowCount -gt $SemanticValidationRowLimit -and $AllowLargeSemanticValidation) {
+    Write-Warning ("Large semantic validation override enabled for {0:N0} row(s)." -f $totalVulnRowCount)
 }
 
 $generateArgs = @{

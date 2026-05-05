@@ -21,6 +21,17 @@ param(
     [switch]$Validate,
 
     [Parameter(Mandatory = $false)]
+    [ValidateSet('artifacts', 'semantic')]
+    [string]$ValidationMode = 'artifacts',
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AllowLargeSemanticValidation,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(100000, 50000000)]
+    [int]$SemanticValidationRowLimit = 1000000,
+
+    [Parameter(Mandatory = $false)]
     [ValidateRange(1, 60)]
     [int]$PollIntervalSeconds = 5
 )
@@ -201,12 +212,23 @@ $command = @(
 )
 if ($Validate) {
     $command += '-Validate'
+    $command += '-ValidationMode'
+    $command += $ValidationMode
+    $command += '-SemanticValidationRowLimit'
+    $command += [string]$SemanticValidationRowLimit
+    if ($AllowLargeSemanticValidation) {
+        $command += '-AllowLargeSemanticValidation'
+    }
 }
 
 Write-Output ("Benchmarking {0}..." -f $Name)
 Write-Output ("  Dataset: {0}" -f $resolvedSyntheticPath)
 Write-Output ("  Dashboard: {0}" -f $resolvedDashboardPath)
 Write-Output ("  Clear cache: {0}" -f ($ClearDashboardCache -eq $true))
+Write-Output ("  Validate: {0}" -f ($Validate -eq $true))
+if ($Validate) {
+    Write-Output ("  Validation mode: {0}" -f $ValidationMode)
+}
 
 $process = Start-Process -FilePath $command[0] `
     -ArgumentList $command[1..($command.Count - 1)] `
@@ -303,6 +325,12 @@ $stopwatch.Stop()
 $report = [PSCustomObject]@{
     name = $Name
     command = $command
+    validation = [PSCustomObject]@{
+        validate = ($Validate -eq $true)
+        validationMode = if ($Validate) { $ValidationMode } else { 'none' }
+        allowLargeSemanticValidation = ($AllowLargeSemanticValidation -eq $true)
+        semanticValidationRowLimit = $SemanticValidationRowLimit
+    }
     dashboard_output_path = $resolvedDashboardPath
     stdout_path = $stdoutPath
     stderr_path = $stderrPath

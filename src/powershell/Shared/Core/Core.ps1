@@ -89,6 +89,21 @@ function Invoke-FullGarbageCollection {
     [System.GC]::Collect()
 }
 
+function Invoke-PhaseTransitionGarbageCollection {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$MemoryLabel
+    )
+
+    Invoke-FullGarbageCollection
+
+    if (-not [string]::IsNullOrWhiteSpace($MemoryLabel) -and (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue)) {
+        Write-MemoryUsage -Label $MemoryLabel
+    }
+}
+
 function Test-IsAzureHostedEnvironment {
     [CmdletBinding()]
     [OutputType([bool])]
@@ -174,7 +189,11 @@ function New-ProgressMarkerState {
 
         [Parameter(Mandatory = $false)]
         [ValidateRange(1, 1000000)]
-        [int]$CheckInterval = 10000
+        [int]$CheckInterval = 10000,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 9223372036854775807)]
+        [long]$TotalCount = 0
     )
 
     return [PSCustomObject]@{
@@ -182,6 +201,7 @@ function New-ProgressMarkerState {
         ProgressInterval = $ProgressInterval
         HeartbeatIntervalSeconds = $HeartbeatIntervalSeconds
         CheckInterval = [Math]::Max(1, [Math]::Min($ProgressInterval, $CheckInterval))
+        TotalCount = $TotalCount
         Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         LastHeartbeatSecond = -1
     }
@@ -221,7 +241,15 @@ function Write-ProgressMarker {
     $elapsedSeconds = [Math]::Max(0.001, $State.Stopwatch.Elapsed.TotalSeconds)
     $rate = [Math]::Round(($Count / $elapsedSeconds), 0)
     $markerSuffix = if ($markerType -eq 'heartbeat') { ' [heartbeat]' } else { '' }
-    Write-Information ("  {0}: {1:N0} {2} processed in {3:N1}s ({4:N0}/s){5}" -f $State.ActivityName, $Count, $UnitLabel, [Math]::Round($elapsedSeconds, 1), $rate, $markerSuffix) -InformationAction Continue
+    $totalCount = if ($State.PSObject.Properties['TotalCount']) { [long]$State.TotalCount } else { 0L }
+    if ($totalCount -gt 0) {
+        $boundedCount = [Math]::Min([long]$Count, $totalCount)
+        $percentComplete = [Math]::Round(($boundedCount / [double]$totalCount) * 100.0, 1)
+        Write-Information ("  {0}: {1:N0}/{2:N0} {3} processed in {4:N1}s ({5:N0}/s, {6:N1}% complete){7}" -f $State.ActivityName, $boundedCount, $totalCount, $UnitLabel, [Math]::Round($elapsedSeconds, 1), $rate, $percentComplete, $markerSuffix) -InformationAction Continue
+    }
+    else {
+        Write-Information ("  {0}: {1:N0} {2} processed in {3:N1}s ({4:N0}/s){5}" -f $State.ActivityName, $Count, $UnitLabel, [Math]::Round($elapsedSeconds, 1), $rate, $markerSuffix) -InformationAction Continue
+    }
     $State.LastHeartbeatSecond = [Math]::Floor($State.Stopwatch.Elapsed.TotalSeconds)
 }
 
