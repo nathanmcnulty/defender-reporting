@@ -15,6 +15,17 @@ param(
     [switch]$ForceFullValidation,
 
     [Parameter(Mandatory = $false)]
+    [ValidateSet('artifacts', 'semantic')]
+    [string]$ValidationMode = 'artifacts',
+
+    [Parameter(Mandatory = $false)]
+    [switch]$AllowLargeSemanticValidation,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(100000, 50000000)]
+    [int]$SemanticValidationRowLimit = 1000000,
+
+    [Parameter(Mandatory = $false)]
     [ValidateRange(15, 3600)]
     [int]$ValidationHeartbeatSeconds = 60,
 
@@ -61,6 +72,84 @@ function Get-HeartbeatTimestampText {
     param()
 
     return (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+}
+
+function Add-PathSuffixBeforeExtensionLocal {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Suffix
+    )
+
+    $extension = [System.IO.Path]::GetExtension($Path)
+    if ([string]::IsNullOrEmpty($extension)) {
+        return ($Path + $Suffix)
+    }
+
+    return ($Path.Substring(0, $Path.Length - $extension.Length) + $Suffix + $extension)
+}
+
+function Get-DatasetRowCountForReview {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $manifestPath = Join-Path $Path 'synthetic-manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        return 0
+    }
+
+    $manifest = Get-Content -Path $manifestPath -Raw | ConvertFrom-Json -Depth 20
+    if ($manifest.PSObject.Properties['actualTotalVulnRows']) {
+        return [int]$manifest.actualTotalVulnRows
+    }
+
+    if ($manifest.PSObject.Properties['actualCurrentRows'] -and $manifest.PSObject.Properties['actualHistoryRows']) {
+        return ([int]$manifest.actualCurrentRows + [int]$manifest.actualHistoryRows)
+    }
+
+    return 0
+}
+
+function Invoke-GeneratedArtifactValidation {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SelfContainedPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$HostedPath
+    )
+
+    $validatorScriptPath = Join-Path $PSScriptRoot 'Validate-DashboardGeneratedArtifacts.js'
+    if (-not (Test-Path -LiteralPath $validatorScriptPath -PathType Leaf)) {
+        throw "Artifact validator '$validatorScriptPath' was not found."
+    }
+
+    $nodeCommand = Get-Command -Name 'node' -ErrorAction Stop
+    & $nodeCommand.Source $validatorScriptPath $SelfContainedPath $HostedPath
+
+    $validatorExitCode = [int]$global:LASTEXITCODE
+    if ($validatorExitCode -ne 0) {
+        throw "Generated artifact validation failed with exit code $validatorExitCode."
+    }
+
+    return [PSCustomObject]@{
+        mode = 'generated-artifact-parity'
+        validatorScriptPath = [System.IO.Path]::GetFullPath($validatorScriptPath)
+        selfContainedPath = [System.IO.Path]::GetFullPath($SelfContainedPath)
+        hostedPath = [System.IO.Path]::GetFullPath($HostedPath)
+        hostedAssetsPath = Join-Path (Split-Path -Path (Resolve-Path -LiteralPath $HostedPath).Path -Parent) (([System.IO.Path]::GetFileNameWithoutExtension($HostedPath)) + '.assets')
+        passed = $true
+    }
 }
 
 function Get-HeartbeatFileStatus {
@@ -476,8 +565,25 @@ $dashboardScript = Join-Path $repoRoot 'Generate-VulnerabilityDashboard.ps1'
 $resolvedDirectoryPath = [System.IO.Path]::GetFullPath($DirectoryPath)
 $resolvedOutputRoot = [System.IO.Path]::GetFullPath($OutputRoot)
 
+if ($ValidationMode -eq 'artifacts' -and $ForceFullValidation) {
+    throw '-ForceFullValidation is only supported with -ValidationMode semantic.'
+}
+
+if ($ValidationMode -eq 'artifacts' -and $SplitAssets) {
+    throw '-SplitAssets cannot be combined with -ValidationMode artifacts. Use the default dual-package artifact review or switch to -ValidationMode semantic.'
+}
+
 if (-not (Test-Path -LiteralPath $resolvedDirectoryPath -PathType Container)) {
     throw "Directory '$resolvedDirectoryPath' was not found."
+}
+
+$datasetRowCount = Get-DatasetRowCountForReview -Path $resolvedDirectoryPath
+if ($ValidationMode -eq 'semantic' -and $datasetRowCount -gt $SemanticValidationRowLimit -and -not $AllowLargeSemanticValidation) {
+    throw ("Semantic hot phase review is blocked for datasets above {0:N0} row(s). '{1}' reports {2:N0} row(s). Re-run with -AllowLargeSemanticValidation only when you explicitly want the long semantic replay, or use -ValidationMode artifacts." -f $SemanticValidationRowLimit, $resolvedDirectoryPath, $datasetRowCount)
+}
+
+if ($ValidationMode -eq 'semantic' -and $datasetRowCount -gt $SemanticValidationRowLimit -and $AllowLargeSemanticValidation) {
+    Write-Warning ("Large semantic hot phase review override enabled for {0:N0} row(s)." -f $datasetRowCount)
 }
 
 if (-not (Test-Path -LiteralPath $resolvedOutputRoot -PathType Container)) {
@@ -485,15 +591,21 @@ if (-not (Test-Path -LiteralPath $resolvedOutputRoot -PathType Container)) {
 }
 
 $dashboardPath = Join-Path $resolvedOutputRoot 'VulnerabilityDashboard.html'
-$auditPath = Join-Path $resolvedOutputRoot 'dashboard-audit.json'
+$hostedDashboardPath = Add-PathSuffixBeforeExtensionLocal -Path $dashboardPath -Suffix '.Hosted'
+$auditPath = if ($ValidationMode -eq 'semantic') { Join-Path $resolvedOutputRoot 'dashboard-audit.json' } else { $null }
 $stdoutPath = Join-Path $resolvedOutputRoot 'hot-phase-review.stdout.log'
 $stderrPath = Join-Path $resolvedOutputRoot 'hot-phase-review.stderr.log'
 $reportPath = Join-Path $resolvedOutputRoot 'hot-phase-review.json'
 
-foreach ($path in @($dashboardPath, $auditPath, $stdoutPath, $stderrPath, $reportPath)) {
+foreach ($path in @($dashboardPath, $hostedDashboardPath, $auditPath, $stdoutPath, $stderrPath, $reportPath) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) {
     if (Test-Path -LiteralPath $path) {
         Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+$hostedAssetsPath = Join-Path (Split-Path -Path $hostedDashboardPath -Parent) (([System.IO.Path]::GetFileNameWithoutExtension($hostedDashboardPath)) + '.assets')
+if (Test-Path -LiteralPath $hostedAssetsPath -PathType Container) {
+    Remove-Item -LiteralPath $hostedAssetsPath -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $argumentList = @(
@@ -502,12 +614,18 @@ $argumentList = @(
     '-DirectoryPath', $resolvedDirectoryPath
     '-OutputPath', $dashboardPath
     '-ExportMachineData:$false'
-    '-Validate'
-    '-ValidationOutputPath', $auditPath
     '-ValidationHeartbeatSeconds', $ValidationHeartbeatSeconds
     '-ValidationPartitionCompareParallelism', $ValidationPartitionCompareParallelism
 )
-if ($SplitAssets) {
+if ($ValidationMode -eq 'semantic') {
+    $argumentList += '-Validate'
+    $argumentList += '-ValidationOutputPath', $auditPath
+}
+else {
+    $argumentList += '-DualPackage'
+    $argumentList += '-HostedOutputPath', $hostedDashboardPath
+}
+if ($ValidationMode -eq 'semantic' -and $SplitAssets) {
     $argumentList += '-SplitAssets'
 }
 if ($ForceFullValidation) {
@@ -544,7 +662,13 @@ Add-MeasurementSample -Samples $samples -Process $process -Stopwatch $stopwatch 
 $stopwatch.Stop()
 
 $generatorPhases = Get-LocalPhaseSummaryFromLog -Path $stdoutPath
-$audit = if (Test-Path -LiteralPath $auditPath -PathType Leaf) {
+$artifactValidationSummary = if ($ValidationMode -eq 'artifacts') {
+    Invoke-GeneratedArtifactValidation -SelfContainedPath $dashboardPath -HostedPath $hostedDashboardPath
+}
+else {
+    $null
+}
+$audit = if ($ValidationMode -eq 'semantic' -and (Test-Path -LiteralPath $auditPath -PathType Leaf)) {
     Get-Content -Path $auditPath -Raw | ConvertFrom-Json -Depth 100
 }
 else {
@@ -566,6 +690,10 @@ if ($topValidationPhase.Count -gt 0) {
 }
 elseif ($null -ne $audit) {
     $observations.Add('Validation audit completed without semantic phase timings for this dataset shape.') | Out-Null
+}
+
+if ($null -ne $artifactValidationSummary) {
+    $observations.Add('Artifact validation compared hosted and self-contained outputs instead of running semantic replay.') | Out-Null
 }
 
 if ($null -ne $auditSummary -and $auditSummary.attestationUsed) {
@@ -595,19 +723,25 @@ $report = [PSCustomObject]@{
     }
     artifacts = [PSCustomObject]@{
         dashboardPath = $dashboardPath
-        auditPath = if (Test-Path -LiteralPath $auditPath -PathType Leaf) { $auditPath } else { $null }
+        hostedDashboardPath = if (Test-Path -LiteralPath $hostedDashboardPath -PathType Leaf) { $hostedDashboardPath } else { $null }
+        auditPath = if (-not [string]::IsNullOrWhiteSpace($auditPath) -and (Test-Path -LiteralPath $auditPath -PathType Leaf)) { $auditPath } else { $null }
         stdoutPath = $stdoutPath
         stderrPath = $stderrPath
         reportPath = $reportPath
     }
     review = [PSCustomObject]@{
+        validationMode = $ValidationMode
         validationHeartbeatSeconds = $ValidationHeartbeatSeconds
         validationPartitionCompareParallelism = $ValidationPartitionCompareParallelism
         splitAssets = ($SplitAssets -eq $true)
         forceFullValidation = ($ForceFullValidation -eq $true)
+        allowLargeSemanticValidation = ($AllowLargeSemanticValidation -eq $true)
+        semanticValidationRowLimit = $SemanticValidationRowLimit
+        datasetRowCount = $datasetRowCount
     }
     generatorPhases = @($generatorPhases)
     validationAuditSummary = $auditSummary
+    artifactValidationSummary = $artifactValidationSummary
     validationPhases = @($validationPhases)
     hotPhases = @($hotPhases)
     observations = @($observations)

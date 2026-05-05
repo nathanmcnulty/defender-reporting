@@ -297,7 +297,13 @@ function Write-Base64FileContent {
     $stream = $null
 
     try {
-        $stream = [System.IO.File]::OpenRead($FilePath)
+        $stream = [System.IO.FileStream]::new(
+            $FilePath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read,
+            4096,
+            [System.IO.FileOptions]::SequentialScan)
         while (($bytesRead = $stream.Read($inputBuffer, $pendingByteCount, $inputBlockByteCount)) -gt 0) {
             $totalByteCount = $pendingByteCount + $bytesRead
             $bytesToEncode = if ($stream.Position -lt $stream.Length) {
@@ -1893,8 +1899,16 @@ function Write-TemplatedHtml {
     )
 
     $writer = $null
+    $outputStream = $null
     try {
-        $writer = [System.IO.StreamWriter]::new($OutputPath, $false, [System.Text.UTF8Encoding]::new($false))
+        $outputStream = [System.IO.FileStream]::new(
+            $OutputPath,
+            [System.IO.FileMode]::Create,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::Read,
+            4096,
+            [System.IO.FileOptions]::WriteThrough)
+        $writer = [System.IO.StreamWriter]::new($outputStream, [System.Text.UTF8Encoding]::new($false), 4096, $false)
         $position = 0
         foreach ($segment in $Segments) {
             $placeholder = $segment.Placeholder
@@ -1922,6 +1936,9 @@ function Write-TemplatedHtml {
     finally {
         if ($writer) {
             $writer.Dispose()
+        }
+        elseif ($outputStream) {
+            $outputStream.Dispose()
         }
     }
 }
@@ -4908,6 +4925,25 @@ function Resolve-NormalizedContentLookup {
     }
 }
 
+function Get-NormalizedContentLookupCacheEntry {
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$ContentLookup
+    )
+
+    return [object[]]@(
+        $ContentLookup.sw,
+        $ContentLookup.cve,
+        $ContentLookup.ver,
+        $ContentLookup.upd,
+        $ContentLookup.ua,
+        $ContentLookup.dp,
+        $ContentLookup.rp
+    )
+}
+
 function Get-NormalizedRecordLookup {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -5329,7 +5365,7 @@ function Test-NormalizedWriterRowCount {
     }
 }
 
-function New-NoOnboardedVulnerabilityMessage {
+function Get-NoOnboardedVulnerabilityMessage {
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -5457,6 +5493,13 @@ function Invoke-ContentStoreNormalization {
     $deviceLookupIndices = [System.Collections.Generic.List[int]]::new()
     $deviceOnboardedFlags = [System.Collections.Generic.List[bool]]::new()
     $contentLookupCache = [System.Collections.Generic.List[object]]::new()
+    $contentLookupSwIndex = 0
+    $contentLookupCveIndex = 1
+    $contentLookupVersionIndex = 2
+    $contentLookupUpdateIndex = 3
+    $contentLookupUpdateAvailableIndex = 4
+    $contentLookupDiskPathIndex = 5
+    $contentLookupRegistryPathIndex = 6
     $processedCountRef = [ref]0
     $firstLastSwappedCountRef = [ref]0
     $writerState = $null
@@ -5496,7 +5539,7 @@ function Invoke-ContentStoreNormalization {
                 $softwareVersion
             )) | Out-Null
 
-        $contentLookupCache.Add((Resolve-NormalizedContentLookup `
+        $contentLookupCache.Add((Get-NormalizedContentLookupCacheEntry -ContentLookup (Resolve-NormalizedContentLookup `
                 -SoftwareVendor $softwareVendor `
                 -SoftwareName $softwareName `
                 -RecommendationReference ([string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'rr')) `
@@ -5513,13 +5556,22 @@ function Invoke-ContentStoreNormalization {
                 -DiskPaths @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $contentTemplate -Name 'dp')) `
                 -RegistryPaths @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $contentTemplate -Name 'rp')) `
                 -SecurityUpdateAvailable ((Get-VulnPropertyValue -InputObject $contentTemplate -Name 'ua') -eq $true) `
-                -Context $Context)) | Out-Null
+                -Context $Context))) | Out-Null
     }
 
     $contentTemplates = $contentInventoryKeys.ToArray()
     $contentLookupCache = $contentLookupCache.ToArray()
     $contentTemplateCount = $contentTemplates.Length
     $contentInventoryKeys = $null
+
+    # Ref streaming only needs the compact device/content lookup arrays plus
+    # inventory enrichment. Release the larger source maps before processing
+    # the full ref set so they do not overlap with the row stream.
+    $Context.Machines = @{}
+    $Context.AdvancedHuntingData = @{}
+    $Context.AdvancedHuntingDeviceUsers = @{}
+    $Context.NvdCveData = @{}
+    Invoke-FullGarbageCollection
 
     try {
         $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
@@ -5644,15 +5696,15 @@ function Invoke-ContentStoreNormalization {
                             $contentTemplate = $contentTemplates[$contentTemplateIndexValue]
                             $deviceProfileId = $deviceProfiles[$deviceProfileIndexValue]
                             $compactRecord[0] = $deviceLookupIndices[$deviceProfileIndexValue]
-                            $compactRecord[1] = $contentLookup.cve
-                            $compactRecord[2] = $contentLookup.sw
-                            $compactRecord[3] = $contentLookup.ver
+                            $compactRecord[1] = $contentLookup[$contentLookupCveIndex]
+                            $compactRecord[2] = $contentLookup[$contentLookupSwIndex]
+                            $compactRecord[3] = $contentLookup[$contentLookupVersionIndex]
                             $compactRecord[4] = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
                             $compactRecord[5] = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
-                            $compactRecord[6] = $contentLookup.ua
-                            $compactRecord[7] = $contentLookup.upd
-                            $compactRecord[8] = $contentLookup.dp
-                            $compactRecord[9] = $contentLookup.rp
+                            $compactRecord[6] = $contentLookup[$contentLookupUpdateAvailableIndex]
+                            $compactRecord[7] = $contentLookup[$contentLookupUpdateIndex]
+                            $compactRecord[8] = $contentLookup[$contentLookupDiskPathIndex]
+                            $compactRecord[9] = $contentLookup[$contentLookupRegistryPathIndex]
                             $compactRecord[10] = Resolve-NormalizedInventoryLookup `
                                 -DeviceId ([string]$deviceProfileId) `
                                 -SoftwareVendor ([string]$contentTemplate[0]) `
@@ -5935,7 +5987,7 @@ function Invoke-ContentStoreNormalization {
             $refLabels.Add([string]$refPath.Label) | Out-Null
         }
 
-        throw (New-NoOnboardedVulnerabilityMessage `
+        throw (Get-NoOnboardedVulnerabilityMessage `
                 -DataPath $DataPath `
                 -SourceKind 'content-store refs' `
                 -DeviceProfileCount $deviceProfileCount `
@@ -6948,7 +7000,7 @@ function ConvertTo-NormalizedData {
     }
 
     if ($processedCount -eq 0) {
-        throw (New-NoOnboardedVulnerabilityMessage -DataPath $DataPath -SourceKind 'export files')
+        throw (Get-NoOnboardedVulnerabilityMessage -DataPath $DataPath -SourceKind 'export files')
     }
     Write-Information "  Loaded $processedCount onboarded vulnerability records" -InformationAction Continue
 

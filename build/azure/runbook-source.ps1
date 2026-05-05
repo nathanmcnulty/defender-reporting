@@ -1399,11 +1399,8 @@ try {
     ) -OutputPath (Join-Path $tempLibraries 'pdf-export.bundle.js')
     $chartJsBundlePath = $null
     $pdfExportBundlePath = $null
-    if ($requiresEmbeddedBundles) {
-        $chartJsBundlePath = Compress-FileGzip -InputPath $chartJsLibraryPath -OutputPath (Join-Path $tempLibraries 'chart.js.gz')
-        $pdfExportBundlePath = Compress-FileGzip -InputPath $pdfExportBundleSourcePath -OutputPath (Join-Path $tempLibraries 'pdf-export.bundle.js.gz')
-    }
     Write-MemoryUsage -Label "JS Libraries"
+    Invoke-PhaseTransitionGarbageCollection -MemoryLabel 'Pre-TemplateLoad'
 
     # Step 5: Load templates
     Write-Output "Loading templates..."
@@ -1441,6 +1438,7 @@ try {
     }
     $dataQualityMetaScript = '<script id="dataQualityMeta" type="application/json">' + ($dataQualityMeta | ConvertTo-Json -Compress) + '</script>'
     Write-MemoryUsage -Label "Post-Compress"
+    Invoke-PhaseTransitionGarbageCollection -MemoryLabel 'Pre-Assembly'
 
     # Step 8: Assemble final HTML
     Write-Output "Assembling dashboard HTML..."
@@ -1448,27 +1446,9 @@ try {
     $dashboardStatusBlobName = $Script:DashboardBlobName
     $dashboardStatusOutputPath = $null
 
-    if ($DashboardDeliveryMode -in @('SelfContained', 'Dual')) {
-        $selfContainedDashboardOutputPath = Join-Path -Path $tempDashboards -ChildPath $Script:DashboardBlobName
-        [void](Write-DashboardArtifactBundle `
-            -TemplateHtml $htmlTemplate `
-            -TemplateCss $cssContent `
-            -TemplateJs $jsContent `
-            -PakoLibraryPath $pakoLibraryPath `
-            -ChartJsLibraryPath $chartJsLibraryPath `
-            -ChartJsBundlePath $chartJsBundlePath `
-            -PdfExportBundleSourcePath $pdfExportBundleSourcePath `
-            -PdfExportBundlePath $pdfExportBundlePath `
-            -PayloadPath $tempPayloadPath `
-            -OutputPath $selfContainedDashboardOutputPath `
-            -LookupsJsonEscaped $lookupsJsonEscaped `
-            -DataQualitySectionHtml $dataQualitySectionHtml `
-            -DataQualityMetaScript $dataQualityMetaScript `
-            -SplitAssets $false)
-        $dashboardStatusOutputPath = $selfContainedDashboardOutputPath
-    }
-
     if ($DashboardDeliveryMode -in @('Hosted', 'Dual')) {
+        Set-PipelineExecutionStage -Stage 'WriteHostedDashboard' -Message 'Writing the hosted dashboard artifacts.'
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
         $hostedDashboardOutputPath = Join-Path -Path $tempDashboards -ChildPath $(if ($useDualDashboard) { $Script:HostedDashboardBlobName } else { $Script:DashboardBlobName })
         $dashboardArtifacts = Write-DashboardArtifactBundle `
             -TemplateHtml $htmlTemplate `
@@ -1493,6 +1473,44 @@ try {
         if ($DashboardDeliveryMode -eq 'Hosted') {
             $dashboardStatusOutputPath = $hostedDashboardOutputPath
         }
+
+        $dashboardArtifacts = $null
+        Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label 'Post-HostedAssembly'
+    }
+
+    if ($DashboardDeliveryMode -in @('SelfContained', 'Dual')) {
+        if ($requiresEmbeddedBundles -and [string]::IsNullOrWhiteSpace($chartJsBundlePath)) {
+            Write-Output '  Preparing embedded self-contained bundles...'
+            $chartJsBundlePath = Compress-FileGzip -InputPath $chartJsLibraryPath -OutputPath (Join-Path $tempLibraries 'chart.js.gz')
+            $pdfExportBundlePath = Compress-FileGzip -InputPath $pdfExportBundleSourcePath -OutputPath (Join-Path $tempLibraries 'pdf-export.bundle.js.gz')
+            Invoke-FullGarbageCollection
+            Write-MemoryUsage -Label 'Embedded Bundles'
+        }
+
+        Set-PipelineExecutionStage -Stage 'WriteSelfContainedDashboard' -Message 'Writing the self-contained dashboard artifact.'
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
+        $selfContainedDashboardOutputPath = Join-Path -Path $tempDashboards -ChildPath $Script:DashboardBlobName
+        [void](Write-DashboardArtifactBundle `
+            -TemplateHtml $htmlTemplate `
+            -TemplateCss $cssContent `
+            -TemplateJs $jsContent `
+            -PakoLibraryPath $pakoLibraryPath `
+            -ChartJsLibraryPath $chartJsLibraryPath `
+            -ChartJsBundlePath $chartJsBundlePath `
+            -PdfExportBundleSourcePath $pdfExportBundleSourcePath `
+            -PdfExportBundlePath $pdfExportBundlePath `
+            -PayloadPath $tempPayloadPath `
+            -OutputPath $selfContainedDashboardOutputPath `
+            -LookupsJsonEscaped $lookupsJsonEscaped `
+            -DataQualitySectionHtml $dataQualitySectionHtml `
+            -DataQualityMetaScript $dataQualityMetaScript `
+            -SplitAssets $false)
+        $dashboardStatusOutputPath = $selfContainedDashboardOutputPath
+        $chartJsBundlePath = $null
+        $pdfExportBundlePath = $null
+        Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label 'Post-SelfContainedAssembly'
     }
 
     $cssContent = $null

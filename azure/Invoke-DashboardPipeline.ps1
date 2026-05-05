@@ -284,6 +284,21 @@ function Invoke-FullGarbageCollection {
     [System.GC]::Collect()
 }
 
+function Invoke-PhaseTransitionGarbageCollection {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$MemoryLabel
+    )
+
+    Invoke-FullGarbageCollection
+
+    if (-not [string]::IsNullOrWhiteSpace($MemoryLabel) -and (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue)) {
+        Write-MemoryUsage -Label $MemoryLabel
+    }
+}
+
 function Test-IsAzureHostedEnvironment {
     [CmdletBinding()]
     [OutputType([bool])]
@@ -369,7 +384,11 @@ function New-ProgressMarkerState {
 
         [Parameter(Mandatory = $false)]
         [ValidateRange(1, 1000000)]
-        [int]$CheckInterval = 10000
+        [int]$CheckInterval = 10000,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 9223372036854775807)]
+        [long]$TotalCount = 0
     )
 
     return [PSCustomObject]@{
@@ -377,6 +396,7 @@ function New-ProgressMarkerState {
         ProgressInterval = $ProgressInterval
         HeartbeatIntervalSeconds = $HeartbeatIntervalSeconds
         CheckInterval = [Math]::Max(1, [Math]::Min($ProgressInterval, $CheckInterval))
+        TotalCount = $TotalCount
         Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         LastHeartbeatSecond = -1
     }
@@ -416,7 +436,15 @@ function Write-ProgressMarker {
     $elapsedSeconds = [Math]::Max(0.001, $State.Stopwatch.Elapsed.TotalSeconds)
     $rate = [Math]::Round(($Count / $elapsedSeconds), 0)
     $markerSuffix = if ($markerType -eq 'heartbeat') { ' [heartbeat]' } else { '' }
-    Write-Information ("  {0}: {1:N0} {2} processed in {3:N1}s ({4:N0}/s){5}" -f $State.ActivityName, $Count, $UnitLabel, [Math]::Round($elapsedSeconds, 1), $rate, $markerSuffix) -InformationAction Continue
+    $totalCount = if ($State.PSObject.Properties['TotalCount']) { [long]$State.TotalCount } else { 0L }
+    if ($totalCount -gt 0) {
+        $boundedCount = [Math]::Min([long]$Count, $totalCount)
+        $percentComplete = [Math]::Round(($boundedCount / [double]$totalCount) * 100.0, 1)
+        Write-Information ("  {0}: {1:N0}/{2:N0} {3} processed in {4:N1}s ({5:N0}/s, {6:N1}% complete){7}" -f $State.ActivityName, $boundedCount, $totalCount, $UnitLabel, [Math]::Round($elapsedSeconds, 1), $rate, $percentComplete, $markerSuffix) -InformationAction Continue
+    }
+    else {
+        Write-Information ("  {0}: {1:N0} {2} processed in {3:N1}s ({4:N0}/s){5}" -f $State.ActivityName, $Count, $UnitLabel, [Math]::Round($elapsedSeconds, 1), $rate, $markerSuffix) -InformationAction Continue
+    }
     $State.LastHeartbeatSecond = [Math]::Floor($State.Stopwatch.Elapsed.TotalSeconds)
 }
 
@@ -10053,7 +10081,13 @@ function Write-Base64FileContent {
     $stream = $null
 
     try {
-        $stream = [System.IO.File]::OpenRead($FilePath)
+        $stream = [System.IO.FileStream]::new(
+            $FilePath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read,
+            4096,
+            [System.IO.FileOptions]::SequentialScan)
         while (($bytesRead = $stream.Read($inputBuffer, $pendingByteCount, $inputBlockByteCount)) -gt 0) {
             $totalByteCount = $pendingByteCount + $bytesRead
             $bytesToEncode = if ($stream.Position -lt $stream.Length) {
@@ -11649,8 +11683,16 @@ function Write-TemplatedHtml {
     )
 
     $writer = $null
+    $outputStream = $null
     try {
-        $writer = [System.IO.StreamWriter]::new($OutputPath, $false, [System.Text.UTF8Encoding]::new($false))
+        $outputStream = [System.IO.FileStream]::new(
+            $OutputPath,
+            [System.IO.FileMode]::Create,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::Read,
+            4096,
+            [System.IO.FileOptions]::WriteThrough)
+        $writer = [System.IO.StreamWriter]::new($outputStream, [System.Text.UTF8Encoding]::new($false), 4096, $false)
         $position = 0
         foreach ($segment in $Segments) {
             $placeholder = $segment.Placeholder
@@ -11678,6 +11720,9 @@ function Write-TemplatedHtml {
     finally {
         if ($writer) {
             $writer.Dispose()
+        }
+        elseif ($outputStream) {
+            $outputStream.Dispose()
         }
     }
 }
@@ -14664,6 +14709,25 @@ function Resolve-NormalizedContentLookup {
     }
 }
 
+function Get-NormalizedContentLookupCacheEntry {
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$ContentLookup
+    )
+
+    return [object[]]@(
+        $ContentLookup.sw,
+        $ContentLookup.cve,
+        $ContentLookup.ver,
+        $ContentLookup.upd,
+        $ContentLookup.ua,
+        $ContentLookup.dp,
+        $ContentLookup.rp
+    )
+}
+
 function Get-NormalizedRecordLookup {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -15085,7 +15149,7 @@ function Test-NormalizedWriterRowCount {
     }
 }
 
-function New-NoOnboardedVulnerabilityMessage {
+function Get-NoOnboardedVulnerabilityMessage {
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -15213,6 +15277,13 @@ function Invoke-ContentStoreNormalization {
     $deviceLookupIndices = [System.Collections.Generic.List[int]]::new()
     $deviceOnboardedFlags = [System.Collections.Generic.List[bool]]::new()
     $contentLookupCache = [System.Collections.Generic.List[object]]::new()
+    $contentLookupSwIndex = 0
+    $contentLookupCveIndex = 1
+    $contentLookupVersionIndex = 2
+    $contentLookupUpdateIndex = 3
+    $contentLookupUpdateAvailableIndex = 4
+    $contentLookupDiskPathIndex = 5
+    $contentLookupRegistryPathIndex = 6
     $processedCountRef = [ref]0
     $firstLastSwappedCountRef = [ref]0
     $writerState = $null
@@ -15252,7 +15323,7 @@ function Invoke-ContentStoreNormalization {
                 $softwareVersion
             )) | Out-Null
 
-        $contentLookupCache.Add((Resolve-NormalizedContentLookup `
+        $contentLookupCache.Add((Get-NormalizedContentLookupCacheEntry -ContentLookup (Resolve-NormalizedContentLookup `
                 -SoftwareVendor $softwareVendor `
                 -SoftwareName $softwareName `
                 -RecommendationReference ([string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'rr')) `
@@ -15269,13 +15340,22 @@ function Invoke-ContentStoreNormalization {
                 -DiskPaths @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $contentTemplate -Name 'dp')) `
                 -RegistryPaths @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $contentTemplate -Name 'rp')) `
                 -SecurityUpdateAvailable ((Get-VulnPropertyValue -InputObject $contentTemplate -Name 'ua') -eq $true) `
-                -Context $Context)) | Out-Null
+                -Context $Context))) | Out-Null
     }
 
     $contentTemplates = $contentInventoryKeys.ToArray()
     $contentLookupCache = $contentLookupCache.ToArray()
     $contentTemplateCount = $contentTemplates.Length
     $contentInventoryKeys = $null
+
+    # Ref streaming only needs the compact device/content lookup arrays plus
+    # inventory enrichment. Release the larger source maps before processing
+    # the full ref set so they do not overlap with the row stream.
+    $Context.Machines = @{}
+    $Context.AdvancedHuntingData = @{}
+    $Context.AdvancedHuntingDeviceUsers = @{}
+    $Context.NvdCveData = @{}
+    Invoke-FullGarbageCollection
 
     try {
         $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
@@ -15400,15 +15480,15 @@ function Invoke-ContentStoreNormalization {
                             $contentTemplate = $contentTemplates[$contentTemplateIndexValue]
                             $deviceProfileId = $deviceProfiles[$deviceProfileIndexValue]
                             $compactRecord[0] = $deviceLookupIndices[$deviceProfileIndexValue]
-                            $compactRecord[1] = $contentLookup.cve
-                            $compactRecord[2] = $contentLookup.sw
-                            $compactRecord[3] = $contentLookup.ver
+                            $compactRecord[1] = $contentLookup[$contentLookupCveIndex]
+                            $compactRecord[2] = $contentLookup[$contentLookupSwIndex]
+                            $compactRecord[3] = $contentLookup[$contentLookupVersionIndex]
                             $compactRecord[4] = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
                             $compactRecord[5] = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
-                            $compactRecord[6] = $contentLookup.ua
-                            $compactRecord[7] = $contentLookup.upd
-                            $compactRecord[8] = $contentLookup.dp
-                            $compactRecord[9] = $contentLookup.rp
+                            $compactRecord[6] = $contentLookup[$contentLookupUpdateAvailableIndex]
+                            $compactRecord[7] = $contentLookup[$contentLookupUpdateIndex]
+                            $compactRecord[8] = $contentLookup[$contentLookupDiskPathIndex]
+                            $compactRecord[9] = $contentLookup[$contentLookupRegistryPathIndex]
                             $compactRecord[10] = Resolve-NormalizedInventoryLookup `
                                 -DeviceId ([string]$deviceProfileId) `
                                 -SoftwareVendor ([string]$contentTemplate[0]) `
@@ -15691,7 +15771,7 @@ function Invoke-ContentStoreNormalization {
             $refLabels.Add([string]$refPath.Label) | Out-Null
         }
 
-        throw (New-NoOnboardedVulnerabilityMessage `
+        throw (Get-NoOnboardedVulnerabilityMessage `
                 -DataPath $DataPath `
                 -SourceKind 'content-store refs' `
                 -DeviceProfileCount $deviceProfileCount `
@@ -16704,7 +16784,7 @@ function ConvertTo-NormalizedData {
     }
 
     if ($processedCount -eq 0) {
-        throw (New-NoOnboardedVulnerabilityMessage -DataPath $DataPath -SourceKind 'export files')
+        throw (Get-NoOnboardedVulnerabilityMessage -DataPath $DataPath -SourceKind 'export files')
     }
     Write-Information "  Loaded $processedCount onboarded vulnerability records" -InformationAction Continue
 
@@ -17955,11 +18035,8 @@ try {
     ) -OutputPath (Join-Path $tempLibraries 'pdf-export.bundle.js')
     $chartJsBundlePath = $null
     $pdfExportBundlePath = $null
-    if ($requiresEmbeddedBundles) {
-        $chartJsBundlePath = Compress-FileGzip -InputPath $chartJsLibraryPath -OutputPath (Join-Path $tempLibraries 'chart.js.gz')
-        $pdfExportBundlePath = Compress-FileGzip -InputPath $pdfExportBundleSourcePath -OutputPath (Join-Path $tempLibraries 'pdf-export.bundle.js.gz')
-    }
     Write-MemoryUsage -Label "JS Libraries"
+    Invoke-PhaseTransitionGarbageCollection -MemoryLabel 'Pre-TemplateLoad'
 
     # Step 5: Load templates
     Write-Output "Loading templates..."
@@ -17997,6 +18074,7 @@ try {
     }
     $dataQualityMetaScript = '<script id="dataQualityMeta" type="application/json">' + ($dataQualityMeta | ConvertTo-Json -Compress) + '</script>'
     Write-MemoryUsage -Label "Post-Compress"
+    Invoke-PhaseTransitionGarbageCollection -MemoryLabel 'Pre-Assembly'
 
     # Step 8: Assemble final HTML
     Write-Output "Assembling dashboard HTML..."
@@ -18004,27 +18082,9 @@ try {
     $dashboardStatusBlobName = $Script:DashboardBlobName
     $dashboardStatusOutputPath = $null
 
-    if ($DashboardDeliveryMode -in @('SelfContained', 'Dual')) {
-        $selfContainedDashboardOutputPath = Join-Path -Path $tempDashboards -ChildPath $Script:DashboardBlobName
-        [void](Write-DashboardArtifactBundle `
-            -TemplateHtml $htmlTemplate `
-            -TemplateCss $cssContent `
-            -TemplateJs $jsContent `
-            -PakoLibraryPath $pakoLibraryPath `
-            -ChartJsLibraryPath $chartJsLibraryPath `
-            -ChartJsBundlePath $chartJsBundlePath `
-            -PdfExportBundleSourcePath $pdfExportBundleSourcePath `
-            -PdfExportBundlePath $pdfExportBundlePath `
-            -PayloadPath $tempPayloadPath `
-            -OutputPath $selfContainedDashboardOutputPath `
-            -LookupsJsonEscaped $lookupsJsonEscaped `
-            -DataQualitySectionHtml $dataQualitySectionHtml `
-            -DataQualityMetaScript $dataQualityMetaScript `
-            -SplitAssets $false)
-        $dashboardStatusOutputPath = $selfContainedDashboardOutputPath
-    }
-
     if ($DashboardDeliveryMode -in @('Hosted', 'Dual')) {
+        Set-PipelineExecutionStage -Stage 'WriteHostedDashboard' -Message 'Writing the hosted dashboard artifacts.'
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
         $hostedDashboardOutputPath = Join-Path -Path $tempDashboards -ChildPath $(if ($useDualDashboard) { $Script:HostedDashboardBlobName } else { $Script:DashboardBlobName })
         $dashboardArtifacts = Write-DashboardArtifactBundle `
             -TemplateHtml $htmlTemplate `
@@ -18049,6 +18109,44 @@ try {
         if ($DashboardDeliveryMode -eq 'Hosted') {
             $dashboardStatusOutputPath = $hostedDashboardOutputPath
         }
+
+        $dashboardArtifacts = $null
+        Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label 'Post-HostedAssembly'
+    }
+
+    if ($DashboardDeliveryMode -in @('SelfContained', 'Dual')) {
+        if ($requiresEmbeddedBundles -and [string]::IsNullOrWhiteSpace($chartJsBundlePath)) {
+            Write-Output '  Preparing embedded self-contained bundles...'
+            $chartJsBundlePath = Compress-FileGzip -InputPath $chartJsLibraryPath -OutputPath (Join-Path $tempLibraries 'chart.js.gz')
+            $pdfExportBundlePath = Compress-FileGzip -InputPath $pdfExportBundleSourcePath -OutputPath (Join-Path $tempLibraries 'pdf-export.bundle.js.gz')
+            Invoke-FullGarbageCollection
+            Write-MemoryUsage -Label 'Embedded Bundles'
+        }
+
+        Set-PipelineExecutionStage -Stage 'WriteSelfContainedDashboard' -Message 'Writing the self-contained dashboard artifact.'
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
+        $selfContainedDashboardOutputPath = Join-Path -Path $tempDashboards -ChildPath $Script:DashboardBlobName
+        [void](Write-DashboardArtifactBundle `
+            -TemplateHtml $htmlTemplate `
+            -TemplateCss $cssContent `
+            -TemplateJs $jsContent `
+            -PakoLibraryPath $pakoLibraryPath `
+            -ChartJsLibraryPath $chartJsLibraryPath `
+            -ChartJsBundlePath $chartJsBundlePath `
+            -PdfExportBundleSourcePath $pdfExportBundleSourcePath `
+            -PdfExportBundlePath $pdfExportBundlePath `
+            -PayloadPath $tempPayloadPath `
+            -OutputPath $selfContainedDashboardOutputPath `
+            -LookupsJsonEscaped $lookupsJsonEscaped `
+            -DataQualitySectionHtml $dataQualitySectionHtml `
+            -DataQualityMetaScript $dataQualityMetaScript `
+            -SplitAssets $false)
+        $dashboardStatusOutputPath = $selfContainedDashboardOutputPath
+        $chartJsBundlePath = $null
+        $pdfExportBundlePath = $null
+        Invoke-FullGarbageCollection
+        Write-MemoryUsage -Label 'Post-SelfContainedAssembly'
     }
 
     $cssContent = $null

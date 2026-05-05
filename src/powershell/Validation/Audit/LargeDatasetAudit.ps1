@@ -513,7 +513,11 @@ function Write-PartitionedSignatureSet {
         [string]$OutputDirectoryPath,
 
         [Parameter(Mandatory = $false)]
-        [switch]$Persistent
+        [switch]$Persistent,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 2147483647)]
+        [int]$ExpectedTotalCount = 0
     )
 
     $directoryPath = if (-not [string]::IsNullOrWhiteSpace($OutputDirectoryPath)) {
@@ -530,7 +534,7 @@ function Write-PartitionedSignatureSet {
 
     $writers = [System.IO.StreamWriter[]]::new($PartitionCount)
     $count = 0
-    $progressState = New-ProgressMarkerState -ActivityName ("Partitioned {0}" -f $Label) -ProgressInterval $ProgressInterval -HeartbeatIntervalSeconds $Script:DashboardValidationHeartbeatSeconds -CheckInterval ([Math]::Min($ProgressInterval, 10000))
+    $progressState = New-ProgressMarkerState -ActivityName ("Partitioned {0}" -f $Label) -ProgressInterval $ProgressInterval -HeartbeatIntervalSeconds $Script:DashboardValidationHeartbeatSeconds -CheckInterval ([Math]::Min($ProgressInterval, 10000)) -TotalCount $ExpectedTotalCount
     try {
         & $SignatureSource | ForEach-Object {
             $resolvedSignature = [string]$_
@@ -839,12 +843,16 @@ function Get-SourceVendorSetForAudit {
         [string]$ExportsPath,
 
         [Parameter(Mandatory = $false)]
-        [switch]$SkipObservedWindowMerge
+        [switch]$SkipObservedWindowMerge,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 2147483647)]
+        [int]$ExpectedTotalCount = 0
     )
 
     $vendorSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $processedCount = 0
-    $progressState = New-ProgressMarkerState -ActivityName 'Indexed source vendors' -ProgressInterval $Script:DashboardValidationProgressInterval -HeartbeatIntervalSeconds $Script:DashboardValidationHeartbeatSeconds -CheckInterval 10000
+    $progressState = New-ProgressMarkerState -ActivityName 'Indexed source vendors' -ProgressInterval $Script:DashboardValidationProgressInterval -HeartbeatIntervalSeconds $Script:DashboardValidationHeartbeatSeconds -CheckInterval 10000 -TotalCount $ExpectedTotalCount
     Read-SourceAuditRecordStream -ExportsPath $ExportsPath -SkipObservedWindowMerge:$SkipObservedWindowMerge | ForEach-Object {
         $record = $_
         if ((Get-VulnPropertyValue -InputObject $record -Name 'IsOnboarded') -eq $true) {
@@ -890,13 +898,17 @@ function Read-SourceCanonicalSignatureStream {
         [ref]$FirstLastSwappedCount = ([ref]0),
 
         [Parameter(Mandatory = $false)]
-        [ref]$MissingMachineCount = ([ref]0)
+        [ref]$MissingMachineCount = ([ref]0),
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 2147483647)]
+        [int]$ExpectedTotalCount = 0
     )
 
     $deviceProfiles = @{}
     $cveEnrichmentCache = @{}
     $processedCount = 0
-    $progressState = New-ProgressMarkerState -ActivityName 'Canonicalized source' -ProgressInterval $Script:DashboardValidationProgressInterval -HeartbeatIntervalSeconds $Script:DashboardValidationHeartbeatSeconds -CheckInterval 10000
+    $progressState = New-ProgressMarkerState -ActivityName 'Canonicalized source' -ProgressInterval $Script:DashboardValidationProgressInterval -HeartbeatIntervalSeconds $Script:DashboardValidationHeartbeatSeconds -CheckInterval 10000 -TotalCount $ExpectedTotalCount
 
     Read-SourceAuditRecordStream -ExportsPath $ExportsPath -SkipObservedWindowMerge:$SkipObservedWindowMerge | ForEach-Object {
         $record = $_
@@ -1963,13 +1975,13 @@ function Get-StreamingDashboardAuditResult {
                 $advancedHuntingLoadElapsedSeconds = [math]::Round($advancedHuntingLoadStopwatch.Elapsed.TotalSeconds, 2)
 
                 $vendorIndexStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-                $vendorSet = Get-SourceVendorSetForAudit -ExportsPath $ResolvedExportsPath -SkipObservedWindowMerge:$skipObservedWindowMerge
+                $vendorSet = Get-SourceVendorSetForAudit -ExportsPath $ResolvedExportsPath -SkipObservedWindowMerge:$skipObservedWindowMerge -ExpectedTotalCount $cachedPayloadRowCount
                 $vendorIndexStopwatch.Stop()
                 $vendorIndexElapsedSeconds = [math]::Round($vendorIndexStopwatch.Elapsed.TotalSeconds, 2)
                 $sourceUniqueVendors = @($vendorSet | Sort-Object)
 
                 if (-not [string]::IsNullOrWhiteSpace($currentSourceFingerprint)) {
-                    $sourceSignatureSet = Write-PartitionedSignatureSet -Label 'source' -ProgressInterval $Script:DashboardValidationProgressInterval -OutputDirectoryPath (Get-SourceSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry -SourceFingerprint $currentSourceFingerprint -Create) -Persistent -SignatureSource {
+                        $sourceSignatureSet = Write-PartitionedSignatureSet -Label 'source' -ProgressInterval $Script:DashboardValidationProgressInterval -OutputDirectoryPath (Get-SourceSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry -SourceFingerprint $currentSourceFingerprint -Create) -Persistent -ExpectedTotalCount $cachedPayloadRowCount -SignatureSource {
                         Read-SourceCanonicalSignatureStream `
                             -ExportsPath $ResolvedExportsPath `
                             -Machines $machines `
@@ -1979,13 +1991,14 @@ function Get-StreamingDashboardAuditResult {
                             -VendorSet $vendorSet `
                             -SkipObservedWindowMerge:$skipObservedWindowMerge `
                             -FirstLastSwappedCount ([ref]$sourceFirstLastSwappedCount) `
-                            -MissingMachineCount ([ref]$sourceMissingMachineCount)
+                            -MissingMachineCount ([ref]$sourceMissingMachineCount) `
+                            -ExpectedTotalCount $cachedPayloadRowCount
                     }
                     Write-CachedSourceSignatureSetMetadata -PayloadCacheEntry $PayloadCacheEntry -SourceFingerprint $currentSourceFingerprint -SignatureSet $sourceSignatureSet -SourceMissingMachineCount $sourceMissingMachineCount -SourceFirstLastSwappedCount $sourceFirstLastSwappedCount -SourceUniqueVendors $sourceUniqueVendors | Out-Null
                     Write-Information '  Cached source signature set for future semantic comparisons.' -InformationAction Continue
                 }
                 else {
-                    $sourceSignatureSet = Write-PartitionedSignatureSet -Label 'source' -ProgressInterval $Script:DashboardValidationProgressInterval -SignatureSource {
+                        $sourceSignatureSet = Write-PartitionedSignatureSet -Label 'source' -ProgressInterval $Script:DashboardValidationProgressInterval -ExpectedTotalCount $cachedPayloadRowCount -SignatureSource {
                         Read-SourceCanonicalSignatureStream `
                             -ExportsPath $ResolvedExportsPath `
                             -Machines $machines `
@@ -1995,7 +2008,8 @@ function Get-StreamingDashboardAuditResult {
                             -VendorSet $vendorSet `
                             -SkipObservedWindowMerge:$skipObservedWindowMerge `
                             -FirstLastSwappedCount ([ref]$sourceFirstLastSwappedCount) `
-                            -MissingMachineCount ([ref]$sourceMissingMachineCount)
+                            -MissingMachineCount ([ref]$sourceMissingMachineCount) `
+                            -ExpectedTotalCount $cachedPayloadRowCount
                     }
                 }
             }
@@ -2011,7 +2025,7 @@ function Get-StreamingDashboardAuditResult {
                     Write-Information '  Reusing cached payload signature set for semantic comparison.' -InformationAction Continue
                 }
                 else {
-                    $payloadSignatureSet = Write-PartitionedSignatureSet -Label $comparisonPayloadLabel -ProgressInterval $Script:DashboardValidationProgressInterval -OutputDirectoryPath (Get-PayloadSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry -Create) -Persistent -SignatureSource {
+                    $payloadSignatureSet = Write-PartitionedSignatureSet -Label $comparisonPayloadLabel -ProgressInterval $Script:DashboardValidationProgressInterval -OutputDirectoryPath (Get-PayloadSignatureCacheDirectory -PayloadCacheEntry $PayloadCacheEntry -Create) -Persistent -ExpectedTotalCount $cachedPayloadRowCount -SignatureSource {
                         Read-PayloadCanonicalSignatureStream -PayloadPath $comparisonPayloadPath
                     }
                     Write-CachedPayloadSignatureSetMetadata -PayloadCacheEntry $PayloadCacheEntry -PayloadSha256 $cachedPayloadSha256 -PayloadRowCount $cachedPayloadRowCount -SignatureSet $payloadSignatureSet | Out-Null
@@ -2019,7 +2033,7 @@ function Get-StreamingDashboardAuditResult {
                 }
             }
             else {
-                $payloadSignatureSet = Write-PartitionedSignatureSet -Label $comparisonPayloadLabel -ProgressInterval $Script:DashboardValidationProgressInterval -SignatureSource {
+                $payloadSignatureSet = Write-PartitionedSignatureSet -Label $comparisonPayloadLabel -ProgressInterval $Script:DashboardValidationProgressInterval -ExpectedTotalCount $dashboardPayloadRowCount -SignatureSource {
                     Read-PayloadCanonicalSignatureStream -PayloadPath $comparisonPayloadPath
                 }
             }

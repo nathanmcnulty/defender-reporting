@@ -23,6 +23,26 @@ function Assert-True {
     }
 }
 
+function Get-OutputRecordText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Record
+    )
+
+    if ($null -eq $Record) {
+        return $null
+    }
+
+    if ($Record -is [System.Management.Automation.InformationRecord]) {
+        return [string]$Record.MessageData
+    }
+
+    return ($Record | Out-String).Trim()
+}
+
 function Get-TestVulnRow {
     [CmdletBinding()]
     param(
@@ -1999,6 +2019,105 @@ function Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryR
     }
 }
 
+function Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePayloadClose {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-content-store-context-release-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'content-store-context-release-001' -CveId 'CVE-2026-0154' -SnapshotDate '2026-03-20' -Version '2.0.0'
+        $currentRow.DeviceId = 'device-context-release-001'
+        $currentRow.DeviceName = 'device-context-release-001.contoso.com'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+
+        $context = Get-NormalizationContext
+        $machines = @{
+            'device-context-release-001' = [PSCustomObject]@{
+                id = 'device-context-release-001'
+                computerDnsName = 'device-context-release-001.contoso.com'
+                rbacGroupName = 'Prod'
+                osPlatform = 'Windows 11'
+                osVersion = '10.0.26100'
+                machineTags = @('Prod')
+                lastIpAddress = '10.0.0.21'
+                lastExternalIpAddress = '52.0.0.21'
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'Low'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-20'
+                firstSeen = '2026-03-01'
+            }
+        }
+        $advancedHuntingData = @{
+            'CVE-2026-0154' = @{
+                PublishedDate = '2026-03-20'
+                VulnerabilityDescription = 'Context release regression.'
+                EpssScore = 0.18
+                AffectedSoftware = @('contoso:legacy_agent')
+            }
+        }
+        $advancedHuntingDeviceUsers = @{
+            'device-context-release-001' = @('alice@contoso.com')
+        }
+        $advancedHuntingInventoryData = @{
+            (Get-AdvancedHuntingInventoryMatchKey -DeviceId 'device-context-release-001' -SoftwareVendor 'Contoso' -SoftwareName 'Legacy Agent' -SoftwareVersion '2.0.0') = [PSCustomObject]@{
+                ProductCodeCpe = 'cpe:/a:contoso:legacy_agent:2.0.0'
+                EndOfSupportStatus = 'supported'
+                EndOfSupportDate = '2027-12-31'
+            }
+        }
+        $nvdCveData = @{
+            'CVE-2026-0154' = [PSCustomObject]@{
+                PublishedDate = '2026-03-19'
+                LastModifiedDate = '2026-03-21'
+                VulnerabilityDescription = 'NVD fallback metadata.'
+                BaseScore = 7.1
+                BaseSeverity = 'High'
+                Vector = 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N'
+                CisaExploitAdd = $null
+                CisaActionDue = $null
+                CisaRequiredAction = $null
+                Weaknesses = @('CWE-416')
+            }
+        }
+
+        $result = Invoke-ContentStoreNormalization `
+            -DataPath $tempRoot `
+            -VulnOutputPath $outputPath `
+            -Context $context `
+            -Machines $machines `
+            -AdvancedHuntingData $advancedHuntingData `
+            -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers `
+            -AdvancedHuntingInventoryData $advancedHuntingInventoryData `
+            -NvdCveData $nvdCveData `
+            -PayloadOutputPath $payloadPath `
+            -ConsumeLookupsOnPayloadClose
+
+        Assert-True ($result.ProcessedCount -eq 1) 'Expected content-store context-release regression fixture to normalize one row.'
+        Assert-True ([string]$result.PayloadPath -eq $payloadPath) 'Expected content-store context-release regression fixture to write the direct payload output.'
+        Assert-True ((Get-CompressedPayloadVulnCount -Path $payloadPath) -eq $result.ProcessedCount) 'Expected content-store context-release regression payload row count to match the processed count.'
+        Assert-True ($context.Machines.Count -eq 0) 'Expected content-store normalization to release machine lookups before payload close.'
+        Assert-True ($context.AdvancedHuntingData.Count -eq 0) 'Expected content-store normalization to release Advanced Hunting CVE data before payload close.'
+        Assert-True ($context.AdvancedHuntingDeviceUsers.Count -eq 0) 'Expected content-store normalization to release Advanced Hunting device-user data before payload close.'
+        Assert-True ($context.NvdCveData.Count -eq 0) 'Expected content-store normalization to release NVD CVE data before payload close.'
+        Assert-True ($context.AdvancedHuntingInventoryData.Count -eq 1) 'Expected content-store normalization to preserve inventory enrichment needed during ref streaming.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup {
     [CmdletBinding()]
     param()
@@ -2028,7 +2147,7 @@ function Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup {
     }
 }
 
-function Test-ConvertToNormalizedDataReportsZeroOnboardedContentStoreDiagnostics {
+function Test-ConvertToNormalizedDataReportsZeroOnboardedContentStoreDiagnostic {
     [CmdletBinding()]
     param()
 
@@ -3400,11 +3519,26 @@ function Test-DashboardDualPackagingGenerationAndValidation {
         & $dashboardScriptPath -DirectoryPath $tempRoot -ExportMachineData:$false -NormalizeOnly -NormalizedPayloadOutputPath $normalizedPayloadPath | Out-Null
         Assert-True ((Test-Path -LiteralPath $normalizedPayloadPath -PathType Leaf)) 'Expected NormalizeOnly to materialize the normalized payload for dual packaging.'
 
-        & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $selfContainedOutputPath -ExportMachineData:$false -PackageOnly -NormalizedPayloadInputPath $normalizedPayloadPath -DualPackage -Validate -ValidationOutputPath $selfAuditPath | Out-Null
+        $packageOutput = @(& $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $selfContainedOutputPath -ExportMachineData:$false -PackageOnly -NormalizedPayloadInputPath $normalizedPayloadPath -DualPackage -Validate -ValidationOutputPath $selfAuditPath 6>&1)
+        $packageMessages = @($packageOutput | ForEach-Object { Get-OutputRecordText -Record $_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $hostedWriteMessageIndex = -1
+        $selfContainedWriteMessageIndex = -1
+        for ($i = 0; $i -lt $packageMessages.Count; $i++) {
+            if ($hostedWriteMessageIndex -lt 0 -and $packageMessages[$i].Contains('Writing hosted dashboard to')) {
+                $hostedWriteMessageIndex = $i
+            }
+
+            if ($selfContainedWriteMessageIndex -lt 0 -and $packageMessages[$i].Contains('Writing self-contained dashboard to')) {
+                $selfContainedWriteMessageIndex = $i
+            }
+        }
 
         Assert-True ((Test-Path -LiteralPath $selfContainedOutputPath -PathType Leaf)) 'Expected dual packaging to write the self-contained dashboard HTML.'
         Assert-True ((Test-Path -LiteralPath $hostedOutputPath -PathType Leaf)) 'Expected dual packaging to write the hosted dashboard HTML.'
         Assert-True ((Test-Path -LiteralPath $hostedAssetsPath -PathType Container)) 'Expected dual packaging to create the hosted sibling asset directory.'
+        Assert-True ($hostedWriteMessageIndex -ge 0) 'Expected dual packaging output to announce hosted dashboard generation.'
+        Assert-True ($selfContainedWriteMessageIndex -ge 0) 'Expected dual packaging output to announce self-contained dashboard generation.'
+        Assert-True ($hostedWriteMessageIndex -lt $selfContainedWriteMessageIndex) 'Expected dual packaging to write the hosted dashboard before the self-contained dashboard.'
 
         foreach ($assetFileName in @('dashboard.css', 'dashboard.js', 'pako.js', 'chart.js', 'pdf-export.bundle.js', 'payload.json.gz')) {
             Assert-True ((Test-Path -LiteralPath (Join-Path $hostedAssetsPath $assetFileName) -PathType Leaf)) ("Expected dual packaging to write '{0}' to the hosted asset directory." -f $assetFileName)
@@ -3614,6 +3748,8 @@ function Test-FunctionAppWriteOutputNoEnumeratePreservesJObject {
     $observed = @(& {
         function Write-PipelineFileTraceLine {
             param($Message)
+
+            $null = $Message
         }
 
         . ([scriptblock]::Create($functionDefinition))
@@ -3710,7 +3846,7 @@ Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader
 Write-Output '  Content-store streaming normalization checks passed.'
 Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup
 Write-Output '  Repeated CVE lookup deduplication checks passed.'
-Test-ConvertToNormalizedDataReportsZeroOnboardedContentStoreDiagnostics
+Test-ConvertToNormalizedDataReportsZeroOnboardedContentStoreDiagnostic
 Write-Output '  Zero-onboarded content-store diagnostics checks passed.'
 Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
 Write-Output '  Advanced Hunting device-user normalization checks passed.'
