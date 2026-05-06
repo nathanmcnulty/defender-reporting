@@ -243,6 +243,94 @@ function Get-ValidationDatasetFileList {
     )
 }
 
+function Get-StorageBlobRestHeaderSet {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param()
+
+    $accessToken = (& az account get-access-token --resource https://storage.azure.com/ --query accessToken -o tsv 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($accessToken)) {
+        throw 'Failed to acquire an Azure Storage access token for blob REST operations.'
+    }
+
+    return @{
+        Authorization = "Bearer $accessToken"
+        'x-ms-version' = '2023-11-03'
+    }
+}
+
+function Get-BlobNamesViaRest {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerName
+    )
+
+    $headers = Get-StorageBlobRestHeaderSet
+    $requestUri = "https://$AccountName.blob.core.windows.net/${ContainerName}?restype=container&comp=list"
+    $response = Invoke-WebRequest -Method Get -Uri $requestUri -Headers $headers -UseBasicParsing
+    if ([string]::IsNullOrWhiteSpace([string]$response.Content)) {
+        return @()
+    }
+
+    $blobNameMatches = [System.Text.RegularExpressions.Regex]::Matches([string]$response.Content, '<Blob>\s*<Name>([^<]+)</Name>')
+    return @($blobNameMatches | ForEach-Object { $_.Groups[1].Value } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Remove-BlobViaRest {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BlobName
+    )
+
+    $headers = Get-StorageBlobRestHeaderSet
+    $encodedBlobName = [System.Uri]::EscapeDataString($BlobName).Replace('%2F', '/')
+    $requestUri = "https://$AccountName.blob.core.windows.net/${ContainerName}/$encodedBlobName"
+    if ($PSCmdlet.ShouldProcess($requestUri, 'Delete blob via REST')) {
+        Invoke-WebRequest -Method Delete -Uri $requestUri -Headers $headers -UseBasicParsing | Out-Null
+    }
+}
+
+function Set-BlobViaRest {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BlobName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContentType
+    )
+
+    $headers = Get-StorageBlobRestHeaderSet
+    $headers['x-ms-blob-type'] = 'BlockBlob'
+    $headers['Content-Type'] = $ContentType
+    $encodedBlobName = [System.Uri]::EscapeDataString($BlobName).Replace('%2F', '/')
+    $requestUri = "https://$AccountName.blob.core.windows.net/${ContainerName}/$encodedBlobName"
+    if ($PSCmdlet.ShouldProcess($requestUri, 'Upload blob via REST')) {
+        Invoke-WebRequest -Method Put -Uri $requestUri -Headers $headers -InFile $FilePath -UseBasicParsing | Out-Null
+    }
+}
+
 function Clear-BlobContainerContent {
     [CmdletBinding()]
     param(
@@ -254,20 +342,25 @@ function Clear-BlobContainerContent {
     )
 
     $blobsJson = (& az storage blob list --account-name $AccountName --container-name $ContainerName --auth-mode login --output json 2>&1 | Out-String)
-    if ($LASTEXITCODE -ne 0) {
-        throw ("Failed to list blobs in container '{0}': {1}" -f $ContainerName, $blobsJson.Trim())
+    if ($LASTEXITCODE -eq 0) {
+        $blobs = if ([string]::IsNullOrWhiteSpace($blobsJson)) { @() } else { @($blobsJson | ConvertFrom-Json -Depth 20) }
+        foreach ($blob in @($blobs)) {
+            if ($null -eq $blob -or [string]::IsNullOrWhiteSpace([string]$blob.name)) {
+                continue
+            }
+
+            & az storage blob delete --account-name $AccountName --container-name $ContainerName --name ([string]$blob.name) --auth-mode login --output none | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw ("Failed to delete blob '{0}' from container '{1}'." -f ([string]$blob.name), $ContainerName)
+            }
+        }
+
+        return
     }
 
-    $blobs = if ([string]::IsNullOrWhiteSpace($blobsJson)) { @() } else { @($blobsJson | ConvertFrom-Json -Depth 20) }
-    foreach ($blob in @($blobs)) {
-        if ($null -eq $blob -or [string]::IsNullOrWhiteSpace([string]$blob.name)) {
-            continue
-        }
-
-        & az storage blob delete --account-name $AccountName --container-name $ContainerName --name ([string]$blob.name) --auth-mode login --output none | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw ("Failed to delete blob '{0}' from container '{1}'." -f ([string]$blob.name), $ContainerName)
-        }
+    Write-Warning ("Azure CLI blob listing failed for container '{0}'. Falling back to blob REST: {1}" -f $ContainerName, $blobsJson.Trim())
+    foreach ($blobName in @(Get-BlobNamesViaRest -AccountName $AccountName -ContainerName $ContainerName)) {
+        Remove-BlobViaRest -AccountName $AccountName -ContainerName $ContainerName -BlobName $blobName
     }
 }
 
@@ -304,9 +397,10 @@ function Initialize-ValidationExportsContainer {
     Clear-BlobContainerContent -AccountName $AccountName -ContainerName 'exports'
     foreach ($file in $datasetFiles) {
         $contentType = if ($file.Name.EndsWith('.gz')) { 'application/gzip' } else { 'application/json' }
-        & az storage blob upload --account-name $AccountName --container-name exports --name $file.Name --file $file.FullName --content-type $contentType --auth-mode login --overwrite --output none | Out-Null
+        & az storage blob upload --account-name $AccountName --container-name exports --name $file.Name --file $file.FullName --content-type $contentType --auth-mode login --overwrite --output none 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            throw ("Failed to upload '{0}' to the exports container." -f $file.Name)
+            Write-Warning ("Azure CLI blob upload failed for '{0}' in container 'exports'. Falling back to blob REST." -f $file.Name)
+            Set-BlobViaRest -AccountName $AccountName -ContainerName 'exports' -BlobName $file.Name -FilePath $file.FullName -ContentType $contentType
         }
     }
 }
