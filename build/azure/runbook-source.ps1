@@ -159,8 +159,12 @@ $Script:PipelineControlBlobName = '_diagnostics/ExportAndGenerate.control.json'
 $Script:PipelineStatusBlobName = '_diagnostics/ExportAndGenerate.status.json'
 $Script:PipelineRunId = [guid]::NewGuid().ToString('N')
 $Script:PipelineStartedOnUtc = [datetime]::UtcNow
+$Script:PipelineArchitectureVersion = 'monolithic-v1'
+$Script:PipelineArchitectureTrack = 'stage0-observability'
 $Script:PipelineCurrentStage = 'Initializing'
 $Script:PipelineCurrentStageMessage = 'Initializing pipeline.'
+$Script:PipelineCurrentStageEnteredOnUtc = $Script:PipelineStartedOnUtc
+$Script:PipelineNormalizedPayloadCacheHit = $null
 $Script:PipelineExecutionHostDescriptor = Resolve-PipelineExecutionHostDescriptor
 $Script:PipelineExecutionHost = [string]$Script:PipelineExecutionHostDescriptor.Name
 
@@ -232,6 +236,7 @@ function Set-PipelineExecutionStage {
 
     $Script:PipelineCurrentStage = $Stage
     $Script:PipelineCurrentStageMessage = $Message
+    $Script:PipelineCurrentStageEnteredOnUtc = [datetime]::UtcNow
 }
 
 function Write-PipelineExecutionStatus {
@@ -270,10 +275,13 @@ function Write-PipelineExecutionStatus {
             runId = $Script:PipelineRunId
             executionHost = $Script:PipelineExecutionHost
             executionHostEvidence = if ($null -ne $Script:PipelineExecutionHostDescriptor) { [string]$Script:PipelineExecutionHostDescriptor.Evidence } else { $null }
+            pipelineArchitectureVersion = $Script:PipelineArchitectureVersion
+            pipelineArchitectureTrack = $Script:PipelineArchitectureTrack
             status = $Status
             stage = $Stage
             message = $Message
             startedOnUtc = $Script:PipelineStartedOnUtc.ToString('o')
+            stageEnteredOnUtc = $Script:PipelineCurrentStageEnteredOnUtc.ToString('o')
             updatedOnUtc = ([datetime]::UtcNow).ToString('o')
             storageAccountName = $AccountName
             dashboardDeliveryMode = if ([string]::IsNullOrWhiteSpace($DashboardDeliveryMode)) { $null } else { $DashboardDeliveryMode }
@@ -288,6 +296,10 @@ function Write-PipelineExecutionStatus {
 
         foreach ($key in $AdditionalProperties.Keys) {
             $statusDocument[$key] = $AdditionalProperties[$key]
+        }
+
+        if ($null -ne $Script:PipelineNormalizedPayloadCacheHit) {
+            $statusDocument.normalizedPayloadCacheHit = [bool]$Script:PipelineNormalizedPayloadCacheHit
         }
 
         $statusDocument | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $statusFilePath -Encoding utf8
@@ -1278,13 +1290,18 @@ try {
     $tempPayloadPath = Join-Path -Path $tempRoot -ChildPath 'payload.json.gz'
     $syntheticManifestPath = Join-Path -Path $tempExports -ChildPath 'synthetic-manifest.json'
     $skipObservedWindowMerge = (Test-Path -LiteralPath $syntheticManifestPath -PathType Leaf)
+    Set-PipelineExecutionStage -Stage 'CheckDashboardPayloadCache' -Message 'Checking for a reusable normalized payload cache.'
+    [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
     $payloadCacheEntry = Get-NormalizedPayloadCacheEntry -BasePath $tempExports -SkipObservedWindowMerge:$skipObservedWindowMerge
+    $Script:PipelineNormalizedPayloadCacheHit = ($null -ne $payloadCacheEntry)
     Invoke-FullGarbageCollection
     Write-MemoryUsage -Label "Post-PayloadCacheCheck"
     $machines = $null
     $advancedHuntingData = $null
     $normalizedQuality = $null
     if ($payloadCacheEntry) {
+        Set-PipelineExecutionStage -Stage 'PrepareDashboardPayload' -Message 'Reusing the cached normalized payload for dashboard packaging.'
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
         Write-Output "Preparing data for embedding..."
         Write-Output ("  Reusing cached normalized payload ({0})..." -f $payloadCacheEntry.Fingerprint.Substring(0, 12))
         Copy-Item -LiteralPath $payloadCacheEntry.PayloadPath -Destination $tempPayloadPath -Force
@@ -1295,6 +1312,8 @@ try {
     }
     else {
         # Step 1: Read machine and Advanced Hunting data
+        Set-PipelineExecutionStage -Stage 'ReadNormalizationInputs' -Message 'Loading machine and Advanced Hunting inputs for dashboard normalization.'
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
         $machines = Read-NormalizationMachineLookup -Path $tempExports
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-MachineRead"
@@ -1319,11 +1338,62 @@ try {
         Write-MemoryUsage -Label "Post-NormalizationInputs"
 
         # Step 2: Normalize data while the working set is still lean
+        Set-PipelineExecutionStage -Stage 'NormalizeDashboardData' -Message 'Normalizing export data into the compact dashboard payload model.'
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
         Write-Output "Normalizing data..."
         if ($skipObservedWindowMerge) {
             Write-Output "Synthetic manifest detected. Skipping observed-window merge for stress normalization."
         }
-        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+        $normalizationStatusState = @{
+            SubPhase = $null
+            PhaseMessage = $Script:PipelineCurrentStageMessage
+            PhaseStartedOnUtc = [datetime]::UtcNow
+            PhaseRowCountBase = 0L
+            LastReportedRowCount = 0L
+        }
+        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -NormalizationProgressCallback {
+            param($NormalizationEvent)
+
+            if ($null -eq $NormalizationEvent) {
+                return
+            }
+
+            $additionalProperties = @{}
+            $statusMessage = $Script:PipelineCurrentStageMessage
+            $eventKind = if ($NormalizationEvent.PSObject.Properties['Kind']) { [string]$NormalizationEvent.Kind } else { '' }
+            switch ($eventKind) {
+                'phase' {
+                    $normalizationStatusState.SubPhase = if ($NormalizationEvent.PSObject.Properties['Phase']) { [string]$NormalizationEvent.Phase } else { $null }
+                    $normalizationStatusState.PhaseMessage = if ($NormalizationEvent.PSObject.Properties['Message']) { [string]$NormalizationEvent.Message } else { $Script:PipelineCurrentStageMessage }
+                    $normalizationStatusState.PhaseStartedOnUtc = [datetime]::UtcNow
+                    $normalizationStatusState.PhaseRowCountBase = [long]$normalizationStatusState.LastReportedRowCount
+                    $statusMessage = [string]$normalizationStatusState.PhaseMessage
+                    if (-not [string]::IsNullOrWhiteSpace([string]$normalizationStatusState.SubPhase)) {
+                        $additionalProperties['normalizedSubPhase'] = [string]$normalizationStatusState.SubPhase
+                    }
+                }
+                'progress' {
+                    $currentRowCount = [long]$NormalizationEvent.Count
+                    $normalizationStatusState.LastReportedRowCount = $currentRowCount
+                    $phaseElapsedSeconds = [Math]::Max(0.001, ([datetime]::UtcNow - [datetime]$normalizationStatusState.PhaseStartedOnUtc).TotalSeconds)
+                    $phaseProcessedCount = [Math]::Max(0L, ($currentRowCount - [long]$normalizationStatusState.PhaseRowCountBase))
+                    $phaseRate = [Math]::Round(($phaseProcessedCount / $phaseElapsedSeconds), 0)
+                    $statusMessage = ('{0} Processed {1:N0} onboarded vulnerability record(s) over {2:N1}s in the current subphase ({3:N0}/s).' -f [string]$normalizationStatusState.PhaseMessage, $currentRowCount, $phaseElapsedSeconds, $phaseRate)
+                    if (-not [string]::IsNullOrWhiteSpace([string]$normalizationStatusState.SubPhase)) {
+                        $additionalProperties['normalizedSubPhase'] = [string]$normalizationStatusState.SubPhase
+                    }
+                    $additionalProperties['normalizedRowCount'] = $currentRowCount
+                    $additionalProperties['normalizedSubPhaseRowCount'] = $phaseProcessedCount
+                    $additionalProperties['normalizedProgressElapsedSeconds'] = [Math]::Round($phaseElapsedSeconds, 1)
+                    $additionalProperties['normalizedRowRatePerSecond'] = $phaseRate
+                    if ($NormalizationEvent.PSObject.Properties['MarkerType']) {
+                        $additionalProperties['normalizedProgressMarkerType'] = [string]$NormalizationEvent.MarkerType
+                    }
+                }
+            }
+
+            [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'NormalizeDashboardData' -Message $statusMessage -AdditionalProperties $additionalProperties)
+        }
         Write-MemoryUsage -Label "Post-ConvertToNormalizedData"
         $machines = $null
         $advancedHuntingData = $null
@@ -1332,6 +1402,8 @@ try {
         Write-MemoryUsage -Label "Post-NormalizationCleanup"
 
         # Step 3: Prepare payload for embedding
+        Set-PipelineExecutionStage -Stage 'PrepareDashboardPayload' -Message 'Preparing and caching the normalized payload for dashboard packaging.'
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
         Write-Output "Preparing data for embedding..."
         $vulnCount = $normalizedResult.VulnCount
         $deviceCount = [int]$normalizedResult.DeviceCount
@@ -1376,6 +1448,8 @@ try {
     $requiresEmbeddedBundles = ($DashboardDeliveryMode -ne 'Hosted')
 
     # Step 4: Download JavaScript libraries
+    Set-PipelineExecutionStage -Stage 'PrepareDashboardLibraries' -Message 'Preparing cached client libraries for dashboard packaging.'
+    [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
     Write-Output "Preparing dashboard client libraries..."
     $lib = $Script:LibraryConfig.ChartJs
     $chartJsLibraryPath = Save-JSLibraryFile -Url $lib.Url -Name $lib.Name -OutputPath (Join-Path $tempLibraries 'chart.js') -Critical $lib.Critical
@@ -1403,6 +1477,8 @@ try {
     Invoke-PhaseTransitionGarbageCollection -MemoryLabel 'Pre-TemplateLoad'
 
     # Step 5: Load templates
+    Set-PipelineExecutionStage -Stage 'LoadDashboardTemplates' -Message 'Loading dashboard templates before final artifact assembly.'
+    [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
     Write-Output "Loading templates..."
     $htmlTemplatePath = Join-Path -Path $tempTemplates -ChildPath "dashboard.html"
     $cssTemplatePath = Join-Path -Path $tempTemplates -ChildPath "dashboard.css"
