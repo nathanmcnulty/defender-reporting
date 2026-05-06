@@ -63,6 +63,63 @@ function Get-DashboardTemplateContent {
     return $templates
 }
 
+function Get-LocalDashboardRepositoryRoot {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    $candidatePath = $PSScriptRoot
+    while (-not [string]::IsNullOrWhiteSpace($candidatePath)) {
+        if ((Test-Path -LiteralPath (Join-Path $candidatePath 'Generate-VulnerabilityDashboard.ps1') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $candidatePath 'build') -PathType Container)) {
+            return $candidatePath
+        }
+
+        $parentPath = Split-Path -Path $candidatePath -Parent
+        if ([string]::IsNullOrWhiteSpace($parentPath) -or $parentPath -eq $candidatePath) {
+            break
+        }
+
+        $candidatePath = $parentPath
+    }
+
+    return $null
+}
+
+function Find-SharedDashboardLibraryCacheFile {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CacheFileName
+    )
+
+    $repoRoot = Get-LocalDashboardRepositoryRoot
+    if ([string]::IsNullOrWhiteSpace($repoRoot)) {
+        return $null
+    }
+
+    $libraryCacheSuffix = [System.IO.Path]::Combine('.dashboard-cache', 'libraries')
+    foreach ($searchRoot in @(
+        (Join-Path $repoRoot 'exports'),
+        (Join-Path $repoRoot '.local')
+    )) {
+        if (-not (Test-Path -LiteralPath $searchRoot -PathType Container)) {
+            continue
+        }
+
+        $cacheMatch = Get-ChildItem -LiteralPath $searchRoot -Filter $CacheFileName -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.DirectoryName.EndsWith($libraryCacheSuffix, [System.StringComparison]::OrdinalIgnoreCase) -and $_.Length -gt 0 } |
+            Select-Object -First 1
+
+        if ($null -ne $cacheMatch) {
+            return $cacheMatch.FullName
+        }
+    }
+
+    return $null
+}
+
 function Save-JSLibraryFile {
     [CmdletBinding()]
     [OutputType([string])]
@@ -84,6 +141,7 @@ function Save-JSLibraryFile {
     )
 
     $cachePath = $null
+    $cacheFileName = $null
     if (-not [string]::IsNullOrWhiteSpace($CacheBasePath)) {
         $cacheDirectory = Get-DashboardCacheDirectory -BasePath $CacheBasePath -ChildPath 'libraries' -Create
         $urlHashBytes = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($Url))
@@ -95,6 +153,7 @@ function Save-JSLibraryFile {
 
         $safeName = ($Name -replace '[^A-Za-z0-9._-]', '-')
         $cachePath = Join-Path $cacheDirectory ("{0}-{1}{2}" -f $safeName, $urlHash, $extension)
+        $cacheFileName = [System.IO.Path]::GetFileName($cachePath)
         if (Test-Path -LiteralPath $cachePath -PathType Leaf) {
             $cachedLibrary = Get-Item -LiteralPath $cachePath
             if ($cachedLibrary.Length -le 0) {
@@ -106,6 +165,19 @@ function Save-JSLibraryFile {
                 Write-Information "Reusing cached $Name library" -InformationAction Continue
                 return $OutputPath
             }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($cacheFileName)) {
+        $sharedCachePath = Find-SharedDashboardLibraryCacheFile -CacheFileName $cacheFileName
+        if (-not [string]::IsNullOrWhiteSpace($sharedCachePath)) {
+            Copy-Item -LiteralPath $sharedCachePath -Destination $OutputPath -Force
+            if (-not [string]::IsNullOrWhiteSpace($cachePath) -and -not $sharedCachePath.Equals($cachePath, [System.StringComparison]::OrdinalIgnoreCase)) {
+                Copy-Item -LiteralPath $sharedCachePath -Destination $cachePath -Force
+            }
+
+            Write-Information "Reusing shared cached $Name library" -InformationAction Continue
+            return $OutputPath
         }
     }
 
@@ -4725,6 +4797,10 @@ function Resolve-NormalizedInventoryLookup {
         [AllowNull()]
         [object]$SoftwareVersion,
 
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [object]$SoftwareIdentityKey,
+
         [Parameter(Mandatory = $true)]
         [pscustomobject]$Context
     )
@@ -4734,11 +4810,27 @@ function Resolve-NormalizedInventoryLookup {
         return -1
     }
 
-    $inventoryKey = Get-AdvancedHuntingInventoryMatchKey `
-        -DeviceId ([string]$DeviceId) `
-        -SoftwareVendor ([string]($SoftwareVendor ?? '')) `
-        -SoftwareName ([string]($SoftwareName ?? '')) `
-        -SoftwareVersion ([string]($SoftwareVersion ?? ''))
+    $deviceIdText = [string]$DeviceId
+    if ([string]::IsNullOrWhiteSpace($deviceIdText)) {
+        return -1
+    }
+
+    $inventoryKey = $null
+    $softwareIdentityKeyText = [string]($SoftwareIdentityKey ?? '')
+    if (-not [string]::IsNullOrWhiteSpace($softwareIdentityKeyText)) {
+        $inventoryKey = @(
+            $deviceIdText
+            $softwareIdentityKeyText
+        ) -join '|'
+    }
+    else {
+        $inventoryKey = Get-AdvancedHuntingInventoryMatchKey `
+            -DeviceId $deviceIdText `
+            -SoftwareVendor ([string]($SoftwareVendor ?? '')) `
+            -SoftwareName ([string]($SoftwareName ?? '')) `
+            -SoftwareVersion ([string]($SoftwareVersion ?? ''))
+    }
+
     if ([string]::IsNullOrWhiteSpace($inventoryKey)) {
         return -1
     }
@@ -4929,19 +5021,50 @@ function Get-NormalizedContentLookupCacheEntry {
     [CmdletBinding()]
     [OutputType([object[]])]
     param(
+        [Parameter(Mandatory = $false)]
+        [switch]$IncludeInventoryIdentity,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$SoftwareInventoryIdentityKey,
+
         [Parameter(Mandatory = $true)]
         [pscustomobject]$ContentLookup
     )
 
-    return [object[]]@(
-        $ContentLookup.sw,
-        $ContentLookup.cve,
-        $ContentLookup.ver,
-        $ContentLookup.upd,
-        $ContentLookup.ua,
-        $ContentLookup.dp,
-        $ContentLookup.rp
+    $cacheEntry = [System.Collections.Generic.List[object]]::new()
+    $cacheEntry.Add($ContentLookup.sw) | Out-Null
+    $cacheEntry.Add($ContentLookup.cve) | Out-Null
+    $cacheEntry.Add($ContentLookup.ver) | Out-Null
+    $cacheEntry.Add($ContentLookup.upd) | Out-Null
+    $cacheEntry.Add($ContentLookup.ua) | Out-Null
+    $cacheEntry.Add($ContentLookup.dp) | Out-Null
+    $cacheEntry.Add($ContentLookup.rp) | Out-Null
+
+    if ($IncludeInventoryIdentity) {
+        $cacheEntry.Add($SoftwareInventoryIdentityKey) | Out-Null
+    }
+
+    return [object[]]$cacheEntry.ToArray()
+}
+
+function Get-ContentStoreDeviceProfileIdentityCache {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [switch]$IncludeInventoryIdentity,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.Generic.List[string]]$DeviceProfileIds
     )
+
+    if (-not $IncludeInventoryIdentity -or $null -eq $DeviceProfileIds) {
+        return $null
+    }
+
+    return ,([string[]]$DeviceProfileIds.ToArray())
 }
 
 function Get-NormalizedRecordLookup {
@@ -5488,8 +5611,11 @@ function Invoke-ContentStoreNormalization {
         throw "Content dictionary '$dictionaryPath' was not found."
     }
 
-    $deviceProfileIds = [System.Collections.Generic.List[string]]::new()
-    $contentInventoryKeys = [System.Collections.Generic.List[object]]::new()
+    $hasInventoryIdentity = ($Context.AdvancedHuntingInventoryData.Count -gt 0)
+    $deviceProfileIds = $null
+    if ($hasInventoryIdentity) {
+        $deviceProfileIds = [System.Collections.Generic.List[string]]::new()
+    }
     $deviceLookupIndices = [System.Collections.Generic.List[int]]::new()
     $deviceOnboardedFlags = [System.Collections.Generic.List[bool]]::new()
     $contentLookupCache = [System.Collections.Generic.List[object]]::new()
@@ -5500,6 +5626,7 @@ function Invoke-ContentStoreNormalization {
     $contentLookupUpdateAvailableIndex = 4
     $contentLookupDiskPathIndex = 5
     $contentLookupRegistryPathIndex = 6
+    $contentLookupSoftwareIdentityKeyIndex = 7
     $processedCountRef = [ref]0
     $firstLastSwappedCountRef = [ref]0
     $writerState = $null
@@ -5509,7 +5636,9 @@ function Invoke-ContentStoreNormalization {
 
     foreach ($deviceProfile in @(Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles')) {
         $deviceId = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'id')
-        $deviceProfileIds.Add($deviceId) | Out-Null
+        if ($hasInventoryIdentity) {
+            $deviceProfileIds.Add($deviceId) | Out-Null
+        }
         $deviceLookupIndices.Add((Add-NormalizedDevice `
                 -DeviceId $deviceId `
                 -DeviceName ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'n')) `
@@ -5521,10 +5650,10 @@ function Invoke-ContentStoreNormalization {
         $deviceOnboardedFlags.Add(((Get-VulnPropertyValue -InputObject $deviceProfile -Name 'ob') -eq $true)) | Out-Null
     }
 
-    $deviceProfiles = $deviceProfileIds.ToArray()
+    $deviceProfiles = Get-ContentStoreDeviceProfileIdentityCache -IncludeInventoryIdentity:$hasInventoryIdentity -DeviceProfileIds $deviceProfileIds
     $deviceLookupIndices = $deviceLookupIndices.ToArray()
     $deviceOnboardedFlags = $deviceOnboardedFlags.ToArray()
-    $deviceProfileCount = $deviceProfiles.Length
+    $deviceProfileCount = $deviceLookupIndices.Length
     $onboardedDeviceProfileCount = @($deviceOnboardedFlags | Where-Object { $_ }).Count
     $deviceProfileIds = $null
 
@@ -5532,14 +5661,21 @@ function Invoke-ContentStoreNormalization {
         $softwareVendor = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sv')
         $softwareName = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sn')
         $softwareVersion = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'ver')
+        $softwareInventoryIdentityKey = if ($hasInventoryIdentity -and -not [string]::IsNullOrWhiteSpace($softwareName)) {
+            @(
+                [string]($softwareVendor ?? '')
+                $softwareName
+                [string]($softwareVersion ?? '')
+            ) -join '|'
+        }
+        else {
+            $null
+        }
 
-        $contentInventoryKeys.Add([object[]]@(
-                $softwareVendor,
-                $softwareName,
-                $softwareVersion
-            )) | Out-Null
-
-        $contentLookupCache.Add((Get-NormalizedContentLookupCacheEntry -ContentLookup (Resolve-NormalizedContentLookup `
+        $contentLookupCache.Add((Get-NormalizedContentLookupCacheEntry `
+            -IncludeInventoryIdentity:$hasInventoryIdentity `
+            -SoftwareInventoryIdentityKey $softwareInventoryIdentityKey `
+            -ContentLookup (Resolve-NormalizedContentLookup `
                 -SoftwareVendor $softwareVendor `
                 -SoftwareName $softwareName `
                 -RecommendationReference ([string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'rr')) `
@@ -5559,10 +5695,8 @@ function Invoke-ContentStoreNormalization {
                 -Context $Context))) | Out-Null
     }
 
-    $contentTemplates = $contentInventoryKeys.ToArray()
     $contentLookupCache = $contentLookupCache.ToArray()
-    $contentTemplateCount = $contentTemplates.Length
-    $contentInventoryKeys = $null
+    $contentTemplateCount = $contentLookupCache.Length
 
     # Ref streaming only needs the compact device/content lookup arrays plus
     # inventory enrichment. Release the larger source maps before processing
@@ -5693,8 +5827,6 @@ function Invoke-ContentStoreNormalization {
                             if (-not $lastSeen) { $lastSeen = '' }
 
                             $contentLookup = $contentLookupCache[$contentTemplateIndexValue]
-                            $contentTemplate = $contentTemplates[$contentTemplateIndexValue]
-                            $deviceProfileId = $deviceProfiles[$deviceProfileIndexValue]
                             $compactRecord[0] = $deviceLookupIndices[$deviceProfileIndexValue]
                             $compactRecord[1] = $contentLookup[$contentLookupCveIndex]
                             $compactRecord[2] = $contentLookup[$contentLookupSwIndex]
@@ -5705,12 +5837,15 @@ function Invoke-ContentStoreNormalization {
                             $compactRecord[7] = $contentLookup[$contentLookupUpdateIndex]
                             $compactRecord[8] = $contentLookup[$contentLookupDiskPathIndex]
                             $compactRecord[9] = $contentLookup[$contentLookupRegistryPathIndex]
-                            $compactRecord[10] = Resolve-NormalizedInventoryLookup `
-                                -DeviceId ([string]$deviceProfileId) `
-                                -SoftwareVendor ([string]$contentTemplate[0]) `
-                                -SoftwareName ([string]$contentTemplate[1]) `
-                                -SoftwareVersion ([string]$contentTemplate[2]) `
-                                -Context $Context
+                            if ($hasInventoryIdentity) {
+                                $compactRecord[10] = Resolve-NormalizedInventoryLookup `
+                                    -DeviceId ([string]$deviceProfiles[$deviceProfileIndexValue]) `
+                                    -SoftwareIdentityKey ([string]$contentLookup[$contentLookupSoftwareIdentityKeyIndex]) `
+                                    -Context $Context
+                            }
+                            else {
+                                $compactRecord[10] = -1
+                            }
 
                             if ($columnStates) {
                                 for ($columnIndex = 0; $columnIndex -lt 11; $columnIndex++) {
@@ -5839,24 +5974,25 @@ function Invoke-ContentStoreNormalization {
                                     if (-not $lastSeen) { $lastSeen = '' }
 
                                     $contentLookup = $contentLookupCache[$ctv]
-                                    $contentTemplate = $contentTemplates[$ctv]
-                                    $deviceProfileId = $deviceProfiles[$dpv]
                                     $compactRecord[0] = $deviceLookupIndices[$dpv]
-                                    $compactRecord[1] = $contentLookup.cve
-                                    $compactRecord[2] = $contentLookup.sw
-                                    $compactRecord[3] = $contentLookup.ver
+                                    $compactRecord[1] = $contentLookup[$contentLookupCveIndex]
+                                    $compactRecord[2] = $contentLookup[$contentLookupSwIndex]
+                                    $compactRecord[3] = $contentLookup[$contentLookupVersionIndex]
                                     $compactRecord[4] = Get-OrCreateIndex -value $firstSeen -list $lookups.dates -indexMap $dateIndex
                                     $compactRecord[5] = Get-OrCreateIndex -value $lastSeen -list $lookups.dates -indexMap $dateIndex
-                                    $compactRecord[6] = $contentLookup.ua
-                                    $compactRecord[7] = $contentLookup.upd
-                                    $compactRecord[8] = $contentLookup.dp
-                                    $compactRecord[9] = $contentLookup.rp
-                                    $compactRecord[10] = Resolve-NormalizedInventoryLookup `
-                                        -DeviceId ([string]$deviceProfileId) `
-                                        -SoftwareVendor ([string]$contentTemplate[0]) `
-                                        -SoftwareName ([string]$contentTemplate[1]) `
-                                        -SoftwareVersion ([string]$contentTemplate[2]) `
-                                        -Context $Context
+                                    $compactRecord[6] = $contentLookup[$contentLookupUpdateAvailableIndex]
+                                    $compactRecord[7] = $contentLookup[$contentLookupUpdateIndex]
+                                    $compactRecord[8] = $contentLookup[$contentLookupDiskPathIndex]
+                                    $compactRecord[9] = $contentLookup[$contentLookupRegistryPathIndex]
+                                    if ($hasInventoryIdentity) {
+                                        $compactRecord[10] = Resolve-NormalizedInventoryLookup `
+                                            -DeviceId ([string]$deviceProfiles[$dpv]) `
+                                            -SoftwareIdentityKey ([string]$contentLookup[$contentLookupSoftwareIdentityKeyIndex]) `
+                                            -Context $Context
+                                    }
+                                    else {
+                                        $compactRecord[10] = -1
+                                    }
 
                                     if ($columnStates) {
                                         for ($columnIndex = 0; $columnIndex -lt 11; $columnIndex++) {
@@ -5935,7 +6071,7 @@ function Invoke-ContentStoreNormalization {
         # Payload finalization only needs the compact lookup collections. Release
         # the much larger content-store scaffolding first so hosted Automation
         # does not carry that transient state into lookup serialization.
-        foreach ($transientArray in @($deviceProfiles, $contentTemplates, $deviceLookupIndices, $deviceOnboardedFlags, $contentLookupCache)) {
+        foreach ($transientArray in @($deviceProfiles, $deviceLookupIndices, $deviceOnboardedFlags, $contentLookupCache)) {
             if ($null -ne $transientArray) {
                 [System.Array]::Clear($transientArray, 0, $transientArray.Length)
             }
@@ -5957,7 +6093,6 @@ function Invoke-ContentStoreNormalization {
         }
 
         $deviceProfiles = $null
-        $contentTemplates = $null
         $deviceLookupIndices = $null
         $deviceOnboardedFlags = $null
         $contentLookupCache = $null

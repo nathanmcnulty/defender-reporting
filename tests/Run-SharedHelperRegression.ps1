@@ -1664,9 +1664,15 @@ function Test-ResolveNormalizedInventoryLookupSkipsEmptyInventoryData {
         -SoftwareVersion '6.0.0' `
         -Context $context
 
+    $compactIdentityInventoryIndex = Resolve-NormalizedInventoryLookup `
+        -DeviceId 'device-001' `
+        -SoftwareIdentityKey 'contoso|legacy_agent|6.0.0' `
+        -Context $context
+
     Assert-True ($emptyInventoryIndex -eq -1) 'Expected empty inventory data to skip normalized inventory lookup creation.'
     Assert-True ($context.Lookups.inventory.Count -eq 1) 'Expected only the populated inventory lookup to materialize in the lookup table.'
     Assert-True ($populatedInventoryIndex -eq 0) 'Expected populated inventory data to create the first normalized inventory lookup.'
+    Assert-True ($compactIdentityInventoryIndex -eq $populatedInventoryIndex) 'Expected the compact software identity key to resolve the same normalized inventory lookup.'
     Assert-True ([string]$context.Lookups.inventory[0].cpe -eq 'cpe:/a:contoso:legacy_agent:6.0.0') 'Expected populated inventory lookup to preserve ProductCodeCpe.'
 }
 
@@ -2116,6 +2122,45 @@ function Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePaylo
             Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
+}
+
+function Test-GetNormalizedContentLookupCacheEntryOmitsInventoryIdentityWhenUnused {
+    [CmdletBinding()]
+    param()
+
+    $contentLookup = [PSCustomObject]@{
+        sw = 1
+        cve = 2
+        ver = 3
+        upd = 4
+        ua = 1
+        dp = ,([int[]]@(5))
+        rp = ,([int[]]@(6))
+    }
+
+    $withoutInventoryIdentity = @(Get-NormalizedContentLookupCacheEntry -ContentLookup $contentLookup)
+    $withInventoryIdentity = @(Get-NormalizedContentLookupCacheEntry -IncludeInventoryIdentity -SoftwareInventoryIdentityKey 'Contoso|Legacy Agent|2.0.0' -ContentLookup $contentLookup)
+
+    Assert-True ($withoutInventoryIdentity.Count -eq 7) 'Expected content lookup cache entries without inventory data to omit the extra software identity fields.'
+    Assert-True ($withInventoryIdentity.Count -eq 8) 'Expected content lookup cache entries with inventory data to retain only the compact software identity key.'
+    Assert-True ([string]$withInventoryIdentity[7] -eq 'Contoso|Legacy Agent|2.0.0') 'Expected inventory-aware cache entries to preserve the compact software identity key.'
+}
+
+function Test-GetContentStoreDeviceProfileIdentityCacheOmitsIdsWhenUnused {
+    [CmdletBinding()]
+    param()
+
+    $deviceProfileIds = [System.Collections.Generic.List[string]]::new()
+    $deviceProfileIds.Add('device-001') | Out-Null
+    $deviceProfileIds.Add('device-002') | Out-Null
+
+    $withoutInventoryIdentity = @(Get-ContentStoreDeviceProfileIdentityCache -DeviceProfileIds $deviceProfileIds)
+    $withInventoryIdentity = @(Get-ContentStoreDeviceProfileIdentityCache -IncludeInventoryIdentity -DeviceProfileIds $deviceProfileIds)
+
+    Assert-True ($withoutInventoryIdentity.Count -eq 0) 'Expected content-store device profile identity cache to stay empty when inventory enrichment is not in use.'
+    Assert-True ($withInventoryIdentity.Count -eq 2) 'Expected content-store device profile identity cache to preserve device IDs when inventory enrichment is enabled.'
+    Assert-True ([string]$withInventoryIdentity[0] -eq 'device-001') 'Expected the first cached device ID to be preserved for inventory enrichment.'
+    Assert-True ([string]$withInventoryIdentity[1] -eq 'device-002') 'Expected the second cached device ID to be preserved for inventory enrichment.'
 }
 
 function Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup {
