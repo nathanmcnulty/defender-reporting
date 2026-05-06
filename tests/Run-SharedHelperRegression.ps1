@@ -2067,6 +2067,209 @@ function Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose {
     }
 }
 
+function Invoke-WithContentDictionaryStreamProbe {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$DeviceProfiles,
+
+        [Parameter(Mandatory = $true)]
+        [object[]]$ContentTemplates,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Action
+    )
+
+    $originalArrayEntriesReader = ${function:Read-VulnContentDictionaryArrayEntries}
+    $originalAddNormalizedDevice = ${function:Add-NormalizedDevice}
+    $originalResolveNormalizedContentLookup = ${function:Resolve-NormalizedContentLookup}
+    $deviceProfileEntries = @($DeviceProfiles)
+    $contentTemplateEntries = @($ContentTemplates)
+    $probeState = [PSCustomObject]@{
+        DeviceProfilesBuffered = $false
+        ContentTemplatesBuffered = $false
+        FirstDeviceProfileProcessed = $false
+        FirstContentTemplateProcessed = $false
+    }
+
+    try {
+        Set-Item -Path Function:Read-VulnContentDictionaryArrayEntries -Value ({
+                param(
+                    [Parameter(Mandatory = $true)]
+                    [string]$Path,
+
+                    [Parameter(Mandatory = $true)]
+                    [ValidateSet('deviceProfiles', 'contentTemplates')]
+                    [string]$PropertyName
+                )
+
+                $null = $Path
+
+                $entries = switch ($PropertyName) {
+                    'deviceProfiles' { $deviceProfileEntries }
+                    'contentTemplates' { $contentTemplateEntries }
+                    default { @() }
+                }
+
+                if ($entries.Count -eq 0) {
+                    return
+                }
+
+                Write-Output -InputObject $entries[0] -NoEnumerate
+                for ($entryIndex = 1; $entryIndex -lt $entries.Count; $entryIndex++) {
+                    switch ($PropertyName) {
+                        'deviceProfiles' {
+                            if (-not $probeState.FirstDeviceProfileProcessed) {
+                                $probeState.DeviceProfilesBuffered = $true
+                            }
+                        }
+                        'contentTemplates' {
+                            if (-not $probeState.FirstContentTemplateProcessed) {
+                                $probeState.ContentTemplatesBuffered = $true
+                            }
+                        }
+                    }
+
+                    Write-Output -InputObject $entries[$entryIndex] -NoEnumerate
+                }
+            }.GetNewClosure())
+
+        Set-Item -Path Function:Add-NormalizedDevice -Value ({
+                param(
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$DeviceId,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$DeviceName,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$GroupName,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$OsPlatform,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$OsVersion,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object[]]$MachineTags,
+
+                    [Parameter(Mandatory = $true)]
+                    [pscustomobject]$Context
+                )
+
+                if (-not $probeState.FirstDeviceProfileProcessed) {
+                    $probeState.FirstDeviceProfileProcessed = $true
+                }
+
+                & $originalAddNormalizedDevice @PSBoundParameters
+            }.GetNewClosure())
+
+        Set-Item -Path Function:Resolve-NormalizedContentLookup -Value ({
+                param(
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$SoftwareVendor,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$SoftwareName,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$RecommendationReference,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$CveId,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$CvssScore,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$SeverityLevel,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$ExploitabilityLevel,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$CveUrl,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$CveBatchTitle,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$RecommendedSecurityUpdate,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$RecommendedSecurityUpdateId,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$RecommendedSecurityUpdateUrl,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$SoftwareVersion,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object[]]$DiskPaths,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object[]]$RegistryPaths,
+
+                    [Parameter(Mandatory = $false)]
+                    [AllowNull()]
+                    [object]$SecurityUpdateAvailable,
+
+                    [Parameter(Mandatory = $true)]
+                    [pscustomobject]$Context
+                )
+
+                if (-not $probeState.FirstContentTemplateProcessed) {
+                    $probeState.FirstContentTemplateProcessed = $true
+                }
+
+                & $originalResolveNormalizedContentLookup @PSBoundParameters
+            }.GetNewClosure())
+
+        $result = & $Action
+        return [PSCustomObject]@{
+            Result = $result
+            State = $probeState
+        }
+    }
+    finally {
+        if ($null -ne $originalArrayEntriesReader) {
+            Set-Item -Path Function:Read-VulnContentDictionaryArrayEntries -Value $originalArrayEntriesReader
+        }
+
+        if ($null -ne $originalAddNormalizedDevice) {
+            Set-Item -Path Function:Add-NormalizedDevice -Value $originalAddNormalizedDevice
+        }
+
+        if ($null -ne $originalResolveNormalizedContentLookup) {
+            Set-Item -Path Function:Resolve-NormalizedContentLookup -Value $originalResolveNormalizedContentLookup
+        }
+    }
+}
+
 function Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader {
     [CmdletBinding()]
     param()
@@ -2080,6 +2283,64 @@ function Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryR
     try {
         $currentRow = Get-TestVulnRow -Id 'content-store-streaming-001' -CveId 'CVE-2026-0152' -SnapshotDate '2026-03-20' -Version '2.0.0'
         $historyRow = Get-TestVulnRow -Id 'content-store-streaming-002' -CveId 'CVE-2026-0153' -SnapshotDate '2026-03-18' -Version '2.0.1'
+        $streamedDeviceProfiles = @(
+            [PSCustomObject]@{
+                id = [string]$currentRow.DeviceId
+                n = [string]$currentRow.DeviceName
+                g = [string]$currentRow.RbacGroupName
+                o = [string]$currentRow.OSPlatform
+                ov = [string]$currentRow.OSVersion
+                t = @($currentRow.MachineTags)
+                ob = ($currentRow.IsOnboarded -eq $true)
+            }
+            [PSCustomObject]@{
+                id = [string]$historyRow.DeviceId
+                n = [string]$historyRow.DeviceName
+                g = [string]$historyRow.RbacGroupName
+                o = [string]$historyRow.OSPlatform
+                ov = [string]$historyRow.OSVersion
+                t = @($historyRow.MachineTags)
+                ob = ($historyRow.IsOnboarded -eq $true)
+            }
+        )
+        $streamedContentTemplates = @(
+            [PSCustomObject]@{
+                c = [string]$currentRow.CveId
+                sv = [string]$currentRow.SoftwareVendor
+                sn = [string]$currentRow.SoftwareName
+                ver = [string]$currentRow.SoftwareVersion
+                sev = [string]$currentRow.VulnerabilitySeverityLevel
+                sc = $currentRow.CvssScore
+                ex = [string]$currentRow.ExploitabilityLevel
+                rr = [string]$currentRow.RecommendationReference
+                ru = [string]$currentRow.RecommendedSecurityUpdate
+                rid = [string]$currentRow.RecommendedSecurityUpdateId
+                url = [string]$currentRow.RecommendedSecurityUpdateUrl
+                ua = ($currentRow.SecurityUpdateAvailable -eq $true)
+                dp = @($currentRow.DiskPaths)
+                rp = @($currentRow.RegistryPaths)
+                bt = [string]$currentRow.CveBatchTitle
+                bu = [string]$currentRow.CveBatchUrl
+            }
+            [PSCustomObject]@{
+                c = [string]$historyRow.CveId
+                sv = [string]$historyRow.SoftwareVendor
+                sn = [string]$historyRow.SoftwareName
+                ver = [string]$historyRow.SoftwareVersion
+                sev = [string]$historyRow.VulnerabilitySeverityLevel
+                sc = $historyRow.CvssScore
+                ex = [string]$historyRow.ExploitabilityLevel
+                rr = [string]$historyRow.RecommendationReference
+                ru = [string]$historyRow.RecommendedSecurityUpdate
+                rid = [string]$historyRow.RecommendedSecurityUpdateId
+                url = [string]$historyRow.RecommendedSecurityUpdateUrl
+                ua = ($historyRow.SecurityUpdateAvailable -eq $true)
+                dp = @($historyRow.DiskPaths)
+                rp = @($historyRow.RegistryPaths)
+                bt = [string]$historyRow.CveBatchTitle
+                bu = [string]$historyRow.CveBatchUrl
+            }
+        )
 
         Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
         [void](New-Item -Path (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -ItemType File -Force)
@@ -2096,11 +2357,19 @@ function Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryR
             throw "ConvertTo-NormalizedData should stream the content dictionary during content-store normalization instead of calling Read-VulnContentDictionary for '$Path'."
         }
 
-        $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -PayloadOutputPath $payloadPath -Machines @{} -AdvancedHuntingData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+        $probeResult = Invoke-WithContentDictionaryStreamProbe -DeviceProfiles $streamedDeviceProfiles -ContentTemplates $streamedContentTemplates -Action {
+            ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -PayloadOutputPath $payloadPath -Machines @{} -AdvancedHuntingData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+        }
+        $result = $probeResult.Result
+        $probeState = $probeResult.State
 
         Assert-True ($result.VulnCount -eq 2) 'Expected content-store normalization to preserve both current and history rows while bypassing the legacy dictionary reader.'
         Assert-True ([string]$result.PayloadPath -eq $payloadPath) 'Expected content-store normalization to still write the direct payload output.'
         Assert-True ((Get-CompressedPayloadVulnCount -Path $payloadPath) -eq $result.VulnCount) 'Expected content-store streaming normalization to keep payload row count aligned with processed rows.'
+        Assert-True ($probeState.FirstDeviceProfileProcessed -eq $true) 'Expected the streaming probe to observe the first content-store device profile being consumed.'
+        Assert-True ($probeState.FirstContentTemplateProcessed -eq $true) 'Expected the streaming probe to observe the first content-store template being consumed.'
+        Assert-True ($probeState.DeviceProfilesBuffered -eq $false) 'Expected content-store normalization to consume device profiles as they stream instead of buffering the full dictionary array first.'
+        Assert-True ($probeState.ContentTemplatesBuffered -eq $false) 'Expected content-store normalization to consume content templates as they stream instead of buffering the full dictionary array first.'
     }
     finally {
         if ($null -ne $originalDictionaryReader) {

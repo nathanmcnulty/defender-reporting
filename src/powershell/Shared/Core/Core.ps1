@@ -3740,7 +3740,8 @@ function Read-VulnContentDictionaryExpansionLookups {
     )
 
     $deviceProfiles = [System.Collections.Generic.List[object]]::new()
-    foreach ($deviceProfile in @(Read-VulnContentDictionaryArrayEntries -Path $Path -PropertyName 'deviceProfiles')) {
+    Read-VulnContentDictionaryArrayEntries -Path $Path -PropertyName 'deviceProfiles' | ForEach-Object {
+        $deviceProfile = $_
         $deviceProfiles.Add([PSCustomObject]@{
                 id = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'id')
                 n = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'n')
@@ -3753,7 +3754,8 @@ function Read-VulnContentDictionaryExpansionLookups {
     }
 
     $contentTemplates = [System.Collections.Generic.List[object]]::new()
-    foreach ($contentTemplate in @(Read-VulnContentDictionaryArrayEntries -Path $Path -PropertyName 'contentTemplates')) {
+    Read-VulnContentDictionaryArrayEntries -Path $Path -PropertyName 'contentTemplates' | ForEach-Object {
+        $contentTemplate = $_
         $contentTemplates.Add([PSCustomObject]@{
                 c = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'c')
                 sv = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sv')
