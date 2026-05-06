@@ -4041,7 +4041,8 @@ function Restore-ContentStoreNormalizedLookupsFromColumnCache {
         }
     }
 
-    foreach ($deviceProfile in @(Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles')) {
+    Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles' | ForEach-Object {
+        $deviceProfile = $_
         Add-NormalizedDevice `
             -DeviceId ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'id')) `
             -DeviceName ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'n')) `
@@ -4052,7 +4053,8 @@ function Restore-ContentStoreNormalizedLookupsFromColumnCache {
             -Context $context | Out-Null
     }
 
-    foreach ($contentTemplate in @(Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'contentTemplates')) {
+    Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'contentTemplates' | ForEach-Object {
+        $contentTemplate = $_
         Resolve-NormalizedContentLookup `
             -SoftwareVendor ([string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sv')) `
             -SoftwareName ([string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sn')) `
@@ -5746,7 +5748,8 @@ function Invoke-ContentStoreNormalization {
             Message = 'Loading content-store device profiles into normalization lookups.'
         })
 
-    foreach ($deviceProfile in @(Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles')) {
+    Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles' | ForEach-Object {
+        $deviceProfile = $_
         $deviceId = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'id')
         if ($hasInventoryIdentity) {
             $deviceProfileIds.Add($deviceId) | Out-Null
@@ -5775,7 +5778,8 @@ function Invoke-ContentStoreNormalization {
             Message = 'Loading content-store vulnerability templates into normalization lookups.'
         })
 
-    foreach ($contentTemplate in @(Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'contentTemplates')) {
+    Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'contentTemplates' | ForEach-Object {
+        $contentTemplate = $_
         $softwareVendor = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sv')
         $softwareName = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sn')
         $softwareVersion = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'ver')
