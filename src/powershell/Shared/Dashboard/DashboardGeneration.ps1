@@ -5260,6 +5260,98 @@ function Write-NormalizedCompactRecordFromLookup {
     Write-NormalizedCompactRecord -WriterState $WriterState -Record $Record
 }
 
+function New-NormalizationProgressState {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only creates an in-memory normalization progress tracker.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 1000000)]
+        [int]$ProgressInterval = 50000,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(15, 3600)]
+        [int]$HeartbeatIntervalSeconds = 60,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 1000000)]
+        [int]$CheckInterval = 10000
+    )
+
+    return [PSCustomObject]@{
+        ProgressInterval = $ProgressInterval
+        HeartbeatIntervalSeconds = $HeartbeatIntervalSeconds
+        CheckInterval = [Math]::Max(1, [Math]::Min($ProgressInterval, $CheckInterval))
+        Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        LastHeartbeatSecond = -1
+    }
+}
+
+function Invoke-NormalizationCallbackEvent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$Callback,
+
+        [Parameter(Mandatory = $true)]
+        $EventData
+    )
+
+    if ($null -eq $Callback -or $null -eq $EventData) {
+        return
+    }
+
+    try {
+        & $Callback $EventData
+    }
+    catch {
+        Write-Verbose ("Normalization callback failed: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Invoke-NormalizationProgressCallback {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        $State,
+
+        [Parameter(Mandatory = $true)]
+        [long]$Count,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$Callback
+    )
+
+    if ($null -eq $State -or $Count -le 0 -or $null -eq $Callback) {
+        return
+    }
+
+    $markerType = 'progress'
+    $shouldInvoke = (($Count % [long]$State.ProgressInterval) -eq 0)
+    if (-not $shouldInvoke -and (($Count % [long]$State.CheckInterval) -eq 0)) {
+        $elapsedWholeSeconds = [Math]::Floor($State.Stopwatch.Elapsed.TotalSeconds)
+        if (($State.LastHeartbeatSecond + [int]$State.HeartbeatIntervalSeconds) -le $elapsedWholeSeconds) {
+            $shouldInvoke = $true
+            $markerType = 'heartbeat'
+        }
+    }
+
+    if (-not $shouldInvoke) {
+        return
+    }
+
+    $elapsedSeconds = [Math]::Max(0.001, $State.Stopwatch.Elapsed.TotalSeconds)
+    $rate = [Math]::Round(($Count / $elapsedSeconds), 0)
+    Invoke-NormalizationCallbackEvent -Callback $Callback -EventData ([PSCustomObject]@{
+            Kind = 'progress'
+            Count = $Count
+            ElapsedSeconds = [Math]::Round($elapsedSeconds, 1)
+            RatePerSecond = $rate
+            MarkerType = $markerType
+        })
+    $State.LastHeartbeatSecond = [Math]::Floor($State.Stopwatch.Elapsed.TotalSeconds)
+}
+
 function Write-NormalizedSourceRow {
     [CmdletBinding()]
     param(
@@ -5274,6 +5366,12 @@ function Write-NormalizedSourceRow {
 
         [Parameter(Mandatory = $true)]
         [ref]$ProcessedCount,
+
+        [Parameter(Mandatory = $false)]
+        $NormalizationProgressState,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$NormalizationProgressCallback,
 
         [Parameter(Mandatory = $false)]
         [AllowNull()]
@@ -5411,6 +5509,8 @@ function Write-NormalizedSourceRow {
         -FirstSeenValue $FirstSeenValue `
         -LastSeenValue $LastSeenValue `
         -FirstLastSwappedCount $FirstLastSwappedCount
+
+    Invoke-NormalizationProgressCallback -State $NormalizationProgressState -Count $ProcessedCount.Value -Callback $NormalizationProgressCallback
 
     if (($ProcessedCount.Value % 50000) -eq 0) {
         Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $ProcessedCount.Value) -InformationAction Continue
@@ -5589,6 +5689,12 @@ function Invoke-ContentStoreNormalization {
         [string[]]$MergedRefPaths,
 
         [Parameter(Mandatory = $false)]
+        $NormalizationProgressState,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$NormalizationProgressCallback,
+
+        [Parameter(Mandatory = $false)]
         [string]$PayloadOutputPath,
 
         [Parameter(Mandatory = $false)]
@@ -5634,6 +5740,12 @@ function Invoke-ContentStoreNormalization {
     $lookupCountSummary = $null
     $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
 
+    Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
+            Kind = 'phase'
+            Phase = 'LoadContentStoreDeviceProfiles'
+            Message = 'Loading content-store device profiles into normalization lookups.'
+        })
+
     foreach ($deviceProfile in @(Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles')) {
         $deviceId = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'id')
         if ($hasInventoryIdentity) {
@@ -5656,6 +5768,12 @@ function Invoke-ContentStoreNormalization {
     $deviceProfileCount = $deviceLookupIndices.Length
     $onboardedDeviceProfileCount = @($deviceOnboardedFlags | Where-Object { $_ }).Count
     $deviceProfileIds = $null
+
+    Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
+            Kind = 'phase'
+            Phase = 'LoadContentStoreTemplates'
+            Message = 'Loading content-store vulnerability templates into normalization lookups.'
+        })
 
     foreach ($contentTemplate in @(Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'contentTemplates')) {
         $softwareVendor = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sv')
@@ -5706,6 +5824,12 @@ function Invoke-ContentStoreNormalization {
     $Context.AdvancedHuntingDeviceUsers = @{}
     $Context.NvdCveData = @{}
     Invoke-FullGarbageCollection
+
+    Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
+            Kind = 'phase'
+            Phase = 'StreamContentStoreRefs'
+            Message = 'Streaming content-store vulnerability references into the normalized payload.'
+        })
 
     try {
         $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
@@ -5897,6 +6021,8 @@ function Invoke-ContentStoreNormalization {
                                 Write-CompactVulnRecordJson -Writer $jsonWriter -Record $compactRecord
                             }
 
+                            Invoke-NormalizationProgressCallback -State $NormalizationProgressState -Count $processedCountRef.Value -Callback $NormalizationProgressCallback
+
                             if (($processedCountRef.Value % 50000) -eq 0) {
                                 Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCountRef.Value) -InformationAction Continue
                             }
@@ -6044,6 +6170,8 @@ function Invoke-ContentStoreNormalization {
                                         Write-CompactVulnRecordJson -Writer $jsonWriter -Record $compactRecord
                                     }
 
+                                    Invoke-NormalizationProgressCallback -State $NormalizationProgressState -Count $processedCountRef.Value -Callback $NormalizationProgressCallback
+
                                     if (($processedCountRef.Value % 50000) -eq 0) {
                                         Write-Information ("  Processed {0} onboarded vulnerability record(s)..." -f $processedCountRef.Value) -InformationAction Continue
                                     }
@@ -6181,6 +6309,12 @@ function Invoke-RawStoreNormalization {
         [hashtable]$NvdCveData = @{},
 
         [Parameter(Mandatory = $false)]
+        $NormalizationProgressState,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$NormalizationProgressCallback,
+
+        [Parameter(Mandatory = $false)]
         [string]$PayloadOutputPath,
 
         [Parameter(Mandatory = $false)]
@@ -6201,6 +6335,14 @@ function Invoke-RawStoreNormalization {
     $compactRecord = [object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1)
     $lookupCountSummary = $null
     $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
+    $normalizationProgressStateForStream = $NormalizationProgressState
+    $normalizationProgressCallbackForStream = $NormalizationProgressCallback
+
+    Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
+            Kind = 'phase'
+            Phase = 'StreamRawVulnStoreRows'
+            Message = 'Streaming raw vulnerability store rows into the normalized payload.'
+        })
 
     try {
         $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
@@ -6543,7 +6685,9 @@ function Invoke-RawStoreNormalization {
                             -Context $Context `
                             -FirstSeenValue $seenFirstValue `
                             -LastSeenValue $seenLastValue `
-                            -FirstLastSwappedCount $firstLastSwappedCountRef
+                            -FirstLastSwappedCount $firstLastSwappedCountRef `
+                            -NormalizationProgressState $normalizationProgressStateForStream `
+                            -NormalizationProgressCallback $normalizationProgressCallbackForStream
                 }
 
                 if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
@@ -6986,7 +7130,10 @@ function ConvertTo-NormalizedData {
         [string]$PayloadOutputPath,
 
         [Parameter(Mandatory = $false)]
-        [switch]$ConsumeLookupsOnPayloadClose
+        [switch]$ConsumeLookupsOnPayloadClose,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$NormalizationProgressCallback
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
@@ -7009,6 +7156,7 @@ function ConvertTo-NormalizedData {
     $autoColumnDir = $null
     $lookupCountSummary = $null
     $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
+    $normalizationProgressState = if ($null -ne $NormalizationProgressCallback) { New-NormalizationProgressState } else { $null }
 
     # Auto-enable column-store format for better gzip compression when caller
     # has not explicitly specified a column directory.
@@ -7037,7 +7185,7 @@ function ConvertTo-NormalizedData {
         else {
             Write-Information '  Content-store detected; using fast path (no merge).' -InformationAction Continue
         }
-        $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -MergedRefPaths $mergedRefPaths -PayloadOutputPath $PayloadOutputPath -ConsumeLookupsOnPayloadClose:$consumeLookups
+        $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -MergedRefPaths $mergedRefPaths -NormalizationProgressState $normalizationProgressState -NormalizationProgressCallback $NormalizationProgressCallback -PayloadOutputPath $PayloadOutputPath -ConsumeLookupsOnPayloadClose:$consumeLookups
         $processedCount = [int]$rawNormalizationResult.ProcessedCount
         $firstLastSwappedCount = [int]$rawNormalizationResult.FirstLastSwappedCount
         $hasNoTags = ($rawNormalizationResult.HasNoTags -eq $true)
@@ -7056,7 +7204,7 @@ function ConvertTo-NormalizedData {
     }
     elseif ($effectiveSkipObservedWindowMerge -and $storeExists) {
         Write-Information '  Raw store detected; using raw store normalization fast path.' -InformationAction Continue
-        $rawNormalizationResult = Invoke-RawStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -PayloadOutputPath $PayloadOutputPath -ConsumeLookupsOnPayloadClose:$consumeLookups
+        $rawNormalizationResult = Invoke-RawStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -NormalizationProgressState $normalizationProgressState -NormalizationProgressCallback $NormalizationProgressCallback -PayloadOutputPath $PayloadOutputPath -ConsumeLookupsOnPayloadClose:$consumeLookups
         $processedCount = [int]$rawNormalizationResult.ProcessedCount
         $firstLastSwappedCount = [int]$rawNormalizationResult.FirstLastSwappedCount
         $hasNoTags = ($rawNormalizationResult.HasNoTags -eq $true)
@@ -7077,6 +7225,12 @@ function ConvertTo-NormalizedData {
         try {
             $writerState = Open-NormalizedVulnWriter -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -PayloadOutputPath $PayloadOutputPath
             $compactRecord = [object[]]@(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1)
+
+            Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
+                    Kind = 'phase'
+                    Phase = 'StreamNormalizationSourceRows'
+                    Message = 'Streaming normalization source rows into the normalized payload.'
+                })
 
             # IMPORTANT: Use pipeline (| ForEach-Object) not foreach() to avoid
             # collecting all source rows into memory at once.
@@ -7112,7 +7266,9 @@ function ConvertTo-NormalizedData {
                     -Context $context `
                     -FirstSeenValue $v.PSObject.Properties['FirstSeenTimestamp']?.Value `
                     -LastSeenValue $v.PSObject.Properties['LastSeenTimestamp']?.Value `
-                    -FirstLastSwappedCount ([ref]$firstLastSwappedCount)
+                        -FirstLastSwappedCount ([ref]$firstLastSwappedCount) `
+                        -NormalizationProgressState $normalizationProgressState `
+                        -NormalizationProgressCallback $NormalizationProgressCallback
             }
 
             Sync-NormalizedVulnWriter -WriterState $writerState

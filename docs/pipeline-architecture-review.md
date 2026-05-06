@@ -1,90 +1,115 @@
 # Pipeline Architecture Review
 
-This review covers the Defender reporting data path from API export through dashboard generation. It is based on the tracked source and maintainer docs, with generated outputs and local history treated as non-authoritative.
+This review captures the post-merge architecture decision after PR #37. It is based on the tracked source and maintainer docs, with generated outputs and local history treated as non-authoritative.
+
+## Current Validated State
+
+The current monolithic pipeline is no longer failing its Azure acceptance gate.
+
+- Azure Automation passed on the 50k device / 1.5M row hosted dataset.
+- The hosted Function App validation also completed successfully on the same dataset during the keeper merge acceptance run.
+- The latest hosted Function App acceptance invocation was accepted at `2026-05-06T06:26:05Z` and wrote the dashboard blob at `2026-05-06T06:33:39Z`.
+- Recent keeper changes already reduced transient normalization state, reused shared library caches, and hardened blob validation against Azure CLI data-plane failures on this machine.
+
+That changes the architecture decision. A high-risk sharded rewrite is no longer the right immediate next step.
+
+## Decision
+
+Keep the current runtime architecture as the accepted baseline and name it `monolithic-v1`.
+
+Treat a staged, shard-oriented rewrite as a contingency path, not the active implementation scope for this branch.
+
+The next work should lock in observability, planning metadata, and escalation criteria so we can prove when a larger rewrite is actually required.
 
 ## Pipeline Map
 
 1. API export
    - [Invoke-VulnerabilityExport.ps1](../Invoke-VulnerabilityExport.ps1) authenticates to Defender for Endpoint, downloads bulk vulnerability snapshots, refreshes machine data, optionally refreshes Advanced Hunting enrichment, and writes canonical gzip stores under `exports/`.
-   - The shared export helpers live in [MdeExport.ps1](../src/powershell/Shared/DefenderApi/MdeExport.ps1), with store layout helpers in [Core.ps1](../src/powershell/Shared/Core/Core.ps1), [VulnerabilityStore.ps1](../src/powershell/Shared/Stores/VulnerabilityStore.ps1), [VulnerabilitySnapshotImport.ps1](../src/powershell/Shared/Stores/VulnerabilitySnapshotImport.ps1), and [MachineStore.ps1](../src/powershell/Shared/Stores/MachineStore.ps1).
+   - Shared export helpers live under `src/powershell/Shared/DefenderApi`, `src/powershell/Shared/Core`, and `src/powershell/Shared/Stores`.
 
 2. Normalization
-   - [Generate-VulnerabilityDashboard.ps1](../Generate-VulnerabilityDashboard.ps1) reads canonical stores, optionally refreshes machine data, loads Advanced Hunting and NVD enrichment, and calls `ConvertTo-NormalizedData` from [DashboardGeneration.ps1](../src/powershell/Shared/Dashboard/DashboardGeneration.ps1).
-   - Normalization can run from content-store sidecars or raw current/history rows. It can also reuse normalized column caches and normalized payload caches under `.dashboard-cache/`.
+   - [Generate-VulnerabilityDashboard.ps1](../Generate-VulnerabilityDashboard.ps1) reads canonical stores, loads machine and enrichment data, and calls `ConvertTo-NormalizedData` from [DashboardGeneration.ps1](../src/powershell/Shared/Dashboard/DashboardGeneration.ps1).
+   - Normalization can run from content-store sidecars or raw current/history rows and can reuse normalized column and payload caches under `.dashboard-cache/`.
 
 3. Payload preparation
-   - The generator writes a compressed payload with lookup tables plus vulnerability rows or columns. `-NormalizeOnly` can materialize this payload and its manifest; `-PackageOnly` can package a previously materialized payload.
-   - Cache identity comes from `Get-DashboardPayloadCacheFingerprint`, which depends on vulnerability, machine, Advanced Hunting, NVD, and normalization-mode inputs.
+   - The generator writes a compressed payload with lookup tables plus vulnerability rows or columns.
+   - `-NormalizeOnly` materializes the payload and manifest; `-PackageOnly` packages a previously materialized payload.
 
 4. Dashboard packaging
-   - `Write-DashboardArtifactBundle` combines templates, payload, pako, Chart.js, and the PDF export bundle into either a self-contained HTML file or a hosted split-assets directory.
+   - `Write-DashboardArtifactBundle` combines templates, payload, pako, Chart.js, and the PDF export bundle into self-contained or hosted split-assets output.
    - `-DualPackage` writes both delivery modes from the same normalized payload.
 
 5. Validation and delivery
    - `Invoke-DashboardValidation` and the audit helpers validate payload/source parity, enrichment, report semantics, and legacy fixture behavior.
    - Azure Automation and Function App entrypoints are built from [runbook-source.ps1](../build/azure/runbook-source.ps1) plus the manifest-driven helper bundle.
 
-## Findings
+## Locked Plan
 
-### Addressed on This Branch
+### Stage 0: Observability and Architecture Scaffolding
 
-1. Cache fingerprints include file timestamps after computing content hashes.
-   - `Get-FileSetFingerprint` already computes SHA-256 for every source file, but it also includes `LastWriteTimeUtc.Ticks` in the fingerprint material.
-   - Result: identical export content with a different timestamp misses the normalized payload, observed-window, and related caches. This is inefficient and especially expensive for large datasets because cache lookup already paid the cost of content hashing.
-   - Branch result: file-set fingerprints are now content-addressed by file identity, length, and SHA-256. A regression proves timestamp-only changes do not invalidate cache identity while content changes still do.
+This is the active branch scope.
 
-2. Normalized payload cache entries are trusted without verifying the cached payload bytes against the manifest hash.
-   - `Get-NormalizedPayloadCacheEntry` checks the cache fingerprint and manifest fingerprint, but it does not verify that `PayloadSha256` still matches the payload file.
-   - Result: a partial or corrupted cached payload can be reused until a later phase happens to detect it.
-   - Branch result: cached payload bytes are validated against manifest `PayloadSha256` before returning a cache hit. Normal generation treats mismatches as cache misses and rechecks after copy; `-PackageOnly` fails fast when a provided manifest hash does not match the provided payload.
+1. Stamp the runtime path with explicit architecture metadata.
+   - Emit `pipelineArchitectureVersion = monolithic-v1` in the Azure pipeline status blob.
+   - Keep the current pipeline behavior unchanged.
 
-3. JavaScript library cache reuse accepts zero-byte files.
-   - `Save-JSLibraryFile` reuses any cached library path that exists.
-   - Result: a failed or interrupted previous download can poison later self-contained and hosted dashboard packages.
-   - Branch result: empty cached library files are rejected and refreshed, and new downloads are verified as non-empty before caching or packaging.
+2. Make Stage D diagnosable without a debugger.
+   - Replace the single coarse `GenerateDashboard` runtime status with finer status transitions for cache reuse, normalization inputs, normalization, payload preparation, library preparation, template loading, and hosted/self-contained assembly.
+   - When a normalized payload cache hit is available, the pipeline intentionally skips the normalization-input and normalization stages. Status reporting must make that path explicit instead of leaving operators to infer it.
+   - Preserve the existing success/failure contract for the status blob so current tooling keeps working.
 
-4. Operator-visible data freshness and enrichment metadata is thin.
-   - Machine export failures during dashboard generation are warning-only and reuse existing machine data. Advanced Hunting enrichment is optional and may be intentionally absent.
-   - Result: operators need better metadata to distinguish intentional offline generation from degraded freshness or enrichment.
-   - Branch result: payload manifests, validation sidecars, and audit outputs now carry source summaries for machine data, Advanced Hunting, NVD, normalization mode, and source file freshness. Strict freshness/enrichment policy remains a compatibility-preserving follow-up.
+3. Surface the new metadata in the validation path.
+   - Keep the current heartbeat and timeout logic.
+   - Include architecture-version context in the Function App status summary so future Azure regressions are attributable to a known execution model.
 
-### Deferred Follow-Ups
+4. Record the decision in tracked docs.
+   - This file is the decision record for keeping `monolithic-v1` as the accepted baseline until a concrete trigger forces a larger rewrite.
 
-1. Add a strict freshness mode for machine data.
-   - Candidate: `-RequireFreshMachineData` or `-AllowStaleMachineData` with a configurable maximum age and validation-sidecar metadata.
+### Stage 1: Baseline Capture and Triggering
 
-2. Add explicit Advanced Hunting expectation controls.
-   - Candidate: `-RequireAdvancedHunting` plus policy around the source count metadata now emitted in manifests, sidecars, and audits.
+Do this after Stage 0 is merged.
 
-3. Expand JavaScript fixture coverage for `columns-v1` payloads.
-   - Validation helper coverage already canonicalizes rows and columns, but the browser-side assertion scripts should exercise column payloads too.
+1. Capture durable post-acceptance benchmark baselines.
+   - Use the repo performance workflow and Azure acceptance artifacts to record the accepted envelope for the current monolithic pipeline.
 
-4. Add machine-history continuity diagnostics.
-   - Candidate: warn when quarterly history files have unexpected gaps, overlaps, or out-of-order observed dates.
+2. Add explicit rewrite triggers.
+   - Escalate only if repeated Azure acceptance runs regress materially or fail.
+   - Use the existing repo thresholds as the minimum review bar: investigate elapsed or working-set regressions above `10%`, and investigate Azure Function execution-unit growth above `15%`.
 
-## Implementation Plan
+### Stage 2: Resume-Oriented Enhancements
 
-1. Harden cache identity and cache hit validation.
-   - Remove timestamp material from `Get-FileSetFingerprint`.
-   - Add normalized payload manifest hash confirmation and use it in cache lookup plus package-only manifest handling.
+Only start this if Stage 1 shows that observability is not enough.
 
-2. Harden dashboard library caching.
-   - Refresh empty cached library files.
-   - Treat empty fresh downloads as failed downloads before cache publish.
+1. Add source fingerprint and payload lineage metadata to the runtime status or sidecar path.
+2. Add explicit resume checkpoints around already-materialized payload reuse.
+3. Keep the current payload contract unchanged.
 
-3. Add focused regression coverage.
-   - Fingerprint stability for timestamp-only changes.
-   - Normalized payload cache miss on payload/manifest hash mismatch.
-   - Library cache refresh when an empty cached file exists.
+### Stage 3: Staged Rewrite Contingency
 
-4. Rebuild generated helper artifacts.
-   - Run the shared helper build because [DashboardGeneration.ps1](../src/powershell/Shared/Dashboard/DashboardGeneration.ps1) changes feed [shared-helpers.ps1](../build/generated/shared-helpers.ps1), Azure runbook, and Function App artifacts.
+Only start this if the accepted `monolithic-v1` path regresses again.
 
-5. Validate.
-   - Run the focused shared-helper regression test first.
-   - Run the deterministic preflight before final review.
+1. Introduce durable shard planning and shard-local normalization artifacts.
+2. Stream the global reduce and final materialization phases.
+3. Gate the staged path behind an explicit architecture-version setting and preserve the current payload contract until parity is proven.
+
+## Escalation Triggers
+
+Start the staged rewrite only when at least one of these conditions becomes true:
+
+1. Two consecutive hosted Function App Azure acceptance runs fail on the standard 50k / 1.5M dataset.
+2. Hosted Function App Azure acceptance regresses materially beyond the accepted baseline and keeps doing so after localized fixes.
+3. Operational requirements demand resumability across invocations rather than a single successful monolithic run.
+
+## First Implementation on This Branch
+
+This branch implements Stage 0 only:
+
+1. add architecture-version metadata to the pipeline status blob
+2. add finer status transitions inside Stage D
+3. surface the architecture version in the validation status summary
 
 ## Review Notes
 
-- The export phase already uses staged partial vulnerability downloads and transactional machine store publishing, so this branch does not replace those mechanisms.
-- The validation attestation fast path is intentionally payload-oriented. Dashboard runtime behavior remains covered by the Node dashboard assertion suite and browser inspection gates rather than by semantic payload replay.
+- The export phase already uses staged partial vulnerability downloads and transactional machine store publishing, so this review does not replace those mechanisms.
+- The validation attestation fast path remains payload-oriented. Dashboard runtime behavior is still covered by the Node dashboard assertion suite, semantic validation, and Azure acceptance runs.
+- If `monolithic-v1` remains within the accepted Azure envelope, prefer smaller focused improvements over a speculative rewrite.

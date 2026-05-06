@@ -1177,11 +1177,46 @@ function Get-FunctionExecutionStatusSummaryText {
     $statusText = if ($StatusDocument.PSObject.Properties['status']) { [string]$StatusDocument.status } else { 'unknown' }
     $stageText = if ($StatusDocument.PSObject.Properties['stage']) { [string]$StatusDocument.stage } else { 'unknown' }
     $messageText = if ($StatusDocument.PSObject.Properties['message']) { [string]$StatusDocument.message } else { '' }
-    if ([string]::IsNullOrWhiteSpace($messageText)) {
-        return ("{0}/{1}" -f $statusText, $stageText)
+    $summaryText = if ([string]::IsNullOrWhiteSpace($messageText)) {
+        ("{0}/{1}" -f $statusText, $stageText)
+    }
+    else {
+        ("{0}/{1}: {2}" -f $statusText, $stageText, $messageText)
     }
 
-    return ("{0}/{1}: {2}" -f $statusText, $stageText, $messageText)
+    $metadataParts = [System.Collections.Generic.List[string]]::new()
+    $architectureVersionText = if ($StatusDocument.PSObject.Properties['pipelineArchitectureVersion']) { [string]$StatusDocument.pipelineArchitectureVersion } else { '' }
+    if (-not [string]::IsNullOrWhiteSpace($architectureVersionText)) {
+        $metadataParts.Add("arch=$architectureVersionText") | Out-Null
+    }
+
+    if ($StatusDocument.PSObject.Properties['normalizedPayloadCacheHit']) {
+        $metadataParts.Add(("payloadCache={0}" -f $(if ([bool]$StatusDocument.normalizedPayloadCacheHit) { 'hit' } else { 'miss' }))) | Out-Null
+    }
+
+    if ($StatusDocument.PSObject.Properties['normalizedSubPhase']) {
+        $subPhaseText = [string]$StatusDocument.normalizedSubPhase
+        if (-not [string]::IsNullOrWhiteSpace($subPhaseText)) {
+            $metadataParts.Add("subphase=$subPhaseText") | Out-Null
+        }
+    }
+
+    if ($StatusDocument.PSObject.Properties['normalizedRowCount']) {
+        $rowCountText = [string]$StatusDocument.normalizedRowCount
+        [long]$rowCountValue = 0
+        if ([long]::TryParse($rowCountText, [ref]$rowCountValue)) {
+            $metadataParts.Add(("rows={0:N0}" -f $rowCountValue)) | Out-Null
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($rowCountText)) {
+            $metadataParts.Add("rows=$rowCountText") | Out-Null
+        }
+    }
+
+    if ($metadataParts.Count -eq 0) {
+        return $summaryText
+    }
+
+    return ("{0} ({1})" -f $summaryText, ($metadataParts -join ', '))
 }
 
 function Set-FunctionExecutionControlBlob {
