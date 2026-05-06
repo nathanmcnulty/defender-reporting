@@ -1205,7 +1205,7 @@ function Get-FunctionExecutionStatusSummaryText {
         $rowCountText = [string]$StatusDocument.normalizedRowCount
         [long]$rowCountValue = 0
         if ([long]::TryParse($rowCountText, [ref]$rowCountValue)) {
-            $metadataParts.Add(("rows={0:N0}" -f $rowCountValue)) | Out-Null
+            $metadataParts.Add(("rows={0}" -f $rowCountValue.ToString('N0', [System.Globalization.CultureInfo]::InvariantCulture))) | Out-Null
         }
         elseif (-not [string]::IsNullOrWhiteSpace($rowCountText)) {
             $metadataParts.Add("rows=$rowCountText") | Out-Null
