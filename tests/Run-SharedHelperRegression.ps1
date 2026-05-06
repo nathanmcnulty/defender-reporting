@@ -1731,6 +1731,94 @@ function Test-GetNormalizedRecordLookupHandlesScalarPathInputs {
     Assert-True ($context.Lookups.regPaths.Count -eq 1) 'Expected scalar registry path input to materialize one registry path lookup.'
 }
 
+function Test-InvokeNormalizationProgressCallbackUsesCountAndHeartbeat {
+    [CmdletBinding()]
+    param()
+
+    $progressEvents = [System.Collections.Generic.List[object]]::new()
+    $progressState = New-NormalizationProgressState -ProgressInterval 3 -HeartbeatIntervalSeconds 60 -CheckInterval 1
+
+    Invoke-NormalizationProgressCallback -State $progressState -Count 1 -Callback {
+        param($ProgressEvent)
+
+        $progressEvents.Add($ProgressEvent) | Out-Null
+    }
+    Assert-True ($progressEvents.Count -eq 0) 'Expected normalization progress callback to remain quiet before the progress interval is reached.'
+
+    Invoke-NormalizationProgressCallback -State $progressState -Count 3 -Callback {
+        param($ProgressEvent)
+
+        $progressEvents.Add($ProgressEvent) | Out-Null
+    }
+
+    Assert-True ($progressEvents.Count -eq 1) 'Expected normalization progress callback to fire when the progress interval is reached.'
+    Assert-True ([string]$progressEvents[0].Kind -eq 'progress') 'Expected normalization progress callback events to identify progress updates.'
+    Assert-True ([string]$progressEvents[0].MarkerType -eq 'progress') 'Expected interval-driven normalization callback events to be labeled as progress updates.'
+    Assert-True ([long]$progressEvents[0].Count -eq 3) 'Expected normalization progress callback events to carry the processed row count.'
+
+    $heartbeatEvents = [System.Collections.Generic.List[object]]::new()
+    $heartbeatState = [PSCustomObject]@{
+        ProgressInterval = 100
+        HeartbeatIntervalSeconds = 60
+        CheckInterval = 1
+        Stopwatch = [PSCustomObject]@{
+            Elapsed = [TimeSpan]::FromSeconds(61)
+        }
+        LastHeartbeatSecond = -1
+    }
+
+    Invoke-NormalizationProgressCallback -State $heartbeatState -Count 1 -Callback {
+        param($ProgressEvent)
+
+        $heartbeatEvents.Add($ProgressEvent) | Out-Null
+    }
+
+    Assert-True ($heartbeatEvents.Count -eq 1) 'Expected normalization progress callback to emit a heartbeat event after the heartbeat interval elapses.'
+    Assert-True ([string]$heartbeatEvents[0].MarkerType -eq 'heartbeat') 'Expected elapsed-time normalization callback events to be labeled as heartbeats.'
+}
+
+function Test-ConvertToNormalizedDataReportsContentStoreNormalizationPhase {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-progress-callback-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+
+    try {
+        $currentRow = Get-TestVulnRow -Id 'progress-callback-001' -CveId 'CVE-2026-0999' -SnapshotDate '2026-03-20' -Version '1.0.0'
+        $historyRow = Get-TestVulnRow -Id 'progress-callback-002' -CveId 'CVE-2026-1000' -SnapshotDate '2026-03-18' -Version '1.0.1'
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        [void](New-Item -Path (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -ItemType File -Force)
+        Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+
+        $events = [System.Collections.Generic.List[object]]::new()
+        $result = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -Machines @{} -AdvancedHuntingData @{} -SkipObservedWindowMerge -NormalizationProgressCallback {
+            param($ProgressEvent)
+
+            $events.Add([PSCustomObject]@{
+                Kind = [string]$ProgressEvent.Kind
+                Phase = [string]$ProgressEvent.Phase
+                Message = [string]$ProgressEvent.Message
+                }) | Out-Null
+        }
+
+        Assert-True ($result.VulnCount -eq 2) 'Expected content-store normalization to preserve both onboarded test rows.'
+        Assert-True ($events.Count -gt 0) 'Expected ConvertTo-NormalizedData to forward normalization callback events when a callback is provided.'
+
+        $phaseNames = @($events | Where-Object { [string]$_.Kind -eq 'phase' } | ForEach-Object { [string]$_.Phase })
+        Assert-True ('LoadContentStoreDeviceProfiles' -in $phaseNames) 'Expected content-store normalization to report device-profile loading through the normalization callback.'
+        Assert-True ('LoadContentStoreTemplates' -in $phaseNames) 'Expected content-store normalization to report template loading through the normalization callback.'
+        Assert-True ('StreamContentStoreRefs' -in $phaseNames) 'Expected content-store normalization to report ref streaming through the normalization callback.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-ConvertToNormalizedDataUsesStableDeviceIdFallback {
     [CmdletBinding()]
     param()
@@ -3808,6 +3896,39 @@ function Test-FunctionAppWriteOutputNoEnumeratePreservesJObject {
     Assert-True ((Get-VulnPropertyValue -InputObject $observed[0] -Name 'ob') -eq $true) 'Expected Function App Write-Output -NoEnumerate to preserve compact boolean properties.'
 }
 
+function Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $validationScriptPath = Join-Path $repoRoot 'build\Invoke-AzureDeploymentValidation.ps1'
+    Assert-True ((Test-Path -LiteralPath $validationScriptPath -PathType Leaf)) "Expected validation script at '$validationScriptPath'."
+
+    $scriptText = Get-Content -LiteralPath $validationScriptPath -Raw
+    $functionMatch = [regex]::Match($scriptText, '(?s)function Get-FunctionExecutionStatusSummaryText \{.*?\r?\n\}\r?\n\r?\nfunction Set-FunctionExecutionControlBlob')
+    Assert-True ($functionMatch.Success) 'Expected validation script to contain Get-FunctionExecutionStatusSummaryText.'
+
+    $functionDefinition = $functionMatch.Value -replace '\r?\n\r?\nfunction Set-FunctionExecutionControlBlob\z', ''
+    $summary = & {
+        . ([scriptblock]::Create($functionDefinition))
+
+        Get-FunctionExecutionStatusSummaryText -StatusDocument ([PSCustomObject]@{
+                status = 'running'
+                stage = 'NormalizeDashboardData'
+                message = 'Streaming content-store vulnerability references into the normalized payload.'
+                pipelineArchitectureVersion = 'monolithic-v1'
+                normalizedPayloadCacheHit = $false
+                normalizedSubPhase = 'StreamContentStoreRefs'
+                normalizedRowCount = 125000
+            })
+    }
+
+    Assert-True ($summary -like '*arch=monolithic-v1*') 'Expected validation status summary text to retain architecture metadata.'
+    Assert-True ($summary -like '*payloadCache=miss*') 'Expected validation status summary text to retain payload-cache metadata.'
+    Assert-True ($summary -like '*subphase=StreamContentStoreRefs*') 'Expected validation status summary text to surface normalization subphase metadata.'
+    Assert-True ($summary -like '*rows=125,000*') 'Expected validation status summary text to surface formatted normalization row counts.'
+}
+
 Write-Output 'Running shared-helper regression checks...'
 Test-CanonicalLayoutHelper
 Write-Output '  Canonical layout helper checks passed.'
@@ -3877,6 +3998,10 @@ Test-AddNormalizedCveUsesStableSeverityIndexLookup
 Write-Output '  CVE severity lookup checks passed.'
 Test-GetNormalizedRecordLookupHandlesScalarPathInputs
 Write-Output '  Scalar path lookup checks passed.'
+Test-InvokeNormalizationProgressCallbackUsesCountAndHeartbeat
+Write-Output '  Normalization progress callback cadence checks passed.'
+Test-ConvertToNormalizedDataReportsContentStoreNormalizationPhase
+Write-Output '  Content-store normalization phase callback checks passed.'
 Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
 Write-Output '  Stable device fallback identity checks passed.'
 Test-ConvertToNormalizedDataWritesExpectedRowCount
@@ -3949,4 +4074,6 @@ Test-VulnObservedWindowCacheRoundTrip
 Write-Output '  Observed-window cache round-trip checks passed.'
 Test-FunctionAppWriteOutputNoEnumeratePreservesJObject
 Write-Output '  Function App Write-Output -NoEnumerate checks passed.'
+Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo
+Write-Output '  Function execution status summary metadata checks passed.'
 Write-Output 'Shared-helper regression checks passed.'
