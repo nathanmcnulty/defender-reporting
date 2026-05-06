@@ -420,6 +420,162 @@ function Resolve-FunctionExecutionDatasetPath {
     return $resolvedPath
 }
 
+function Get-StorageBlobRestHeaderSet {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param()
+
+    $accessToken = Invoke-AzCliText -Arguments @('account', 'get-access-token', '--resource', 'https://storage.azure.com/', '--query', 'accessToken', '-o', 'tsv')
+    if ([string]::IsNullOrWhiteSpace($accessToken)) {
+        throw 'Failed to acquire an Azure Storage access token for blob REST operations.'
+    }
+
+    return @{
+        Authorization = "Bearer $accessToken"
+        'x-ms-version' = '2023-11-03'
+    }
+}
+
+function Get-BlobNamesViaRest {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerName
+    )
+
+    $headers = Get-StorageBlobRestHeaderSet
+    $requestUri = "https://$AccountName.blob.core.windows.net/${ContainerName}?restype=container&comp=list"
+    $response = Invoke-WebRequest -Method Get -Uri $requestUri -Headers $headers -UseBasicParsing
+    if ([string]::IsNullOrWhiteSpace([string]$response.Content)) {
+        return @()
+    }
+
+    $blobNameMatches = [System.Text.RegularExpressions.Regex]::Matches([string]$response.Content, '<Blob>\s*<Name>([^<]+)</Name>')
+    return @($blobNameMatches | ForEach-Object { $_.Groups[1].Value } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Remove-BlobViaRest {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BlobName
+    )
+
+    $headers = Get-StorageBlobRestHeaderSet
+    $encodedBlobName = [System.Uri]::EscapeDataString($BlobName).Replace('%2F', '/')
+    $requestUri = "https://$AccountName.blob.core.windows.net/${ContainerName}/$encodedBlobName"
+    if ($PSCmdlet.ShouldProcess($requestUri, 'Delete blob via REST')) {
+        Invoke-WebRequest -Method Delete -Uri $requestUri -Headers $headers -UseBasicParsing | Out-Null
+    }
+}
+
+function Set-BlobViaRest {
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BlobName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContentType
+    )
+
+    $headers = Get-StorageBlobRestHeaderSet
+    $headers['x-ms-blob-type'] = 'BlockBlob'
+    $headers['Content-Type'] = $ContentType
+    $encodedBlobName = [System.Uri]::EscapeDataString($BlobName).Replace('%2F', '/')
+    $requestUri = "https://$AccountName.blob.core.windows.net/${ContainerName}/$encodedBlobName"
+    if ($PSCmdlet.ShouldProcess($requestUri, 'Upload blob via REST')) {
+        Invoke-WebRequest -Method Put -Uri $requestUri -Headers $headers -InFile $FilePath -UseBasicParsing | Out-Null
+    }
+}
+
+function Get-BlobTextViaRest {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BlobName
+    )
+
+    $headers = Get-StorageBlobRestHeaderSet
+    $encodedBlobName = [System.Uri]::EscapeDataString($BlobName).Replace('%2F', '/')
+    $requestUri = "https://$AccountName.blob.core.windows.net/${ContainerName}/$encodedBlobName"
+
+    try {
+        $response = Invoke-WebRequest -Method Get -Uri $requestUri -Headers $headers -UseBasicParsing
+        return [string]$response.Content
+    }
+    catch {
+        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
+            return $null
+        }
+
+        throw
+    }
+}
+
+function Get-BlobLastModifiedUtcViaRest {
+    [CmdletBinding()]
+    [OutputType([Nullable[datetime]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AccountName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContainerName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BlobName
+    )
+
+    $headers = Get-StorageBlobRestHeaderSet
+    $encodedBlobName = [System.Uri]::EscapeDataString($BlobName).Replace('%2F', '/')
+    $requestUri = "https://$AccountName.blob.core.windows.net/${ContainerName}/$encodedBlobName"
+
+    try {
+        $response = Invoke-WebRequest -Method Head -Uri $requestUri -Headers $headers -UseBasicParsing
+    }
+    catch {
+        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
+            return $null
+        }
+
+        throw
+    }
+
+    $lastModifiedHeader = [string]$response.Headers['Last-Modified']
+    if ([string]::IsNullOrWhiteSpace($lastModifiedHeader)) {
+        return $null
+    }
+
+    return ([datetimeoffset]$lastModifiedHeader).UtcDateTime
+}
+
 function Clear-BlobContainer {
     [CmdletBinding()]
     param(
@@ -430,23 +586,34 @@ function Clear-BlobContainer {
         [string]$ContainerName
     )
 
-    $blobs = @(Invoke-AzCliJson -Arguments @(
+    try {
+        $blobs = @(Invoke-AzCliJson -Arguments @(
         'storage', 'blob', 'list',
         '--account-name', $AccountName,
         '--container-name', $ContainerName,
         '--auth-mode', 'login',
         '-o', 'json'
-    ))
+        ))
 
-    foreach ($blob in @($blobs)) {
-        if ($null -eq $blob -or [string]::IsNullOrWhiteSpace([string]$blob.name)) {
-            continue
+        foreach ($blob in @($blobs)) {
+            if ($null -eq $blob -or [string]::IsNullOrWhiteSpace([string]$blob.name)) {
+                continue
+            }
+
+            & az storage blob delete --account-name $AccountName --container-name $ContainerName --name ([string]$blob.name) --auth-mode login --output none | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to delete blob '$([string]$blob.name)' from container '$ContainerName'."
+            }
         }
 
-        & az storage blob delete --account-name $AccountName --container-name $ContainerName --name ([string]$blob.name) --auth-mode login --output none | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to delete blob '$([string]$blob.name)' from container '$ContainerName'."
-        }
+        return
+    }
+    catch {
+        Write-ValidationLogLine -Message ("Azure CLI blob listing failed for container '{0}'. Falling back to blob REST: {1}" -f $ContainerName, $_.Exception.Message) -ForegroundColor Yellow
+    }
+
+    foreach ($blobName in @(Get-BlobNamesViaRest -AccountName $AccountName -ContainerName $ContainerName)) {
+        Remove-BlobViaRest -AccountName $AccountName -ContainerName $ContainerName -BlobName $blobName
     }
 }
 
@@ -577,9 +744,10 @@ function Seed-ExportsContainer {
     Clear-BlobContainer -AccountName $AccountName -ContainerName 'exports'
     foreach ($file in $datasetFiles) {
         $contentType = if ($file.Name.EndsWith('.gz')) { 'application/gzip' } else { 'application/json' }
-        & az storage blob upload --account-name $AccountName --container-name exports --name $file.Name --file $file.FullName --content-type $contentType --auth-mode login --overwrite --output none | Out-Null
+        & az storage blob upload --account-name $AccountName --container-name exports --name $file.Name --file $file.FullName --content-type $contentType --auth-mode login --overwrite --output none 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            throw "Failed to upload '$($file.Name)' to the Function App exports container."
+            Write-ValidationLogLine -Message ("Azure CLI blob upload failed for '{0}' in container 'exports'. Falling back to blob REST." -f $file.Name) -ForegroundColor Yellow
+            Set-BlobViaRest -AccountName $AccountName -ContainerName 'exports' -BlobName $file.Name -FilePath $file.FullName -ContentType $contentType
         }
     }
 }
@@ -927,7 +1095,7 @@ function Get-BlobLastModifiedUtc {
 
     $output = & az storage blob show --auth-mode login --account-name $StorageAccountName --container-name $ContainerName --name $BlobName --query properties.lastModified -o tsv 2>$null
     if ($LASTEXITCODE -ne 0) {
-        return $null
+        return (Get-BlobLastModifiedUtcViaRest -AccountName $StorageAccountName -ContainerName $ContainerName -BlobName $BlobName)
     }
 
     $text = ($output -join [Environment]::NewLine).Trim()
@@ -956,7 +1124,7 @@ function Get-BlobTextContent {
     try {
         & az storage blob download --auth-mode login --account-name $StorageAccountName --container-name $ContainerName --name $BlobName --file $downloadPath --output none 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $downloadPath -PathType Leaf)) {
-            return $null
+            return (Get-BlobTextViaRest -AccountName $StorageAccountName -ContainerName $ContainerName -BlobName $BlobName)
         }
 
         return (Get-Content -LiteralPath $downloadPath -Raw)
@@ -1041,9 +1209,9 @@ function Set-FunctionExecutionControlBlob {
     $controlFilePath = Join-Path ([System.IO.Path]::GetTempPath()) ("function-control-{0}.json" -f [guid]::NewGuid().ToString('N'))
     try {
         $controlDocument | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $controlFilePath -Encoding utf8
-        & az storage blob upload --auth-mode login --account-name $StorageAccountName --container-name $script:FunctionExecutionStatusContainerName --name $script:FunctionExecutionControlBlobName --file $controlFilePath --content-type application/json --overwrite --output none | Out-Null
+        & az storage blob upload --auth-mode login --account-name $StorageAccountName --container-name $script:FunctionExecutionStatusContainerName --name $script:FunctionExecutionControlBlobName --file $controlFilePath --content-type application/json --overwrite --output none 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            throw ("Failed to upload Function App execution control blob '{0}'." -f $script:FunctionExecutionControlBlobName)
+            Set-BlobViaRest -AccountName $StorageAccountName -ContainerName $script:FunctionExecutionStatusContainerName -BlobName $script:FunctionExecutionControlBlobName -FilePath $controlFilePath -ContentType 'application/json'
         }
     }
     finally {
@@ -1060,6 +1228,9 @@ function Remove-FunctionExecutionControlBlob {
     )
 
     & az storage blob delete --auth-mode login --account-name $StorageAccountName --container-name $script:FunctionExecutionStatusContainerName --name $script:FunctionExecutionControlBlobName --output none 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Remove-BlobViaRest -AccountName $StorageAccountName -ContainerName $script:FunctionExecutionStatusContainerName -BlobName $script:FunctionExecutionControlBlobName
+    }
 }
 
 function Get-FunctionExecutionActivity {
