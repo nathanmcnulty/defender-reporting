@@ -10,7 +10,7 @@ This playbook keeps performance work measurable while preserving memory headroom
 | Hot phase review | Every refactor that touches normalization, payload generation, validation, or Azure packaging | `pwsh -NoProfile -File .\tests\Invoke-HotPhaseReview.ps1 -DirectoryPath <dataset>` | `hot-phase-review.json`, stdout log, validation audit | Investigate generator or validation phases that regress by more than `5%` or materially shift relative ordering |
 | Synthetic benchmark | After a change that appears to improve or regress performance | `pwsh -NoProfile -File .\tests\Measure-BranchVsMainBenchmark.ps1 -CurrentOnly -DatasetPath <dataset> -ResultsOutputPath <path>` | branch benchmark JSON | Investigate local elapsed or peak memory regressions above `10%` |
 | Local history capture | After any benchmark you expect to compare again later | `pwsh -NoProfile -File .\tests\Record-BenchmarkHistory.ps1 -BenchmarkResultPath <path>` | `.local\benchmark-history\benchmark-history.jsonl`, `latest-summary.md` | Use for longitudinal local tracking; do not update merge-tracked docs for one-off review datasets |
-| Azure acceptance | Before merging perf-sensitive changes and before release packaging changes | `pwsh -NoProfile -File .\build\Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName <name> -FunctionAppName <name>` | live Azure validation artifacts | Investigate runbook or Function App regressions above `10%`; investigate Function execution-unit growth above `15%` |
+| Azure acceptance | Before merging perf-sensitive changes and before release packaging changes | `pwsh -NoProfile -File .\build\Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName <name> -FunctionAppName <name>` | live Azure validation artifacts | Investigate runbook or Function App regressions above `10%`; investigate Function execution-unit growth above `15%`; compare the standard large-dataset run against the accepted envelope in `docs/performance-baselines.md` |
 | Baseline refresh | After an accepted improvement or a durable dataset change | update `docs/performance-baselines.md` and keep raw JSON under `.local/` | doc summary plus local raw artifacts | Capture only after the new behavior is accepted |
 
 ## Dataset cadence
@@ -27,6 +27,12 @@ Standard benchmark dataset:
 - Generator: `pwsh -NoProfile -File .\tests\New-BenchmarkDataset.ps1 -DatasetId benchmark-medium-v1`
 - Series capture: `pwsh -NoProfile -File .\tests\Invoke-BenchmarkSeries.ps1 -BenchmarkDatasetId benchmark-medium-v1 -Iterations 3 -IncludePersistentLocalWorkflow`
 - Shape: `BalancedMediumHeavy`, `1,500` devices, `120,000` vulnerability rows, seed `20260322`
+
+Standard large Azure acceptance dataset:
+- Dataset path: `.local\large-datasets\synthetic-50k-1_5m`
+- Shape: `50,000` devices, `1,500,000` vulnerability rows, `3,097` CVEs
+- Accepted architecture anchor: `monolithic-v1`
+- Compare future hosted Azure acceptance runs against the latest accepted envelope in `docs/performance-baselines.md`
 
 ## Recommended workflow
 
@@ -49,6 +55,14 @@ Timing interpretation:
 - Azure Automation already tracks active execution time from job start to job end.
 - Function App benchmark summaries now treat `function_app.elapsed_seconds` as active execution time when the runtime status blob is available.
 - Function App invoke-to-finish time remains available as `function_app.end_to_end_elapsed_seconds` so queue delay and cold-start variance can still be reviewed separately.
+
+## Rewrite trigger review
+
+- Use the standard `synthetic-50k-1_5m` Azure acceptance lane as the rewrite-trigger anchor for `monolithic-v1`.
+- Do not escalate on a single Azure failure or a single noisy run.
+- Investigate any runbook or hosted Function App elapsed or working-set regression above `10%` relative to the accepted envelope in `docs/performance-baselines.md`.
+- Investigate any hosted Function App execution-unit growth above `15%`.
+- Escalate to the staged rewrite only after two consecutive hosted Function App Azure acceptance failures on the standard large dataset, repeated beyond-threshold regressions that persist after localized fixes, or a new resumability requirement.
 
 ## Hot phase interpretation
 
