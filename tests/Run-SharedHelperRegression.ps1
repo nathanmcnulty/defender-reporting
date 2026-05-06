@@ -3909,24 +3909,37 @@ function Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo {
     Assert-True ($functionMatch.Success) 'Expected validation script to contain Get-FunctionExecutionStatusSummaryText.'
 
     $functionDefinition = $functionMatch.Value -replace '\r?\n\r?\nfunction Set-FunctionExecutionControlBlob\z', ''
-    $summary = & {
-        . ([scriptblock]::Create($functionDefinition))
+    $originalCulture = [System.Globalization.CultureInfo]::CurrentCulture
+    $originalUiCulture = [System.Globalization.CultureInfo]::CurrentUICulture
+    try {
+        $nonEnglishCulture = [System.Globalization.CultureInfo]::GetCultureInfo('de-DE')
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = $nonEnglishCulture
+        [System.Threading.Thread]::CurrentThread.CurrentUICulture = $nonEnglishCulture
 
-        Get-FunctionExecutionStatusSummaryText -StatusDocument ([PSCustomObject]@{
-                status = 'running'
-                stage = 'NormalizeDashboardData'
-                message = 'Streaming content-store vulnerability references into the normalized payload.'
-                pipelineArchitectureVersion = 'monolithic-v1'
-                normalizedPayloadCacheHit = $false
-                normalizedSubPhase = 'StreamContentStoreRefs'
-                normalizedRowCount = 125000
-            })
+        $summary = & {
+            . ([scriptblock]::Create($functionDefinition))
+
+            Get-FunctionExecutionStatusSummaryText -StatusDocument ([PSCustomObject]@{
+                    status = 'running'
+                    stage = 'NormalizeDashboardData'
+                    message = 'Streaming content-store vulnerability references into the normalized payload.'
+                    pipelineArchitectureVersion = 'monolithic-v1'
+                    normalizedPayloadCacheHit = $false
+                    normalizedSubPhase = 'StreamContentStoreRefs'
+                    normalizedRowCount = 125000
+                })
+        }
+    }
+    finally {
+        [System.Threading.Thread]::CurrentThread.CurrentCulture = $originalCulture
+        [System.Threading.Thread]::CurrentThread.CurrentUICulture = $originalUiCulture
     }
 
     Assert-True ($summary -like '*arch=monolithic-v1*') 'Expected validation status summary text to retain architecture metadata.'
     Assert-True ($summary -like '*payloadCache=miss*') 'Expected validation status summary text to retain payload-cache metadata.'
     Assert-True ($summary -like '*subphase=StreamContentStoreRefs*') 'Expected validation status summary text to surface normalization subphase metadata.'
     Assert-True ($summary -like '*rows=125,000*') 'Expected validation status summary text to surface formatted normalization row counts.'
+    Assert-True ($summary -notlike '*rows=125.000*') 'Expected validation status summary text to avoid host-culture row count formatting.'
 }
 
 Write-Output 'Running shared-helper regression checks...'
