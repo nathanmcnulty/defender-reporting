@@ -16,4 +16,7 @@
 
 - Dataset(s):
 - Artifact path(s):
+- Azure acceptance delta vs `docs/performance-baselines.md`:
+- Rewrite-trigger review (`two consecutive failures`, `>10%` elapsed or working-set regression, `>15%` execution-unit growth):
+- Accepted-envelope refresh, if this PR changes it: raw artifact path kept under `.local/`
 - Skipped gates and reason:

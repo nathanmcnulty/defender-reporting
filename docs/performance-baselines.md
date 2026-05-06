@@ -40,22 +40,31 @@ The raw result JSON files from the April 5, 2026 capture remain local-only under
 | `exports-synthetic-live` | `710160384` bytes | `616402944` bytes | `593.3 MB` | `298.2 MB` | `1029.2 MB` | `1029.2 MB` | `1172889600` |
 | `review-synthetic-medium` | `333520896 to 341286912` bytes | `236150784 to 242094080` bytes | `407.6 to 412.5 MB` | `85.2 to 95.0 MB` | `580.6 to 587.6 MB` | `580.2 to 587.6 MB` | `0.0` |
 
+## Standard large Azure acceptance
+
+| Dataset | Shape | Architecture | Azure path | Acceptance markers | Review notes |
+| --- | --- | --- | --- | --- | --- |
+| `synthetic-50k-1_5m` | `50,000` devices, `1,500,000` rows, `3,097` CVEs | `monolithic-v1` | Azure Automation plus hosted Function App (`Dual`) | Function App execution accepted `2026-05-06T06:26:05Z`; dashboard blob written `2026-05-06T06:33:39Z`; blob-write interval `454s` | Treat this as the accepted Stage 1 large Azure envelope anchor until a newer accepted run replaces it. Compare future standard-dataset Azure runs against this record plus the review thresholds in `docs/performance-gate-playbook.md`, and keep the raw Azure validation artifacts local under `.local/`. |
+
 ## Capture notes
 
 - Date captured: `2026-04-05` for the original synthetic replay baselines.
 - Date captured: `2026-04-20` for the hosted `review-synthetic-medium` Azure acceptance replay.
 - Date captured: `2026-04-20` for the durable `benchmark-medium-v1` three-iteration hosted benchmark series.
+- Date captured: `2026-05-06` for the accepted standard large-dataset Azure envelope on `synthetic-50k-1_5m`.
 - Branch intent: current branch only, no `main` comparison.
 - Dataset shapes:
   - `benchmark-medium-v1`: standard durable benchmark dataset generated from the catalog entry in `tests/benchmark-datasets.json` with preset `BalancedMediumHeavy`, seed `20260322`, `120000` rows, and `1500` devices.
   - `exports-synthetic`: original `20K` synthetic replay dataset.
   - `exports-synthetic-live`: shifted synthetic live-export dataset with a latest snapshot date of `2026-04-05`.
   - `review-synthetic-medium`: `BalancedMediumHeavy` review dataset with `120000` rows and `1500` devices, validated against Azure Automation `aa-defender-reporting` and Function App `func-defender-reporting-parallel-0404a`.
+  - `synthetic-50k-1_5m`: standard large Azure acceptance dataset rooted at `.local\large-datasets\synthetic-50k-1_5m`.
 - `benchmark-medium-v1` is now the standard durable dataset for merge-tracked baseline refreshes and supersedes `review-synthetic-medium` for future benchmark-series captures.
 - `benchmark-medium-v1` Function App headline timing now uses active execution time from the runtime status blob; end-to-end invocation time and pickup delay are recorded separately for queue and cold-start review.
 - The durable `benchmark-medium-v1` persistent local cache reuse pass was effectively stable across reruns (`45.44s` to `45.49s`) and is the preferred baseline for normalized-column cache reuse.
 - The hosted review baseline was captured twice on the same dataset and command path. This document records ranges because the cold local normalization pass moved more than the hosted paths across reruns.
 - The local benchmark harness stages a private dataset copy before validation so raw datasets do not get mutated by sidecar regeneration during baseline capture.
+- The standard large Azure entry intentionally records the accepted invocation and blob-write markers that are already tracked in-repo. Preserve the raw Azure validation artifacts under `.local/` when refreshing this section so future updates can add comparable working-set or execution-unit detail without reconstructing the run later.
 
 ## Regenerating the baseline
 
