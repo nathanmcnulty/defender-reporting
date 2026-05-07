@@ -212,6 +212,13 @@ if ($analyzerResults) {
     throw "ScriptAnalyzer returned findings:`n$formatted"
 }
 
+Write-Output 'Running routine semantic review wrapper smoke...'
+Reset-LastExitCode
+& (Join-Path $repoRoot 'tests\Invoke-RoutineSemanticReview.ps1') -WhatIf
+if (Test-LastExitCodeFailed) {
+    throw 'tests/Invoke-RoutineSemanticReview.ps1 smoke failed.'
+}
+
 Write-Output 'Running shared-helper regression tests...'
 & (Join-Path $repoRoot 'tests\Run-SharedHelperRegression.ps1')
 

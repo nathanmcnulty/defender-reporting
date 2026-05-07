@@ -168,7 +168,7 @@ Current state:
 
 Remaining recommendation:
 
-- Add a cheaper routine semantic-review lane that uses a deterministic medium or stratified dataset, then reserve the 50k/1.5m full semantic gate for release sign-off and high-risk normalization changes.
+- Keep the new routine semantic-review lane on a deterministic medium dataset, then reserve the 50k/1.5m full semantic gate for release sign-off and high-risk normalization changes.
 - Investigate durable signature cache artifacts keyed by source fingerprint, normalized payload `PayloadSha256`, semantic canonicalizer version, and validation helper version so repeat validations can reuse unchanged signatures safely.
 - Evaluate whether source and payload signature partitioning can be parallelized without increasing memory pressure or destabilizing Azure Automation/Function App parity.
 - Record phase timings from several local and Azure runs before setting thresholds, because the observed cost is dominated by host performance and dataset size.
@@ -193,5 +193,5 @@ Use these as a menu based on the changed surface.
 2. Keep the manifest, sidecar, and audit source metadata from this branch, then add strict freshness/enrichment controls in a separate behavior-focused change.
 3. Keep the new negative hosted-payload and package-only mismatch checks, then add stale-attestation and baseline mismatch fixtures separately.
 4. Keep the non-visual hosted browser runtime smoke as a local/manual gate until a cross-platform browser dependency is accepted.
-5. Add a cheaper routine semantic-review lane and investigate durable signature cache reuse before making the 50k/1.5m semantic gate part of frequent validation.
+5. Keep the routine semantic-review lane and investigate durable signature cache reuse before making the 50k/1.5m semantic gate part of frequent validation.
 6. Keep the PR checklist for manual heavy gates and revisit benchmark artifact threshold automation after several recorded runs establish normal variance.
