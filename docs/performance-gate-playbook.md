@@ -8,6 +8,7 @@ This playbook keeps performance work measurable while preserving memory headroom
 | --- | --- | --- | --- | --- |
 | Deterministic preflight | Every PR and before any perf run | `pwsh -NoProfile -File .\build\Invoke-RegressionValidation.ps1` | parser, ScriptAnalyzer, fixture smoke | Must pass |
 | Hot phase review | Every refactor that touches normalization, payload generation, validation, or Azure packaging | `pwsh -NoProfile -File .\tests\Invoke-HotPhaseReview.ps1 -DirectoryPath <dataset>` | `hot-phase-review.json`, stdout log, validation audit | Investigate generator or validation phases that regress by more than `5%` or materially shift relative ordering |
+| Routine semantic review | When semantic or validation changes need repeatable review during iteration | `pwsh -NoProfile -File .\tests\Invoke-RoutineSemanticReview.ps1` | medium-dataset `hot-phase-review.json`, audit, stdout/stderr logs | Use before escalating to the `synthetic-50k-1_5m` semantic sign-off lane |
 | Synthetic benchmark | After a change that appears to improve or regress performance | `pwsh -NoProfile -File .\tests\Measure-BranchVsMainBenchmark.ps1 -CurrentOnly -DatasetPath <dataset> -ResultsOutputPath <path>` | branch benchmark JSON | Investigate local elapsed or peak memory regressions above `10%` |
 | Local history capture | After any benchmark you expect to compare again later | `pwsh -NoProfile -File .\tests\Record-BenchmarkHistory.ps1 -BenchmarkResultPath <path>` | `.local\benchmark-history\benchmark-history.jsonl`, `latest-summary.md` | Use for longitudinal local tracking; do not update merge-tracked docs for one-off review datasets |
 | Azure acceptance | Before merging perf-sensitive changes and before release packaging changes | `pwsh -NoProfile -File .\build\Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName <name> -FunctionAppName <name>` | live Azure validation artifacts | Investigate runbook or Function App regressions above `10%`; investigate Function execution-unit growth above `15%`; compare the standard large-dataset run against the accepted envelope in `docs/performance-baselines.md` |
@@ -38,13 +39,14 @@ Standard large Azure acceptance dataset:
 
 1. Run the deterministic preflight.
 2. Run `tests/Invoke-HotPhaseReview.ps1` on the representative local dataset you are using for the refactor.
-3. If validation dominates, run `tests/Invoke-ValidationModeComparison.ps1` to split package-only, force-full validation, and attested validation into separate measured runs.
-4. Review the top generator phases plus the audit `PhaseTimings` values from the hot-phase or validation-mode report.
-5. Make one focused change at a time and re-run the relevant local review command.
-6. Once the local review looks better, refresh `benchmark-medium-v1` if needed and capture a benchmark result with `tests/Measure-BranchVsMainBenchmark.ps1` or `tests/Invoke-BenchmarkSeries.ps1`.
-7. If the change is still favorable, validate the large dataset in Azure.
-8. Append the benchmark JSON to `.local` history with `tests/Record-BenchmarkHistory.ps1`.
-9. Record accepted durable baselines in `docs/performance-baselines.md` and keep raw JSON artifacts under `.local/`.
+3. If semantic or validation behavior changed, run `tests/Invoke-RoutineSemanticReview.ps1` before escalating to the large semantic sign-off lane.
+4. If validation dominates, run `tests/Invoke-ValidationModeComparison.ps1` to split package-only, force-full validation, and attested validation into separate measured runs.
+5. Review the top generator phases plus the audit `PhaseTimings` values from the hot-phase or validation-mode report.
+6. Make one focused change at a time and re-run the relevant local review command.
+7. Once the local review looks better, refresh `benchmark-medium-v1` if needed and capture a benchmark result with `tests/Measure-BranchVsMainBenchmark.ps1` or `tests/Invoke-BenchmarkSeries.ps1`.
+8. If the change is still favorable, validate the large dataset in Azure.
+9. Append the benchmark JSON to `.local` history with `tests/Record-BenchmarkHistory.ps1`.
+10. Record accepted durable baselines in `docs/performance-baselines.md` and keep raw JSON artifacts under `.local/`.
 
 Guardrails:
 - `tests/Invoke-HotPhaseReview.ps1` now defaults to artifact parity review instead of semantic replay.
