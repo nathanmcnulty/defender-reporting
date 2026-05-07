@@ -9383,6 +9383,24 @@ function buildRemediationDetailsModalSections(remediationData) {
         : buildGroupedRemediationDetailsModalSections(remediationData, modalCache);
 }
 
+function deferModalContentRender(modal, renderContent) {
+    const scheduleFrame = (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function')
+        ? window.requestAnimationFrame.bind(window)
+        : (typeof requestAnimationFrame === 'function'
+            ? requestAnimationFrame
+            : callback => window.setTimeout(callback, 0));
+
+    scheduleFrame(() => {
+        scheduleFrame(() => {
+            if (!modal || !modal.classList || !modal.classList.contains('active')) {
+                return;
+            }
+
+            renderContent();
+        });
+    });
+}
+
 function focusModalCloseButton() {
     const closeButton = document.getElementById('closeModalButton');
     if (closeButton) {
@@ -9425,8 +9443,7 @@ function showDetails(remediationData) {
         initCveTooltips();
     }
 
-    // Defer heavy work so the modal + loading indicator render first
-    requestAnimationFrame(() => {
+    deferModalContentRender(modal, () => {
         const { parts, vtRowData } = buildDetailsModalSections(remediationData);
         modalBody.innerHTML = parts.join('');
         const scrollContainer = modalBody.closest('.modal-content');
@@ -9455,7 +9472,7 @@ function showRemediationDetails(data) {
         initCveTooltips();
     }
 
-    requestAnimationFrame(() => {
+    deferModalContentRender(modal, () => {
         const modalSections = buildRemediationDetailsModalSections(data);
         const updateEntries = data.updateEntries && data.updateEntries.length > 0
             ? data.updateEntries
@@ -9492,61 +9509,65 @@ function showImpactAnalysisDetails(item) {
     const modalBody = document.getElementById('modalBody');
     
     modalTitle.textContent = `Remediation Details: ${item.name}`;
+    modalBody.innerHTML = '<p class="loading">Loading details...</p>';
+    lastFocusedElementBeforeModal = (typeof HTMLElement !== 'undefined' && document.activeElement instanceof HTMLElement) ? document.activeElement : null;
+    modal.classList.add('active');
+    modal.setAttribute('aria-hidden', 'false');
+    hideGlobalTooltip();
+    focusModalCloseButton();
 
     if (!document.getElementById('cve-global-tooltip')) {
         initCveTooltips();
     }
-    
-    // Group vulnerabilities by device (using DeviceId as key)
-    const deviceMap = {};
-    item.vulnerabilities.forEach(v => {
-        const deviceKey = getDeviceIdentityKey(v);
-        if (!deviceMap[deviceKey]) {
-            deviceMap[deviceKey] = {
-                name: v.DeviceName,
-                id: v.DeviceId,
-                cves: new Set()
-            };
-        }
-        deviceMap[deviceKey].cves.add(v.CveId);
-    });
 
-    const updateLinksHtml = buildRemediationModalUpdateLinksHtml(
-        item.updateEntries && item.updateEntries.length > 0
-            ? item.updateEntries
-            : buildRemediationUpdateEntriesFromDetails(item.vulnerabilities)
-    );
-    
-    let html = '<h3>Affected Devices</h3>';
-    if (updateLinksHtml) {
-        html = updateLinksHtml + html;
-    }
-    html += '<div class="modal-table-container"><table class="detail-table"><thead><tr>';
-    html += '<th>Device Name</th><th>Device ID</th><th>CVE Count</th><th>CVE IDs</th>';
-    html += '</tr></thead><tbody>';
-    
-    // Sort devices by CVE count descending
-    const sortedDevices = Object.values(deviceMap).sort((a, b) => b.cves.size - a.cves.size);
-    
-    sortedDevices.forEach(device => {
-        const cveList = Array.from(device.cves).sort().join(', ');
-        const deviceIdShort = device.id ? device.id.substring(0, 12) + '...' : '-';
-        
-        html += `<tr>
+    deferModalContentRender(modal, () => {
+        // Group vulnerabilities by device (using DeviceId as key)
+        const deviceMap = {};
+        item.vulnerabilities.forEach(v => {
+            const deviceKey = getDeviceIdentityKey(v);
+            if (!deviceMap[deviceKey]) {
+                deviceMap[deviceKey] = {
+                    name: v.DeviceName,
+                    id: v.DeviceId,
+                    cves: new Set()
+                };
+            }
+            deviceMap[deviceKey].cves.add(v.CveId);
+        });
+
+        const updateLinksHtml = buildRemediationModalUpdateLinksHtml(
+            item.updateEntries && item.updateEntries.length > 0
+                ? item.updateEntries
+                : buildRemediationUpdateEntriesFromDetails(item.vulnerabilities)
+        );
+
+        let html = '<h3>Affected Devices</h3>';
+        if (updateLinksHtml) {
+            html = updateLinksHtml + html;
+        }
+        html += '<div class="modal-table-container"><table class="detail-table"><thead><tr>';
+        html += '<th>Device Name</th><th>Device ID</th><th>CVE Count</th><th>CVE IDs</th>';
+        html += '</tr></thead><tbody>';
+
+        // Sort devices by CVE count descending
+        const sortedDevices = Object.values(deviceMap).sort((a, b) => b.cves.size - a.cves.size);
+
+        sortedDevices.forEach(device => {
+            const cveList = Array.from(device.cves).sort().join(', ');
+            const deviceIdShort = device.id ? device.id.substring(0, 12) + '...' : '-';
+
+            html += `<tr>
             <td>${escapeHtml(device.name)}</td>
             <td title="${escapeHtml(device.id || '')}">${escapeHtml(deviceIdShort)}</td>
             <td>${device.cves.size}</td>
             <td class="modal-cve-list-cell">${escapeHtml(cveList)}</td>
         </tr>`;
+        });
+
+        html += '</tbody></table></div>';
+
+        modalBody.innerHTML = html;
     });
-    
-    html += '</tbody></table></div>';
-    
-    modalBody.innerHTML = html;
-    lastFocusedElementBeforeModal = (typeof HTMLElement !== 'undefined' && document.activeElement instanceof HTMLElement) ? document.activeElement : null;
-    modal.classList.add('active');
-    modal.setAttribute('aria-hidden', 'false');
-    focusModalCloseButton();
 }
 
 /**

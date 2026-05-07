@@ -582,6 +582,56 @@ if (-not $provisioningHelperPath) {
 
 . $provisioningHelperPath
 
+function Get-OptionalArmResource {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Description
+    )
+
+    try {
+        return [PSCustomObject]@{
+            Exists = $true
+            Resource = (Invoke-ArmApi -Path $Path -Method GET -Description $Description)
+        }
+    }
+    catch {
+        if (Test-IsArmNotFoundError -ErrorRecord $_) {
+            return [PSCustomObject]@{
+                Exists = $false
+                Resource = $null
+            }
+        }
+
+        throw
+    }
+}
+
+function Get-CreateOnlyProvisioningPayload {
+    [CmdletBinding()]
+    [OutputType([System.Collections.IDictionary])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Payload,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$IsNewResource
+    )
+
+    if ($IsNewResource) {
+        $Payload['tags'] = $Script:ProvisioningTags
+    }
+    elseif ($Payload.Contains('tags')) {
+        [void]$Payload.Remove('tags')
+    }
+
+    return $Payload
+}
+
 # =============================================================================
 # MAIN SCRIPT
 # =============================================================================
@@ -710,31 +760,17 @@ try {
         }
     }
 
-    $rgAction = if ($rgExists) { 'Update resource group tags' } else { 'Create resource group' }
-    if ($PSCmdlet.ShouldProcess($ResourceGroupName, $rgAction)) {
-        $rgTags = @{}
-        $existingTags = if ($rgExists -and $null -ne $rg) { $rg.PSObject.Properties['tags']?.Value } else { $null }
-        if ($rgExists -and $null -ne $existingTags) {
-            foreach ($property in $existingTags.PSObject.Properties) {
-                $rgTags[$property.Name] = [string]$property.Value
-            }
-        }
-        foreach ($tagKey in $Script:ProvisioningTags.Keys) {
-            $rgTags[$tagKey] = $Script:ProvisioningTags[$tagKey]
-        }
-
+    if ($rgExists) {
+        Write-Host "  Leaving existing resource group tags unchanged" -ForegroundColor Gray
+    }
+    elseif ($PSCmdlet.ShouldProcess($ResourceGroupName, 'Create resource group')) {
         $rgPayload = @{
-            location = if ($rgExists) { $rg.location } else { $Location }
-            tags     = $rgTags
+            location = $Location
+            tags     = $Script:ProvisioningTags
         } | ConvertTo-Json -Depth 5
 
-        Invoke-ArmApi -Path $rgPath -Method PUT -Payload $rgPayload -Description "Create/update resource group" | Out-Null
-        if ($rgExists) {
-            Write-Host "  Resource group tags updated" -ForegroundColor Green
-        }
-        else {
-            Write-Host "  Resource group created" -ForegroundColor Green
-        }
+        Invoke-ArmApi -Path $rgPath -Method PUT -Payload $rgPayload -Description 'Create resource group' | Out-Null
+        Write-Host "  Resource group created" -ForegroundColor Green
     }
 
     # -------------------------------------------------------------------------
@@ -744,10 +780,10 @@ try {
         Write-Host "`nStep 3: Automation Account '$AutomationAccountName'..." -ForegroundColor Cyan
 
         $aaPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/${AutomationAccountName}?api-version=$($Script:ArmApiVersions.AutomationAccount)"
+        $aaState = Get-OptionalArmResource -Path $aaPath -Description 'Check automation account'
 
-        $aaPayload = @{
+        $aaPayload = Get-CreateOnlyProvisioningPayload -Payload ([ordered]@{
             location   = $Location
-            tags       = $Script:ProvisioningTags
             identity   = @{
                 type = "SystemAssigned"
             }
@@ -755,7 +791,7 @@ try {
                 sku              = @{ name = "Basic" }
                 disableLocalAuth = $true
             }
-        } | ConvertTo-Json -Depth 5
+        }) -IsNewResource (-not $aaState.Exists) | ConvertTo-Json -Depth 5
 
         if ($PSCmdlet.ShouldProcess($AutomationAccountName, "Create/update automation account")) {
             $null = Invoke-ArmApi -Path $aaPath -Method PUT -Payload $aaPayload -Description "Create/update automation account"
@@ -786,10 +822,10 @@ try {
         # 3a: Create Flex Consumption App Service Plan
         $planName = "$FunctionAppName-plan"
         $planPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/serverfarms/${planName}?api-version=$($Script:ArmApiVersions.WebApp)"
+        $planState = Get-OptionalArmResource -Path $planPath -Description 'Check Flex Consumption plan'
 
-        $planPayload = @{
+        $planPayload = Get-CreateOnlyProvisioningPayload -Payload ([ordered]@{
             location   = $Location
-            tags       = $Script:ProvisioningTags
             kind       = "functionapp"
             sku        = @{
                 name = "FC1"
@@ -798,7 +834,7 @@ try {
             properties = @{
                 reserved = $true
             }
-        } | ConvertTo-Json -Depth 5
+        }) -IsNewResource (-not $planState.Exists) | ConvertTo-Json -Depth 5
 
         if ($PSCmdlet.ShouldProcess($planName, "Create/update Flex Consumption plan")) {
             $null = Invoke-ArmApi -Path $planPath -Method PUT -Payload $planPayload -Description "Create/update Flex Consumption plan"
@@ -807,10 +843,10 @@ try {
 
         # 3b: Create Function App with system-assigned Managed Identity
         $functionAppPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/${FunctionAppName}?api-version=$($Script:ArmApiVersions.WebApp)"
+        $functionAppState = Get-OptionalArmResource -Path $functionAppPath -Description 'Check Function App'
 
-        $functionAppPayload = @{
+        $functionAppPayload = Get-CreateOnlyProvisioningPayload -Payload ([ordered]@{
             location   = $Location
-            tags       = $Script:ProvisioningTags
             kind       = "functionapp,linux"
             identity   = @{
                 type = "SystemAssigned"
@@ -846,7 +882,7 @@ try {
                     }
                 }
             }
-        } | ConvertTo-Json -Depth 10
+        }) -IsNewResource (-not $functionAppState.Exists) | ConvertTo-Json -Depth 10
 
         if ($PSCmdlet.ShouldProcess($FunctionAppName, "Create/update Function App")) {
             $null = Invoke-ArmApi -Path $functionAppPath -Method PUT -Payload $functionAppPayload -Description "Create/update Function App"
@@ -961,10 +997,9 @@ try {
 
     $saPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/${StorageAccountName}?api-version=$($Script:ArmApiVersions.StorageAccount)"
 
-    $saPayload = @{
+    $saPayload = Get-CreateOnlyProvisioningPayload -Payload ([ordered]@{
         location   = $Location
         kind       = "StorageV2"
-        tags       = $Script:ProvisioningTags
         sku        = @{ name = "Standard_LRS" }
         properties = @{
             minimumTlsVersion          = "TLS1_2"
@@ -976,7 +1011,7 @@ try {
                 defaultAction = "Allow"
             }
         }
-    } | ConvertTo-Json -Depth 5
+    }) -IsNewResource (-not $existingStorageFound) | ConvertTo-Json -Depth 5
 
     if ($PSCmdlet.ShouldProcess($StorageAccountName, "Create/update storage account")) {
         Invoke-ArmApi -Path $saPath -Method PUT -Payload $saPayload -Description "Create/update storage account" | Out-Null
@@ -1257,10 +1292,10 @@ try {
     Write-Host "`nStep 9: Creating custom runtime environment..." -ForegroundColor Cyan
 
     $runtimeEnvPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/runtimeEnvironments/$($Script:RuntimeEnvName)?api-version=$($Script:ArmApiVersions.RuntimeEnvironment)"
+    $runtimeEnvState = Get-OptionalArmResource -Path $runtimeEnvPath -Description 'Check runtime environment'
 
-    $runtimeEnvPayload = @{
+    $runtimeEnvPayload = Get-CreateOnlyProvisioningPayload -Payload ([ordered]@{
         location   = $Location
-        tags       = $Script:ProvisioningTags
         properties = @{
             runtime         = @{
                 language = 'PowerShell'
@@ -1269,7 +1304,7 @@ try {
             defaultPackages = @{}
             description     = 'PowerShell 7.4 with Az.Accounts only (no full Az module or Az CLI)'
         }
-    } | ConvertTo-Json -Depth 5
+    }) -IsNewResource (-not $runtimeEnvState.Exists) | ConvertTo-Json -Depth 5
 
     if ($PSCmdlet.ShouldProcess($Script:RuntimeEnvName, "Create runtime environment")) {
         Invoke-ArmApi -Path $runtimeEnvPath -Method PUT -Payload $runtimeEnvPayload -Description "Create runtime environment" | Out-Null
@@ -1308,10 +1343,10 @@ try {
 
     $runbookName = "Invoke-DashboardPipeline"
     $runbookPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/runbooks/${runbookName}?api-version=$($Script:ArmApiVersions.RuntimeEnvironment)"
+    $runbookState = Get-OptionalArmResource -Path $runbookPath -Description 'Check runbook'
 
-    $runbookPayload = @{
+    $runbookPayload = Get-CreateOnlyProvisioningPayload -Payload ([ordered]@{
         location   = $Location
-        tags       = $Script:ProvisioningTags
         properties = @{
             runbookType        = "PowerShell"
             runtimeEnvironment = $Script:RuntimeEnvName
@@ -1319,7 +1354,7 @@ try {
             logVerbose         = $false
             description        = "Exports MDE vulnerability data, generates the HTML dashboard, and uploads results to blob storage."
         }
-    } | ConvertTo-Json -Depth 5
+    }) -IsNewResource (-not $runbookState.Exists) | ConvertTo-Json -Depth 5
 
     if ($PSCmdlet.ShouldProcess($runbookName, "Create runbook")) {
         Invoke-ArmApi -Path $runbookPath -Method PUT -Payload $runbookPayload -Description "Create runbook" | Out-Null
@@ -1878,10 +1913,10 @@ try {
         Write-Host "`nStep 16: Creating Container Apps Environment '$ContainerAppEnvName'..." -ForegroundColor Cyan
 
         $caEnvPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.App/managedEnvironments/${ContainerAppEnvName}?api-version=$($Script:ArmApiVersions.ContainerAppEnvironment)"
+        $caEnvState = Get-OptionalArmResource -Path $caEnvPath -Description 'Check Container Apps Environment'
 
-        $caEnvPayload = @{
+        $caEnvPayload = Get-CreateOnlyProvisioningPayload -Payload ([ordered]@{
             location   = $Location
-            tags       = $Script:ProvisioningTags
             properties = @{
                 appLogsConfiguration = @{
                     destination = ''
@@ -1894,7 +1929,7 @@ try {
                     }
                 )
             }
-        } | ConvertTo-Json -Depth 5
+        }) -IsNewResource (-not $caEnvState.Exists) | ConvertTo-Json -Depth 5
 
         if ($PSCmdlet.ShouldProcess($ContainerAppEnvName, "Create Container Apps Environment")) {
             Invoke-ArmApi -Path $caEnvPath -Method PUT -Payload $caEnvPayload -Description "Create Container Apps Environment" | Out-Null
@@ -1932,6 +1967,7 @@ try {
         Write-Host "`nStep 17: Creating Container App '$ContainerAppName'..." -ForegroundColor Cyan
 
         $caPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.App/containerApps/${ContainerAppName}?api-version=$($Script:ArmApiVersions.ContainerApp)"
+        $caState = Get-OptionalArmResource -Path $caPath -Description 'Check Container App'
 
         # Build a startup script that downloads the dashboard blob using managed identity,
         # then starts Caddy to serve it. The script is base64-encoded to avoid JSON/shell
@@ -2036,7 +2072,6 @@ exec caddy file-server --root /data --listen :80
         # stripping args with special characters)
         $caObj = [ordered]@{
             location   = $Location
-            tags       = $Script:ProvisioningTags
             identity   = @{ type = 'SystemAssigned' }
             properties = [ordered]@{
                 managedEnvironmentId = $caEnvResourceId
@@ -2082,6 +2117,7 @@ exec caddy file-server --root /data --listen :80
                 }
             }
         }
+        $caObj = Get-CreateOnlyProvisioningPayload -Payload $caObj -IsNewResource (-not $caState.Exists)
         $caPayloadBytes = [System.Text.Json.JsonSerializer]::SerializeToUtf8Bytes($caObj, [System.Text.Json.JsonSerializerOptions]@{ WriteIndented = $false })
         $caPayload = [System.Text.Encoding]::UTF8.GetString($caPayloadBytes)
 
