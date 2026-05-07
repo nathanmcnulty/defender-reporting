@@ -57,7 +57,7 @@ function Wait-WithPolling {
 function Invoke-ArmApi {
     <#
     .SYNOPSIS
-        Wrapper for Invoke-AzRestMethod with standardized error handling.
+        Thin ARM wrapper that prefers Invoke-AzRestMethod and falls back to an explicit bearer token when the current Az session cannot refresh ARM tokens.
     #>
     [CmdletBinding()]
     param(
@@ -86,18 +86,49 @@ function Invoke-ArmApi {
     $params = @{
         Uri = $requestUri
         Method = $Method
-        Headers = @{
-            Authorization = "Bearer $(Get-ArmToken)"
-        }
         ErrorAction = 'Stop'
-        SkipHttpErrorCheck = $true
     }
     if ($Payload) {
-        $params.ContentType = 'application/json'
-        $params.Body = $Payload
+        $params.Payload = $Payload
     }
 
-    $response = Invoke-WebRequest @params
+    $response = $null
+    $shouldFallbackToExplicitToken = $false
+    try {
+        $response = Invoke-AzRestMethod @params
+    }
+    catch {
+        Write-Verbose ("Invoke-AzRestMethod could not complete '{0}': {1}" -f $Description, $_.Exception.Message)
+        $shouldFallbackToExplicitToken = $true
+    }
+
+    if ($null -eq $response) {
+        Write-Verbose ("Invoke-AzRestMethod returned no response for '{0}'. Falling back to explicit token acquisition." -f $Description)
+        $shouldFallbackToExplicitToken = $true
+    }
+
+    if ($null -ne $response -and [int]$response.StatusCode -eq 401) {
+        Write-Verbose ("Invoke-AzRestMethod returned HTTP 401 for '{0}'. Falling back to explicit token acquisition." -f $Description)
+        $shouldFallbackToExplicitToken = $true
+    }
+
+    if ($shouldFallbackToExplicitToken) {
+        $fallbackParams = @{
+            Uri = $requestUri
+            Method = $Method
+            Headers = @{
+                Authorization = "Bearer $(Get-ArmToken)"
+            }
+            ErrorAction = 'Stop'
+            SkipHttpErrorCheck = $true
+        }
+        if ($Payload) {
+            $fallbackParams.ContentType = 'application/json'
+            $fallbackParams.Body = $Payload
+        }
+
+        $response = Invoke-WebRequest @fallbackParams
+    }
 
     if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
         if ($response.Content) {
