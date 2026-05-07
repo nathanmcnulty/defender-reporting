@@ -202,6 +202,22 @@ Long-running review, stress, and benchmark wrappers now emit timestamped heartbe
 
 Use a smaller synthetic dataset while iterating, then move to the benchmark and Azure validation entrypoints once the local hot phases improve.
 
+## Routine semantic review
+
+Run the routine medium-dataset semantic lane with:
+
+```powershell
+pwsh -NoProfile -File .\tests\Invoke-RoutineSemanticReview.ps1
+```
+
+That command:
+- ensures the durable `benchmark-medium-v1` dataset is present
+- runs `Invoke-HotPhaseReview.ps1` against that dataset in `semantic` mode with `-ForceFullValidation`
+- writes the review artifacts under `.local\routine-semantic-review\<timestamp>\`
+- gives you a repeatable semantic review path that is materially cheaper than the `synthetic-50k-1_5m` full sign-off lane
+
+Use this workflow for routine semantic or validation review during iteration, then keep the full `synthetic-50k-1_5m` semantic gate for release sign-off and high-risk normalization changes.
+
 ## Validation mode comparison
 
 Split packaging, full validation, and attested validation into separate measured runs with:
@@ -295,6 +311,7 @@ Recommendations:
 - keep raw benchmark outputs under `.local/`
 - use `.local\benchmark-history\benchmark-history.jsonl` plus `.local\benchmark-history\latest-summary.md` for repeated review and Azure acceptance captures that you want to compare over time
 - prefer `benchmark-medium-v1` plus `Invoke-BenchmarkSeries.ps1` when you need the durable, merge-tracked benchmark cadence instead of an ad hoc review capture
+- prefer `benchmark-medium-v1` plus `Invoke-RoutineSemanticReview.ps1` when you need repeatable semantic review coverage without paying for the 50k/1.5m local replay
 - prefer `benchmark-large-50k-v1` plus `New-SyntheticSnapshotDelta.ps1` when you need a reusable large Azure seed with a fresh incoming snapshot date
 - use the staged local copy behavior in `Measure-BranchVsMainBenchmark.ps1` when benchmarking raw datasets without sidecars
 - use `docs/performance-baselines.md` only for accepted durable datasets that should remain merge-tracked as baseline documentation
