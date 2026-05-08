@@ -82,6 +82,113 @@ function Get-HeartbeatFileStatus {
     }
 }
 
+function Get-StressReportObject {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$Command,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$Validate,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ValidationMode,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$AllowLargeSemanticValidation,
+
+        [Parameter(Mandatory = $true)]
+        [int]$SemanticValidationRowLimit,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ResolvedDashboardPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StdoutPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StderrPath,
+
+        [Parameter(Mandatory = $true)]
+        [System.Diagnostics.Stopwatch]$Stopwatch,
+
+        [Parameter(Mandatory = $true)]
+        [int64]$PeakRssBytes,
+
+        [Parameter(Mandatory = $true)]
+        [double]$PeakRssAt,
+
+        [Parameter(Mandatory = $true)]
+        [int64]$PeakPrivateBytes,
+
+        [Parameter(Mandatory = $true)]
+        [double]$PeakPrivateAt,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Generic.List[object]]$Samples,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$ChildExited,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [int]$ReturnCode
+    )
+
+    return [PSCustomObject]@{
+        name = $Name
+        report_state = if ($ChildExited) { 'completed' } else { 'running' }
+        command = $Command
+        validation = [PSCustomObject]@{
+            validate = $Validate
+            validationMode = if ($Validate) { $ValidationMode } else { 'none' }
+            allowLargeSemanticValidation = $AllowLargeSemanticValidation
+            semanticValidationRowLimit = $SemanticValidationRowLimit
+        }
+        dashboard_output_path = $ResolvedDashboardPath
+        stdout_path = $StdoutPath
+        stderr_path = $StderrPath
+        elapsed_seconds = [math]::Round($Stopwatch.Elapsed.TotalSeconds, 2)
+        return_code = if ($ChildExited) { $ReturnCode } else { $null }
+        peak_tree_rss_bytes = $PeakRssBytes
+        peak_tree_rss_gb = [math]::Round(($PeakRssBytes / 1GB), 3)
+        peak_tree_rss_at_seconds = $PeakRssAt
+        peak_tree_private_bytes = $PeakPrivateBytes
+        peak_tree_private_gb = [math]::Round(($PeakPrivateBytes / 1GB), 3)
+        peak_tree_private_at_seconds = $PeakPrivateAt
+        sample_count = $Samples.Count
+        dashboard_exists = (Test-Path -LiteralPath $ResolvedDashboardPath -PathType Leaf)
+        dashboard_bytes = if (Test-Path -LiteralPath $ResolvedDashboardPath -PathType Leaf) { (Get-Item -LiteralPath $ResolvedDashboardPath).Length } else { 0 }
+        samples = @($Samples)
+    }
+}
+
+function Write-StressReportFile {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ReportPath,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Report
+    )
+
+    $reportDirectory = Split-Path -Path $ReportPath -Parent
+    if (-not [string]::IsNullOrWhiteSpace($reportDirectory) -and -not (Test-Path -LiteralPath $reportDirectory -PathType Container)) {
+        [void](New-Item -Path $reportDirectory -ItemType Directory -Force)
+    }
+
+    $tempReportPath = $ReportPath + '.tmp'
+    $Report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $tempReportPath -Encoding utf8
+    Move-Item -LiteralPath $tempReportPath -Destination $ReportPath -Force
+    return $Report
+}
+
 function Write-StressHeartbeat {
     [CmdletBinding()]
     param(
@@ -185,9 +292,14 @@ $reportPath = if ([string]::IsNullOrWhiteSpace($ReportOutputPath)) {
 else {
     [System.IO.Path]::GetFullPath($ReportOutputPath)
 }
+$reportDirectory = Split-Path -Path $reportPath -Parent
 
 if (-not (Test-Path -LiteralPath $resolvedSyntheticPath -PathType Container)) {
     throw "Synthetic dataset path '$resolvedSyntheticPath' was not found."
+}
+
+if (-not [string]::IsNullOrWhiteSpace($reportDirectory) -and -not (Test-Path -LiteralPath $reportDirectory -PathType Container)) {
+    [void](New-Item -Path $reportDirectory -ItemType Directory -Force)
 }
 
 if ($ClearDashboardCache) {
@@ -306,12 +418,14 @@ function Add-MeasurementSample {
 }
 
 Add-MeasurementSample -Samples $samples -Process $process -Stopwatch $stopwatch -PeakRssBytes ([ref]$peakRssBytes) -PeakRssAt ([ref]$peakRssAt) -PeakPrivateBytes ([ref]$peakPrivateBytes) -PeakPrivateAt ([ref]$peakPrivateAt)
+$report = Write-StressReportFile -ReportPath $reportPath -Report (Get-StressReportObject -Name $Name -Command $command -Validate ($Validate -eq $true) -ValidationMode $ValidationMode -AllowLargeSemanticValidation ($AllowLargeSemanticValidation -eq $true) -SemanticValidationRowLimit $SemanticValidationRowLimit -ResolvedDashboardPath $resolvedDashboardPath -StdoutPath $stdoutPath -StderrPath $stderrPath -Stopwatch $stopwatch -PeakRssBytes $peakRssBytes -PeakRssAt $peakRssAt -PeakPrivateBytes $peakPrivateBytes -PeakPrivateAt $peakPrivateAt -Samples $samples -ChildExited $false)
 Write-StressHeartbeat -Name $Name -Stopwatch $stopwatch -Samples $samples -StdoutPath $stdoutPath -DashboardPath $resolvedDashboardPath -PeakRssBytes $peakRssBytes -PeakPrivateBytes $peakPrivateBytes
 
 while (-not $process.HasExited) {
     Start-Sleep -Seconds $PollIntervalSeconds
     $process.Refresh()
     Add-MeasurementSample -Samples $samples -Process $process -Stopwatch $stopwatch -PeakRssBytes ([ref]$peakRssBytes) -PeakRssAt ([ref]$peakRssAt) -PeakPrivateBytes ([ref]$peakPrivateBytes) -PeakPrivateAt ([ref]$peakPrivateAt)
+    $report = Write-StressReportFile -ReportPath $reportPath -Report (Get-StressReportObject -Name $Name -Command $command -Validate ($Validate -eq $true) -ValidationMode $ValidationMode -AllowLargeSemanticValidation ($AllowLargeSemanticValidation -eq $true) -SemanticValidationRowLimit $SemanticValidationRowLimit -ResolvedDashboardPath $resolvedDashboardPath -StdoutPath $stdoutPath -StderrPath $stderrPath -Stopwatch $stopwatch -PeakRssBytes $peakRssBytes -PeakRssAt $peakRssAt -PeakPrivateBytes $peakPrivateBytes -PeakPrivateAt $peakPrivateAt -Samples $samples -ChildExited $false)
     if (-not $process.HasExited) {
         Write-StressHeartbeat -Name $Name -Stopwatch $stopwatch -Samples $samples -StdoutPath $stdoutPath -DashboardPath $resolvedDashboardPath -PeakRssBytes $peakRssBytes -PeakPrivateBytes $peakPrivateBytes
     }
@@ -322,33 +436,7 @@ $process.Refresh()
 Add-MeasurementSample -Samples $samples -Process $process -Stopwatch $stopwatch -PeakRssBytes ([ref]$peakRssBytes) -PeakRssAt ([ref]$peakRssAt) -PeakPrivateBytes ([ref]$peakPrivateBytes) -PeakPrivateAt ([ref]$peakPrivateAt)
 $stopwatch.Stop()
 
-$report = [PSCustomObject]@{
-    name = $Name
-    command = $command
-    validation = [PSCustomObject]@{
-        validate = ($Validate -eq $true)
-        validationMode = if ($Validate) { $ValidationMode } else { 'none' }
-        allowLargeSemanticValidation = ($AllowLargeSemanticValidation -eq $true)
-        semanticValidationRowLimit = $SemanticValidationRowLimit
-    }
-    dashboard_output_path = $resolvedDashboardPath
-    stdout_path = $stdoutPath
-    stderr_path = $stderrPath
-    elapsed_seconds = [math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
-    return_code = $process.ExitCode
-    peak_tree_rss_bytes = $peakRssBytes
-    peak_tree_rss_gb = [math]::Round(($peakRssBytes / 1GB), 3)
-    peak_tree_rss_at_seconds = $peakRssAt
-    peak_tree_private_bytes = $peakPrivateBytes
-    peak_tree_private_gb = [math]::Round(($peakPrivateBytes / 1GB), 3)
-    peak_tree_private_at_seconds = $peakPrivateAt
-    sample_count = $samples.Count
-    dashboard_exists = (Test-Path -LiteralPath $resolvedDashboardPath -PathType Leaf)
-    dashboard_bytes = if (Test-Path -LiteralPath $resolvedDashboardPath -PathType Leaf) { (Get-Item -LiteralPath $resolvedDashboardPath).Length } else { 0 }
-    samples = @($samples)
-}
-
-$report | ConvertTo-Json -Depth 6 | Set-Content -Path $reportPath -Encoding utf8
+$report = Write-StressReportFile -ReportPath $reportPath -Report (Get-StressReportObject -Name $Name -Command $command -Validate ($Validate -eq $true) -ValidationMode $ValidationMode -AllowLargeSemanticValidation ($AllowLargeSemanticValidation -eq $true) -SemanticValidationRowLimit $SemanticValidationRowLimit -ResolvedDashboardPath $resolvedDashboardPath -StdoutPath $stdoutPath -StderrPath $stderrPath -Stopwatch $stopwatch -PeakRssBytes $peakRssBytes -PeakRssAt $peakRssAt -PeakPrivateBytes $peakPrivateBytes -PeakPrivateAt $peakPrivateAt -Samples $samples -ChildExited $true -ReturnCode $process.ExitCode)
 
 Write-Output ("  Elapsed seconds: {0}" -f $report.elapsed_seconds)
 Write-Output ("  Peak RSS GB: {0}" -f $report.peak_tree_rss_gb)

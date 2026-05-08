@@ -207,6 +207,34 @@ function New-ProgressMarkerState {
     }
 }
 
+function Format-ProgressRemainingTime {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [double]$Seconds
+    )
+
+    if ($Seconds -lt 1) {
+        return '<1s'
+    }
+
+    $remaining = [TimeSpan]::FromSeconds([Math]::Ceiling($Seconds))
+    if ($remaining.TotalDays -ge 1) {
+        return ('{0}d {1}h {2}m' -f [int]$remaining.TotalDays, $remaining.Hours, $remaining.Minutes)
+    }
+
+    if ($remaining.TotalHours -ge 1) {
+        return ('{0}h {1}m {2}s' -f [int]$remaining.TotalHours, $remaining.Minutes, $remaining.Seconds)
+    }
+
+    if ($remaining.TotalMinutes -ge 1) {
+        return ('{0}m {1}s' -f [int]$remaining.TotalMinutes, $remaining.Seconds)
+    }
+
+    return ('{0}s' -f [int]$remaining.TotalSeconds)
+}
+
 function Write-ProgressMarker {
     [CmdletBinding()]
     param(
@@ -239,13 +267,27 @@ function Write-ProgressMarker {
     }
 
     $elapsedSeconds = [Math]::Max(0.001, $State.Stopwatch.Elapsed.TotalSeconds)
-    $rate = [Math]::Round(($Count / $elapsedSeconds), 0)
+    $rawRate = ($Count / $elapsedSeconds)
+    $rate = [Math]::Round($rawRate, 0)
     $markerSuffix = if ($markerType -eq 'heartbeat') { ' [heartbeat]' } else { '' }
     $totalCount = if ($State.PSObject.Properties['TotalCount']) { [long]$State.TotalCount } else { 0L }
     if ($totalCount -gt 0) {
         $boundedCount = [Math]::Min([long]$Count, $totalCount)
         $percentComplete = [Math]::Round(($boundedCount / [double]$totalCount) * 100.0, 1)
-        Write-Information ("  {0}: {1:N0}/{2:N0} {3} processed in {4:N1}s ({5:N0}/s, {6:N1}% complete){7}" -f $State.ActivityName, $boundedCount, $totalCount, $UnitLabel, [Math]::Round($elapsedSeconds, 1), $rate, $percentComplete, $markerSuffix) -InformationAction Continue
+        $remainingCount = [Math]::Max(0L, ($totalCount - $boundedCount))
+        $etaText = if ($remainingCount -gt 0 -and $rawRate -gt 0) {
+            Format-ProgressRemainingTime -Seconds ($remainingCount / $rawRate)
+        }
+        else {
+            $null
+        }
+
+        if ([string]::IsNullOrWhiteSpace($etaText)) {
+            Write-Information ("  {0}: {1:N0}/{2:N0} {3} processed in {4:N1}s ({5:N0}/s, {6:N1}% complete){7}" -f $State.ActivityName, $boundedCount, $totalCount, $UnitLabel, [Math]::Round($elapsedSeconds, 1), $rate, $percentComplete, $markerSuffix) -InformationAction Continue
+        }
+        else {
+            Write-Information ("  {0}: {1:N0}/{2:N0} {3} processed in {4:N1}s ({5:N0}/s, {6:N1}% complete, ETA {7}){8}" -f $State.ActivityName, $boundedCount, $totalCount, $UnitLabel, [Math]::Round($elapsedSeconds, 1), $rate, $percentComplete, $etaText, $markerSuffix) -InformationAction Continue
+        }
     }
     else {
         Write-Information ("  {0}: {1:N0} {2} processed in {3:N1}s ({4:N0}/s){5}" -f $State.ActivityName, $Count, $UnitLabel, [Math]::Round($elapsedSeconds, 1), $rate, $markerSuffix) -InformationAction Continue

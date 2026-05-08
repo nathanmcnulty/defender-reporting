@@ -852,7 +852,17 @@ function Get-SourceVendorSetForAudit {
 
     $vendorSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $processedCount = 0
-    $progressState = New-ProgressMarkerState -ActivityName 'Indexed source vendors' -ProgressInterval $Script:DashboardValidationProgressInterval -HeartbeatIntervalSeconds $Script:DashboardValidationHeartbeatSeconds -CheckInterval 10000 -TotalCount $ExpectedTotalCount
+    $progressStateArguments = @{
+        ActivityName = 'Indexed source vendors'
+        ProgressInterval = $Script:DashboardValidationProgressInterval
+        HeartbeatIntervalSeconds = $Script:DashboardValidationHeartbeatSeconds
+        CheckInterval = 10000
+    }
+    if ($ExpectedTotalCount -gt 0) {
+        $progressStateArguments['TotalCount'] = $ExpectedTotalCount
+    }
+
+    $progressState = New-ProgressMarkerState @progressStateArguments
     Read-SourceAuditRecordStream -ExportsPath $ExportsPath -SkipObservedWindowMerge:$SkipObservedWindowMerge | ForEach-Object {
         $record = $_
         if ((Get-VulnPropertyValue -InputObject $record -Name 'IsOnboarded') -eq $true) {
@@ -871,6 +881,10 @@ function Get-SourceVendorSetForAudit {
 }
 
 function Read-SourceCanonicalSignatureStream {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'AdvancedHunting', Justification = 'Consumed by nested source projection helpers during streaming canonicalization.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'AdvancedHuntingInventory', Justification = 'Consumed by nested source projection helpers during streaming canonicalization.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'NvdCveData', Justification = 'Consumed by nested source projection helpers during streaming canonicalization.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'VendorSet', Justification = 'Consumed by nested source projection helpers during streaming canonicalization.')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -906,9 +920,351 @@ function Read-SourceCanonicalSignatureStream {
     )
 
     $deviceProfiles = @{}
-    $cveEnrichmentCache = @{}
+    $cveProjectionCache = @{}
+    $inventoryProjectionCache = @{}
+    $seenWindowCache = @{}
+    $normalizedAuditDecimalCache = @{}
+    $cveUrlCache = @{}
     $processedCount = 0
-    $progressState = New-ProgressMarkerState -ActivityName 'Canonicalized source' -ProgressInterval $Script:DashboardValidationProgressInterval -HeartbeatIntervalSeconds $Script:DashboardValidationHeartbeatSeconds -CheckInterval 10000 -TotalCount $ExpectedTotalCount
+    $progressStateArguments = @{
+        ActivityName = 'Canonicalized source'
+        ProgressInterval = $Script:DashboardValidationProgressInterval
+        HeartbeatIntervalSeconds = $Script:DashboardValidationHeartbeatSeconds
+        CheckInterval = 10000
+    }
+    if ($ExpectedTotalCount -gt 0) {
+        $progressStateArguments['TotalCount'] = $ExpectedTotalCount
+    }
+
+    $progressState = New-ProgressMarkerState @progressStateArguments
+
+    function Get-CachedSourceSeenWindow {
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $FirstSeenValue,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $LastSeenValue
+        )
+
+        $cacheKey = ([string]$FirstSeenValue) + [string][char]0x001f + ([string]$LastSeenValue)
+        if ($seenWindowCache.ContainsKey($cacheKey)) {
+            return $seenWindowCache[$cacheKey]
+        }
+
+        $seenWindow = Get-NormalizedVulnSeenWindow -FirstSeenValue $FirstSeenValue -LastSeenValue $LastSeenValue
+        $seenWindowCache[$cacheKey] = $seenWindow
+        return $seenWindow
+    }
+
+    function Get-CachedSourceNormalizedAuditDecimalString {
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $Value
+        )
+
+        $cacheKey = [string]$Value
+        if ($normalizedAuditDecimalCache.ContainsKey($cacheKey)) {
+            return $normalizedAuditDecimalCache[$cacheKey]
+        }
+
+        $normalizedValue = [string](Get-NormalizedAuditDecimalString -Value $Value)
+        $normalizedAuditDecimalCache[$cacheKey] = $normalizedValue
+        return $normalizedValue
+    }
+
+    function Get-CachedSourceCveUrl {
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$Url
+        )
+
+        $cacheKey = [string]$Url
+        if ($cveUrlCache.ContainsKey($cacheKey)) {
+            return $cveUrlCache[$cacheKey]
+        }
+
+        $normalizedUrl = [string](Convert-CveUrl -Url $Url)
+        $cveUrlCache[$cacheKey] = $normalizedUrl
+        return $normalizedUrl
+    }
+
+    function Get-SourceDeviceProjection {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$DeviceKey,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $Machine,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$FallbackDeviceName,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$FallbackGroupName,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$FallbackPlatform,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$FallbackOsVersion,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string[]]$FallbackMachineTags = @()
+        )
+
+        if ($deviceProfiles.ContainsKey($DeviceKey)) {
+            return $deviceProfiles[$DeviceKey]
+        }
+
+        $machineProjection = Get-MachineProjection -Machine $Machine
+        $groupName = if ($machineProjection) { [string]$machineProjection.RbacGroupName } else { $FallbackGroupName }
+        if ([string]::IsNullOrWhiteSpace($groupName)) {
+            $groupName = if ([string]::IsNullOrWhiteSpace($FallbackGroupName)) { '(none)' } else { $FallbackGroupName }
+        }
+
+        $projectedDeviceName = if ($machineProjection) { [string]$machineProjection.ComputerDnsName } else { $null }
+        $projectedOsPlatform = if ($machineProjection) { [string]$machineProjection.OSPlatform } else { $null }
+        $projectedOsVersion = if ($machineProjection) { [string]$machineProjection.OSVersion } else { $null }
+        $machineTags = if ($machineProjection -and @($machineProjection.MachineTags).Count -gt 0) {
+            @($machineProjection.MachineTags)
+        }
+        elseif (@($FallbackMachineTags).Count -gt 0) {
+            @($FallbackMachineTags)
+        }
+        else {
+            @()
+        }
+
+        $machineInfo = if ($machineProjection) { $machineProjection.MachineInfo } else { $null }
+        $projection = [PSCustomObject]@{
+            DeviceName = if (-not [string]::IsNullOrWhiteSpace($projectedDeviceName)) { $projectedDeviceName } elseif (-not [string]::IsNullOrWhiteSpace([string]$FallbackDeviceName)) { $FallbackDeviceName } else { '(no machine data)' }
+            RbacGroupName = $groupName
+            OSPlatform = if (-not [string]::IsNullOrWhiteSpace($projectedOsPlatform)) { $projectedOsPlatform } else { $FallbackPlatform }
+            OSVersion = if (-not [string]::IsNullOrWhiteSpace($projectedOsVersion)) { $projectedOsVersion } else { $FallbackOsVersion }
+            MachineTags = Convert-ToCanonicalValidationListString -Value $machineTags
+            MachineIp = if ($machineInfo) { [string]$machineInfo.ip } else { $null }
+            MachineExternalIp = if ($machineInfo) { [string]$machineInfo.eip } else { $null }
+            MachineHealthStatus = if ($machineInfo) { [string]$machineInfo.hs } else { $null }
+            MachineRiskScore = if ($machineInfo) { [string]$machineInfo.rs } else { $null }
+            MachineExposureLevel = if ($machineInfo) { [string]$machineInfo.el } else { $null }
+            MachineDeviceValue = if ($machineInfo) { [string]$machineInfo.dv } else { $null }
+            MachineManagedBy = if ($machineInfo) { [string]$machineInfo.mb } else { $null }
+            MachineAadJoined = [string]([bool]$(if ($machineInfo) { $machineInfo.aad -eq $true } else { $false }))
+            MachineLastSeen = [string](Convert-ToYmdDate -DateValue $(if ($machineInfo) { $machineInfo.ls } else { $null }))
+            MachineFirstSeen = [string](Convert-ToYmdDate -DateValue $(if ($machineInfo) { $machineInfo.fs } else { $null }))
+        }
+
+        $deviceProfiles[$DeviceKey] = $projection
+        return $projection
+    }
+
+    function Get-SourceCveProjection {
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$CveId
+        )
+
+        if ([string]::IsNullOrWhiteSpace($CveId)) {
+            return $null
+        }
+
+        if ($cveProjectionCache.ContainsKey($CveId)) {
+            return $cveProjectionCache[$CveId]
+        }
+
+        $cveEnrichment = Get-SourceCveEnrichment -CveId $CveId -AdvancedHunting $AdvancedHunting -NvdCveData $NvdCveData -VendorSet $VendorSet
+        $exploitAvailable = $cveEnrichment.IsExploitAvailable
+        $projection = [PSCustomObject]@{
+            PublishedDate = [string](Convert-ToYmdDate -DateValue $cveEnrichment.PublishedDate)
+            VulnerabilityDescription = Get-NormalizedAuditText -Text ([string]$cveEnrichment.VulnerabilityDescription)
+            EpssScore = Get-NormalizedAuditDecimalString -Value $cveEnrichment.EpssScore
+            AffectedSoftware = Convert-ToCanonicalValidationListString -Value $cveEnrichment.AffectedSoftware
+            IsExploitAvailable = if ($null -eq $exploitAvailable) { '' } else { [string]([bool]$exploitAvailable) }
+            NvdLastModifiedDate = [string](Convert-ToYmdDate -DateValue $cveEnrichment.NvdLastModifiedDate)
+            NvdBaseScore = Get-NormalizedAuditDecimalString -Value $cveEnrichment.NvdBaseScore
+            NvdBaseSeverity = [string]$cveEnrichment.NvdBaseSeverity
+            NvdVector = [string]$cveEnrichment.NvdVector
+            NvdKevDate = [string](Convert-ToYmdDate -DateValue $cveEnrichment.NvdKevDate)
+            NvdActionDue = [string](Convert-ToYmdDate -DateValue $cveEnrichment.NvdActionDue)
+            NvdRequiredAction = Get-NormalizedAuditText -Text ([string]$cveEnrichment.NvdRequiredAction)
+            NvdWeaknesses = Convert-ToCanonicalValidationListString -Value $cveEnrichment.NvdWeaknesses
+        }
+        $cveProjectionCache[$CveId] = $projection
+        return $projection
+    }
+
+    function Get-SourceInventoryProjection {
+        param(
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$DeviceId,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$SoftwareVendor,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$SoftwareName,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$SoftwareVersion
+        )
+
+        if ($null -eq $AdvancedHuntingInventory) {
+            return $null
+        }
+
+        $inventoryKey = Get-AdvancedHuntingInventoryMatchKey -DeviceId $DeviceId -SoftwareVendor $SoftwareVendor -SoftwareName $SoftwareName -SoftwareVersion $SoftwareVersion
+        if ([string]::IsNullOrWhiteSpace($inventoryKey)) {
+            return $null
+        }
+
+        if ($inventoryProjectionCache.ContainsKey($inventoryKey)) {
+            return $inventoryProjectionCache[$inventoryKey]
+        }
+
+        $inventoryRecord = $AdvancedHuntingInventory[$inventoryKey]
+        $projection = if ($null -eq $inventoryRecord) {
+            $null
+        }
+        else {
+            [PSCustomObject]@{
+                ProductCodeCpe = [string]$inventoryRecord.ProductCodeCpe
+                EndOfSupportStatus = [string]$inventoryRecord.EndOfSupportStatus
+                EndOfSupportDate = [string](Convert-ToYmdDate -DateValue $inventoryRecord.EndOfSupportDate)
+            }
+        }
+
+        $inventoryProjectionCache[$inventoryKey] = $projection
+        return $projection
+    }
+
+    function Get-SourceCanonicalValidationSignature {
+        param(
+            [Parameter(Mandatory = $true)]
+            $Record,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$DeviceId,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $DeviceProjection,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$CveId,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $CveProjection,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $InventoryProjection,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $FirstSeen,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $LastSeen,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$SoftwareVendor,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$SoftwareName,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$SoftwareVersion,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$RecommendedUpdate,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$UpdateId,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            [string]$UpdateUrl
+        )
+
+        $valueDelimiter = [string][char]0x001f
+        return @(
+            [string]$DeviceId
+            [string]$(if ($DeviceProjection) { $DeviceProjection.DeviceName } else { '(no machine data)' })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.RbacGroupName } else { '(none)' })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.OSPlatform } else { $null })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.OSVersion } else { $null })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.MachineTags } else { '' })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.MachineIp } else { $null })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.MachineExternalIp } else { $null })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.MachineHealthStatus } else { $null })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.MachineRiskScore } else { $null })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.MachineExposureLevel } else { $null })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.MachineDeviceValue } else { $null })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.MachineManagedBy } else { $null })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.MachineAadJoined } else { [string][bool]$false })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.MachineLastSeen } else { $null })
+            [string]$(if ($DeviceProjection) { $DeviceProjection.MachineFirstSeen } else { $null })
+            [string]$CveId
+            (Get-CachedSourceNormalizedAuditDecimalString -Value (Get-VulnPropertyValue -InputObject $Record -Name 'CvssScore'))
+            [string](Get-VulnPropertyValue -InputObject $Record -Name 'VulnerabilitySeverityLevel')
+            [string](Get-VulnPropertyValue -InputObject $Record -Name 'ExploitabilityLevel')
+            [string](Get-CachedSourceCveUrl -Url ([string](Get-VulnPropertyValue -InputObject $Record -Name 'CveBatchUrl')))
+            [string](Get-VulnPropertyValue -InputObject $Record -Name 'CveBatchTitle')
+            [string]$(if ($CveProjection) { $CveProjection.PublishedDate } else { $null })
+            [string]$(if ($CveProjection) { $CveProjection.VulnerabilityDescription } else { '' })
+            [string]$(if ($CveProjection) { $CveProjection.EpssScore } else { '' })
+            [string]$(if ($CveProjection) { $CveProjection.AffectedSoftware } else { '' })
+            [string]$(if ($CveProjection) { $CveProjection.IsExploitAvailable } else { '' })
+            [string]$(if ($CveProjection) { $CveProjection.NvdLastModifiedDate } else { $null })
+            [string]$(if ($CveProjection) { $CveProjection.NvdBaseScore } else { '' })
+            [string]$(if ($CveProjection) { $CveProjection.NvdBaseSeverity } else { $null })
+            [string]$(if ($CveProjection) { $CveProjection.NvdVector } else { $null })
+            [string]$(if ($CveProjection) { $CveProjection.NvdKevDate } else { $null })
+            [string]$(if ($CveProjection) { $CveProjection.NvdActionDue } else { $null })
+            [string]$(if ($CveProjection) { $CveProjection.NvdRequiredAction } else { '' })
+            [string]$(if ($CveProjection) { $CveProjection.NvdWeaknesses } else { '' })
+            [string]$SoftwareVendor
+            [string]$SoftwareName
+            [string]$SoftwareVersion
+            [string](Get-VulnPropertyValue -InputObject $Record -Name 'RecommendationReference')
+            [string]$(if ($InventoryProjection) { $InventoryProjection.ProductCodeCpe } else { $null })
+            [string]$(if ($InventoryProjection) { $InventoryProjection.EndOfSupportStatus } else { $null })
+            [string]$(if ($InventoryProjection) { $InventoryProjection.EndOfSupportDate } else { $null })
+            [string](Convert-ToYmdDate -DateValue $FirstSeen)
+            [string](Convert-ToYmdDate -DateValue $LastSeen)
+            [string]([bool]((Get-VulnPropertyValue -InputObject $Record -Name 'SecurityUpdateAvailable') -eq $true))
+            [string]$RecommendedUpdate
+            [string]$UpdateId
+            [string]$UpdateUrl
+            (Convert-ToCanonicalValidationListString -Value (Get-StringArray -Value (Get-VulnPropertyValue -InputObject $Record -Name 'DiskPaths')))
+            (Convert-ToCanonicalValidationListString -Value (Get-StringArray -Value (Get-VulnPropertyValue -InputObject $Record -Name 'RegistryPaths')))
+        ) -join $valueDelimiter
+    }
 
     Read-SourceAuditRecordStream -ExportsPath $ExportsPath -SkipObservedWindowMerge:$SkipObservedWindowMerge | ForEach-Object {
         $record = $_
@@ -940,39 +1296,8 @@ function Read-SourceCanonicalSignatureStream {
             ) -join '|'
         }
 
-        if (-not $deviceProfiles.ContainsKey($deviceKey)) {
-            $machineProjection = Get-MachineProjection -Machine $machine
-            $groupName = if ($machineProjection) { [string]$machineProjection.RbacGroupName } else { $fallbackGroupName }
-            if ([string]::IsNullOrWhiteSpace($groupName)) {
-                $groupName = if ([string]::IsNullOrWhiteSpace($fallbackGroupName)) { '(none)' } else { $fallbackGroupName }
-            }
-
-            $projectedDeviceName = if ($machineProjection) { [string]$machineProjection.ComputerDnsName } else { $null }
-            $projectedOsPlatform = if ($machineProjection) { [string]$machineProjection.OSPlatform } else { $null }
-            $projectedOsVersion = if ($machineProjection) { [string]$machineProjection.OSVersion } else { $null }
-
-            $machineTags = if ($machineProjection -and @($machineProjection.MachineTags).Count -gt 0) {
-                @($machineProjection.MachineTags)
-            }
-            elseif (@($fallbackMachineTags).Count -gt 0) {
-                @($fallbackMachineTags)
-            }
-            else {
-                @()
-            }
-
-            $deviceProfiles[$deviceKey] = [PSCustomObject]@{
-                DeviceName = if (-not [string]::IsNullOrWhiteSpace($projectedDeviceName)) { $projectedDeviceName } elseif (-not [string]::IsNullOrWhiteSpace([string]$fallbackDeviceName)) { $fallbackDeviceName } else { '(no machine data)' }
-                RbacGroupName = $groupName
-                OSPlatform = if (-not [string]::IsNullOrWhiteSpace($projectedOsPlatform)) { $projectedOsPlatform } else { $fallbackPlatform }
-                OSVersion = if (-not [string]::IsNullOrWhiteSpace($projectedOsVersion)) { $projectedOsVersion } else { $fallbackOsVersion }
-                MachineTags = $machineTags
-                MachineInfo = if ($machineProjection) { $machineProjection.MachineInfo } else { $null }
-            }
-        }
-
-        $deviceProfile = $deviceProfiles[$deviceKey]
-        $seenWindow = Get-NormalizedVulnSeenWindow `
+        $deviceProfile = Get-SourceDeviceProjection -DeviceKey $deviceKey -Machine $machine -FallbackDeviceName $fallbackDeviceName -FallbackGroupName $fallbackGroupName -FallbackPlatform $fallbackPlatform -FallbackOsVersion $fallbackOsVersion -FallbackMachineTags $fallbackMachineTags
+        $seenWindow = Get-CachedSourceSeenWindow `
             -FirstSeenValue (Get-VulnPropertyValue -InputObject $record -Name 'FirstSeenTimestamp') `
             -LastSeenValue (Get-VulnPropertyValue -InputObject $record -Name 'LastSeenTimestamp')
         $firstSeen = $seenWindow.FirstSeenTimestamp
@@ -984,18 +1309,11 @@ function Read-SourceCanonicalSignatureStream {
         if (-not $lastSeen) { $lastSeen = '' }
 
         $cveId = [string](Get-VulnPropertyValue -InputObject $record -Name 'CveId')
-        $cveEnrichment = if (-not [string]::IsNullOrWhiteSpace($cveId) -and $cveEnrichmentCache.ContainsKey($cveId)) {
-            $cveEnrichmentCache[$cveId]
-        }
-        else {
-            $resolvedCveEnrichment = Get-SourceCveEnrichment -CveId $cveId -AdvancedHunting $AdvancedHunting -NvdCveData $NvdCveData -VendorSet $VendorSet
-            if (-not [string]::IsNullOrWhiteSpace($cveId)) {
-                $cveEnrichmentCache[$cveId] = $resolvedCveEnrichment
-            }
-
-            $resolvedCveEnrichment
-        }
-        $inventoryEnrichment = Get-SourceInventoryEnrichment -Record $record -AdvancedHuntingInventory $AdvancedHuntingInventory
+        $cveProjection = Get-SourceCveProjection -CveId $cveId
+        $softwareVendor = [string](Get-VulnPropertyValue -InputObject $record -Name 'SoftwareVendor')
+        $softwareName = [string](Get-VulnPropertyValue -InputObject $record -Name 'SoftwareName')
+        $softwareVersion = [string](Get-VulnPropertyValue -InputObject $record -Name 'SoftwareVersion')
+        $inventoryProjection = Get-SourceInventoryProjection -DeviceId $deviceId -SoftwareVendor $softwareVendor -SoftwareName $softwareName -SoftwareVersion $softwareVersion
 
         $recommendedUpdate = [string](Get-VulnPropertyValue -InputObject $record -Name 'RecommendedSecurityUpdate')
         if ([string]::IsNullOrWhiteSpace($recommendedUpdate) -or $recommendedUpdate -eq '--') {
@@ -1005,54 +1323,10 @@ function Read-SourceCanonicalSignatureStream {
         $updateId = if ($recommendedUpdate) { [string](Get-VulnPropertyValue -InputObject $record -Name 'RecommendedSecurityUpdateId') } else { $null }
         $updateUrl = if ($recommendedUpdate) { [string](Get-VulnPropertyValue -InputObject $record -Name 'RecommendedSecurityUpdateUrl') } else { $null }
 
-        $row = [PSCustomObject]@{
-            DeviceId = $deviceId
-            DeviceName = [string]$deviceProfile.DeviceName
-            RbacGroupName = [string]$deviceProfile.RbacGroupName
-            OSPlatform = [string]$deviceProfile.OSPlatform
-            OSVersion = [string]$deviceProfile.OSVersion
-            MachineTags = @($deviceProfile.MachineTags)
-            MachineInfo = $deviceProfile.MachineInfo
-            CveId = $cveId
-            CvssScore = Get-VulnPropertyValue -InputObject $record -Name 'CvssScore'
-            VulnerabilitySeverityLevel = [string](Get-VulnPropertyValue -InputObject $record -Name 'VulnerabilitySeverityLevel')
-            ExploitabilityLevel = [string](Get-VulnPropertyValue -InputObject $record -Name 'ExploitabilityLevel')
-            CveBatchUrl = Convert-CveUrl -Url ([string](Get-VulnPropertyValue -InputObject $record -Name 'CveBatchUrl'))
-            CveBatchTitle = [string](Get-VulnPropertyValue -InputObject $record -Name 'CveBatchTitle')
-            PublishedDate = $cveEnrichment.PublishedDate
-            VulnerabilityDescription = $cveEnrichment.VulnerabilityDescription
-            EpssScore = $cveEnrichment.EpssScore
-            AffectedSoftware = $cveEnrichment.AffectedSoftware
-            IsExploitAvailable = $cveEnrichment.IsExploitAvailable
-            NvdLastModifiedDate = $cveEnrichment.NvdLastModifiedDate
-            NvdBaseScore = $cveEnrichment.NvdBaseScore
-            NvdBaseSeverity = $cveEnrichment.NvdBaseSeverity
-            NvdVector = $cveEnrichment.NvdVector
-            NvdKevDate = $cveEnrichment.NvdKevDate
-            NvdActionDue = $cveEnrichment.NvdActionDue
-            NvdRequiredAction = $cveEnrichment.NvdRequiredAction
-            NvdWeaknesses = $cveEnrichment.NvdWeaknesses
-            SoftwareVendor = [string](Get-VulnPropertyValue -InputObject $record -Name 'SoftwareVendor')
-            SoftwareName = [string](Get-VulnPropertyValue -InputObject $record -Name 'SoftwareName')
-            SoftwareVersion = [string](Get-VulnPropertyValue -InputObject $record -Name 'SoftwareVersion')
-            RecommendationReference = [string](Get-VulnPropertyValue -InputObject $record -Name 'RecommendationReference')
-            ProductCodeCpe = $inventoryEnrichment.ProductCodeCpe
-            EndOfSupportStatus = $inventoryEnrichment.EndOfSupportStatus
-            EndOfSupportDate = $inventoryEnrichment.EndOfSupportDate
-            FirstSeenTimestamp = $firstSeen
-            LastSeenTimestamp = $lastSeen
-            SecurityUpdateAvailable = ((Get-VulnPropertyValue -InputObject $record -Name 'SecurityUpdateAvailable') -eq $true)
-            RecommendedSecurityUpdate = $recommendedUpdate
-            RecommendedSecurityUpdateId = $updateId
-            RecommendedSecurityUpdateUrl = $updateUrl
-            DiskPaths = Get-StringArray -Value (Get-VulnPropertyValue -InputObject $record -Name 'DiskPaths')
-            RegistryPaths = Get-StringArray -Value (Get-VulnPropertyValue -InputObject $record -Name 'RegistryPaths')
-        }
-
         $processedCount++
         Write-ProgressMarker -State $progressState -Count $processedCount -UnitLabel 'row(s)'
 
-        Get-CanonicalValidationRowSignature -Row $row
+        Get-SourceCanonicalValidationSignature -Record $record -DeviceId $deviceId -DeviceProjection $deviceProfile -CveId $cveId -CveProjection $cveProjection -InventoryProjection $inventoryProjection -FirstSeen $firstSeen -LastSeen $lastSeen -SoftwareVendor $softwareVendor -SoftwareName $softwareName -SoftwareVersion $softwareVersion -RecommendedUpdate $recommendedUpdate -UpdateId $updateId -UpdateUrl $updateUrl
     }
 }
 
@@ -1472,136 +1746,334 @@ function Read-PayloadCanonicalSignatureStream {
     }
 
     Invoke-FullGarbageCollection
-    $progressState = New-ProgressMarkerState -ActivityName 'Canonicalized payload' -ProgressInterval $Script:DashboardValidationProgressInterval -HeartbeatIntervalSeconds $Script:DashboardValidationHeartbeatSeconds -CheckInterval 10000
+    $deviceProjectionCache = @{}
+    $cveProjectionCache = @{}
+    $softwareProjectionCache = @{}
+    $updateProjectionCache = @{}
+    $inventoryProjectionCache = @{}
+    $lookupInventoryValues = Get-VulnPropertyValue -InputObject $lookups -Name 'inventory'
+    $progressTotalCount = if ($vulnsFormat -eq 'columns-v1' -and $null -ne $columnDeviceIndices) { $columnDeviceIndices.Length } else { 0 }
+    $progressState = if ($progressTotalCount -gt 0) {
+        New-ProgressMarkerState -ActivityName 'Canonicalized payload' -ProgressInterval $Script:DashboardValidationProgressInterval -HeartbeatIntervalSeconds $Script:DashboardValidationHeartbeatSeconds -CheckInterval 10000 -TotalCount $progressTotalCount
+    }
+    else {
+        New-ProgressMarkerState -ActivityName 'Canonicalized payload' -ProgressInterval $Script:DashboardValidationProgressInterval -HeartbeatIntervalSeconds $Script:DashboardValidationHeartbeatSeconds -CheckInterval 10000
+    }
 
-    function Get-PayloadCanonicalValidationRow {
+    function Get-PayloadLookupCanonicalListString {
         param(
             [Parameter(Mandatory = $true)]
-            $VulnRecord
+            $LookupValues,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $Indices
         )
 
-        $device = Get-PayloadLookupItem -LookupValues $lookups.devices -Index $VulnRecord[0]
-        $cve = Get-PayloadLookupItem -LookupValues $lookups.cves -Index $VulnRecord[1]
-        $software = Get-PayloadLookupItem -LookupValues $lookups.software -Index $VulnRecord[2]
+        $resolvedValues = [System.Collections.Generic.List[string]]::new()
+        foreach ($index in @($Indices)) {
+            if ($null -eq $index) {
+                continue
+            }
+
+            $resolvedText = Get-PayloadLookupText -LookupValues $LookupValues -Index $index
+            if ($null -ne $resolvedText) {
+                $resolvedValues.Add($resolvedText)
+            }
+        }
+
+        if ($resolvedValues.Count -eq 0) {
+            return ''
+        }
+
+        return (Convert-ToCanonicalValidationListString -Value $resolvedValues)
+    }
+
+    function Get-PayloadDeviceProjection {
+        param(
+            [Parameter(Mandatory = $true)]
+            [int]$DeviceIndex
+        )
+
+        if ($DeviceIndex -lt 0) {
+            return $null
+        }
+
+        if ($deviceProjectionCache.ContainsKey($DeviceIndex)) {
+            return $deviceProjectionCache[$DeviceIndex]
+        }
+
+        $device = Get-PayloadLookupItem -LookupValues $lookups.devices -Index $DeviceIndex
+        if ($null -eq $device) {
+            return $null
+        }
+
         $machineInfo = Get-VulnPropertyValue -InputObject $device -Name 'm'
-
-        $resolvedMachineTags = [System.Collections.Generic.List[string]]::new()
-        foreach ($tagIndex in @((Get-VulnPropertyValue -InputObject $device -Name 't'))) {
-            if ($null -eq $tagIndex) { continue }
-            $tagText = Get-PayloadLookupText -LookupValues $lookups.tags -Index $tagIndex
-            if ($null -ne $tagText) {
-                $resolvedMachineTags.Add($tagText)
-            }
-        }
-
-        $resolvedDiskPaths = [System.Collections.Generic.List[string]]::new()
-        foreach ($pathIndex in @($VulnRecord[8])) {
-            if ($null -eq $pathIndex -or [int]$pathIndex -lt 0) { continue }
-            $pathText = Get-PayloadLookupText -LookupValues $lookups.diskPaths -Index $pathIndex
-            if ($null -ne $pathText) {
-                $resolvedDiskPaths.Add($pathText)
-            }
-        }
-
-        $resolvedRegistryPaths = [System.Collections.Generic.List[string]]::new()
-        foreach ($pathIndex in @($VulnRecord[9])) {
-            if ($null -eq $pathIndex -or [int]$pathIndex -lt 0) { continue }
-            $pathText = Get-PayloadLookupText -LookupValues $lookups.regPaths -Index $pathIndex
-            if ($null -ne $pathText) {
-                $resolvedRegistryPaths.Add($pathText)
-            }
-        }
-
-        $resolvedAffectedSoftware = [System.Collections.Generic.List[string]]::new()
-        foreach ($softwareIndex in @((Get-VulnPropertyValue -InputObject $cve -Name 'as'))) {
-            if ($null -eq $softwareIndex) { continue }
-            $softwareText = Get-PayloadLookupText -LookupValues $lookups.affSoftware -Index $softwareIndex
-            if ($null -ne $softwareText) {
-                $resolvedAffectedSoftware.Add($softwareText)
-            }
-        }
-
         $groupName = Get-PayloadLookupText -LookupValues $lookups.groups -Index (Get-VulnPropertyValue -InputObject $device -Name 'g')
         $platformName = Get-PayloadLookupText -LookupValues $lookups.platforms -Index (Get-VulnPropertyValue -InputObject $device -Name 'o')
-        $severityName = Get-PayloadLookupText -LookupValues $lookups.severities -Index (Get-VulnPropertyValue -InputObject $cve -Name 'sv')
-        $exploitabilityName = Get-PayloadLookupText -LookupValues $lookups.exploitLevels -Index (Get-VulnPropertyValue -InputObject $cve -Name 'ex')
-        $batchTitle = Get-PayloadLookupText -LookupValues $lookups.batchTitles -Index (Get-VulnPropertyValue -InputObject $cve -Name 'bt')
-        $softwareVendor = Get-PayloadLookupText -LookupValues $lookups.vendors -Index (Get-VulnPropertyValue -InputObject $software -Name 'v')
-        $softwareVersion = Get-PayloadLookupText -LookupValues $lookups.versions -Index $VulnRecord[3]
-        $firstSeenDate = Get-PayloadLookupText -LookupValues $lookups.dates -Index $VulnRecord[4]
-        $lastSeenDate = Get-PayloadLookupText -LookupValues $lookups.dates -Index $VulnRecord[5]
-        $updateObject = if ($VulnRecord[7] -ge 0) { Get-PayloadLookupItem -LookupValues $lookups.updates -Index $VulnRecord[7] } else { $null }
-        $updateName = if ($updateObject) { Get-VulnPropertyValue -InputObject $updateObject -Name 'n' } else { $null }
-        $updateId = if ($updateObject) { Get-VulnPropertyValue -InputObject $updateObject -Name 'id' } else { $null }
-        $updateUrl = if ($updateObject) { Get-VulnPropertyValue -InputObject $updateObject -Name 'url' } else { $null }
-        $inventoryLookupValues = Get-VulnPropertyValue -InputObject $lookups -Name 'inventory'
-        $inventoryObject = if ($null -ne $inventoryLookupValues -and $VulnRecord.Count -gt 10 -and [int]$VulnRecord[10] -ge 0) {
-            Get-PayloadLookupItem -LookupValues $inventoryLookupValues -Index $VulnRecord[10]
-        }
-        else {
-            $null
-        }
-        $nvdWeaknesses = @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $cve -Name 'nw'))
-
-        return [PSCustomObject]@{
+        $projection = [PSCustomObject]@{
             DeviceId = [string](Get-VulnPropertyValue -InputObject $device -Name 'id')
             DeviceName = [string](Get-VulnPropertyValue -InputObject $device -Name 'n')
             RbacGroupName = if ($groupName -and -not [string]::IsNullOrWhiteSpace([string]$groupName)) { [string]$groupName } else { '(none)' }
             OSPlatform = if ($null -ne $platformName) { [string]$platformName } else { $null }
             OSVersion = [string](Get-VulnPropertyValue -InputObject $device -Name 'ov')
-            MachineTags = if ($resolvedMachineTags.Count -gt 0) { @($resolvedMachineTags) } else { $null }
-            MachineInfo = if ($machineInfo) {
-                [PSCustomObject]@{
-                    ip = [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'ip')
-                    eip = [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'eip')
-                    hs = [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'hs')
-                    rs = [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'rs')
-                    el = [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'el')
-                    dv = [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'dv')
-                    mb = [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'mb')
-                    aad = ((Get-VulnPropertyValue -InputObject $machineInfo -Name 'aad') -eq $true)
-                    ls = Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $machineInfo -Name 'ls')
-                    fs = Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $machineInfo -Name 'fs')
-                }
-            }
-            else {
-                $null
-            }
+            MachineTags = Get-PayloadLookupCanonicalListString -LookupValues $lookups.tags -Indices (Get-VulnPropertyValue -InputObject $device -Name 't')
+            MachineIp = if ($machineInfo) { [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'ip') } else { $null }
+            MachineExternalIp = if ($machineInfo) { [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'eip') } else { $null }
+            MachineHealthStatus = if ($machineInfo) { [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'hs') } else { $null }
+            MachineRiskScore = if ($machineInfo) { [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'rs') } else { $null }
+            MachineExposureLevel = if ($machineInfo) { [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'el') } else { $null }
+            MachineDeviceValue = if ($machineInfo) { [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'dv') } else { $null }
+            MachineManagedBy = if ($machineInfo) { [string](Get-VulnPropertyValue -InputObject $machineInfo -Name 'mb') } else { $null }
+            MachineAadJoined = [string]([bool]$(if ($machineInfo) { (Get-VulnPropertyValue -InputObject $machineInfo -Name 'aad') -eq $true } else { $false }))
+            MachineLastSeen = [string](Convert-ToYmdDate -DateValue $(if ($machineInfo) { Get-VulnPropertyValue -InputObject $machineInfo -Name 'ls' } else { $null }))
+            MachineFirstSeen = [string](Convert-ToYmdDate -DateValue $(if ($machineInfo) { Get-VulnPropertyValue -InputObject $machineInfo -Name 'fs' } else { $null }))
+        }
+
+        $deviceProjectionCache[$DeviceIndex] = $projection
+        return $projection
+    }
+
+    function Get-PayloadCveProjection {
+        param(
+            [Parameter(Mandatory = $true)]
+            [int]$CveIndex
+        )
+
+        if ($CveIndex -lt 0) {
+            return $null
+        }
+
+        if ($cveProjectionCache.ContainsKey($CveIndex)) {
+            return $cveProjectionCache[$CveIndex]
+        }
+
+        $cve = Get-PayloadLookupItem -LookupValues $lookups.cves -Index $CveIndex
+        if ($null -eq $cve) {
+            return $null
+        }
+
+        $severityName = Get-PayloadLookupText -LookupValues $lookups.severities -Index (Get-VulnPropertyValue -InputObject $cve -Name 'sv')
+        $exploitabilityName = Get-PayloadLookupText -LookupValues $lookups.exploitLevels -Index (Get-VulnPropertyValue -InputObject $cve -Name 'ex')
+        $batchTitle = Get-PayloadLookupText -LookupValues $lookups.batchTitles -Index (Get-VulnPropertyValue -InputObject $cve -Name 'bt')
+        $exploitAvailable = Get-VulnPropertyValue -InputObject $cve -Name 'ea'
+        $projection = [PSCustomObject]@{
             CveId = [string](Get-VulnPropertyValue -InputObject $cve -Name 'id')
-            CvssScore = Get-VulnPropertyValue -InputObject $cve -Name 'sc'
+            CvssScore = Get-NormalizedAuditDecimalString -Value (Get-VulnPropertyValue -InputObject $cve -Name 'sc')
             VulnerabilitySeverityLevel = if ($null -ne $severityName) { [string]$severityName } else { $null }
             ExploitabilityLevel = if ($null -ne $exploitabilityName) { [string]$exploitabilityName } else { $null }
             CveBatchUrl = [string](Get-VulnPropertyValue -InputObject $cve -Name 'u')
             CveBatchTitle = if ($null -ne $batchTitle) { [string]$batchTitle } else { $null }
-            PublishedDate = Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $cve -Name 'pd')
-            VulnerabilityDescription = [string](Get-VulnPropertyValue -InputObject $cve -Name 'desc')
-            EpssScore = Get-VulnPropertyValue -InputObject $cve -Name 'ep'
-            AffectedSoftware = if ($resolvedAffectedSoftware.Count -gt 0) { @($resolvedAffectedSoftware) } else { $null }
-            IsExploitAvailable = if ($null -eq (Get-VulnPropertyValue -InputObject $cve -Name 'ea')) { $null } else { ((Get-VulnPropertyValue -InputObject $cve -Name 'ea') -eq $true) }
-            NvdLastModifiedDate = Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $cve -Name 'nlm')
-            NvdBaseScore = Get-VulnPropertyValue -InputObject $cve -Name 'nbs'
+            PublishedDate = [string](Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $cve -Name 'pd'))
+            VulnerabilityDescription = Get-NormalizedAuditText -Text ([string](Get-VulnPropertyValue -InputObject $cve -Name 'desc'))
+            EpssScore = Get-NormalizedAuditDecimalString -Value (Get-VulnPropertyValue -InputObject $cve -Name 'ep')
+            AffectedSoftware = Get-PayloadLookupCanonicalListString -LookupValues $lookups.affSoftware -Indices (Get-VulnPropertyValue -InputObject $cve -Name 'as')
+            IsExploitAvailable = if ($null -eq $exploitAvailable) { '' } else { [string]($exploitAvailable -eq $true) }
+            NvdLastModifiedDate = [string](Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $cve -Name 'nlm'))
+            NvdBaseScore = Get-NormalizedAuditDecimalString -Value (Get-VulnPropertyValue -InputObject $cve -Name 'nbs')
             NvdBaseSeverity = [string](Get-VulnPropertyValue -InputObject $cve -Name 'nsv')
             NvdVector = [string](Get-VulnPropertyValue -InputObject $cve -Name 'nvec')
-            NvdKevDate = Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $cve -Name 'nkev')
-            NvdActionDue = Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $cve -Name 'ndu')
-            NvdRequiredAction = [string](Get-VulnPropertyValue -InputObject $cve -Name 'nact')
-            NvdWeaknesses = if ($nvdWeaknesses.Count -gt 0) { $nvdWeaknesses } else { $null }
+            NvdKevDate = [string](Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $cve -Name 'nkev'))
+            NvdActionDue = [string](Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $cve -Name 'ndu'))
+            NvdRequiredAction = Get-NormalizedAuditText -Text ([string](Get-VulnPropertyValue -InputObject $cve -Name 'nact'))
+            NvdWeaknesses = Convert-ToCanonicalValidationListString -Value (Get-StringArray -Value (Get-VulnPropertyValue -InputObject $cve -Name 'nw'))
+        }
+
+        $cveProjectionCache[$CveIndex] = $projection
+        return $projection
+    }
+
+    function Get-PayloadSoftwareProjection {
+        param(
+            [Parameter(Mandatory = $true)]
+            [int]$SoftwareIndex
+        )
+
+        if ($SoftwareIndex -lt 0) {
+            return $null
+        }
+
+        if ($softwareProjectionCache.ContainsKey($SoftwareIndex)) {
+            return $softwareProjectionCache[$SoftwareIndex]
+        }
+
+        $software = Get-PayloadLookupItem -LookupValues $lookups.software -Index $SoftwareIndex
+        if ($null -eq $software) {
+            return $null
+        }
+
+        $softwareVendor = Get-PayloadLookupText -LookupValues $lookups.vendors -Index (Get-VulnPropertyValue -InputObject $software -Name 'v')
+        $projection = [PSCustomObject]@{
             SoftwareVendor = if ($null -ne $softwareVendor) { [string]$softwareVendor } else { $null }
             SoftwareName = [string](Get-VulnPropertyValue -InputObject $software -Name 'n')
-            SoftwareVersion = if ($null -ne $softwareVersion) { [string]$softwareVersion } else { $null }
             RecommendationReference = [string](Get-VulnPropertyValue -InputObject $software -Name 'r')
-            ProductCodeCpe = if ($inventoryObject) { [string](Get-VulnPropertyValue -InputObject $inventoryObject -Name 'cpe') } else { $null }
-            EndOfSupportStatus = if ($inventoryObject) { [string](Get-VulnPropertyValue -InputObject $inventoryObject -Name 'eos') } else { $null }
-            EndOfSupportDate = if ($inventoryObject) { (Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $inventoryObject -Name 'eod')) } else { $null }
-            FirstSeenTimestamp = if ($null -ne $firstSeenDate) { (Convert-ToYmdDate -DateValue $firstSeenDate) ?? '' } else { '' }
-            LastSeenTimestamp = if ($null -ne $lastSeenDate) { (Convert-ToYmdDate -DateValue $lastSeenDate) ?? '' } else { '' }
-            SecurityUpdateAvailable = ($VulnRecord[6] -eq 1)
-            RecommendedSecurityUpdate = if ($updateObject) { [string]$(if ($null -ne $updateName) { $updateName } else { $updateObject }) } else { $null }
-            RecommendedSecurityUpdateId = if ($updateObject -and $null -ne $updateId) { [string]$updateId } else { $null }
-            RecommendedSecurityUpdateUrl = if ($updateObject -and $null -ne $updateUrl) { [string]$updateUrl } else { $null }
-            DiskPaths = if ($resolvedDiskPaths.Count -gt 0) { @($resolvedDiskPaths) } else { $null }
-            RegistryPaths = if ($resolvedRegistryPaths.Count -gt 0) { @($resolvedRegistryPaths) } else { $null }
         }
+
+        $softwareProjectionCache[$SoftwareIndex] = $projection
+        return $projection
+    }
+
+    function Get-PayloadUpdateProjection {
+        param(
+            [Parameter(Mandatory = $true)]
+            [int]$UpdateIndex
+        )
+
+        if ($UpdateIndex -lt 0) {
+            return $null
+        }
+
+        if ($updateProjectionCache.ContainsKey($UpdateIndex)) {
+            return $updateProjectionCache[$UpdateIndex]
+        }
+
+        $updateObject = Get-PayloadLookupItem -LookupValues $lookups.updates -Index $UpdateIndex
+        if ($null -eq $updateObject) {
+            return $null
+        }
+
+        $updateName = Get-VulnPropertyValue -InputObject $updateObject -Name 'n'
+        $updateId = Get-VulnPropertyValue -InputObject $updateObject -Name 'id'
+        $updateUrl = Get-VulnPropertyValue -InputObject $updateObject -Name 'url'
+        $projection = [PSCustomObject]@{
+            RecommendedSecurityUpdate = [string]$(if ($null -ne $updateName) { $updateName } else { $updateObject })
+            RecommendedSecurityUpdateId = if ($null -ne $updateId) { [string]$updateId } else { $null }
+            RecommendedSecurityUpdateUrl = if ($null -ne $updateUrl) { [string]$updateUrl } else { $null }
+        }
+
+        $updateProjectionCache[$UpdateIndex] = $projection
+        return $projection
+    }
+
+    function Get-PayloadInventoryProjection {
+        param(
+            [Parameter(Mandatory = $true)]
+            [int]$InventoryIndex
+        )
+
+        if ($InventoryIndex -lt 0 -or $null -eq $lookupInventoryValues) {
+            return $null
+        }
+
+        if ($inventoryProjectionCache.ContainsKey($InventoryIndex)) {
+            return $inventoryProjectionCache[$InventoryIndex]
+        }
+
+        $inventoryObject = Get-PayloadLookupItem -LookupValues $lookupInventoryValues -Index $InventoryIndex
+        if ($null -eq $inventoryObject) {
+            return $null
+        }
+
+        $projection = [PSCustomObject]@{
+            ProductCodeCpe = [string](Get-VulnPropertyValue -InputObject $inventoryObject -Name 'cpe')
+            EndOfSupportStatus = [string](Get-VulnPropertyValue -InputObject $inventoryObject -Name 'eos')
+            EndOfSupportDate = [string](Convert-ToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $inventoryObject -Name 'eod'))
+        }
+
+        $inventoryProjectionCache[$InventoryIndex] = $projection
+        return $projection
+    }
+
+    function Get-PayloadCanonicalValidationSignature {
+        param(
+            [Parameter(Mandatory = $true)]
+            [int]$DeviceIndex,
+
+            [Parameter(Mandatory = $true)]
+            [int]$CveIndex,
+
+            [Parameter(Mandatory = $true)]
+            [int]$SoftwareIndex,
+
+            [Parameter(Mandatory = $true)]
+            [int]$VersionIndex,
+
+            [Parameter(Mandatory = $true)]
+            [int]$FirstSeenIndex,
+
+            [Parameter(Mandatory = $true)]
+            [int]$LastSeenIndex,
+
+            [Parameter(Mandatory = $true)]
+            [int]$UpdateAvailabilityFlag,
+
+            [Parameter(Mandatory = $true)]
+            [int]$UpdateIndex,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $DiskPathIndices,
+
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $RegistryPathIndices,
+
+            [Parameter(Mandatory = $false)]
+            [int]$InventoryIndex = -1
+        )
+
+        $valueDelimiter = [string][char]0x001f
+        $deviceProjection = Get-PayloadDeviceProjection -DeviceIndex $DeviceIndex
+        $cveProjection = Get-PayloadCveProjection -CveIndex $CveIndex
+        $softwareProjection = Get-PayloadSoftwareProjection -SoftwareIndex $SoftwareIndex
+        $updateProjection = if ($UpdateIndex -ge 0) { Get-PayloadUpdateProjection -UpdateIndex $UpdateIndex } else { $null }
+        $inventoryProjection = if ($InventoryIndex -ge 0) { Get-PayloadInventoryProjection -InventoryIndex $InventoryIndex } else { $null }
+        $softwareVersion = Get-PayloadLookupText -LookupValues $lookups.versions -Index $VersionIndex
+        $firstSeenDate = Get-PayloadLookupText -LookupValues $lookups.dates -Index $FirstSeenIndex
+        $lastSeenDate = Get-PayloadLookupText -LookupValues $lookups.dates -Index $LastSeenIndex
+
+        return @(
+            [string]$(if ($deviceProjection) { $deviceProjection.DeviceId } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.DeviceName } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.RbacGroupName } else { '(none)' })
+            [string]$(if ($deviceProjection) { $deviceProjection.OSPlatform } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.OSVersion } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.MachineTags } else { '' })
+            [string]$(if ($deviceProjection) { $deviceProjection.MachineIp } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.MachineExternalIp } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.MachineHealthStatus } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.MachineRiskScore } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.MachineExposureLevel } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.MachineDeviceValue } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.MachineManagedBy } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.MachineAadJoined } else { [string][bool]$false })
+            [string]$(if ($deviceProjection) { $deviceProjection.MachineLastSeen } else { $null })
+            [string]$(if ($deviceProjection) { $deviceProjection.MachineFirstSeen } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.CveId } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.CvssScore } else { '' })
+            [string]$(if ($cveProjection) { $cveProjection.VulnerabilitySeverityLevel } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.ExploitabilityLevel } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.CveBatchUrl } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.CveBatchTitle } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.PublishedDate } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.VulnerabilityDescription } else { '' })
+            [string]$(if ($cveProjection) { $cveProjection.EpssScore } else { '' })
+            [string]$(if ($cveProjection) { $cveProjection.AffectedSoftware } else { '' })
+            [string]$(if ($cveProjection) { $cveProjection.IsExploitAvailable } else { '' })
+            [string]$(if ($cveProjection) { $cveProjection.NvdLastModifiedDate } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.NvdBaseScore } else { '' })
+            [string]$(if ($cveProjection) { $cveProjection.NvdBaseSeverity } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.NvdVector } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.NvdKevDate } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.NvdActionDue } else { $null })
+            [string]$(if ($cveProjection) { $cveProjection.NvdRequiredAction } else { '' })
+            [string]$(if ($cveProjection) { $cveProjection.NvdWeaknesses } else { '' })
+            [string]$(if ($softwareProjection) { $softwareProjection.SoftwareVendor } else { $null })
+            [string]$(if ($softwareProjection) { $softwareProjection.SoftwareName } else { $null })
+            [string]$softwareVersion
+            [string]$(if ($softwareProjection) { $softwareProjection.RecommendationReference } else { $null })
+            [string]$(if ($inventoryProjection) { $inventoryProjection.ProductCodeCpe } else { $null })
+            [string]$(if ($inventoryProjection) { $inventoryProjection.EndOfSupportStatus } else { $null })
+            [string]$(if ($inventoryProjection) { $inventoryProjection.EndOfSupportDate } else { $null })
+            [string]$(if ($null -ne $firstSeenDate) { (Convert-ToYmdDate -DateValue $firstSeenDate) ?? '' } else { '' })
+            [string]$(if ($null -ne $lastSeenDate) { (Convert-ToYmdDate -DateValue $lastSeenDate) ?? '' } else { '' })
+            [string]([bool]($UpdateAvailabilityFlag -eq 1))
+            [string]$(if ($updateProjection) { $updateProjection.RecommendedSecurityUpdate } else { $null })
+            [string]$(if ($updateProjection) { $updateProjection.RecommendedSecurityUpdateId } else { $null })
+            [string]$(if ($updateProjection) { $updateProjection.RecommendedSecurityUpdateUrl } else { $null })
+            [string](Get-PayloadLookupCanonicalListString -LookupValues $lookups.diskPaths -Indices $DiskPathIndices)
+            [string](Get-PayloadLookupCanonicalListString -LookupValues $lookups.regPaths -Indices $RegistryPathIndices)
+        ) -join $valueDelimiter
     }
 
     if ($vulnsFormat -eq 'rows-v1') {
@@ -1614,13 +2086,25 @@ function Read-PayloadCanonicalSignatureStream {
             }
         }
 
+        $progressState.TotalCount = $payloadRows.Count
         $processedCount = 0
         foreach ($v in $payloadRows) {
             if ($null -eq $v) { continue }
             $processedCount++
             Write-ProgressMarker -State $progressState -Count $processedCount -UnitLabel 'row(s)'
 
-            Get-CanonicalValidationRowSignature -Row (Get-PayloadCanonicalValidationRow -VulnRecord $v)
+            Get-PayloadCanonicalValidationSignature `
+                -DeviceIndex ([int]$v[0]) `
+                -CveIndex ([int]$v[1]) `
+                -SoftwareIndex ([int]$v[2]) `
+                -VersionIndex ([int]$v[3]) `
+                -FirstSeenIndex ([int]$v[4]) `
+                -LastSeenIndex ([int]$v[5]) `
+                -UpdateAvailabilityFlag ([int]$v[6]) `
+                -UpdateIndex ([int]$v[7]) `
+                -DiskPathIndices $v[8] `
+                -RegistryPathIndices $v[9] `
+                -InventoryIndex $(if ($v.Count -gt 10) { [int]$v[10] } else { -1 })
         }
         return
     }
@@ -1644,21 +2128,18 @@ function Read-PayloadCanonicalSignatureStream {
     for ($i = 0; $i -lt $vulnCount; $i++) {
         Write-ProgressMarker -State $progressState -Count ($i + 1) -UnitLabel 'row(s)'
 
-        $payloadRecord = @(
-            $columnDeviceIndices[$i]
-            $columnCveIndices[$i]
-            $columnSoftwareIndices[$i]
-            $columnVersionIndices[$i]
-            $columnFirstSeenIndices[$i]
-            $columnLastSeenIndices[$i]
-            $columnUpdateAvailability[$i]
-            $columnUpdateIndices[$i]
-            ,$columnDiskPathIndices[$i]
-            ,$columnRegistryPathIndices[$i]
-            $(if ($null -ne $columnInventoryIndices -and $i -lt $columnInventoryIndices.Length) { $columnInventoryIndices[$i] } else { -1 })
-        )
-
-        Get-CanonicalValidationRowSignature -Row (Get-PayloadCanonicalValidationRow -VulnRecord $payloadRecord)
+        Get-PayloadCanonicalValidationSignature `
+            -DeviceIndex $columnDeviceIndices[$i] `
+            -CveIndex $columnCveIndices[$i] `
+            -SoftwareIndex $columnSoftwareIndices[$i] `
+            -VersionIndex $columnVersionIndices[$i] `
+            -FirstSeenIndex $columnFirstSeenIndices[$i] `
+            -LastSeenIndex $columnLastSeenIndices[$i] `
+            -UpdateAvailabilityFlag $columnUpdateAvailability[$i] `
+            -UpdateIndex $columnUpdateIndices[$i] `
+            -DiskPathIndices $columnDiskPathIndices[$i] `
+            -RegistryPathIndices $columnRegistryPathIndices[$i] `
+            -InventoryIndex $(if ($null -ne $columnInventoryIndices -and $i -lt $columnInventoryIndices.Length) { $columnInventoryIndices[$i] } else { -1 })
     }
 }
 
@@ -1908,7 +2389,7 @@ function Get-StreamingDashboardAuditResult {
     $vendorIndexElapsedSeconds = 0
     $comparisonStorage = 'partitioned-hash-files'
     $comparisonPayloadSource = 'dashboard-payload'
-    $dashboardPayloadPath = $null
+    $dashboardPayloadSource = $null
     $comparisonPayloadPath = $null
     $comparisonPayloadLabel = 'dashboard'
     $machines = $null
@@ -1938,8 +2419,8 @@ function Get-StreamingDashboardAuditResult {
             Write-Information '  Dashboard payload matches the normalized payload cache; reusing cached payload for semantic comparison.' -InformationAction Continue
         }
         else {
-            $dashboardPayloadPath = Get-DashboardEmbeddedPayloadTempPath -HtmlPath $ResolvedHtmlPath
-            $comparisonPayloadPath = $dashboardPayloadPath
+            $dashboardPayloadSource = Resolve-DashboardEmbeddedPayloadSource -HtmlPath $ResolvedHtmlPath
+            $comparisonPayloadPath = [string]$dashboardPayloadSource.PayloadPath
             Write-Information '  Dashboard payload differs from the normalized payload cache; comparing dashboard payload directly against source exports.' -InformationAction Continue
         }
 
@@ -2050,8 +2531,8 @@ function Get-StreamingDashboardAuditResult {
             $rowComparison | Add-Member -NotePropertyName ComparisonStorage -NotePropertyValue 'partitioned-hash-files'
         }
         finally {
-            if (-not [string]::IsNullOrWhiteSpace($dashboardPayloadPath) -and (Test-Path -LiteralPath $dashboardPayloadPath -PathType Leaf)) {
-                Remove-Item -LiteralPath $dashboardPayloadPath -Force -ErrorAction SilentlyContinue
+            if ($null -ne $dashboardPayloadSource -and $dashboardPayloadSource.DeleteAfterRead -and -not [string]::IsNullOrWhiteSpace([string]$dashboardPayloadSource.PayloadPath) -and (Test-Path -LiteralPath ([string]$dashboardPayloadSource.PayloadPath) -PathType Leaf)) {
+                Remove-Item -LiteralPath ([string]$dashboardPayloadSource.PayloadPath) -Force -ErrorAction SilentlyContinue
             }
         }
     }
