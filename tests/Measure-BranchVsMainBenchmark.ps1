@@ -67,6 +67,9 @@ param(
     [switch]$CurrentOnly,
 
     [Parameter(Mandatory = $false)]
+    [switch]$IncludeLocalBenchmark,
+
+    [Parameter(Mandatory = $false)]
     [switch]$LocalOnly,
 
     [Parameter(Mandatory = $false)]
@@ -224,6 +227,7 @@ function Write-AdHocBenchmarkSeriesSummary {
     $datasetDefinition = Get-ObjectPropertyValue -InputObject $dataset -Name 'definition'
     $currentBaseline = Get-ObjectPropertyValue -InputObject (Get-ObjectPropertyValue -InputObject $firstResult -Name 'current') -Name 'baseline'
     $localOnly = [bool](Get-ObjectPropertyValue -InputObject $firstResult -Name 'local_only')
+    $includeLocalBenchmark = Test-BenchmarkIncludesLocalRun -BenchmarkObject $firstResult
     $persistentLocalWorkflow = [bool](Get-ObjectPropertyValue -InputObject $firstResult -Name 'persistent_local_workflow')
 
     $summaryProperties = [ordered]@{
@@ -233,12 +237,13 @@ function Write-AdHocBenchmarkSeriesSummary {
         benchmark_dataset_path = [string](Get-ObjectPropertyValue -InputObject $dataset -Name 'path')
         iteration_count = $runResults.Count
         local_only = $localOnly
+        include_local_benchmark = $includeLocalBenchmark
         persistent_local_workflow = $persistentLocalWorkflow
         current_baseline_name = [string]$currentBaseline
         result_paths = @($resultPaths)
     }
 
-    $metricSummary = Get-BenchmarkSeriesMetricSummary -RunResults @($runResults) -LocalOnly $localOnly -IncludePersistentLocalWorkflow $persistentLocalWorkflow
+    $metricSummary = Get-BenchmarkSeriesMetricSummary -RunResults @($runResults) -LocalOnly $localOnly -IncludeLocalBenchmark $includeLocalBenchmark -IncludePersistentLocalWorkflow $persistentLocalWorkflow
     foreach ($property in $metricSummary.PSObject.Properties) {
         $summaryProperties[$property.Name] = $property.Value
     }
@@ -581,7 +586,8 @@ function Write-BaselineBenchmarkHeartbeat {
         [Parameter(Mandatory = $true)]
         [string]$BaselineName,
 
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
         [System.Collections.IDictionary]$LocalState,
 
         [Parameter(Mandatory = $false)]
@@ -599,24 +605,37 @@ function Write-BaselineBenchmarkHeartbeat {
         $FunctionExecutionActivity
     )
 
-    $localElapsedSeconds = [math]::Round($LocalState.stopwatch.Elapsed.TotalSeconds, 2)
-    $localStatus = if ($LocalState.completed) { 'Completed' } else { 'Running' }
-    $localPeakRssGb = [math]::Round(($LocalState.peakRssBytes / 1GB), 3)
     $runbookStatus = if ($null -ne $RunbookJob -and $RunbookJob.PSObject.Properties['status']) { [string]$RunbookJob.status } else { 'Pending' }
     $functionElapsedSeconds = [math]::Round((New-TimeSpan -Start $FunctionInvokeStartedUtc -End ([datetime]::UtcNow)).TotalSeconds, 2)
     $functionExecutionCount = if ($null -ne $FunctionExecutionActivity -and $FunctionExecutionActivity.PSObject.Properties['total_count']) { [int]$FunctionExecutionActivity.total_count } else { 0 }
 
-    $message = "[{0}] {1} heartbeat: local={2} elapsed={3:N0}s peak-rss={4}GB; runbook={5}; function={6} elapsed={7:N0}s exec-count={8}" -f @(
-        (Get-HeartbeatTimestampText)
-        $BaselineName
-        $localStatus
-        $localElapsedSeconds
-        $localPeakRssGb
-        $runbookStatus
-        $FunctionStatus
-        $functionElapsedSeconds
-        $functionExecutionCount
-    )
+    if ($null -ne $LocalState) {
+        $localElapsedSeconds = [math]::Round($LocalState.stopwatch.Elapsed.TotalSeconds, 2)
+        $localStatus = if ($LocalState.completed) { 'Completed' } else { 'Running' }
+        $localPeakRssGb = [math]::Round(($LocalState.peakRssBytes / 1GB), 3)
+        $message = "[{0}] {1} heartbeat: local={2} elapsed={3:N0}s peak-rss={4}GB; runbook={5}; function={6} elapsed={7:N0}s exec-count={8}" -f @(
+            (Get-HeartbeatTimestampText)
+            $BaselineName
+            $localStatus
+            $localElapsedSeconds
+            $localPeakRssGb
+            $runbookStatus
+            $FunctionStatus
+            $functionElapsedSeconds
+            $functionExecutionCount
+        )
+    }
+    else {
+        $message = "[{0}] {1} heartbeat: runbook={2}; function={3} elapsed={4:N0}s exec-count={5}" -f @(
+            (Get-HeartbeatTimestampText)
+            $BaselineName
+            $runbookStatus
+            $FunctionStatus
+            $functionElapsedSeconds
+            $functionExecutionCount
+        )
+    }
+
     Write-Host $message
 }
 
@@ -2296,6 +2315,9 @@ function Invoke-BaselineBenchmark {
         [int]$TotalRows,
 
         [Parameter(Mandatory = $false)]
+        [switch]$IncludeLocalBenchmark,
+
+        [Parameter(Mandatory = $false)]
         [switch]$LocalOnly,
 
         [Parameter(Mandatory = $false)]
@@ -2356,11 +2378,21 @@ function Invoke-BaselineBenchmark {
     Wait-FunctionHostReady -HostName $FunctionHostName -MasterKey $effectiveFunctionMasterKey
     Remove-FunctionTraceFiles -HostName $FunctionHostName -MasterKey $effectiveFunctionMasterKey
 
-    $localState = Start-LocalBenchmark -RepoPath $RepoPath -Name $BaselineName -BenchmarkDatasetPath $DatasetRoot -OutputDirectory $baselineOutputDirectory
+    $localState = if ($IncludeLocalBenchmark) {
+        Start-LocalBenchmark -RepoPath $RepoPath -Name $BaselineName -BenchmarkDatasetPath $DatasetRoot -OutputDirectory $baselineOutputDirectory
+    }
+    else {
+        $null
+    }
     $runbookState = Start-RunbookBenchmark
     $functionInvokeStartedUtc = [datetime]::UtcNow
     $null = Invoke-FunctionAdminRequest -Method Post -HostName $FunctionHostName -MasterKey $effectiveFunctionMasterKey -Path 'admin/functions/ExportAndGenerate' -Body '{}'
-    Write-Host 'Local, runbook, and Function App runs started.'
+    if ($null -ne $localState) {
+        Write-Host 'Local, runbook, and Function App runs started.'
+    }
+    else {
+        Write-Host 'Runbook and Function App runs started.'
+    }
 
     $runbookCompleted = $false
     $runbookJob = $null
@@ -2381,8 +2413,10 @@ function Invoke-BaselineBenchmark {
     $functionDashboardCompletedUtc = $null
     $functionCompletionSource = $null
 
-    while (-not ($localState.completed -and $runbookCompleted -and $functionCompleted)) {
-        Update-LocalBenchmark -State $localState
+    while ($true) {
+        if ($null -ne $localState) {
+            Update-LocalBenchmark -State $localState
+        }
 
         if (-not $runbookCompleted) {
             $runbookJob = Get-RunbookJobStatus -JobName $runbookState.name
@@ -2486,16 +2520,18 @@ function Invoke-BaselineBenchmark {
             }
         }
 
-        if (-not ($localState.completed -and $runbookCompleted -and $functionCompleted)) {
-            Write-BaselineBenchmarkHeartbeat -BaselineName $BaselineName -LocalState $localState -RunbookJob $runbookJob -FunctionStatus $functionStatus -FunctionInvokeStartedUtc $functionInvokeStartedUtc -FunctionExecutionActivity $functionExecutionActivity
+        $localCompleted = ($null -eq $localState -or $localState.completed)
+        if ($localCompleted -and $runbookCompleted -and $functionCompleted) {
+            break
         }
 
-        if (-not ($localState.completed -and $runbookCompleted -and $functionCompleted)) {
-            Start-Sleep -Seconds $PollIntervalSeconds
-        }
+        Write-BaselineBenchmarkHeartbeat -BaselineName $BaselineName -LocalState $localState -RunbookJob $runbookJob -FunctionStatus $functionStatus -FunctionInvokeStartedUtc $functionInvokeStartedUtc -FunctionExecutionActivity $functionExecutionActivity
+        Start-Sleep -Seconds $PollIntervalSeconds
     }
 
-    Update-LocalBenchmark -State $localState
+    if ($null -ne $localState) {
+        Update-LocalBenchmark -State $localState
+    }
 
     $runbookElapsedSeconds = if ($null -ne $runbookJob -and $null -ne $runbookJob.startTime -and $null -ne $runbookJob.endTime) {
         [math]::Round((New-TimeSpan -Start ([datetimeoffset]$runbookJob.startTime).UtcDateTime -End ([datetimeoffset]$runbookJob.endTime).UtcDateTime).TotalSeconds, 2)
@@ -2558,7 +2594,12 @@ function Invoke-BaselineBenchmark {
     $functionEvents = @(Get-FunctionTraceEvents -HostName $FunctionHostName -MasterKey $effectiveFunctionMasterKey -NotBeforeUtc $functionInvokeStartedUtc)
     $functionMetricSummary = Get-FunctionMetricSummary -ResourceId $FunctionResourceId -StartTimeUtc $functionMetricStartUtc -EndTimeUtc $functionMetricEndUtc
 
-    $localResult = Get-LocalBenchmarkResult -State $localState -TotalRows $TotalRows
+    $localResult = if ($null -ne $localState) {
+        Get-LocalBenchmarkResult -State $localState -TotalRows $TotalRows
+    }
+    else {
+        $null
+    }
     $runbookResult = Get-PipelineEventSummary -Events $runbookEvents -TotalElapsedSeconds $runbookElapsedSeconds -DashboardBytes (Get-BlobLengthBytes -AccountName $RunbookStorageAccountName -ContainerName 'dashboards' -BlobName 'VulnerabilityDashboard.html') -TotalRows $TotalRows -TerminalStatus ([string]$runbookJob.status)
     $functionDashboardBytes = Get-BlobLengthBytes -AccountName $FunctionStorageAccountName -ContainerName 'dashboards' -BlobName 'VulnerabilityDashboard.html'
     $functionResult = [PSCustomObject]@{
@@ -2659,12 +2700,17 @@ function Get-ComparisonBlock {
     )
 
     return [PSCustomObject]@{
-        local = [PSCustomObject]@{
-            elapsed_seconds_delta = [math]::Round(($Current.local.elapsed_seconds - $Main.local.elapsed_seconds), 2)
-            peak_rss_gb_delta = [math]::Round(($Current.local.peak_tree_rss_gb - $Main.local.peak_tree_rss_gb), 3)
-            peak_private_gb_delta = [math]::Round(($Current.local.peak_tree_private_gb - $Main.local.peak_tree_private_gb), 3)
-            phase_elapsed_seconds_delta = Get-PhaseElapsedSecondsDeltaSummary -CurrentResult $Current.local -MainResult $Main.local
-            environment_snapshot_delta = Get-EnvironmentSnapshotDeltaSummary -CurrentResult $Current.local -MainResult $Main.local
+        local = if ($null -ne $Current.local -and $null -ne $Main.local) {
+            [PSCustomObject]@{
+                elapsed_seconds_delta = [math]::Round(($Current.local.elapsed_seconds - $Main.local.elapsed_seconds), 2)
+                peak_rss_gb_delta = [math]::Round(($Current.local.peak_tree_rss_gb - $Main.local.peak_tree_rss_gb), 3)
+                peak_private_gb_delta = [math]::Round(($Current.local.peak_tree_private_gb - $Main.local.peak_tree_private_gb), 3)
+                phase_elapsed_seconds_delta = Get-PhaseElapsedSecondsDeltaSummary -CurrentResult $Current.local -MainResult $Main.local
+                environment_snapshot_delta = Get-EnvironmentSnapshotDeltaSummary -CurrentResult $Current.local -MainResult $Main.local
+            }
+        }
+        else {
+            $null
         }
         local_persistent_cache = if ($Current.PSObject.Properties['local_persistent_cache'] -and $Main.PSObject.Properties['local_persistent_cache'] -and $null -ne $Current.local_persistent_cache -and $null -ne $Main.local_persistent_cache) {
             [PSCustomObject]@{
@@ -2778,6 +2824,7 @@ if ($null -ne $datasetDefinition -and -not $datasetDefinitionMatch) {
 
 $datasetDefinitionMetadata = Get-BenchmarkDatasetResultMetadata -DatasetPath $resolvedDatasetPath -Manifest $datasetManifest -BenchmarkDatasetId $BenchmarkDatasetId -RepoRoot $repoRoot
 $totalRows = [int]$datasetPreflight.totalRows
+$effectiveIncludeLocalBenchmark = ($LocalOnly -or $IncludeLocalBenchmark -or $IncludePersistentLocalWorkflow)
 
 Write-Host ("Dataset preflight passed: {0} rows, {1:N2} GB on disk, {2} GB free memory, {3} GB free disk." -f $totalRows, ($datasetPreflight.datasetBytes / 1GB), $datasetPreflight.availableMemoryGB, $datasetPreflight.freeDiskGB)
 
@@ -2795,7 +2842,7 @@ try {
         Wait-FunctionHostReady -HostName $functionHostName -MasterKey $functionMasterKey
     }
 
-    $currentResult = @(Invoke-BaselineBenchmark -BaselineName $CurrentBaselineName -RepoPath $resolvedCurrentRepoPath -DatasetRoot $resolvedDatasetPath -OutputRoot $outputDirectory -FunctionHostName $functionHostName -FunctionResourceId $functionResourceId -SubscriptionId $(if ($LocalOnly) { '' } else { [string]$subscription.id }) -TotalRows $totalRows -LocalOnly:$LocalOnly -IncludePersistentLocalWorkflow:$IncludePersistentLocalWorkflow) | Select-Object -Last 1
+    $currentResult = @(Invoke-BaselineBenchmark -BaselineName $CurrentBaselineName -RepoPath $resolvedCurrentRepoPath -DatasetRoot $resolvedDatasetPath -OutputRoot $outputDirectory -FunctionHostName $functionHostName -FunctionResourceId $functionResourceId -SubscriptionId $(if ($LocalOnly) { '' } else { [string]$subscription.id }) -TotalRows $totalRows -IncludeLocalBenchmark:$effectiveIncludeLocalBenchmark -LocalOnly:$LocalOnly -IncludePersistentLocalWorkflow:$IncludePersistentLocalWorkflow) | Select-Object -Last 1
     $currentResult | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path -Path $outputDirectory -ChildPath ($CurrentBaselineName + '.result.json')) -Encoding utf8
 
     if (-not $CurrentOnly) {
@@ -2804,7 +2851,7 @@ try {
             Wait-FunctionHostReady -HostName $functionHostName -MasterKey $functionMasterKey
         }
 
-        $mainResult = @(Invoke-BaselineBenchmark -BaselineName $MainBaselineName -RepoPath $resolvedMainRepoPath -DatasetRoot $resolvedDatasetPath -OutputRoot $outputDirectory -FunctionHostName $functionHostName -FunctionResourceId $functionResourceId -SubscriptionId $(if ($LocalOnly) { '' } else { [string]$subscription.id }) -TotalRows $totalRows -LocalOnly:$LocalOnly -IncludePersistentLocalWorkflow:$IncludePersistentLocalWorkflow) | Select-Object -Last 1
+        $mainResult = @(Invoke-BaselineBenchmark -BaselineName $MainBaselineName -RepoPath $resolvedMainRepoPath -DatasetRoot $resolvedDatasetPath -OutputRoot $outputDirectory -FunctionHostName $functionHostName -FunctionResourceId $functionResourceId -SubscriptionId $(if ($LocalOnly) { '' } else { [string]$subscription.id }) -TotalRows $totalRows -IncludeLocalBenchmark:$effectiveIncludeLocalBenchmark -LocalOnly:$LocalOnly -IncludePersistentLocalWorkflow:$IncludePersistentLocalWorkflow) | Select-Object -Last 1
         $mainResult | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path -Path $outputDirectory -ChildPath ($MainBaselineName + '.result.json')) -Encoding utf8
     }
 }
@@ -2827,10 +2874,14 @@ $result = [PSCustomObject]@{
     benchmark_mode = if ($LocalOnly) {
         if ($CurrentOnly) { 'local-current-only' } else { 'local-branch-vs-main' }
     }
+    elseif ($effectiveIncludeLocalBenchmark) {
+        if ($CurrentOnly) { 'azure-plus-local-current-only' } else { 'azure-plus-local-branch-vs-main' }
+    }
     else {
-        if ($CurrentOnly) { 'current-only' } else { 'branch-vs-main' }
+        if ($CurrentOnly) { 'azure-current-only' } else { 'azure-branch-vs-main' }
     }
     local_only = ($LocalOnly -eq $true)
+    include_local_benchmark = ($effectiveIncludeLocalBenchmark -eq $true)
     persistent_local_workflow = ($IncludePersistentLocalWorkflow -eq $true)
     subscription = if ($null -ne $subscription) {
         [PSCustomObject]@{
@@ -2870,8 +2921,14 @@ if ($null -ne $currentResult) {
     if ($LocalOnly) {
         Write-Host ('{0} local elapsed: {1}s' -f $CurrentBaselineName, $currentResult.local.elapsed_seconds)
     }
-    else {
+    elseif ($effectiveIncludeLocalBenchmark) {
         Write-Host ('{0} local/runbook/function elapsed: {1}s / {2}s / {3}s ({4})' -f $CurrentBaselineName, $currentResult.local.elapsed_seconds, $currentResult.runbook.elapsed_seconds, $currentResult.function_app.elapsed_seconds, $currentResult.function_app.timing_basis)
+        if ($null -ne $currentResult.function_app.end_to_end_elapsed_seconds) {
+            Write-Host ('{0} function end-to-end/pickup delay: {1}s / {2}s' -f $CurrentBaselineName, $currentResult.function_app.end_to_end_elapsed_seconds, $currentResult.function_app.pickup_delay_seconds)
+        }
+    }
+    else {
+        Write-Host ('{0} runbook/function elapsed: {1}s / {2}s ({3})' -f $CurrentBaselineName, $currentResult.runbook.elapsed_seconds, $currentResult.function_app.elapsed_seconds, $currentResult.function_app.timing_basis)
         if ($null -ne $currentResult.function_app.end_to_end_elapsed_seconds) {
             Write-Host ('{0} function end-to-end/pickup delay: {1}s / {2}s' -f $CurrentBaselineName, $currentResult.function_app.end_to_end_elapsed_seconds, $currentResult.function_app.pickup_delay_seconds)
         }
@@ -2884,8 +2941,14 @@ if ($null -ne $mainResult) {
     if ($LocalOnly) {
         Write-Host ('{0} local elapsed: {1}s' -f $MainBaselineName, $mainResult.local.elapsed_seconds)
     }
-    else {
+    elseif ($effectiveIncludeLocalBenchmark) {
         Write-Host ('{0} local/runbook/function elapsed: {1}s / {2}s / {3}s ({4})' -f $MainBaselineName, $mainResult.local.elapsed_seconds, $mainResult.runbook.elapsed_seconds, $mainResult.function_app.elapsed_seconds, $mainResult.function_app.timing_basis)
+        if ($null -ne $mainResult.function_app.end_to_end_elapsed_seconds) {
+            Write-Host ('{0} function end-to-end/pickup delay: {1}s / {2}s' -f $MainBaselineName, $mainResult.function_app.end_to_end_elapsed_seconds, $mainResult.function_app.pickup_delay_seconds)
+        }
+    }
+    else {
+        Write-Host ('{0} runbook/function elapsed: {1}s / {2}s ({3})' -f $MainBaselineName, $mainResult.runbook.elapsed_seconds, $mainResult.function_app.elapsed_seconds, $mainResult.function_app.timing_basis)
         if ($null -ne $mainResult.function_app.end_to_end_elapsed_seconds) {
             Write-Host ('{0} function end-to-end/pickup delay: {1}s / {2}s' -f $MainBaselineName, $mainResult.function_app.end_to_end_elapsed_seconds, $mainResult.function_app.pickup_delay_seconds)
         }
