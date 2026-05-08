@@ -20,6 +20,9 @@ param(
     [double]$MinimumAvailableMemoryGB = 3,
 
     [Parameter(Mandatory = $false)]
+    [switch]$IncludeLocalBenchmark,
+
+    [Parameter(Mandatory = $false)]
     [switch]$LocalOnly,
 
     [Parameter(Mandatory = $false)]
@@ -55,6 +58,7 @@ $historyScriptPath = Join-Path $PSScriptRoot 'Record-BenchmarkHistory.ps1'
 
 $runResults = [System.Collections.Generic.List[object]]::new()
 $resultPaths = [System.Collections.Generic.List[string]]::new()
+$effectiveIncludeLocalBenchmark = ($LocalOnly -or $IncludeLocalBenchmark -or $IncludePersistentLocalWorkflow)
 
 for ($iteration = 1; $iteration -le $Iterations; $iteration++) {
     $resultPath = Join-Path $resolvedResultsRoot ('run-{0:00}.json' -f $iteration)
@@ -69,6 +73,9 @@ for ($iteration = 1; $iteration -le $Iterations; $iteration++) {
     }
     if ($LocalOnly) {
         $measureArguments.LocalOnly = $true
+    }
+    elseif ($effectiveIncludeLocalBenchmark) {
+        $measureArguments.IncludeLocalBenchmark = $true
     }
     if ($IncludePersistentLocalWorkflow) {
         $measureArguments.IncludePersistentLocalWorkflow = $true
@@ -87,11 +94,16 @@ $summaryProperties = [ordered]@{
     benchmark_dataset_path = $datasetPath
     iteration_count = $Iterations
     local_only = ($LocalOnly -eq $true)
+    include_local_benchmark = $effectiveIncludeLocalBenchmark
     persistent_local_workflow = ($IncludePersistentLocalWorkflow -eq $true)
     result_paths = @($resultPaths)
 }
 
-$metricSummary = Get-BenchmarkSeriesMetricSummary -RunResults @($runResults) -LocalOnly ($LocalOnly -eq $true) -IncludePersistentLocalWorkflow ($IncludePersistentLocalWorkflow -eq $true)
+if ($runResults.Count -gt 0) {
+    $summaryProperties.benchmark_mode = [string]$runResults[0].benchmark_mode
+}
+
+$metricSummary = Get-BenchmarkSeriesMetricSummary -RunResults @($runResults) -LocalOnly ($LocalOnly -eq $true) -IncludeLocalBenchmark $effectiveIncludeLocalBenchmark -IncludePersistentLocalWorkflow ($IncludePersistentLocalWorkflow -eq $true)
 foreach ($property in $metricSummary.PSObject.Properties) {
     $summaryProperties[$property.Name] = $property.Value
 }

@@ -78,6 +78,74 @@ function Get-NumericSeriesSummary {
     }
 }
 
+function Get-BenchmarkModeScenarioKey {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [string]$BenchmarkMode
+    )
+
+    if ([string]::IsNullOrWhiteSpace($BenchmarkMode)) {
+        return ''
+    }
+
+    if ($BenchmarkMode -match 'current-only$') {
+        return 'current-only'
+    }
+
+    if ($BenchmarkMode -match 'branch-vs-main$') {
+        return 'branch-vs-main'
+    }
+
+    return [string]$BenchmarkMode
+}
+
+function Test-BenchmarkIncludesLocalRun {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $BenchmarkObject
+    )
+
+    if ($null -eq $BenchmarkObject) {
+        return $false
+    }
+
+    $includeLocalProperty = $BenchmarkObject.PSObject.Properties['include_local_benchmark']
+    if ($null -ne $includeLocalProperty -and $null -ne $includeLocalProperty.Value) {
+        return [bool]$includeLocalProperty.Value
+    }
+
+    $localOnlyProperty = $BenchmarkObject.PSObject.Properties['local_only']
+    if ($null -ne $localOnlyProperty -and [bool]$localOnlyProperty.Value) {
+        return $true
+    }
+
+    $currentProperty = $BenchmarkObject.PSObject.Properties['current']
+    if ($null -ne $currentProperty -and $null -ne $currentProperty.Value) {
+        $localProperty = $currentProperty.Value.PSObject.Properties['local']
+        if ($null -ne $localProperty) {
+            return ($null -ne $localProperty.Value)
+        }
+
+        $localElapsedProperty = $currentProperty.Value.PSObject.Properties['local_elapsed_seconds']
+        if ($null -ne $localElapsedProperty) {
+            return ($null -ne $localElapsedProperty.Value)
+        }
+    }
+
+    $localElapsedProperty = $BenchmarkObject.PSObject.Properties['local_elapsed_seconds']
+    if ($null -ne $localElapsedProperty) {
+        return ($null -ne $localElapsedProperty.Value)
+    }
+
+    return $false
+}
+
 function Get-MarkdownStatisticLine {
     [CmdletBinding()]
     [OutputType([string])]
@@ -137,14 +205,21 @@ function Get-BenchmarkSeriesMetricSummary {
         [bool]$LocalOnly,
 
         [Parameter(Mandatory = $true)]
+        [bool]$IncludeLocalBenchmark,
+
+        [Parameter(Mandatory = $true)]
         [bool]$IncludePersistentLocalWorkflow
     )
 
+    $capturesLocalMetrics = ($LocalOnly -or $IncludeLocalBenchmark)
+
     return [PSCustomObject]@{
-        local_elapsed_seconds = Get-NumericSeriesSummary -Values (Get-BenchmarkMetricSeriesValueList -RunResults $RunResults -Selector {
+        local_elapsed_seconds = if ($capturesLocalMetrics) { Get-NumericSeriesSummary -Values (Get-BenchmarkMetricSeriesValueList -RunResults $RunResults -Selector {
             param($result)
-            [double]$result.current.local.elapsed_seconds
-        })
+            if ($null -ne $result.current -and $null -ne $result.current.local) {
+                [double]$result.current.local.elapsed_seconds
+            }
+        }) } else { $null }
         runbook_elapsed_seconds = if ($LocalOnly) { $null } else { Get-NumericSeriesSummary -Values (Get-BenchmarkMetricSeriesValueList -RunResults $RunResults -Selector {
             param($result)
             if ($null -ne $result.current.runbook) {
@@ -220,9 +295,13 @@ function Write-BenchmarkSeriesSummaryOutput {
     $summaryLines.Add(('- Iterations: `{0}`' -f [int]$Summary.iteration_count)) | Out-Null
     $summaryLines.Add(('- Results root: `{0}`' -f $resolvedResultsRoot)) | Out-Null
     $summaryLines.Add('') | Out-Null
-    $summaryLines.Add((Get-MarkdownStatisticLine -Label 'Local elapsed' -Summary $Summary.local_elapsed_seconds)) | Out-Null
 
     $localOnly = [bool]$Summary.local_only
+    $includeLocalBenchmark = Test-BenchmarkIncludesLocalRun -BenchmarkObject $Summary
+    if ($includeLocalBenchmark) {
+        $summaryLines.Add((Get-MarkdownStatisticLine -Label 'Local elapsed' -Summary $Summary.local_elapsed_seconds)) | Out-Null
+    }
+
     if (-not $localOnly) {
         $summaryLines.Add((Get-MarkdownStatisticLine -Label 'Runbook elapsed' -Summary $Summary.runbook_elapsed_seconds)) | Out-Null
         $summaryLines.Add((Get-MarkdownStatisticLine -Label 'Function active elapsed' -Summary $Summary.function_active_elapsed_seconds)) | Out-Null

@@ -7,6 +7,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'build\Import-SharedHelpers.ps1')
+. (Join-Path $PSScriptRoot 'helpers\BenchmarkSeriesTools.ps1')
 
 function Assert-True {
     [CmdletBinding()]
@@ -1811,6 +1812,8 @@ function Test-ConvertToNormalizedDataReportsContentStoreNormalizationPhase {
         Assert-True ('LoadContentStoreDeviceProfiles' -in $phaseNames) 'Expected content-store normalization to report device-profile loading through the normalization callback.'
         Assert-True ('LoadContentStoreTemplates' -in $phaseNames) 'Expected content-store normalization to report template loading through the normalization callback.'
         Assert-True ('StreamContentStoreRefs' -in $phaseNames) 'Expected content-store normalization to report ref streaming through the normalization callback.'
+        Assert-True ('StreamContentStoreCurrentRefs' -in $phaseNames) 'Expected content-store normalization to split current ref streaming into its own normalization phase.'
+        Assert-True ('StreamContentStoreHistoryRefs' -in $phaseNames) 'Expected content-store normalization to split history ref streaming into its own normalization phase.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -2390,8 +2393,23 @@ function Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePaylo
     [void](New-Item -Path $tempRoot -ItemType Directory -Force)
     $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
     $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+    $originalWriteMemoryUsage = if (Test-Path -LiteralPath Function:\Write-MemoryUsage) {
+        Get-Item -LiteralPath Function:\Write-MemoryUsage
+    }
+    else {
+        $null
+    }
 
     try {
+        Set-Item -LiteralPath Function:\Write-MemoryUsage -Value {
+            param(
+                [Parameter(Mandatory = $false)]
+                [string]$Label = ''
+            )
+
+            Write-Output ("mock memory usage: {0}" -f $Label)
+        }
+
         $currentRow = Get-TestVulnRow -Id 'content-store-context-release-001' -CveId 'CVE-2026-0154' -SnapshotDate '2026-03-20' -Version '2.0.0'
         $currentRow.DeviceId = 'device-context-release-001'
         $currentRow.DeviceName = 'device-context-release-001.contoso.com'
@@ -2453,7 +2471,7 @@ function Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePaylo
             }
         }
 
-        $result = Invoke-ContentStoreNormalization `
+        $result = @(Invoke-ContentStoreNormalization `
             -DataPath $tempRoot `
             -VulnOutputPath $outputPath `
             -Context $context `
@@ -2463,18 +2481,28 @@ function Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePaylo
             -AdvancedHuntingInventoryData $advancedHuntingInventoryData `
             -NvdCveData $nvdCveData `
             -PayloadOutputPath $payloadPath `
-            -ConsumeLookupsOnPayloadClose
+            -ConsumeLookupsOnPayloadClose)
 
-        Assert-True ($result.ProcessedCount -eq 1) 'Expected content-store context-release regression fixture to normalize one row.'
-        Assert-True ([string]$result.PayloadPath -eq $payloadPath) 'Expected content-store context-release regression fixture to write the direct payload output.'
-        Assert-True ((Get-CompressedPayloadVulnCount -Path $payloadPath) -eq $result.ProcessedCount) 'Expected content-store context-release regression payload row count to match the processed count.'
+        Assert-True ($result.Count -eq 1) 'Expected content-store normalization to suppress hosted memory diagnostics from the return pipeline.'
+
+        $normalizationResult = $result[0]
+        Assert-True ($normalizationResult.ProcessedCount -eq 1) 'Expected content-store context-release regression fixture to normalize one row.'
+        Assert-True ([string]$normalizationResult.PayloadPath -eq $payloadPath) 'Expected content-store context-release regression fixture to write the direct payload output.'
+        Assert-True ((Get-CompressedPayloadVulnCount -Path $payloadPath) -eq $normalizationResult.ProcessedCount) 'Expected content-store context-release regression payload row count to match the processed count.'
         Assert-True ($context.Machines.Count -eq 0) 'Expected content-store normalization to release machine lookups before payload close.'
         Assert-True ($context.AdvancedHuntingData.Count -eq 0) 'Expected content-store normalization to release Advanced Hunting CVE data before payload close.'
         Assert-True ($context.AdvancedHuntingDeviceUsers.Count -eq 0) 'Expected content-store normalization to release Advanced Hunting device-user data before payload close.'
         Assert-True ($context.NvdCveData.Count -eq 0) 'Expected content-store normalization to release NVD CVE data before payload close.'
-        Assert-True ($context.AdvancedHuntingInventoryData.Count -eq 1) 'Expected content-store normalization to preserve inventory enrichment needed during ref streaming.'
+        Assert-True ($context.AdvancedHuntingInventoryData.Count -eq 0) 'Expected content-store normalization to release inventory enrichment before payload close once ref streaming completes.'
     }
     finally {
+        if ($null -ne $originalWriteMemoryUsage) {
+            Set-Item -LiteralPath Function:\Write-MemoryUsage -Value $originalWriteMemoryUsage.ScriptBlock
+        }
+        elseif (Test-Path -LiteralPath Function:\Write-MemoryUsage) {
+            Remove-Item -LiteralPath Function:\Write-MemoryUsage -Force -ErrorAction SilentlyContinue
+        }
+
         if (Test-Path -LiteralPath $tempRoot) {
             Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -3205,6 +3233,137 @@ function Test-WriteBase64FileContentMatchesReferenceOutput {
     }
 }
 
+function Test-BenchmarkSeriesSummaryHandlesAzureOnlyRunMode {
+    [CmdletBinding()]
+    param()
+
+    $azureOnlyRun = [PSCustomObject]@{
+        include_local_benchmark = $false
+        local_only = $false
+        current = [PSCustomObject]@{
+            local = $null
+            runbook = [PSCustomObject]@{
+                elapsed_seconds = 575.25
+            }
+            function_app = [PSCustomObject]@{
+                active_elapsed_seconds = 530.51
+                end_to_end_elapsed_seconds = 532.12
+                pickup_delay_seconds = 1.61
+            }
+        }
+    }
+
+    $summary = Get-BenchmarkSeriesMetricSummary -RunResults @($azureOnlyRun) -LocalOnly:$false -IncludeLocalBenchmark:$false -IncludePersistentLocalWorkflow:$false
+
+    Assert-True (-not (Test-BenchmarkIncludesLocalRun -BenchmarkObject $azureOnlyRun)) 'Expected Azure-only benchmark runs to report that no local benchmark was included.'
+    Assert-True ($null -eq $summary.local_elapsed_seconds) 'Expected Azure-only benchmark summaries to omit local elapsed metrics.'
+    Assert-True ($null -ne $summary.runbook_elapsed_seconds) 'Expected Azure-only benchmark summaries to retain runbook elapsed metrics.'
+    Assert-True ($null -ne $summary.function_active_elapsed_seconds) 'Expected Azure-only benchmark summaries to retain Function App elapsed metrics.'
+}
+
+function Test-BenchmarkSeriesSummaryHandlesCombinedRunMode {
+    [CmdletBinding()]
+    param()
+
+    $combinedRun = [PSCustomObject]@{
+        include_local_benchmark = $true
+        local_only = $false
+        current = [PSCustomObject]@{
+            local = [PSCustomObject]@{
+                elapsed_seconds = 120.5
+            }
+            runbook = [PSCustomObject]@{
+                elapsed_seconds = 575.25
+            }
+            function_app = [PSCustomObject]@{
+                active_elapsed_seconds = 530.51
+                end_to_end_elapsed_seconds = 532.12
+                pickup_delay_seconds = 1.61
+            }
+        }
+    }
+
+    $summary = Get-BenchmarkSeriesMetricSummary -RunResults @($combinedRun) -LocalOnly:$false -IncludeLocalBenchmark:$true -IncludePersistentLocalWorkflow:$false
+
+    Assert-True (Test-BenchmarkIncludesLocalRun -BenchmarkObject $combinedRun) 'Expected combined Azure plus local benchmark runs to report that a local benchmark was included.'
+    Assert-True ($null -ne $summary.local_elapsed_seconds) 'Expected combined benchmark summaries to retain local elapsed metrics.'
+}
+
+function Test-BenchmarkSeriesSummaryHandlesLocalOnlyRunMode {
+    [CmdletBinding()]
+    param()
+
+    $localOnlyRun = [PSCustomObject]@{
+        local_only = $true
+        current = [PSCustomObject]@{
+            local = [PSCustomObject]@{
+                elapsed_seconds = 98.75
+            }
+            runbook = $null
+            function_app = $null
+        }
+    }
+
+    $summary = Get-BenchmarkSeriesMetricSummary -RunResults @($localOnlyRun) -LocalOnly:$true -IncludeLocalBenchmark:$false -IncludePersistentLocalWorkflow:$false
+
+    Assert-True (Test-BenchmarkIncludesLocalRun -BenchmarkObject $localOnlyRun) 'Expected local-only benchmark runs to report that a local benchmark was included even when the explicit include_local_benchmark flag is absent.'
+    Assert-True ($null -ne $summary.local_elapsed_seconds) 'Expected local-only benchmark summaries to retain local elapsed metrics.'
+    Assert-True ($null -eq $summary.runbook_elapsed_seconds) 'Expected local-only benchmark summaries to omit runbook elapsed metrics.'
+    Assert-True ($null -eq $summary.function_active_elapsed_seconds) 'Expected local-only benchmark summaries to omit Function App elapsed metrics.'
+}
+
+function Test-BenchmarkIncludesLocalRunHandlesLegacyInferenceShape {
+    [CmdletBinding()]
+    param()
+
+    $legacyRun = [PSCustomObject]@{
+        local_only = $false
+        persistent_local_workflow = $true
+        current = [PSCustomObject]@{
+            local = [PSCustomObject]@{
+                elapsed_seconds = 142.25
+            }
+            runbook = [PSCustomObject]@{
+                elapsed_seconds = 575.25
+            }
+            function_app = [PSCustomObject]@{
+                active_elapsed_seconds = 530.51
+                end_to_end_elapsed_seconds = 532.12
+                pickup_delay_seconds = 1.61
+            }
+        }
+    }
+
+    Assert-True (Test-BenchmarkIncludesLocalRun -BenchmarkObject $legacyRun) 'Expected benchmark history helpers to infer local benchmark capture from legacy result shapes that include a local result but omit include_local_benchmark.'
+}
+
+function Test-BenchmarkModeScenarioKeyHandlesLegacyModeMapping {
+    [CmdletBinding()]
+    param()
+
+    Assert-True ((Get-BenchmarkModeScenarioKey -BenchmarkMode 'current-only') -eq 'current-only') 'Expected the legacy current-only benchmark mode to normalize to the current-only scenario.'
+    Assert-True ((Get-BenchmarkModeScenarioKey -BenchmarkMode 'azure-current-only') -eq 'current-only') 'Expected azure-current-only benchmark mode to normalize to the current-only scenario.'
+    Assert-True ((Get-BenchmarkModeScenarioKey -BenchmarkMode 'azure-plus-local-current-only') -eq 'current-only') 'Expected azure-plus-local-current-only benchmark mode to normalize to the current-only scenario.'
+    Assert-True ((Get-BenchmarkModeScenarioKey -BenchmarkMode 'branch-vs-main') -eq 'branch-vs-main') 'Expected the legacy branch-vs-main benchmark mode to normalize to the branch-vs-main scenario.'
+    Assert-True ((Get-BenchmarkModeScenarioKey -BenchmarkMode 'azure-branch-vs-main') -eq 'branch-vs-main') 'Expected azure-branch-vs-main benchmark mode to normalize to the branch-vs-main scenario.'
+    Assert-True ((Get-BenchmarkModeScenarioKey -BenchmarkMode 'azure-plus-local-branch-vs-main') -eq 'branch-vs-main') 'Expected azure-plus-local-branch-vs-main benchmark mode to normalize to the branch-vs-main scenario.'
+}
+
+function Test-WriteProgressMarkerIncludesEtaWhenTotalCountKnown {
+    [CmdletBinding()]
+    param()
+
+    $progressState = New-ProgressMarkerState -ActivityName 'ETA regression' -ProgressInterval 10 -HeartbeatIntervalSeconds 60 -CheckInterval 1 -TotalCount 100
+    $outputRecords = @(& {
+            Write-ProgressMarker -State $progressState -Count 10 -UnitLabel 'row(s)'
+        } 6>&1)
+    $outputText = (@($outputRecords | ForEach-Object { Get-OutputRecordText -Record $_ }) -join [Environment]::NewLine)
+
+    Assert-True (-not [string]::IsNullOrWhiteSpace($outputText)) 'Expected Write-ProgressMarker to emit a progress message when the interval is reached.'
+    Assert-True ($outputText.Contains('ETA ')) 'Expected Write-ProgressMarker to include ETA text when the total row count is known.'
+    Assert-True ($outputText.Contains('10.0% complete')) 'Expected Write-ProgressMarker ETA output to preserve the percent complete marker.'
+}
+
 function Test-ValidationHelperPayloadCanonicalization {
     [CmdletBinding()]
     param()
@@ -3246,6 +3405,358 @@ function Test-ValidationHelperPayloadCanonicalization {
         Assert-True (@(Compare-Object -ReferenceObject $rowFormatSignatures -DifferenceObject $columnFormatSignatures).Count -eq 0) 'Expected validation helper canonicalization to treat rows-v1 and columns-v1 payloads as semantically equivalent.'
     }
     finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ValidationHelperSourceCanonicalization {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('validation-helper-source-canonicalization-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+
+    try {
+        . (Join-Path $repoRoot 'build\Import-ValidationHelpers.ps1')
+
+        $row = Get-TestVulnRow -Id 'validation-source-001' -CveId 'CVE-2026-0313' -SnapshotDate '2026-03-20' -Version '3.2.0'
+        $row.CvssScore = 8.15
+        $row.VulnerabilitySeverityLevel = 'High'
+        $row.ExploitabilityLevel = 'ExploitIsPublic'
+        $row.FirstSeenTimestamp = '2026-03-21T00:00:00Z'
+        $row.LastSeenTimestamp = '2026-03-18T00:00:00Z'
+        $row.DiskPaths = @('C:\z-agent.dll', 'C:\a-agent.dll')
+        $row.RegistryPaths = @('HKLM\Software\Contoso\ZAgent', 'HKLM\Software\Contoso\AAgent')
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($row)
+
+        $machines = @{
+            'device-001' = [PSCustomObject]@{
+                id = 'device-001'
+                computerDnsName = 'device01.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows 11'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod', 'Ring0')
+                lastIpAddress = '10.0.0.21'
+                lastExternalIpAddress = '52.0.0.21'
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'Low'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-22T00:00:00Z'
+                firstSeen = '2026-02-15T00:00:00Z'
+            }
+        }
+        $advancedHunting = @{
+            'CVE-2026-0313' = [PSCustomObject]@{
+                PublishedDate = '2026-03-05T10:11:12Z'
+                VulnerabilityDescription = "  Source`n canonical   description  "
+                EpssScore = 0.8123
+                AffectedSoftware = @('contoso:legacy agent', 'fabrikam:other')
+                IsExploitAvailable = $true
+            }
+        }
+        $nvdCveData = @{
+            'CVE-2026-0313' = [PSCustomObject]@{
+                PublishedDate = '2026-03-04T00:00:00Z'
+                VulnerabilityDescription = 'NVD fallback description'
+                LastModifiedDate = '2026-03-17T01:02:03Z'
+                BaseScore = 8.0
+                BaseSeverity = 'HIGH'
+                Vector = 'AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H'
+                CisaExploitAdd = '2026-03-18T00:00:00Z'
+                CisaActionDue = '2026-04-01T00:00:00Z'
+                CisaRequiredAction = " Patch`r`n immediately "
+                Weaknesses = @('CWE-79', 'CWE-20')
+            }
+        }
+        $inventoryKey = Get-AdvancedHuntingInventoryMatchKey -DeviceId $row.DeviceId -SoftwareVendor $row.SoftwareVendor -SoftwareName $row.SoftwareName -SoftwareVersion $row.SoftwareVersion
+        $advancedHuntingInventory = @{
+            $inventoryKey = [PSCustomObject]@{
+                ProductCodeCpe = 'cpe:/a:contoso:legacy_agent'
+                EndOfSupportStatus = 'supported'
+                EndOfSupportDate = '2028-01-01T00:00:00Z'
+            }
+        }
+        $vendorSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        [void]$vendorSet.Add((Get-VendorMatchKey -Vendor $row.SoftwareVendor))
+
+        $firstLastSwappedCount = 0
+        $missingMachineCount = 0
+        $signatures = @(Read-SourceCanonicalSignatureStream -ExportsPath $tempRoot -Machines $machines -AdvancedHunting $advancedHunting -AdvancedHuntingInventory $advancedHuntingInventory -NvdCveData $nvdCveData -VendorSet $vendorSet -FirstLastSwappedCount ([ref]$firstLastSwappedCount) -MissingMachineCount ([ref]$missingMachineCount))
+
+        $expectedRow = [PSCustomObject]@{
+            DeviceId = 'device-001'
+            DeviceName = 'device01.contoso.com'
+            RbacGroupName = 'Servers'
+            OSPlatform = 'Windows 11'
+            OSVersion = '10.0.22631'
+            MachineTags = @('Prod', 'Ring0')
+            MachineInfo = [PSCustomObject]@{
+                ip = '10.0.0.21'
+                eip = '52.0.0.21'
+                hs = 'Active'
+                rs = 'Medium'
+                el = 'Low'
+                dv = 'Normal'
+                mb = 'Intune'
+                aad = $true
+                ls = '2026-03-22'
+                fs = '2026-02-15'
+            }
+            CveId = 'CVE-2026-0313'
+            CvssScore = 8.15
+            VulnerabilitySeverityLevel = 'High'
+            ExploitabilityLevel = 'ExploitIsPublic'
+            CveBatchUrl = $row.CveBatchUrl
+            CveBatchTitle = $row.CveBatchTitle
+            PublishedDate = '2026-03-05'
+            VulnerabilityDescription = 'Source canonical description'
+            EpssScore = 0.8123
+            AffectedSoftware = @('contoso:legacy agent')
+            IsExploitAvailable = $true
+            NvdLastModifiedDate = '2026-03-17'
+            NvdBaseScore = 8.0
+            NvdBaseSeverity = 'HIGH'
+            NvdVector = 'AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H'
+            NvdKevDate = '2026-03-18'
+            NvdActionDue = '2026-04-01'
+            NvdRequiredAction = 'Patch immediately'
+            NvdWeaknesses = @('CWE-79', 'CWE-20')
+            SoftwareVendor = 'Contoso'
+            SoftwareName = 'Legacy Agent'
+            SoftwareVersion = '3.2.0'
+            RecommendationReference = 'KB000001'
+            ProductCodeCpe = 'cpe:/a:contoso:legacy_agent'
+            EndOfSupportStatus = 'supported'
+            EndOfSupportDate = '2028-01-01'
+            FirstSeenTimestamp = '2026-03-18'
+            LastSeenTimestamp = '2026-03-21'
+            SecurityUpdateAvailable = $true
+            RecommendedSecurityUpdate = 'KB000001'
+            RecommendedSecurityUpdateId = 'KB000001'
+            RecommendedSecurityUpdateUrl = 'https://example.invalid/kb000001'
+            DiskPaths = @('C:\z-agent.dll', 'C:\a-agent.dll')
+            RegistryPaths = @('HKLM\Software\Contoso\ZAgent', 'HKLM\Software\Contoso\AAgent')
+        }
+        $expectedSignature = Get-CanonicalValidationRowSignature -Row $expectedRow
+
+        Assert-True ($signatures.Count -eq 1) 'Expected source canonicalization fixture to emit one signature.'
+        Assert-True ($signatures[0] -eq $expectedSignature) 'Expected source canonicalization to preserve the canonical row signature for enriched source records.'
+        Assert-True ($firstLastSwappedCount -eq 1) 'Expected source canonicalization to continue tracking reordered first/last seen timestamps.'
+        Assert-True ($missingMachineCount -eq 0) 'Expected source canonicalization fixture to resolve machine metadata without fallback misses.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-WriteCombinedPayloadGzipCanConsumeColumnLookupData {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('payload-consume-lookups-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $columnsOutputPath = Join-Path $tempRoot 'columns-normalized.json'
+    $columnPath = Join-Path $tempRoot 'columns'
+    $payloadPath = Join-Path $tempRoot 'columns-payload.json.gz'
+
+    try {
+        . (Join-Path $repoRoot 'build\Import-ValidationHelpers.ps1')
+
+        $currentRow = Get-TestVulnRow -Id 'payload-consume-001' -CveId 'CVE-2026-0411' -SnapshotDate '2026-03-20' -Version '4.0.0'
+        $historyRow = Get-TestVulnRow -Id 'payload-consume-002' -CveId 'CVE-2026-0412' -SnapshotDate '2026-03-18' -Version '4.1.0'
+        $historyRow.DeviceId = 'device-002'
+        $historyRow.DeviceName = 'device02.contoso.com'
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow)
+        [void](New-Item -Path (Get-VulnHistoryPath -BasePath $tempRoot -PeriodKey '2026Q1') -ItemType File -Force)
+        Write-NdjsonRecordsFile -Path (Get-VulnHistoryRowsPath -BasePath $tempRoot -PeriodKey '2026Q1') -Records @($historyRow)
+
+        $columnsResult = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $columnsOutputPath -VulnColumnDirectoryPath $columnPath -Machines @{} -AdvancedHuntingData @{}
+        $deviceCountBeforeConsume = @($columnsResult.Lookups.devices).Count
+        $cveCountBeforeConsume = @($columnsResult.Lookups.cves).Count
+
+        Write-CombinedPayloadGzip -Lookups $columnsResult.Lookups -VulnColumnPaths $columnsResult.VulnColumnPaths -OutputPath $payloadPath -ConsumeLookups
+
+        $payloadSignatures = @(Read-PayloadCanonicalSignatureStream -PayloadPath $payloadPath | Sort-Object)
+
+        Assert-True ($deviceCountBeforeConsume -gt 0) 'Expected the payload fixture to start with populated device lookups before consuming them.'
+        Assert-True ($cveCountBeforeConsume -gt 0) 'Expected the payload fixture to start with populated CVE lookups before consuming them.'
+        Assert-True ($payloadSignatures.Count -eq 2) 'Expected the consumed-lookups payload fixture to preserve both vulnerability rows.'
+        Assert-True ($null -eq $columnsResult.Lookups.devices) 'Expected payload gzip with -ConsumeLookups to release device lookups after serialization.'
+        Assert-True ($null -eq $columnsResult.Lookups.software) 'Expected payload gzip with -ConsumeLookups to release software lookups after serialization.'
+        Assert-True ($null -eq $columnsResult.Lookups.cves) 'Expected payload gzip with -ConsumeLookups to release CVE lookups after serialization.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-embedded-payload-inspection-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+    $htmlPath = Join-Path $tempRoot 'dashboard.html'
+
+    try {
+        Write-GzipTextFile -Path $payloadPath -Content '{"vulnsFormat":"rows-v1","vulns":[[0,0,0,0,"2026-03-20","2026-03-21",null,null,null,null,null],[1,1,1,1,"2026-03-18","2026-03-19",null,null,null,null,null]],"lookups":{"devices":[{"id":"device-001"},{"id":"device-002"}],"cves":[{"id":"CVE-2026-1001"},{"id":"CVE-2026-1002"}]}}'
+        $payloadSha256 = Get-FileSha256Hex -Path $payloadPath
+
+        $template = @"
+<html>
+<head><script id="dataFormat" type="application/json">compressed</script></head>
+<body>
+<script id="vulnsData" type="application/json">__PAYLOAD__</script>
+</body>
+</html>
+"@
+        Write-TemplatedHtml -Template $template -Segments @(@{ Placeholder = '__PAYLOAD__'; Base64FilePath = $payloadPath }) -OutputPath $htmlPath -InsertBase64LineBreaks
+
+        $inspection = Get-DashboardEmbeddedPayloadInspection -Path $htmlPath
+
+        Assert-True ($inspection.DataFormat -eq 'compressed') 'Expected self-contained dashboard inspection to report compressed data format.'
+        Assert-True ($inspection.PayloadRowCount -eq 2) 'Expected self-contained dashboard inspection to preserve the embedded payload row count.'
+        Assert-True ($inspection.PayloadSha256 -eq $payloadSha256) 'Expected self-contained dashboard inspection to preserve the embedded payload SHA256.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-MeasureStressRunWritesProgressAndFinalReport {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('measure-stress-run-report-' + [guid]::NewGuid().ToString('N'))
+    $datasetRoot = Join-Path $tempRoot 'dataset'
+    $outputRoot = Join-Path $tempRoot 'output'
+    [void](New-Item -Path $datasetRoot -ItemType Directory -Force)
+    [void](New-Item -Path $outputRoot -ItemType Directory -Force)
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $measureScriptPath = Join-Path $repoRoot 'tests\Measure-StressRun.ps1'
+    $dashboardPath = Join-Path $outputRoot 'dashboard.html'
+    $reportPath = Join-Path $outputRoot 'stress-report.json'
+    $stdoutPath = Join-Path $outputRoot 'measure.stdout.log'
+    $stderrPath = Join-Path $outputRoot 'measure.stderr.log'
+    $process = $null
+
+    try {
+        . (Join-Path $repoRoot 'build\Import-ValidationHelpers.ps1')
+
+        $row = Get-TestVulnRow -Id 'stress-report-001' -CveId 'CVE-2026-0701' -SnapshotDate '2026-03-20' -Version '7.0.0'
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $datasetRoot) -Records @($row)
+
+        $machines = @(
+            [PSCustomObject]@{
+                id = 'device-001'
+                computerDnsName = 'device01.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows 11'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = '10.0.0.21'
+                lastExternalIpAddress = ''
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'Medium'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-20'
+                firstSeen = '2026-02-01'
+            }
+        )
+
+        [System.IO.File]::WriteAllText((Join-Path $datasetRoot 'Machines_Current.json'), ($machines | ConvertTo-Json -Compress -Depth 20), [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $datasetRoot 'AdvancedHunting_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $datasetRoot 'synthetic-manifest.json'), (([ordered]@{
+            actualDeviceCount = 1
+            actualCurrentRows = 1
+            actualHistoryRows = 0
+        }) | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
+
+        $pwshCommand = Get-Command -Name 'pwsh' -ErrorAction Stop
+        $argumentList = @(
+            '-NoProfile'
+            '-File'
+            $measureScriptPath
+            '-Name'
+            'stress-report-regression'
+            '-SyntheticOutputPath'
+            $datasetRoot
+            '-DashboardOutputPath'
+            $dashboardPath
+            '-ReportOutputPath'
+            $reportPath
+            '-Validate'
+            '-ValidationMode'
+            'artifacts'
+            '-PollIntervalSeconds'
+            '1'
+        )
+
+        $process = Start-Process -FilePath $pwshCommand.Source -ArgumentList $argumentList -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+
+        $reportSeenWhileRunning = $false
+        $deadline = [datetime]::UtcNow.AddSeconds(30)
+        while ([datetime]::UtcNow -lt $deadline) {
+            $process.Refresh()
+            if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
+                if (-not $process.HasExited) {
+                    $reportSeenWhileRunning = $true
+                }
+                break
+            }
+
+            if ($process.HasExited) {
+                break
+            }
+
+            Start-Sleep -Milliseconds 200
+        }
+
+        $process.WaitForExit()
+
+        if (-not $IsWindows) {
+            $stdoutContent = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            $stderrContent = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            $processOutput = @($stdoutContent, $stderrContent) -join [Environment]::NewLine
+
+            Assert-True ($process.ExitCode -ne 0) 'Expected Measure-StressRun regression fixture to fail fast on non-Windows platforms.'
+            Assert-True (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) 'Expected non-Windows Measure-StressRun execution to avoid writing a stress report.'
+            Assert-True ($processOutput.Contains('currently supports Windows only')) 'Expected non-Windows Measure-StressRun execution to explain the Windows-only platform guard.'
+            return
+        }
+
+        $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -Depth 20
+
+        Assert-True $reportSeenWhileRunning 'Expected Measure-StressRun to persist a progress report before the wrapper process exits.'
+        Assert-True ($report.report_state -eq 'completed') 'Expected Measure-StressRun to finalize the persisted report after the child process exits.'
+        Assert-True ($report.return_code -eq 0) 'Expected Measure-StressRun regression fixture to complete successfully.'
+        Assert-True ($report.sample_count -gt 0) 'Expected Measure-StressRun regression fixture to record at least one process-tree sample.'
+        Assert-True ($report.dashboard_exists -eq $true) 'Expected Measure-StressRun regression fixture to generate the dashboard output.'
+    }
+    finally {
+        if ($null -ne $process -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+
         if (Test-Path -LiteralPath $tempRoot) {
             Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
@@ -3436,12 +3947,14 @@ function Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity {
 
         Assert-True ($primeAudit.RowComparison.Match -eq $true) 'Expected the priming forced streaming audit to succeed before the source exports diverge.'
         Assert-True ($primeAudit.SemanticParity.SourceSignatureCacheUsed -eq $false) 'Expected the priming forced streaming audit to build the source signature cache.'
+        Assert-True ((Test-Path -LiteralPath $payloadPath -PathType Leaf)) 'Expected the streaming audit to preserve externally referenced payload files after the priming pass.'
         Assert-True ($audit.PayloadParity.Match -eq $true) 'Expected dashboard payload bytes to remain equal to the cached normalized payload.'
         Assert-True ($audit.SemanticParity.PayloadByteParityMatch -eq $true) 'Expected streaming audit diagnostics to record dashboard payload byte parity.'
         Assert-True ($audit.RowComparison.Match -eq $false) 'Expected streaming semantic parity to fail when the source exports diverge from the dashboard payload.'
         Assert-True ($audit.RowComparison.MissingCount -eq 1) 'Expected the extra source row to be reported as missing from the dashboard payload.'
         Assert-True ([string]$audit.SemanticParity.ComparisonPayloadSource -eq 'cached-payload') 'Expected source streaming audit to reuse the cached payload when byte parity proves dashboard equivalence.'
         Assert-True ($audit.SemanticParity.SourceSignatureCacheUsed -eq $false) 'Expected the streaming audit to bypass the cached source signature set after the source exports fingerprint changes.'
+        Assert-True ((Test-Path -LiteralPath $payloadPath -PathType Leaf)) 'Expected the streaming audit to preserve externally referenced payload files after full comparison completes.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) {
@@ -3831,6 +4344,8 @@ function Test-DashboardValidateOnlyFailsWhenHostedPayloadMissing {
     $outputPath = Join-Path $tempRoot 'dashboard.html'
     $auditPath = Join-Path $tempRoot 'audit.json'
     $assetsPath = Join-Path $tempRoot 'dashboard.assets'
+    $validateStdoutPath = Join-Path $tempRoot 'validate-only.stdout.log'
+    $validateStderrPath = Join-Path $tempRoot 'validate-only.stderr.log'
 
     try {
         Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
@@ -3842,8 +4357,20 @@ function Test-DashboardValidateOnlyFailsWhenHostedPayloadMissing {
         Assert-True ((Test-Path -LiteralPath $payloadAssetPath -PathType Leaf)) 'Expected split-assets generation to write a hosted payload before the negative validation step.'
         Remove-Item -LiteralPath $payloadAssetPath -Force
 
-        & pwsh -NoProfile -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ValidateOnly -ValidationOutputPath $auditPath | Out-Null
-        $validationExitCode = $LASTEXITCODE
+        $pwshCommand = Get-Command -Name 'pwsh' -ErrorAction Stop
+        $validationProcess = Start-Process -FilePath $pwshCommand.Source -ArgumentList @(
+            '-NoProfile'
+            '-File'
+            $dashboardScriptPath
+            '-DirectoryPath'
+            $tempRoot
+            '-OutputPath'
+            $outputPath
+            '-ValidateOnly'
+            '-ValidationOutputPath'
+            $auditPath
+        ) -WorkingDirectory (Split-Path -Path $dashboardScriptPath -Parent) -RedirectStandardOutput $validateStdoutPath -RedirectStandardError $validateStderrPath -PassThru -Wait
+        $validationExitCode = $validationProcess.ExitCode
 
         Assert-True ($validationExitCode -ne 0) 'Expected ValidateOnly to fail when a hosted dashboard payload asset is missing.'
         Assert-True (-not (Test-Path -LiteralPath $auditPath -PathType Leaf)) 'Expected missing hosted payload validation to avoid writing a passing audit artifact.'
@@ -3868,6 +4395,8 @@ function Test-PackageOnlyRejectsMismatchedNormalizedPayloadManifest {
     $normalizedManifestPath = Join-Path $tempRoot '.local\payload\dashboard-payload.json'
     $tamperedPayloadPath = Join-Path $tempRoot '.local\payload\dashboard-payload-tampered.json.gz'
     $outputPath = Join-Path $tempRoot 'dashboard.html'
+    $packageStdoutPath = Join-Path $tempRoot 'package-only.stdout.log'
+    $packageStderrPath = Join-Path $tempRoot 'package-only.stderr.log'
 
     try {
         Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
@@ -3879,8 +4408,23 @@ function Test-PackageOnlyRejectsMismatchedNormalizedPayloadManifest {
 
         Write-GzipTextFile -Path $tamperedPayloadPath -Content '{"lookups":{"devices":[],"cves":[]},"vulnsFormat":"rows-v1","vulns":[]}'
 
-        & pwsh -NoProfile -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -PackageOnly -NormalizedPayloadInputPath $tamperedPayloadPath -NormalizedPayloadManifestInputPath $normalizedManifestPath | Out-Null
-        $packageExitCode = $LASTEXITCODE
+        $pwshCommand = Get-Command -Name 'pwsh' -ErrorAction Stop
+        $packageProcess = Start-Process -FilePath $pwshCommand.Source -ArgumentList @(
+            '-NoProfile'
+            '-File'
+            $dashboardScriptPath
+            '-DirectoryPath'
+            $tempRoot
+            '-OutputPath'
+            $outputPath
+            '-ExportMachineData:$false'
+            '-PackageOnly'
+            '-NormalizedPayloadInputPath'
+            $tamperedPayloadPath
+            '-NormalizedPayloadManifestInputPath'
+            $normalizedManifestPath
+        ) -WorkingDirectory (Split-Path -Path $dashboardScriptPath -Parent) -RedirectStandardOutput $packageStdoutPath -RedirectStandardError $packageStderrPath -PassThru -Wait
+        $packageExitCode = $packageProcess.ExitCode
 
         Assert-True ($packageExitCode -ne 0) 'Expected package-only generation to reject a payload whose bytes do not match the provided manifest.'
         Assert-True (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) 'Expected package-only manifest mismatch to avoid writing a dashboard.'
@@ -4296,6 +4840,8 @@ Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose
 Write-Output '  Consuming payload-close lookup checks passed.'
 Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader
 Write-Output '  Content-store streaming normalization checks passed.'
+Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePayloadClose
+Write-Output '  Content-store transient context-release and hosted-memory diagnostics checks passed.'
 Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup
 Write-Output '  Repeated CVE lookup deduplication checks passed.'
 Test-ConvertToNormalizedDataReportsZeroOnboardedContentStoreDiagnostic
@@ -4310,8 +4856,24 @@ Test-NormalizedVulnColumnCacheRefreshesInventoryColumn
 Write-Output '  Inventory-backed normalized vuln column cache reuse checks passed.'
 Test-WriteBase64FileContentMatchesReferenceOutput
 Write-Output '  Streamed base64 writer checks passed.'
+Test-BenchmarkSeriesSummaryHandlesAzureOnlyRunMode
+Test-BenchmarkSeriesSummaryHandlesCombinedRunMode
+Test-BenchmarkSeriesSummaryHandlesLocalOnlyRunMode
+Test-BenchmarkIncludesLocalRunHandlesLegacyInferenceShape
+Test-BenchmarkModeScenarioKeyHandlesLegacyModeMapping
+Write-Output '  Benchmark series mode checks passed.'
+Test-WriteProgressMarkerIncludesEtaWhenTotalCountKnown
+Write-Output '  Progress marker ETA checks passed.'
+Test-WriteCombinedPayloadGzipCanConsumeColumnLookupData
+Write-Output '  Payload lookup consumption checks passed.'
+Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload
+Write-Output '  Embedded payload inspection checks passed.'
+Test-MeasureStressRunWritesProgressAndFinalReport
+Write-Output '  Measure-StressRun report persistence checks passed.'
 Test-ValidationHelperPayloadCanonicalization
 Write-Output '  Validation helper payload-format checks passed.'
+Test-ValidationHelperSourceCanonicalization
+Write-Output '  Validation helper source canonicalization checks passed.'
 Test-ValidationHelperStandaloneImport
 Write-Output '  Validation helper standalone import checks passed.'
 Test-DashboardValidationFailureExtendedEnrichmentGate
