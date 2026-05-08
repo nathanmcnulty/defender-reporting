@@ -289,6 +289,8 @@ That command:
 - appends each run to `.local\benchmark-history\benchmark-history.jsonl`
 - writes aggregate `series-summary.json` and `series-summary.md` artifacts
 
+`Measure-BranchVsMainBenchmark.ps1` and `Invoke-BenchmarkSeries.ps1` default to Azure-only capture. Add `-IncludeLocalBenchmark` when you also want local timings in the same run, or `-LocalOnly` when you want to skip Azure entirely.
+
 Function App timing semantics:
 - `function_app.elapsed_seconds` now tracks active execution time when the runtime status blob is available
 - `function_app.end_to_end_elapsed_seconds` retains invoke-to-finish timing for queue and cold-start review
@@ -299,6 +301,8 @@ Capture a current-branch-only benchmark baseline with:
 ```powershell
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 pwsh -NoProfile -File .\tests\Measure-BranchVsMainBenchmark.ps1 -CurrentOnly -CurrentBaselineName 'current-live' -DatasetPath .\exports-synthetic-live -ResultsOutputPath (Join-Path $PWD ('.local\current-baseline-live-' + $stamp + '.json'))
+
+pwsh -NoProfile -File .\tests\Measure-BranchVsMainBenchmark.ps1 -CurrentOnly -IncludeLocalBenchmark -CurrentBaselineName 'current-live-with-local' -DatasetPath .\exports-synthetic-live -ResultsOutputPath (Join-Path $PWD ('.local\current-baseline-live-with-local-' + $stamp + '.json'))
 ```
 
 Append a normalized local history entry after a benchmark completes with:

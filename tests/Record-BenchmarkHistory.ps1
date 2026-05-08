@@ -19,6 +19,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'Import-BenchmarkDatasetCatalog.ps1')
+. (Join-Path $PSScriptRoot 'helpers\BenchmarkSeriesTools.ps1')
 
 function Get-ObjectPropertyValue {
     [CmdletBinding()]
@@ -271,6 +272,7 @@ function Get-BenchmarkHistoryEntry {
         benchmark_generated_utc = Format-DateTimeValue -Value (Get-ObjectPropertyValue -InputObject $Result -Name 'generated_utc')
         benchmark_mode = [string](Get-ObjectPropertyValue -InputObject $Result -Name 'benchmark_mode')
         local_only = [bool](Get-ObjectPropertyValue -InputObject $Result -Name 'local_only')
+        include_local_benchmark = Test-BenchmarkIncludesLocalRun -BenchmarkObject $Result
         persistent_local_workflow = [bool](Get-ObjectPropertyValue -InputObject $Result -Name 'persistent_local_workflow')
         subscription = $subscriptionSummary
         dataset = Get-DatasetSummary -Result $Result
@@ -321,8 +323,9 @@ function Find-PreviousMatchingEntry {
     $candidateEntries = @(
         $Entries | Where-Object {
             ([string]$_.benchmark_result_path -ne [string]$CurrentEntry.benchmark_result_path) -and
-            ([string]$_.benchmark_mode -eq [string]$CurrentEntry.benchmark_mode) -and
+            ((Get-BenchmarkModeScenarioKey -BenchmarkMode ([string]$_.benchmark_mode)) -eq (Get-BenchmarkModeScenarioKey -BenchmarkMode ([string]$CurrentEntry.benchmark_mode))) -and
             ([bool]$_.local_only -eq [bool]$CurrentEntry.local_only) -and
+            ((Test-BenchmarkIncludesLocalRun -BenchmarkObject $_) -eq (Test-BenchmarkIncludesLocalRun -BenchmarkObject $CurrentEntry)) -and
             ([bool]$_.persistent_local_workflow -eq [bool]$CurrentEntry.persistent_local_workflow) -and
             ([string]$_.dataset.identity -eq [string]$CurrentEntry.dataset.identity) -and
             ([string]$_.current.baseline -eq [string]$CurrentEntry.current.baseline) -and
@@ -521,6 +524,8 @@ function Write-BenchmarkHistorySummary {
     $lines = [System.Collections.Generic.List[string]]::new()
     $entryRecordedUtc = Format-DateTimeValue -Value $Entry.recorded_utc
     $previousEntryRecordedUtc = Format-DateTimeValue -Value $(if ($null -ne $PreviousEntry) { $PreviousEntry.recorded_utc } else { $null })
+    $entryIncludesLocalBenchmark = Test-BenchmarkIncludesLocalRun -BenchmarkObject $Entry
+    $previousEntryIncludesLocalBenchmark = if ($null -ne $PreviousEntry) { Test-BenchmarkIncludesLocalRun -BenchmarkObject $PreviousEntry } else { $false }
     $lines.Add('# Benchmark History Summary') | Out-Null
     $lines.Add('') | Out-Null
     $lines.Add('Latest capture') | Out-Null
@@ -535,8 +540,10 @@ function Write-BenchmarkHistorySummary {
     if ($null -ne $Entry.current.repo) {
         $lines.Add(('- Current git: `{0}` @ `{1}` ({2})' -f $Entry.current.repo.branch, $Entry.current.repo.commit_short, $(if ($Entry.current.repo.dirty) { 'dirty' } else { 'clean' }))) | Out-Null
     }
-    $lines.Add(('- Local elapsed: {0}' -f (Format-SecondsValue -Value $Entry.current.local_elapsed_seconds))) | Out-Null
+    if ($entryIncludesLocalBenchmark) {
+        $lines.Add(('- Local elapsed: {0}' -f (Format-SecondsValue -Value $Entry.current.local_elapsed_seconds))) | Out-Null
         $lines.Add(('- Local pre-run environment: {0}' -f (Format-EnvironmentSnapshotValue -Snapshot $Entry.current.local_environment_snapshot))) | Out-Null
+    }
     $lines.Add(('- Runbook elapsed: {0}' -f (Format-SecondsValue -Value $Entry.current.runbook_elapsed_seconds))) | Out-Null
     $lines.Add(('- Function elapsed: {0} ({1})' -f (Format-SecondsValue -Value $Entry.current.function_elapsed_seconds), $(if ([string]::IsNullOrWhiteSpace([string]$Entry.current.function_timing_basis)) { 'legacy' } else { [string]$Entry.current.function_timing_basis }))) | Out-Null
     if ($null -ne $Entry.current.function_end_to_end_elapsed_seconds) {
@@ -569,7 +576,9 @@ function Write-BenchmarkHistorySummary {
         $lines.Add('') | Out-Null
         $lines.Add(('- Recorded: `{0}`' -f $previousEntryRecordedUtc)) | Out-Null
         $lines.Add(('- Result file: `{0}`' -f $PreviousEntry.benchmark_result_path)) | Out-Null
-        $lines.Add(('- Local delta: {0}' -f (Format-DeltaValue -CurrentValue $Entry.current.local_elapsed_seconds -PreviousValue $PreviousEntry.current.local_elapsed_seconds))) | Out-Null
+        if ($entryIncludesLocalBenchmark -and $previousEntryIncludesLocalBenchmark) {
+            $lines.Add(('- Local delta: {0}' -f (Format-DeltaValue -CurrentValue $Entry.current.local_elapsed_seconds -PreviousValue $PreviousEntry.current.local_elapsed_seconds))) | Out-Null
+        }
         $lines.Add(('- Runbook delta: {0}' -f (Format-DeltaValue -CurrentValue $Entry.current.runbook_elapsed_seconds -PreviousValue $PreviousEntry.current.runbook_elapsed_seconds))) | Out-Null
         $lines.Add(('- Function delta: {0}' -f (Format-DeltaValue -CurrentValue $Entry.current.function_elapsed_seconds -PreviousValue $PreviousEntry.current.function_elapsed_seconds))) | Out-Null
         if ($null -ne $Entry.current.function_end_to_end_elapsed_seconds -and $null -ne $PreviousEntry.current.function_end_to_end_elapsed_seconds) {

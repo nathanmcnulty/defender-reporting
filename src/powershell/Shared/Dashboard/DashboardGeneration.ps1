@@ -1252,20 +1252,236 @@ function Get-DashboardHtmlScriptContent {
     return $match.Groups['content'].Value.Trim()
 }
 
-function Get-DashboardEmbeddedPayloadTempPath {
+function Write-DecodedBase64TextToStream {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text,
+
+        [Parameter(Mandatory = $true)]
+        [ref]$Carry,
+
+        [Parameter(Mandatory = $true)]
+        [System.IO.Stream]$OutputStream
+    )
+
+    $cleanText = if ([string]::IsNullOrWhiteSpace($Text)) {
+        ''
+    }
+    elseif ($Text.IndexOfAny(@([char]' ', [char]"`t", [char]"`r", [char]"`n")) -ge 0) {
+        [regex]::Replace($Text, '\s+', '')
+    }
+    else {
+        $Text
+    }
+
+    if ([string]::IsNullOrEmpty($cleanText) -and [string]::IsNullOrEmpty([string]$Carry.Value)) {
+        return
+    }
+
+    $combined = ([string]$Carry.Value) + $cleanText
+    $blockCharCount = 16384
+    $fullCharCount = $combined.Length - ($combined.Length % 4)
+    $offset = 0
+    while ($offset -lt $fullCharCount) {
+        $charsToDecode = [System.Math]::Min($blockCharCount, ($fullCharCount - $offset))
+        if (($charsToDecode % 4) -ne 0) {
+            $charsToDecode -= ($charsToDecode % 4)
+        }
+
+        $bytes = [System.Convert]::FromBase64String($combined.Substring($offset, $charsToDecode))
+        $OutputStream.Write($bytes, 0, $bytes.Length)
+        $offset += $charsToDecode
+    }
+
+    $Carry.Value = if ($fullCharCount -lt $combined.Length) {
+        $combined.Substring($fullCharCount)
+    }
+    else {
+        ''
+    }
+}
+
+function Write-EmbeddedDashboardPayloadGzipFile {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HtmlPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath
+    )
+
+    $startMarker = '<script id="vulnsData" type="application/json">'
+    $endMarker = '</script>'
+    $reader = $null
+    $inputStream = $null
+    $outputStream = $null
+    $startFound = $false
+    $endFound = $false
+    $carryText = ''
+    $base64Carry = ''
+
+    try {
+        $inputStream = [System.IO.FileStream]::new(
+            $HtmlPath,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read,
+            4096,
+            [System.IO.FileOptions]::SequentialScan)
+        $reader = [System.IO.StreamReader]::new($inputStream, [System.Text.UTF8Encoding]::new($false), $true, 65536, $false)
+        $charBuffer = [char[]]::new(65536)
+
+        while (($charsRead = $reader.Read($charBuffer, 0, $charBuffer.Length)) -gt 0) {
+            $chunkText = $carryText + [string]::new($charBuffer, 0, $charsRead)
+            $carryText = ''
+
+            if (-not $startFound) {
+                $startIndex = $chunkText.IndexOf($startMarker, [System.StringComparison]::Ordinal)
+                if ($startIndex -lt 0) {
+                    $overlapLength = [System.Math]::Min(($startMarker.Length - 1), $chunkText.Length)
+                    if ($overlapLength -gt 0) {
+                        $carryText = $chunkText.Substring($chunkText.Length - $overlapLength)
+                    }
+                    continue
+                }
+
+                $startFound = $true
+                $outputStream = [System.IO.FileStream]::new(
+                    $OutputPath,
+                    [System.IO.FileMode]::Create,
+                    [System.IO.FileAccess]::Write,
+                    [System.IO.FileShare]::Read,
+                    4096,
+                    [System.IO.FileOptions]::SequentialScan)
+                $chunkText = $chunkText.Substring($startIndex + $startMarker.Length)
+            }
+
+            $endIndex = $chunkText.IndexOf($endMarker, [System.StringComparison]::Ordinal)
+            if ($endIndex -ge 0) {
+                Write-DecodedBase64TextToStream -Text $chunkText.Substring(0, $endIndex) -Carry ([ref]$base64Carry) -OutputStream $outputStream
+                $endFound = $true
+                break
+            }
+
+            $overlapLength = [System.Math]::Min(($endMarker.Length - 1), $chunkText.Length)
+            if ($chunkText.Length -gt $overlapLength) {
+                Write-DecodedBase64TextToStream -Text $chunkText.Substring(0, ($chunkText.Length - $overlapLength)) -Carry ([ref]$base64Carry) -OutputStream $outputStream
+            }
+            if ($overlapLength -gt 0) {
+                $carryText = $chunkText.Substring($chunkText.Length - $overlapLength)
+            }
+        }
+
+        if ($startFound -and -not $endFound) {
+            $endIndex = $carryText.IndexOf($endMarker, [System.StringComparison]::Ordinal)
+            if ($endIndex -ge 0) {
+                Write-DecodedBase64TextToStream -Text $carryText.Substring(0, $endIndex) -Carry ([ref]$base64Carry) -OutputStream $outputStream
+                $endFound = $true
+            }
+        }
+
+        if (-not $startFound) {
+            return $false
+        }
+
+        if (-not $endFound) {
+            throw "Unable to locate payload terminator in '$HtmlPath'."
+        }
+
+        if (-not [string]::IsNullOrEmpty($base64Carry)) {
+            if (($base64Carry.Length % 4) -ne 0) {
+                throw "Embedded payload base64 in '$HtmlPath' ended on an invalid boundary."
+            }
+
+            $bytes = [System.Convert]::FromBase64String($base64Carry)
+            $outputStream.Write($bytes, 0, $bytes.Length)
+        }
+
+        if ($outputStream -and $outputStream.Length -le 0) {
+            throw "Embedded payload in '$HtmlPath' is empty."
+        }
+
+        $outputStream.Flush()
+        return $true
+    }
+    finally {
+        if ($reader) {
+            $reader.Dispose()
+        }
+        elseif ($inputStream) {
+            $inputStream.Dispose()
+        }
+
+        if ($outputStream) {
+            $outputStream.Dispose()
+        }
+    }
+}
+
+function Get-DashboardHtmlPrefixContent {
     [CmdletBinding()]
     [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1024, 1048576)]
+        [int]$MaxChars = 131072
+    )
+
+    $inputStream = $null
+    $reader = $null
+    try {
+        $inputStream = [System.IO.FileStream]::new(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            [System.IO.FileShare]::Read,
+            4096,
+            [System.IO.FileOptions]::SequentialScan)
+        $reader = [System.IO.StreamReader]::new($inputStream, [System.Text.UTF8Encoding]::new($false), $true, 4096, $false)
+        $buffer = [char[]]::new($MaxChars)
+        $charsRead = $reader.Read($buffer, 0, $buffer.Length)
+        if ($charsRead -le 0) {
+            return ''
+        }
+
+        return [string]::new($buffer, 0, $charsRead)
+    }
+    finally {
+        if ($reader) {
+            $reader.Dispose()
+        }
+        elseif ($inputStream) {
+            $inputStream.Dispose()
+        }
+    }
+}
+
+function Resolve-DashboardEmbeddedPayloadSource {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$HtmlPath
     )
 
     $resolvedPath = [System.IO.Path]::GetFullPath($HtmlPath)
-    $content = [System.IO.File]::ReadAllText($resolvedPath, [System.Text.Encoding]::UTF8)
-    $dataFormat = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dataFormat'
+    $metadataContent = Get-DashboardHtmlPrefixContent -Path $resolvedPath
+    $dataFormat = Get-DashboardHtmlScriptContent -Html $metadataContent -ScriptId 'dataFormat'
 
     if ($dataFormat -eq 'external-compressed') {
-        $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dashboardConfig'
+        $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $metadataContent -ScriptId 'dashboardConfig'
+        if ([string]::IsNullOrWhiteSpace($dashboardConfigJson)) {
+            $metadataContent = [System.IO.File]::ReadAllText($resolvedPath, [System.Text.Encoding]::UTF8)
+            $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $metadataContent -ScriptId 'dashboardConfig'
+        }
+
         if ([string]::IsNullOrWhiteSpace($dashboardConfigJson)) {
             throw "Unable to locate dashboardConfig metadata in '$HtmlPath'."
         }
@@ -1278,27 +1494,69 @@ function Get-DashboardEmbeddedPayloadTempPath {
 
         $htmlDirectory = Split-Path -Path $resolvedPath -Parent
         $payloadRelativePath = $payloadUrl.Replace('/', '\')
-        return [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+        return [PSCustomObject]@{
+            DataFormat = $dataFormat
+            PayloadPath = [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+            DeleteAfterRead = $false
+        }
     }
 
-    $startMarker = '<script id="vulnsData" type="application/json">'
-    $endMarker = '</script>'
-    $startIndex = $content.IndexOf($startMarker)
-    if ($startIndex -lt 0) {
+    $tempPayloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-embedded-payload-' + [guid]::NewGuid().ToString('N') + '.json.gz')
+
+    if (Write-EmbeddedDashboardPayloadGzipFile -HtmlPath $resolvedPath -OutputPath $tempPayloadPath) {
+        return [PSCustomObject]@{
+            DataFormat = 'compressed'
+            PayloadPath = $tempPayloadPath
+            DeleteAfterRead = $true
+        }
+    }
+
+    if (Test-Path -LiteralPath $tempPayloadPath -PathType Leaf) {
+        Remove-Item -LiteralPath $tempPayloadPath -Force -ErrorAction SilentlyContinue
+    }
+
+    if ([string]::IsNullOrWhiteSpace($dataFormat)) {
+        $metadataContent = [System.IO.File]::ReadAllText($resolvedPath, [System.Text.Encoding]::UTF8)
+        $dataFormat = Get-DashboardHtmlScriptContent -Html $metadataContent -ScriptId 'dataFormat'
+    }
+
+    if ($dataFormat -eq 'external-compressed') {
+        $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $metadataContent -ScriptId 'dashboardConfig'
+        if ([string]::IsNullOrWhiteSpace($dashboardConfigJson)) {
+            throw "Unable to locate dashboardConfig metadata in '$HtmlPath'."
+        }
+
+        $dashboardConfig = $dashboardConfigJson | ConvertFrom-Json -Depth 20
+        $payloadUrl = [string]$dashboardConfig.payloadUrl
+        if ([string]::IsNullOrWhiteSpace($payloadUrl)) {
+            throw "dashboardConfig in '$HtmlPath' does not define payloadUrl."
+        }
+
+        $htmlDirectory = Split-Path -Path $resolvedPath -Parent
+        $payloadRelativePath = $payloadUrl.Replace('/', '\')
+        return [PSCustomObject]@{
+            DataFormat = $dataFormat
+            PayloadPath = [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+            DeleteAfterRead = $false
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($dataFormat) -or $dataFormat -eq 'compressed') {
         throw "Unable to locate embedded vulnerability payload in '$HtmlPath'."
     }
 
-    $payloadStart = $startIndex + $startMarker.Length
-    $payloadEnd = $content.IndexOf($endMarker, $payloadStart)
-    if ($payloadEnd -lt 0) {
-        throw "Unable to locate payload terminator in '$HtmlPath'."
-    }
+    throw "Unsupported dashboard payload format '$dataFormat' in '$HtmlPath'."
+}
 
-    $base64 = ($content.Substring($payloadStart, $payloadEnd - $payloadStart) -replace '\s+', '')
-    $bytes = [Convert]::FromBase64String($base64)
-    $tempPayloadPath = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-embedded-payload-' + [guid]::NewGuid().ToString('N') + '.json.gz')
-    [System.IO.File]::WriteAllBytes($tempPayloadPath, $bytes)
-    return $tempPayloadPath
+function Get-DashboardEmbeddedPayloadTempPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$HtmlPath
+    )
+
+    return [string](Resolve-DashboardEmbeddedPayloadSource -HtmlPath $HtmlPath).PayloadPath
 }
 
 function Get-DashboardEmbeddedPayloadInspection {
@@ -1309,73 +1567,21 @@ function Get-DashboardEmbeddedPayloadInspection {
         [string]$Path
     )
 
-    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
-    $content = [System.IO.File]::ReadAllText($resolvedPath, [System.Text.Encoding]::UTF8)
-    $dataFormat = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dataFormat'
+    $payloadSource = Resolve-DashboardEmbeddedPayloadSource -HtmlPath $Path
+    $payloadPath = [string]$payloadSource.PayloadPath
 
-    if ($dataFormat -eq 'external-compressed') {
-        $dashboardConfigJson = Get-DashboardHtmlScriptContent -Html $content -ScriptId 'dashboardConfig'
-        if ([string]::IsNullOrWhiteSpace($dashboardConfigJson)) {
-            throw "Unable to locate dashboardConfig metadata in '$Path'."
-        }
-
-        $dashboardConfig = $dashboardConfigJson | ConvertFrom-Json -Depth 20
-        $payloadUrl = [string]$dashboardConfig.payloadUrl
-        if ([string]::IsNullOrWhiteSpace($payloadUrl)) {
-            throw "dashboardConfig in '$Path' does not define payloadUrl."
-        }
-
-        $htmlDirectory = Split-Path -Path $resolvedPath -Parent
-        $payloadRelativePath = $payloadUrl.Replace('/', '\')
-        $payloadPath = [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+    try {
         return [PSCustomObject]@{
-            DataFormat = $dataFormat
+            DataFormat = [string]$payloadSource.DataFormat
             PayloadPath = $payloadPath
             PayloadRowCount = (Get-CompressedPayloadVulnCount -Path $payloadPath)
             PayloadSha256 = (Get-FileSha256Hex -Path $payloadPath)
         }
     }
-
-    $startMarker = '<script id="vulnsData" type="application/json">'
-    $endMarker = '</script>'
-    $startIndex = $content.IndexOf($startMarker)
-    if ($startIndex -lt 0) {
-        throw "Unable to locate embedded vulnerability payload in '$Path'."
-    }
-
-    $payloadStart = $startIndex + $startMarker.Length
-    $payloadEnd = $content.IndexOf($endMarker, $payloadStart)
-    if ($payloadEnd -lt 0) {
-        throw "Unable to locate payload terminator in '$Path'."
-    }
-
-    $base64 = ($content.Substring($payloadStart, $payloadEnd - $payloadStart) -replace '\s+', '')
-    $bytes = [Convert]::FromBase64String($base64)
-    $stream = $null
-    $gzip = $null
-    $reader = $null
-    $jsonReader = $null
-
-    try {
-        $stream = [System.IO.MemoryStream]::new($bytes, $false)
-        $gzip = [System.IO.Compression.GZipStream]::new($stream, [System.IO.Compression.CompressionMode]::Decompress)
-        $reader = [System.IO.StreamReader]::new($gzip, [System.Text.Encoding]::UTF8)
-        $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
-        $payloadRowCount = Get-PayloadVulnCountFromJsonReader -Reader $jsonReader -Path $Path
-    }
     finally {
-        if ($jsonReader) { $jsonReader.Close() }
-        elseif ($reader) { $reader.Dispose() }
-        elseif ($gzip) { $gzip.Dispose() }
-        elseif ($stream) { $stream.Dispose() }
-    }
-
-    $payloadSha256 = ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::HashData($bytes))).Replace('-', '').ToLowerInvariant()
-    return [PSCustomObject]@{
-        DataFormat = $dataFormat
-        PayloadPath = $null
-        PayloadRowCount = $payloadRowCount
-        PayloadSha256 = $payloadSha256
+        if ($payloadSource -and $payloadSource.DeleteAfterRead -and -not [string]::IsNullOrWhiteSpace($payloadPath) -and (Test-Path -LiteralPath $payloadPath -PathType Leaf)) {
+            Remove-Item -LiteralPath $payloadPath -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -1904,7 +2110,10 @@ function Write-CombinedPayloadGzip {
         [hashtable]$VulnColumnPaths,
 
         [Parameter(Mandatory = $true)]
-        [string]$OutputPath
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$ConsumeLookups
     )
 
     $payloadWriter = $null
@@ -1941,7 +2150,7 @@ function Write-CombinedPayloadGzip {
             $jsonWriter.WriteToken($vulnsJsonReader)
         }
 
-        Close-CombinedPayloadWriter -WriterState $payloadWriter -Lookups $Lookups
+        Close-CombinedPayloadWriter -WriterState $payloadWriter -Lookups $Lookups -ConsumeLookups:$ConsumeLookups
         $payloadWriter = $null
     }
     finally {
@@ -5869,6 +6078,26 @@ function Invoke-ContentStoreNormalization {
         }
 
         foreach ($refPath in $refPaths) {
+            $refPhaseName = if ([string]$refPath.Label -like 'VulnHistoryRefs_*') {
+                'StreamContentStoreHistoryRefs'
+            }
+            elseif ([string]$refPath.Label -like 'VulnCurrentRefs*') {
+                'StreamContentStoreCurrentRefs'
+            }
+            else {
+                'StreamContentStoreMergedRefs'
+            }
+
+            Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
+                    Kind = 'phase'
+                    Phase = $refPhaseName
+                    Message = ("Streaming content-store vulnerability refs from '{0}' into the normalized payload." -f $refPath.Label)
+                })
+
+            if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+                $null = Write-MemoryUsage -Label ("ContentStoreRefs " + $refPath.Label + " Start")
+            }
+
             # Inline streaming — eliminates 1.5M scriptblock invocations from
             # Invoke-VulnNdjsonLineAction. Uses direct .NET GZip + buffer scan.
             $refFileStream = [System.IO.File]::OpenRead([string]$refPath.Path)
@@ -6196,6 +6425,15 @@ function Invoke-ContentStoreNormalization {
                 if ($refContentStream -ne $refFileStream) { $refContentStream.Dispose() }
                 $refFileStream.Dispose()
             }
+
+            if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+                $null = Write-MemoryUsage -Label ("ContentStoreRefs " + $refPath.Label + " End")
+            }
+
+            if ($refPath -ne $refPaths[-1]) {
+                Sync-NormalizedVulnWriter -WriterState $writerState
+                Invoke-FullGarbageCollection
+            }
         }
 
         Sync-NormalizedVulnWriter -WriterState $writerState
@@ -6372,7 +6610,7 @@ function Invoke-RawStoreNormalization {
 
             foreach ($storePath in $storePaths) {
                 if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
-                    Write-MemoryUsage -Label ("VulnStore " + $storePath.Label + " Start")
+                    $null = Write-MemoryUsage -Label ("VulnStore " + $storePath.Label + " Start")
                 }
 
                 Invoke-VulnNdjsonJsonRootAction -Path ([string]$storePath.Path) -Action {
@@ -6695,7 +6933,7 @@ function Invoke-RawStoreNormalization {
                 }
 
                 if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
-                    Write-MemoryUsage -Label ("VulnStore " + $storePath.Label + " End")
+                    $null = Write-MemoryUsage -Label ("VulnStore " + $storePath.Label + " End")
                 }
             }
         } | Out-Null
