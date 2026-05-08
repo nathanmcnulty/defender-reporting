@@ -53,68 +53,7 @@ $script:DashboardDeliveryMode = $DashboardDeliveryMode
 $script:UseExistingExportsOnly = if ($PSBoundParameters.ContainsKey('UseExistingExportsOnly')) { [bool]$UseExistingExportsOnly } else { $true }
 $script:ExpectedTotalRows = $ExpectedTotalRows
 $script:PollIntervalSeconds = $PollIntervalSeconds
-
-function ConvertTo-UtcDateTime {
-    [CmdletBinding()]
-    [OutputType([datetime])]
-    param(
-        [Parameter(Mandatory = $false)]
-        [AllowNull()]
-        $Value
-    )
-
-    if ($null -eq $Value) {
-        return $null
-    }
-
-    if ($Value -is [datetime]) {
-        return ([datetime]$Value).ToUniversalTime()
-    }
-
-    if ($Value -is [datetimeoffset]) {
-        return ([datetimeoffset]$Value).UtcDateTime
-    }
-
-    $text = [string]$Value
-    if ([string]::IsNullOrWhiteSpace($text)) {
-        return $null
-    }
-
-    $parsed = [datetimeoffset]::MinValue
-    if ([datetimeoffset]::TryParse($text, [ref]$parsed)) {
-        return $parsed.UtcDateTime
-    }
-
-    return $null
-}
-
-function Invoke-GitText {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$RepoPath,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$Arguments
-    )
-
-    if (-not (Test-Path -LiteralPath $RepoPath -PathType Container)) {
-        return $null
-    }
-
-    $output = (& git -C $RepoPath @Arguments 2>$null | Out-String)
-    if ($LASTEXITCODE -ne 0) {
-        return $null
-    }
-
-    $trimmed = $output.Trim()
-    if ([string]::IsNullOrWhiteSpace($trimmed)) {
-        return $null
-    }
-
-    return $trimmed
-}
+. (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
 
 function Invoke-AzCli {
     [CmdletBinding()]

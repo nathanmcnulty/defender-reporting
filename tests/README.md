@@ -309,7 +309,7 @@ That dataset definition currently maps to:
 For the larger reusable Azure stress seed, materialize or register the existing 50k-device dataset with:
 
 ```powershell
-pwsh -NoProfile -File .\tests\New-BenchmarkDataset.ps1 -DatasetId benchmark-large-50k-v1
+pwsh -NoProfile -File .\tests\New-BenchmarkDataset.ps1 -DatasetId benchmark-large-50k-v1 -AllowLargeDataset
 ```
 
 That dataset definition maps to:
@@ -319,6 +319,13 @@ That dataset definition maps to:
 - target vulnerability rows: `1,500,000`
 - seed: `20260322`
 - output path: `.local\large-datasets\synthetic-50k-1_5m`
+
+Each generated benchmark dataset now records durable breadth counters in both `synthetic-manifest.json` and `benchmark-dataset.json`:
+- `uniqueCveIdCount`: distinct raw `CveId` values present in the compact content dictionary
+- `normalizedCveLookupCount`: distinct normalized CVE lookup entries (`CveId` + score/severity/exploitability/url/title), which is the same breadth surfaced as `CVEs` in dashboard and Azure acceptance summaries
+- `contentTemplateCount`: distinct compact vulnerability content templates in the dataset
+
+Use those counters when you need to compare regenerated benchmark breadth over time without unpacking the dataset by hand.
 
 When you want to keep the large seed current and exercise the vulnerability-store merge path without regenerating 1.5M rows, create a shifted current-snapshot delta overlay with:
 

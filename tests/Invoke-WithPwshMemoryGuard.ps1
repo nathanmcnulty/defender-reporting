@@ -22,18 +22,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
 
 if (-not $IsWindows) {
     throw 'tests/Invoke-WithPwshMemoryGuard.ps1 currently supports Windows only because it relies on Win32 CIM classes for process and memory sampling.'
-}
-
-function Get-AvailableMemoryGB {
-    [CmdletBinding()]
-    [OutputType([double])]
-    param()
-
-    $os = Get-CimInstance Win32_OperatingSystem
-    return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
 }
 
 function Get-ProcessTree {
