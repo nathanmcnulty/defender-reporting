@@ -4333,6 +4333,8 @@ function Test-DashboardValidateOnlyFailsWhenHostedPayloadMissing {
     $outputPath = Join-Path $tempRoot 'dashboard.html'
     $auditPath = Join-Path $tempRoot 'audit.json'
     $assetsPath = Join-Path $tempRoot 'dashboard.assets'
+    $validateStdoutPath = Join-Path $tempRoot 'validate-only.stdout.log'
+    $validateStderrPath = Join-Path $tempRoot 'validate-only.stderr.log'
 
     try {
         Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
@@ -4344,8 +4346,20 @@ function Test-DashboardValidateOnlyFailsWhenHostedPayloadMissing {
         Assert-True ((Test-Path -LiteralPath $payloadAssetPath -PathType Leaf)) 'Expected split-assets generation to write a hosted payload before the negative validation step.'
         Remove-Item -LiteralPath $payloadAssetPath -Force
 
-        & pwsh -NoProfile -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ValidateOnly -ValidationOutputPath $auditPath | Out-Null
-        $validationExitCode = $LASTEXITCODE
+        $pwshCommand = Get-Command -Name 'pwsh' -ErrorAction Stop
+        $validationProcess = Start-Process -FilePath $pwshCommand.Source -ArgumentList @(
+            '-NoProfile'
+            '-File'
+            $dashboardScriptPath
+            '-DirectoryPath'
+            $tempRoot
+            '-OutputPath'
+            $outputPath
+            '-ValidateOnly'
+            '-ValidationOutputPath'
+            $auditPath
+        ) -WorkingDirectory (Split-Path -Path $dashboardScriptPath -Parent) -RedirectStandardOutput $validateStdoutPath -RedirectStandardError $validateStderrPath -PassThru -Wait
+        $validationExitCode = $validationProcess.ExitCode
 
         Assert-True ($validationExitCode -ne 0) 'Expected ValidateOnly to fail when a hosted dashboard payload asset is missing.'
         Assert-True (-not (Test-Path -LiteralPath $auditPath -PathType Leaf)) 'Expected missing hosted payload validation to avoid writing a passing audit artifact.'
@@ -4370,6 +4384,8 @@ function Test-PackageOnlyRejectsMismatchedNormalizedPayloadManifest {
     $normalizedManifestPath = Join-Path $tempRoot '.local\payload\dashboard-payload.json'
     $tamperedPayloadPath = Join-Path $tempRoot '.local\payload\dashboard-payload-tampered.json.gz'
     $outputPath = Join-Path $tempRoot 'dashboard.html'
+    $packageStdoutPath = Join-Path $tempRoot 'package-only.stdout.log'
+    $packageStderrPath = Join-Path $tempRoot 'package-only.stderr.log'
 
     try {
         Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
@@ -4381,8 +4397,23 @@ function Test-PackageOnlyRejectsMismatchedNormalizedPayloadManifest {
 
         Write-GzipTextFile -Path $tamperedPayloadPath -Content '{"lookups":{"devices":[],"cves":[]},"vulnsFormat":"rows-v1","vulns":[]}'
 
-        & pwsh -NoProfile -File $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -PackageOnly -NormalizedPayloadInputPath $tamperedPayloadPath -NormalizedPayloadManifestInputPath $normalizedManifestPath | Out-Null
-        $packageExitCode = $LASTEXITCODE
+        $pwshCommand = Get-Command -Name 'pwsh' -ErrorAction Stop
+        $packageProcess = Start-Process -FilePath $pwshCommand.Source -ArgumentList @(
+            '-NoProfile'
+            '-File'
+            $dashboardScriptPath
+            '-DirectoryPath'
+            $tempRoot
+            '-OutputPath'
+            $outputPath
+            '-ExportMachineData:$false'
+            '-PackageOnly'
+            '-NormalizedPayloadInputPath'
+            $tamperedPayloadPath
+            '-NormalizedPayloadManifestInputPath'
+            $normalizedManifestPath
+        ) -WorkingDirectory (Split-Path -Path $dashboardScriptPath -Parent) -RedirectStandardOutput $packageStdoutPath -RedirectStandardError $packageStderrPath -PassThru -Wait
+        $packageExitCode = $packageProcess.ExitCode
 
         Assert-True ($packageExitCode -ne 0) 'Expected package-only generation to reject a payload whose bytes do not match the provided manifest.'
         Assert-True (-not (Test-Path -LiteralPath $outputPath -PathType Leaf)) 'Expected package-only manifest mismatch to avoid writing a dashboard.'
