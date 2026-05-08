@@ -85,11 +85,19 @@ function Test-BenchmarkDatasetMetadataBreadthSupport {
     param(
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        $Metadata
+        $Metadata,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Manifest
     )
 
     if ($null -eq $Metadata) {
         return $false
+    }
+
+    if (-not (Test-BenchmarkDatasetManifestBreadthSupport -Manifest $Manifest)) {
+        return $true
     }
 
     foreach ($propertyName in @('contentTemplateCount', 'uniqueCveIdCount', 'normalizedCveLookupCount')) {
@@ -99,6 +107,28 @@ function Test-BenchmarkDatasetMetadataBreadthSupport {
     }
 
     return $true
+}
+
+function Test-BenchmarkDatasetManifestBreadthSupport {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Manifest
+    )
+
+    if ($null -eq $Manifest) {
+        return $false
+    }
+
+    foreach ($propertyName in @('contentTemplateCount', 'uniqueCveIdCount', 'normalizedCveLookupCount')) {
+        if ($null -ne $Manifest.PSObject.Properties[$propertyName]) {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
@@ -127,7 +157,7 @@ if ((-not $Force) -and (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
             $null
         }
 
-        if (-not (Test-BenchmarkDatasetMetadataBreadthSupport -Metadata $existingMetadata)) {
+        if (-not (Test-BenchmarkDatasetMetadataBreadthSupport -Metadata $existingMetadata -Manifest $existingManifest)) {
             $metadata = Get-BenchmarkDatasetMetadataRecord -Definition $definition -DatasetPath $resolvedOutputPath -SourcePath (Resolve-BenchmarkDatasetSourcePath -Definition $definition -RepoRoot $repoRoot) -Manifest $existingManifest
             $metadata | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $metadataPath -Encoding utf8
         }

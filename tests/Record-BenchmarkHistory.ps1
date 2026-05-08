@@ -454,6 +454,22 @@ function Format-PhaseDeltaSummaryValue {
     return ($phaseParts -join '; ')
 }
 
+function Format-BenchmarkBreadthValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+
+    return [string]$Value
+}
+
 function Write-BenchmarkHistorySummary {
     [CmdletBinding()]
     param(
@@ -490,7 +506,7 @@ function Write-BenchmarkHistorySummary {
     $datasetLabel = if (-not [string]::IsNullOrWhiteSpace([string]$Entry.dataset.definition_id)) { [string]$Entry.dataset.definition_id } else { [string]$Entry.dataset.leaf }
     $lines.Add(('- Dataset: `{0}` | preset `{1}` | `{2}` rows | `{3}` devices' -f $datasetLabel, $Entry.dataset.preset, $Entry.dataset.total_rows, $Entry.dataset.actual_device_count)) | Out-Null
     if ($null -ne $Entry.dataset.unique_cve_id_count -or $null -ne $Entry.dataset.normalized_cve_lookup_count -or $null -ne $Entry.dataset.content_template_count) {
-        $lines.Add(('- Dataset breadth: `{0}` unique CVE IDs | `{1}` normalized CVE lookups | `{2}` content templates' -f $Entry.dataset.unique_cve_id_count, $Entry.dataset.normalized_cve_lookup_count, $Entry.dataset.content_template_count)) | Out-Null
+        $lines.Add(('- Dataset breadth: `{0}` unique CVE IDs | `{1}` normalized CVE lookups | `{2}` content templates' -f (Format-BenchmarkBreadthValue -Value $Entry.dataset.unique_cve_id_count), (Format-BenchmarkBreadthValue -Value $Entry.dataset.normalized_cve_lookup_count), (Format-BenchmarkBreadthValue -Value $Entry.dataset.content_template_count))) | Out-Null
     }
     $lines.Add(('- Current baseline: `{0}`' -f $Entry.current.baseline)) | Out-Null
     if ($null -ne $Entry.current.repo) {
