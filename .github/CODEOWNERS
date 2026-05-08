@@ -1,0 +1,26 @@
+# Default review owner for this repository.
+* @NathanMcNulty
+
+# Canonical source-of-truth files.
+/src/powershell/ @NathanMcNulty
+/build/private/ @NathanMcNulty
+/build/manifests/ @NathanMcNulty
+/build/azure/runbook-source.ps1 @NathanMcNulty
+/Generate-VulnerabilityDashboard.ps1 @NathanMcNulty
+/Invoke-VulnerabilityExport.ps1 @NathanMcNulty
+/Invoke-NvdCveExport.ps1 @NathanMcNulty
+/Setup-AzureResources.ps1 @NathanMcNulty
+/Setup-GitHubActionServicePrincipal.ps1 @NathanMcNulty
+/templates/ @NathanMcNulty
+/tests/ @NathanMcNulty
+/docs/ @NathanMcNulty
+/build/README.md @NathanMcNulty
+/README.md @NathanMcNulty
+
+# Tracked derived artifacts should be reviewed alongside their source inputs.
+/azure/Invoke-DashboardPipeline.ps1 @NathanMcNulty
+/VulnerabilityDashboard.html @NathanMcNulty
+
+# Repository automation and review policy.
+/.github/workflows/ @NathanMcNulty
+/.github/PULL_REQUEST_TEMPLATE.md @NathanMcNulty

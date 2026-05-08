@@ -44,7 +44,7 @@ The raw result JSON files from the April 5, 2026 capture remain local-only under
 
 | Dataset | Shape | Architecture | Azure path | Acceptance markers | Review notes |
 | --- | --- | --- | --- | --- | --- |
-| `synthetic-50k-1_5m` | `50,000` devices, `1,500,000` rows, `3,097` CVEs | `monolithic-v1` | Azure Automation plus hosted Function App (`Dual`) | Function App execution accepted `2026-05-06T06:26:05Z`; dashboard blob written `2026-05-06T06:33:39Z`; blob-write interval `454s` | Treat this as the accepted Stage 1 large Azure envelope anchor until a newer accepted run replaces it. Compare future standard-dataset Azure runs against this record plus the review thresholds in `docs/performance-gate-playbook.md`, and keep the raw Azure validation artifacts local under `.local/`. |
+| `synthetic-50k-1_5m` | `50,000` devices, `1,500,000` rows, `3,097` normalized CVE lookup entries | `monolithic-v1` | Azure Automation plus hosted Function App (`Dual`) | Function App execution accepted `2026-05-06T06:26:05Z`; dashboard blob written `2026-05-06T06:33:39Z`; blob-write interval `454s` | Treat this as the accepted Stage 1 large Azure envelope anchor until a newer accepted run replaces it. Compare future standard-dataset Azure runs against this record plus the review thresholds in `docs/performance-gate-playbook.md`, and keep the raw Azure validation artifacts local under `.local/`. |
 
 ## Capture notes
 
@@ -64,6 +64,8 @@ The raw result JSON files from the April 5, 2026 capture remain local-only under
 - The durable `benchmark-medium-v1` persistent local cache reuse pass was effectively stable across reruns (`45.44s` to `45.49s`) and is the preferred baseline for normalized-column cache reuse.
 - The hosted review baseline was captured twice on the same dataset and command path. This document records ranges because the cold local normalization pass moved more than the hosted paths across reruns.
 - The local benchmark harness stages a private dataset copy before validation so raw datasets do not get mutated by sidecar regeneration during baseline capture.
+- Synthetic benchmark artifacts now publish `uniqueCveIdCount`, `normalizedCveLookupCount`, and `contentTemplateCount` in both `synthetic-manifest.json` and `benchmark-dataset.json`. `normalizedCveLookupCount` is the same breadth surfaced as `CVEs` in the Azure acceptance summaries above.
+- `benchmark-large-50k-v1` regenerates from the mutable `exports` source path, so its breadth counters can drift even when the dataset id, seed, device target, and row target stay fixed. Use the manifest breadth counters rather than assuming the accepted May 6 anchor's normalized CVE count will remain constant across later refreshes.
 - The standard large Azure entry intentionally records the accepted invocation and blob-write markers that are already tracked in-repo. Preserve the raw Azure validation artifacts under `.local/` when refreshing this section so future updates can add comparable working-set or execution-unit detail without reconstructing the run later.
 
 ## Regenerating the baseline

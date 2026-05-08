@@ -113,6 +113,14 @@ These checks now fail fast in the build helpers and in the deterministic preflig
 - When you add a new maintainer entrypoint or review lane, update the corresponding maintainer docs in `build/README.md`, `tests/README.md`, or `docs/workflows.md` in the same change.
 - Prefer shared helpers under `build/private/` and `tests/helpers/` over copying utility functions into new scripts.
 
+## CODEOWNERS and review ownership
+
+The repository now keeps review ownership in `.github/CODEOWNERS`.
+
+- Canonical source files stay owned at the source-of-truth layer (`src/powershell/`, `build/private/`, `build/manifests/`, `build/azure/runbook-source.ps1`, root maintainer entrypoints, and docs/tests).
+- Tracked derived artifacts such as `azure/Invoke-DashboardPipeline.ps1` and `VulnerabilityDashboard.html` are still code-owned so PRs that touch them get review coverage, but they should be regenerated from their owning sources instead of edited directly.
+- Ignored generated artifacts such as `build/generated/*.ps1` and `azure/function-app/ExportAndGenerate/run.ps1` are not tracked by git, so CODEOWNERS cannot match them directly; review the source files that generate them.
+
 ## Staged dashboard workflow
 
 `Generate-VulnerabilityDashboard.ps1` now supports splitting the expensive normalization step from later packaging and validation work:

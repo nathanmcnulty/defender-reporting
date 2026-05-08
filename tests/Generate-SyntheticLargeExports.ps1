@@ -61,6 +61,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'build\Import-SharedHelpers.ps1')
+. (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
 
 function Get-PresetSetting {
     [CmdletBinding()]
@@ -92,19 +93,6 @@ function Get-PresetSetting {
             throw "Unsupported preset '$Name'."
         }
     }
-}
-
-function Get-AvailableMemoryGB {
-    [CmdletBinding()]
-    [OutputType([double])]
-    param()
-
-    if (-not $IsWindows) {
-        return [double]::NaN
-    }
-
-    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-    return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
 }
 
 function Get-FreeDiskSpaceGB {
@@ -798,6 +786,49 @@ function Add-SourceRowContentTemplateIndex {
     return $contentIndexValue
 }
 
+function Get-ContentTemplateBreadthSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [System.Collections.IEnumerable]$ContentTemplates
+    )
+
+    $templateCount = 0
+    $uniqueCveIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $normalizedCveLookups = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($template in @($ContentTemplates)) {
+        if ($null -eq $template) {
+            continue
+        }
+
+        $templateCount++
+        $cveId = [string]$template.PSObject.Properties['c']?.Value
+        if ([string]::IsNullOrWhiteSpace($cveId)) {
+            continue
+        }
+
+        [void]$uniqueCveIds.Add($cveId)
+        $lookupKey = @(
+            $cveId
+            [string]$template.PSObject.Properties['sc']?.Value
+            [string]$template.PSObject.Properties['sev']?.Value
+            [string]$template.PSObject.Properties['ex']?.Value
+            [string]$template.PSObject.Properties['bu']?.Value
+            [string]$template.PSObject.Properties['bt']?.Value
+        ) -join '|'
+        [void]$normalizedCveLookups.Add($lookupKey)
+    }
+
+    return [PSCustomObject]@{
+        contentTemplateCount = $templateCount
+        uniqueCveIdCount = $uniqueCveIds.Count
+        normalizedCveLookupCount = $normalizedCveLookups.Count
+    }
+}
+
 $presetSettings = Get-PresetSetting -Name $Preset
 if ($TargetDeviceCount -le 0) {
     $TargetDeviceCount = [int]$presetSettings.TargetDeviceCount
@@ -1344,6 +1375,8 @@ $contentDictionary = [PSCustomObject]@{
 Write-GenerationCheckpoint -OutputPath $OutputPath -Stage 'writing-content-dictionary' -CompletedDevices $TargetDeviceCount -TotalDevices $TargetDeviceCount -WrittenCurrentRows $writtenCurrentRows -WrittenHistoryRows $writtenHistoryRows -Stopwatch $generationStopwatch
 Write-GzipTextFile -Path (Get-VulnContentDictionaryPath -BasePath $OutputPath) -Content $contentDictionary
 
+$contentTemplateBreadth = Get-ContentTemplateBreadthSummary -ContentTemplates $contentTemplates
+
 $manifest = [PSCustomObject]@{
     preset = $Preset
     seed = $Seed
@@ -1365,12 +1398,18 @@ $manifest = [PSCustomObject]@{
     sourceRowProfiles = $rowProfiles.Count
     historyPeriods = @($historyRefsWriters.Keys | Sort-Object)
     advancedHuntingRows = $filteredAdvancedHunting.Count
+    contentTemplateCount = $contentTemplateBreadth.contentTemplateCount
+    uniqueCveIdCount = $contentTemplateBreadth.uniqueCveIdCount
+    normalizedCveLookupCount = $contentTemplateBreadth.normalizedCveLookupCount
 }
 $manifest | ConvertTo-Json -Depth 10 | Set-Content -Path (Join-Path $OutputPath 'synthetic-manifest.json') -Encoding utf8
 $generationStopwatch.Stop()
 Write-GenerationCheckpoint -OutputPath $OutputPath -Stage 'completed' -CompletedDevices $TargetDeviceCount -TotalDevices $TargetDeviceCount -WrittenCurrentRows $writtenCurrentRows -WrittenHistoryRows $writtenHistoryRows -Stopwatch $generationStopwatch -Extra @{
     advancedHuntingRows = $filteredAdvancedHunting.Count
     historyPeriods = @($historyRefsWriters.Keys | Sort-Object)
+    contentTemplateCount = $contentTemplateBreadth.contentTemplateCount
+    uniqueCveIdCount = $contentTemplateBreadth.uniqueCveIdCount
+    normalizedCveLookupCount = $contentTemplateBreadth.normalizedCveLookupCount
 }
 
 Write-Output ''
@@ -1379,4 +1418,6 @@ Write-Output ("  Output path: {0}" -f ([System.IO.Path]::GetFullPath($OutputPath
 Write-Output ("  Devices: {0}" -f $plans.Count)
 Write-Output ("  Vulnerability rows: {0} current + {1} history = {2} total" -f $writtenCurrentRows, $writtenHistoryRows, ($writtenCurrentRows + $writtenHistoryRows))
 Write-Output ("  Advanced Hunting rows: {0}" -f $filteredAdvancedHunting.Count)
+Write-Output ("  CVE breadth: {0} unique CVE IDs, {1} normalized CVE lookups" -f $contentTemplateBreadth.uniqueCveIdCount, $contentTemplateBreadth.normalizedCveLookupCount)
+Write-Output ("  Content templates: {0}" -f $contentTemplateBreadth.contentTemplateCount)
 Write-Output ("  History periods: {0}" -f ((@($historyRefsWriters.Keys | Sort-Object) -join ', ')))

@@ -42,6 +42,12 @@ This repository now treats generated helper bundles as build artifacts, not as t
 - If you add a new maintainer workflow or validation lane, update the matching maintainer docs (`build/README.md`, `tests/README.md`, and `docs/workflows.md`) in the same PR.
 - Reuse helpers from `tests/helpers/` or `build/private/` before introducing duplicate utility functions in new scripts.
 
+## Review ownership
+
+- `.github/CODEOWNERS` mirrors the source-of-truth layout so review requests land on the canonical files first.
+- Tracked derived artifacts can still have ownership entries for review visibility, but they should move in lockstep with the source files that generate them.
+- Ignored generated files are outside git and therefore outside CODEOWNERS scope; use the owning source directories and manifests as the review boundary for those outputs.
+
 ## Remaining decomposition watchlist
 
 The current overhaul has moved helper ownership out of the large top-level entry scripts and into explicit source-first domains. The remaining follow-up work is narrower and currently centered on:
