@@ -140,6 +140,8 @@ function Invoke-ArtifactManifestValidation {
         [string[]]$ManifestPaths
     )
 
+    [void](Test-PowerShellArtifactManifestConflict -ManifestPaths $ManifestPaths -RepoRoot $repoRoot)
+
     foreach ($manifestPath in $ManifestPaths) {
         [void](Test-PowerShellArtifactManifestCoverage -ManifestPath $manifestPath -RepoRoot $repoRoot)
     }

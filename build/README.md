@@ -42,6 +42,18 @@ When `-SkipMdePermissions` is paired with Function App execution validation, pas
 
 During seeded Function App validation, the script now writes a short-lived control blob at `dashboards/_diagnostics/ExportAndGenerate.control.json` and polls the runtime status blob at `dashboards/_diagnostics/ExportAndGenerate.status.json`. This makes Flex Consumption execution diagnosable even when admin VFS access and built-in log streaming are unavailable.
 
+## Validation hierarchy
+
+Use the validation entrypoints as a layered stack instead of interchangeable scripts:
+
+| Level | When to use it | Entrypoint | Purpose |
+| --- | --- | --- | --- |
+| 1. Deterministic preflight | Before every PR and before any heavier validation | `.\build\Invoke-RegressionValidation.ps1` | Rebuild generated artifacts, validate manifests, parse scripts, run ScriptAnalyzer, execute shared-helper regressions, run dashboard JS assertions, and smoke-test the committed fixture |
+| 2. Live export integration | When export logic, shipped dashboard behavior, or scheduled-update flow changes | `.\build\Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` | Exercise the real export and dashboard-generation path locally with live auth and emit the audit/manifests used by the update workflow |
+| 3. Azure acceptance | Before merging Azure packaging/runtime changes and before release-sensitive perf changes | `.\build\Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName <name> -FunctionAppName <name>` | Rebuild locally, redeploy Azure Automation and Function App, and run seeded live validation in the hosted environment |
+
+Prefer the lightest level that covers the change you made, then escalate only when the changed surface requires it.
+
 ## Fast maintenance loops
 
 When you change `templates/dashboard.js`, run the focused dashboard assertions before the heavier preflight path:
@@ -83,6 +95,23 @@ The generated helper bundles are no longer assembled by scanning a flat source f
 - the output path for the generated artifact
 
 This makes dependency order explicit, lets the regression preflight catch orphaned source files, and makes the source tree easier for agents to navigate by domain instead of by numeric filename prefixes.
+
+### Manifest guardrails
+
+- `sourceRoots` define the only tracked source directories an artifact is allowed to claim.
+- Every `sourceFiles` entry must live under one of that manifest's `sourceRoots`.
+- Generated `outputPath` values must stay outside tracked source roots.
+- A tracked source file should be owned by one artifact manifest only.
+- When you change a manifest or a file under one of its source roots, rebuild the generated artifact before opening a PR.
+
+These checks now fail fast in the build helpers and in the deterministic preflight so manifest drift is easier to catch before CI.
+
+## Agent-safe maintenance patterns
+
+- Treat files under `src/powershell/`, `build/private/`, `build/manifests/`, and `build/azure/` as the source of truth.
+- Do not hand-edit `build/generated/*.ps1`, `azure/Invoke-DashboardPipeline.ps1`, or `azure/function-app/ExportAndGenerate/run.ps1`; regenerate them from the tracked sources instead.
+- When you add a new maintainer entrypoint or review lane, update the corresponding maintainer docs in `build/README.md`, `tests/README.md`, or `docs/workflows.md` in the same change.
+- Prefer shared helpers under `build/private/` and `tests/helpers/` over copying utility functions into new scripts.
 
 ## Staged dashboard workflow
 

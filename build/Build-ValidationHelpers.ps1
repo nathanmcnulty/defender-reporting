@@ -18,4 +18,13 @@ if (-not (Test-Path -LiteralPath $manifestToolsPath -PathType Leaf)) {
 . $manifestToolsPath
 
 $artifactManifest = Build-PowerShellArtifactFromManifest -ManifestPath $manifestPath -RepoRoot $repoRoot
+if (-not (Test-Path -LiteralPath $artifactManifest.OutputPath -PathType Leaf)) {
+    throw "Expected generated validation helpers at '$($artifactManifest.OutputPath)'."
+}
+
+$generatedArtifact = Get-Item -LiteralPath $artifactManifest.OutputPath
+if ($generatedArtifact.Length -le 0) {
+    throw "Generated validation helpers artifact is empty: '$($artifactManifest.OutputPath)'."
+}
+
 Write-Host "Generated validation helpers: $($artifactManifest.OutputPath)" -ForegroundColor Green
