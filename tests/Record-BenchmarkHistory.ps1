@@ -20,29 +20,7 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'Import-BenchmarkDatasetCatalog.ps1')
 . (Join-Path $PSScriptRoot 'helpers\BenchmarkSeriesTools.ps1')
-
-function Get-ObjectPropertyValue {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $false)]
-        [AllowNull()]
-        $InputObject,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Name
-    )
-
-    if ($null -eq $InputObject) {
-        return $null
-    }
-
-    $property = $InputObject.PSObject.Properties[$Name]
-    if ($null -eq $property) {
-        return $null
-    }
-
-    return $property.Value
-}
+. (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
 
 function Format-DateTimeValue {
     [CmdletBinding()]
@@ -76,34 +54,6 @@ function Format-DateTimeValue {
     }
 
     return $text
-}
-
-function Invoke-GitText {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$RepoPath,
-
-        [Parameter(Mandatory = $true)]
-        [string[]]$Arguments
-    )
-
-    if (-not (Test-Path -LiteralPath $RepoPath -PathType Container)) {
-        return $null
-    }
-
-    $output = (& git -C $RepoPath @Arguments 2>$null | Out-String)
-    if ($LASTEXITCODE -ne 0) {
-        return $null
-    }
-
-    $trimmed = $output.Trim()
-    if ([string]::IsNullOrWhiteSpace($trimmed)) {
-        return $null
-    }
-
-    return $trimmed
 }
 
 function Get-RepoSnapshot {
@@ -182,6 +132,9 @@ function Get-DatasetSummary {
         actual_current_rows = Get-ObjectPropertyValue -InputObject $manifest -Name 'actualCurrentRows'
         actual_history_rows = Get-ObjectPropertyValue -InputObject $manifest -Name 'actualHistoryRows'
         advanced_hunting_rows = Get-ObjectPropertyValue -InputObject $manifest -Name 'advancedHuntingRows'
+        content_template_count = Get-ObjectPropertyValue -InputObject $manifest -Name 'contentTemplateCount'
+        unique_cve_id_count = Get-ObjectPropertyValue -InputObject $manifest -Name 'uniqueCveIdCount'
+        normalized_cve_lookup_count = Get-ObjectPropertyValue -InputObject $manifest -Name 'normalizedCveLookupCount'
         history_periods = @((Get-ObjectPropertyValue -InputObject $manifest -Name 'historyPeriods') | ForEach-Object { [string]$_ })
     }
 }
@@ -501,6 +454,22 @@ function Format-PhaseDeltaSummaryValue {
     return ($phaseParts -join '; ')
 }
 
+function Format-BenchmarkBreadthValue {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+
+    return [string]$Value
+}
+
 function Write-BenchmarkHistorySummary {
     [CmdletBinding()]
     param(
@@ -536,6 +505,9 @@ function Write-BenchmarkHistorySummary {
     $lines.Add(('- Benchmark mode: `{0}`' -f $Entry.benchmark_mode)) | Out-Null
     $datasetLabel = if (-not [string]::IsNullOrWhiteSpace([string]$Entry.dataset.definition_id)) { [string]$Entry.dataset.definition_id } else { [string]$Entry.dataset.leaf }
     $lines.Add(('- Dataset: `{0}` | preset `{1}` | `{2}` rows | `{3}` devices' -f $datasetLabel, $Entry.dataset.preset, $Entry.dataset.total_rows, $Entry.dataset.actual_device_count)) | Out-Null
+    if ($null -ne $Entry.dataset.unique_cve_id_count -or $null -ne $Entry.dataset.normalized_cve_lookup_count -or $null -ne $Entry.dataset.content_template_count) {
+        $lines.Add(('- Dataset breadth: `{0}` unique CVE IDs | `{1}` normalized CVE lookups | `{2}` content templates' -f (Format-BenchmarkBreadthValue -Value $Entry.dataset.unique_cve_id_count), (Format-BenchmarkBreadthValue -Value $Entry.dataset.normalized_cve_lookup_count), (Format-BenchmarkBreadthValue -Value $Entry.dataset.content_template_count))) | Out-Null
+    }
     $lines.Add(('- Current baseline: `{0}`' -f $Entry.current.baseline)) | Out-Null
     if ($null -ne $Entry.current.repo) {
         $lines.Add(('- Current git: `{0}` @ `{1}` ({2})' -f $Entry.current.repo.branch, $Entry.current.repo.commit_short, $(if ($Entry.current.repo.dirty) { 'dirty' } else { 'clean' }))) | Out-Null
@@ -581,6 +553,9 @@ function Write-BenchmarkHistorySummary {
         }
         $lines.Add(('- Runbook delta: {0}' -f (Format-DeltaValue -CurrentValue $Entry.current.runbook_elapsed_seconds -PreviousValue $PreviousEntry.current.runbook_elapsed_seconds))) | Out-Null
         $lines.Add(('- Function delta: {0}' -f (Format-DeltaValue -CurrentValue $Entry.current.function_elapsed_seconds -PreviousValue $PreviousEntry.current.function_elapsed_seconds))) | Out-Null
+        if ($null -ne $Entry.dataset.unique_cve_id_count -and $null -ne $PreviousEntry.dataset.unique_cve_id_count) {
+            $lines.Add(('- Dataset breadth delta: unique CVE IDs {0} | normalized CVE lookups {1} | content templates {2}' -f (Format-DeltaValue -CurrentValue $Entry.dataset.unique_cve_id_count -PreviousValue $PreviousEntry.dataset.unique_cve_id_count), (Format-DeltaValue -CurrentValue $Entry.dataset.normalized_cve_lookup_count -PreviousValue $PreviousEntry.dataset.normalized_cve_lookup_count), (Format-DeltaValue -CurrentValue $Entry.dataset.content_template_count -PreviousValue $PreviousEntry.dataset.content_template_count))) | Out-Null
+        }
         if ($null -ne $Entry.current.function_end_to_end_elapsed_seconds -and $null -ne $PreviousEntry.current.function_end_to_end_elapsed_seconds) {
             $lines.Add(('- Function end-to-end delta: {0}' -f (Format-DeltaValue -CurrentValue $Entry.current.function_end_to_end_elapsed_seconds -PreviousValue $PreviousEntry.current.function_end_to_end_elapsed_seconds))) | Out-Null
         }

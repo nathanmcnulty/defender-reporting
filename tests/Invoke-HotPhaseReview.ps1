@@ -40,57 +40,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
 
 if (-not $IsWindows) {
     throw 'tests/Invoke-HotPhaseReview.ps1 currently supports Windows only because it relies on Win32 CIM classes for process and memory sampling.'
-}
-
-function Get-TextWithoutAnsiEscape {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [string]$Text
-    )
-
-    return ([regex]::Replace($Text, "`e\[[0-9;]*m", ''))
-}
-
-function Get-AvailableMemoryGB {
-    [CmdletBinding()]
-    [OutputType([double])]
-    param()
-
-    $os = Get-CimInstance Win32_OperatingSystem
-    return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
-}
-
-function Get-HeartbeatTimestampText {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param()
-
-    return (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-}
-
-function Add-PathSuffixBeforeExtensionLocal {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Suffix
-    )
-
-    $extension = [System.IO.Path]::GetExtension($Path)
-    if ([string]::IsNullOrEmpty($extension)) {
-        return ($Path + $Suffix)
-    }
-
-    return ($Path.Substring(0, $Path.Length - $extension.Length) + $Suffix + $extension)
 }
 
 function Get-DatasetRowCountForReview {
@@ -149,28 +102,6 @@ function Invoke-GeneratedArtifactValidation {
         hostedPath = [System.IO.Path]::GetFullPath($HostedPath)
         hostedAssetsPath = Join-Path (Split-Path -Path (Resolve-Path -LiteralPath $HostedPath).Path -Parent) (([System.IO.Path]::GetFileNameWithoutExtension($HostedPath)) + '.assets')
         passed = $true
-    }
-}
-
-function Get-HeartbeatFileStatus {
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return [PSCustomObject]@{
-            bytes = 0L
-            ageSeconds = $null
-        }
-    }
-
-    $item = Get-Item -LiteralPath $Path
-    return [PSCustomObject]@{
-        bytes = [int64]$item.Length
-        ageSeconds = [math]::Round(((Get-Date).ToUniversalTime() - $item.LastWriteTimeUtc).TotalSeconds, 1)
     }
 }
 
