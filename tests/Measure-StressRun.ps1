@@ -38,48 +38,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
 
 if (-not $IsWindows) {
     throw 'tests/Measure-StressRun.ps1 currently supports Windows only because it relies on Win32 CIM classes for process and memory sampling.'
-}
-
-function Get-AvailableMemoryGB {
-    [CmdletBinding()]
-    [OutputType([double])]
-    param()
-
-    $os = Get-CimInstance Win32_OperatingSystem
-    return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
-}
-
-function Get-HeartbeatTimestampText {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param()
-
-    return (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-}
-
-function Get-HeartbeatFileStatus {
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return [PSCustomObject]@{
-            bytes = 0L
-            ageSeconds = $null
-        }
-    }
-
-    $item = Get-Item -LiteralPath $Path
-    return [PSCustomObject]@{
-        bytes = [int64]$item.Length
-        ageSeconds = [math]::Round(((Get-Date).ToUniversalTime() - $item.LastWriteTimeUtc).TotalSeconds, 1)
-    }
 }
 
 function Get-StressReportObject {

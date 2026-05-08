@@ -17,6 +17,9 @@ param(
     [int]$MinimumFreeDiskGB = 10,
 
     [Parameter(Mandatory = $false)]
+    [switch]$AllowLargeDataset,
+
+    [Parameter(Mandatory = $false)]
     [switch]$Force
 )
 
@@ -24,6 +27,109 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'Import-BenchmarkDatasetCatalog.ps1')
+
+function Get-BenchmarkDatasetMetadataRecord {
+    [CmdletBinding()]
+    [OutputType([ordered])]
+    param(
+        [Parameter(Mandatory = $true)]
+        $Definition,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DatasetPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Manifest
+    )
+
+    $generatedOnUtc = if ($null -ne $Manifest -and $Manifest.PSObject.Properties['generatedOnUtc']) {
+        $Manifest.generatedOnUtc
+    }
+    else {
+        [datetime]::UtcNow.ToString('o')
+    }
+
+    $metadata = [ordered]@{
+        id = [string]$Definition.id
+        description = [string]$Definition.description
+        preset = [string]$Definition.preset
+        seed = [int]$Definition.seed
+        targetDeviceCount = [int]$Definition.targetDeviceCount
+        targetTotalVulnRows = [int]$Definition.targetTotalVulnRows
+        sourcePath = $SourcePath
+        datasetPath = $DatasetPath
+        generatedBy = 'New-BenchmarkDataset.ps1'
+        generatedOnUtc = $generatedOnUtc
+        historyTags = @($Definition.historyTags)
+    }
+
+    if ($null -ne $Manifest) {
+        foreach ($propertyName in @('contentTemplateCount', 'uniqueCveIdCount', 'normalizedCveLookupCount')) {
+            $property = $Manifest.PSObject.Properties[$propertyName]
+            if ($null -ne $property) {
+                $metadata[$propertyName] = $property.Value
+            }
+        }
+    }
+
+    return $metadata
+}
+
+function Test-BenchmarkDatasetMetadataBreadthSupport {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Metadata,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Manifest
+    )
+
+    if ($null -eq $Metadata) {
+        return $false
+    }
+
+    if (-not (Test-BenchmarkDatasetManifestBreadthSupport -Manifest $Manifest)) {
+        return $true
+    }
+
+    foreach ($propertyName in @('contentTemplateCount', 'uniqueCveIdCount', 'normalizedCveLookupCount')) {
+        if ($null -eq $Metadata.PSObject.Properties[$propertyName]) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-BenchmarkDatasetManifestBreadthSupport {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Manifest
+    )
+
+    if ($null -eq $Manifest) {
+        return $false
+    }
+
+    foreach ($propertyName in @('contentTemplateCount', 'uniqueCveIdCount', 'normalizedCveLookupCount')) {
+        if ($null -ne $Manifest.PSObject.Properties[$propertyName]) {
+            return $true
+        }
+    }
+
+    return $false
+}
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 $definition = Get-BenchmarkDatasetDefinition -DatasetId $DatasetId -RepoRoot $repoRoot
@@ -44,20 +150,15 @@ $metadataPath = Get-BenchmarkDatasetMetadataPath -DatasetPath $resolvedOutputPat
 if ((-not $Force) -and (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     $existingManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 20
     if (Test-BenchmarkDatasetDefinitionMatch -Definition $definition -Manifest $existingManifest) {
-        if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
-            $metadata = [ordered]@{
-                id = [string]$definition.id
-                description = [string]$definition.description
-                preset = [string]$definition.preset
-                seed = [int]$definition.seed
-                targetDeviceCount = [int]$definition.targetDeviceCount
-                targetTotalVulnRows = [int]$definition.targetTotalVulnRows
-                sourcePath = Resolve-BenchmarkDatasetSourcePath -Definition $definition -RepoRoot $repoRoot
-                datasetPath = $resolvedOutputPath
-                generatedBy = 'New-BenchmarkDataset.ps1'
-                generatedOnUtc = [datetime]::UtcNow.ToString('o')
-                historyTags = @($definition.historyTags)
-            }
+        $existingMetadata = if (Test-Path -LiteralPath $metadataPath -PathType Leaf) {
+            Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json -Depth 20
+        }
+        else {
+            $null
+        }
+
+        if (-not (Test-BenchmarkDatasetMetadataBreadthSupport -Metadata $existingMetadata -Manifest $existingManifest)) {
+            $metadata = Get-BenchmarkDatasetMetadataRecord -Definition $definition -DatasetPath $resolvedOutputPath -SourcePath (Resolve-BenchmarkDatasetSourcePath -Definition $definition -RepoRoot $repoRoot) -Manifest $existingManifest
             $metadata | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $metadataPath -Encoding utf8
         }
 
@@ -86,21 +187,11 @@ if ((Test-Path -LiteralPath $resolvedOutputPath) -and $Force) {
     -Seed ([int]$definition.seed) `
     -MinimumAvailableMemoryGB $MinimumAvailableMemoryGB `
     -MinimumFreeDiskGB $MinimumFreeDiskGB `
+    -AllowLargeDataset:$AllowLargeDataset `
     -CleanOutput
 
-$metadata = [ordered]@{
-    id = [string]$definition.id
-    description = [string]$definition.description
-    preset = [string]$definition.preset
-    seed = [int]$definition.seed
-    targetDeviceCount = [int]$definition.targetDeviceCount
-    targetTotalVulnRows = [int]$definition.targetTotalVulnRows
-    sourcePath = $sourcePath
-    datasetPath = $resolvedOutputPath
-    generatedBy = 'New-BenchmarkDataset.ps1'
-    generatedOnUtc = [datetime]::UtcNow.ToString('o')
-    historyTags = @($definition.historyTags)
-}
+$generatedManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 20
+$metadata = Get-BenchmarkDatasetMetadataRecord -Definition $definition -DatasetPath $resolvedOutputPath -SourcePath $sourcePath -Manifest $generatedManifest
 $metadata | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $metadataPath -Encoding utf8
 
 Write-Host ('Benchmark dataset ready: {0}' -f $resolvedOutputPath) -ForegroundColor Green

@@ -94,108 +94,7 @@ $script:PollIntervalSeconds = $PollIntervalSeconds
 
 . (Join-Path $PSScriptRoot 'Import-BenchmarkDatasetCatalog.ps1')
 . (Join-Path $PSScriptRoot 'helpers\BenchmarkSeriesTools.ps1')
-
-function Get-HeartbeatTimestampText {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param()
-
-    return (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
-}
-
-function ConvertTo-UtcDateTime {
-    [CmdletBinding()]
-    [OutputType([datetime])]
-    param(
-        [Parameter(Mandatory = $false)]
-        [AllowNull()]
-        $Value
-    )
-
-    if ($null -eq $Value) {
-        return $null
-    }
-
-    if ($Value -is [datetime]) {
-        return ([datetime]$Value).ToUniversalTime()
-    }
-
-    if ($Value -is [datetimeoffset]) {
-        return ([datetimeoffset]$Value).UtcDateTime
-    }
-
-    $text = [string]$Value
-    if ([string]::IsNullOrWhiteSpace($text)) {
-        return $null
-    }
-
-    $parsed = [datetimeoffset]::MinValue
-    if ([datetimeoffset]::TryParse($text, [ref]$parsed)) {
-        return $parsed.UtcDateTime
-    }
-
-    return $null
-}
-
-function Get-ObjectPropertyValue {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $false)]
-        [AllowNull()]
-        $InputObject,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Name
-    )
-
-    if ($null -eq $InputObject) {
-        return $null
-    }
-
-    $property = $InputObject.PSObject.Properties[$Name]
-    if ($null -eq $property) {
-        return $null
-    }
-
-    return $property.Value
-}
-
-function Get-TextWithoutAnsiEscape {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [string]$Text
-    )
-
-    return ([regex]::Replace($Text, "`e\[[0-9;]*m", ''))
-}
-
-function Test-ScriptParameterSupport {
-    [CmdletBinding()]
-    [OutputType([bool])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$ScriptPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ParameterName
-    )
-
-    if (-not (Test-Path -LiteralPath $ScriptPath -PathType Leaf)) {
-        return $false
-    }
-
-    try {
-        $command = Get-Command -Name $ScriptPath -ErrorAction Stop
-        return $command.Parameters.ContainsKey($ParameterName)
-    }
-    catch {
-        Write-Verbose ("Unable to inspect parameters for {0}: {1}" -f $ScriptPath, $_.Exception.Message)
-        return $false
-    }
-}
+. (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
 
 function Write-AdHocBenchmarkSeriesSummary {
     [CmdletBinding()]
@@ -250,109 +149,6 @@ function Write-AdHocBenchmarkSeriesSummary {
 
     $summary = [PSCustomObject]$summaryProperties
     [void](Write-BenchmarkSeriesSummaryOutput -ResultsRoot $resultsDirectory -Summary $summary)
-}
-
-function Get-LocalDiagnosticTimingSummary {
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $null
-    }
-
-    $phaseByName = [ordered]@{}
-    $pipelineStartUtc = $null
-    $pipelineEndUtc = $null
-
-    foreach ($line in Get-Content -LiteralPath $Path) {
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            continue
-        }
-
-        $parts = @([string]$line -split "`t")
-        if ($parts.Count -lt 3) {
-            continue
-        }
-
-        $timestampUtc = ConvertTo-UtcDateTime -Value $parts[0]
-        if ($null -eq $timestampUtc) {
-            continue
-        }
-
-        $eventType = [string]$parts[1]
-        $name = [string]$parts[2]
-        $status = if ($parts.Count -ge 4) { [string]$parts[3] } else { $null }
-
-        switch ($eventType) {
-            'pipeline-start' {
-                if ($null -eq $pipelineStartUtc) {
-                    $pipelineStartUtc = $timestampUtc
-                }
-            }
-            'pipeline-end' {
-                $pipelineEndUtc = $timestampUtc
-            }
-            'phase-start' {
-                if (-not $phaseByName.Contains($name)) {
-                    $phaseByName[$name] = [ordered]@{
-                        name = $name
-                        start_utc = $null
-                        end_utc = $null
-                        status = $null
-                    }
-                }
-
-                if ($null -eq $phaseByName[$name].start_utc) {
-                    $phaseByName[$name].start_utc = $timestampUtc
-                }
-            }
-            'phase-end' {
-                if (-not $phaseByName.Contains($name)) {
-                    $phaseByName[$name] = [ordered]@{
-                        name = $name
-                        start_utc = $null
-                        end_utc = $null
-                        status = $null
-                    }
-                }
-
-                $phaseByName[$name].end_utc = $timestampUtc
-                $phaseByName[$name].status = $status
-            }
-        }
-    }
-
-    $phaseSummaries = @(
-        foreach ($phaseEntry in $phaseByName.Values) {
-            $elapsedSeconds = if ($null -ne $phaseEntry.start_utc -and $null -ne $phaseEntry.end_utc) {
-                [math]::Round((New-TimeSpan -Start $phaseEntry.start_utc -End $phaseEntry.end_utc).TotalSeconds, 2)
-            }
-            else {
-                $null
-            }
-
-            [PSCustomObject]@{
-                name = [string]$phaseEntry.name
-                status = if ([string]::IsNullOrWhiteSpace([string]$phaseEntry.status)) { 'unknown' } else { [string]$phaseEntry.status }
-                elapsedSeconds = $elapsedSeconds
-            }
-        }
-    )
-
-    return [PSCustomObject]@{
-        path = $Path
-        phase_summaries = $phaseSummaries
-        pipeline_elapsed_seconds = if ($null -ne $pipelineStartUtc -and $null -ne $pipelineEndUtc) {
-            [math]::Round((New-TimeSpan -Start $pipelineStartUtc -End $pipelineEndUtc).TotalSeconds, 2)
-        }
-        else {
-            $null
-        }
-    }
 }
 
 function Get-LocalPhaseSummaryFromLog {
@@ -423,7 +219,7 @@ function Get-LocalBenchmarkLogSummary {
         $null
     }
     else {
-        Get-LocalDiagnosticTimingSummary -Path $DiagnosticLogPath
+        Get-DiagnosticPhaseTimingSummary -Path $DiagnosticLogPath
     }
 
     $phaseEntries = if ($null -ne $diagnosticTimingSummary -and @($diagnosticTimingSummary.phase_summaries).Count -gt 0) {
@@ -1659,15 +1455,6 @@ function Get-RunbookEvents {
     }
 
     return @($events | Sort-Object -Property timestamp_utc, message -Unique)
-}
-
-function Get-AvailableMemoryGB {
-    [CmdletBinding()]
-    [OutputType([double])]
-    param()
-
-    $os = Get-CimInstance Win32_OperatingSystem
-    return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
 }
 
 function Get-PreBenchmarkEnvironmentSnapshot {
