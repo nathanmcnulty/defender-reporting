@@ -34,6 +34,14 @@ This repository now treats generated helper bundles as build artifacts, not as t
 3. Rebuild with `./build/Build-SharedHelpers.ps1` or `./build/Build-ValidationHelpers.ps1` as needed.
 4. Run `./build/Invoke-RegressionValidation.ps1` before merge.
 
+## Agent-safe change guardrails
+
+- Treat `src/powershell/**`, `build/private/**`, `build/manifests/**`, and `build/azure/**` as the authoritative sources.
+- Treat `build/generated/*.ps1`, `azure/Invoke-DashboardPipeline.ps1`, and `azure/function-app/ExportAndGenerate/run.ps1` as derived outputs.
+- Keep each tracked source file owned by one manifest and keep generated outputs outside tracked source roots.
+- If you add a new maintainer workflow or validation lane, update the matching maintainer docs (`build/README.md`, `tests/README.md`, and `docs/workflows.md`) in the same PR.
+- Reuse helpers from `tests/helpers/` or `build/private/` before introducing duplicate utility functions in new scripts.
+
 ## Remaining decomposition watchlist
 
 The current overhaul has moved helper ownership out of the large top-level entry scripts and into explicit source-first domains. The remaining follow-up work is narrower and currently centered on:

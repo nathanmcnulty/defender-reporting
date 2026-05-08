@@ -8,6 +8,21 @@ This folder contains lightweight PowerShell regression coverage for the Defender
 - `tests/manual/` contains ad hoc troubleshooting harnesses that are useful during development but are not part of `build/Invoke-RegressionValidation.ps1`.
 - The top-level scripts in `tests/` are the supported automation entrypoints for regression validation, stress generation, benchmarking, and synthetic live-export creation.
 
+## Platform support
+
+Some entrypoints are cross-platform and some depend on Windows memory-sampling primitives or Microsoft Edge.
+
+| Entrypoint | Windows | macOS | Linux | Notes |
+| --- | --- | --- | --- | --- |
+| `build/Invoke-RegressionValidation.ps1` | Yes | Yes | Yes | Primary deterministic preflight |
+| `build/Invoke-LiveDashboardDryRun.ps1` | Yes | Yes | Yes | Requires the right Az/auth context |
+| `tests/Invoke-HotPhaseReview.ps1` | Yes | No | No | Uses Windows memory/process sampling |
+| `tests/Invoke-ValidationModeComparison.ps1` | Yes | No | No | Uses Windows memory/process sampling |
+| `tests/Measure-BranchVsMainBenchmark.ps1` | Yes | No | No | Uses Windows memory/process sampling |
+| `tests/Measure-StressRun.ps1` | Yes | No | No | Uses Windows memory/process sampling |
+| `tests/Invoke-WithPwshMemoryGuard.ps1` | Yes | No | No | Uses Windows memory/process sampling |
+| `tests/Invoke-HostedDashboardRuntimeSmoke.ps1` | Yes | No | No | Requires Microsoft Edge; use `-AllowSkip` when optional |
+
 ## Deterministic preflight entrypoint
 
 Run the full local regression bundle with:
@@ -17,6 +32,22 @@ pwsh -NoProfile -File .\build\Invoke-RegressionValidation.ps1
 ```
 
 That script is the authoritative deterministic preflight used for local work and PR validation. It rebuilds the generated deployment artifacts, runs parser and PSScriptAnalyzer checks across source scripts, executes focused shared-helper regression tests, and performs a small dashboard fixture smoke generation.
+
+The shared-helper regression lane now logs `START <Test-Name>` and a per-test elapsed time. If the preflight looks slow, use that output to identify the active or expensive test before assuming the suite is hung.
+
+## Test lanes at a glance
+
+| Lane | Primary entrypoint | Use it for |
+| --- | --- | --- |
+| Deterministic regression gate | `build/Invoke-RegressionValidation.ps1` | Every PR and before heavier validation |
+| Live export integration | `build/Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` | Export/authentication/shipped-dashboard changes |
+| Hosted browser/runtime smoke | `tests/Invoke-HostedDashboardRuntimeSmoke.ps1` | Split-assets delivery or hosted runtime changes |
+| Local perf phase review | `tests/Invoke-HotPhaseReview.ps1` | Normalization, payload, validation, or packaging perf work |
+| Routine semantic review | `tests/Invoke-RoutineSemanticReview.ps1` | Repeatable medium-dataset semantic review during iteration |
+| Benchmarking and stress tools | `tests/Invoke-BenchmarkSeries.ps1`, `tests/Measure-BranchVsMainBenchmark.ps1`, `tests/Measure-StressRun.ps1` | Comparative or historical performance work |
+| Manual diagnostics | `tests/manual/` | Ad hoc troubleshooting only |
+
+Helper rule: if a new test or benchmark script needs shared utilities, put them in `tests/helpers/` instead of copying helper functions into multiple entrypoints.
 
 ## CI-aligned live dry run
 
@@ -218,6 +249,19 @@ That command:
 
 Use this workflow for routine semantic or validation review during iteration, then keep the full `synthetic-50k-1_5m` semantic gate for release sign-off and high-risk normalization changes.
 
+## Hosted dashboard runtime smoke
+
+Run the hosted dashboard through a non-visual Edge smoke when split-assets delivery changes or when you want an explicit browser-runtime check:
+
+```powershell
+pwsh -NoProfile -File .\tests\Invoke-HostedDashboardRuntimeSmoke.ps1 -DashboardPath <hosted-html-path>
+```
+
+Notes:
+- this lane requires Windows and Microsoft Edge
+- use `-AllowSkip` when you want optional local coverage on machines without Edge
+- pair it with `build/Invoke-RegressionValidation.ps1`; it supplements the deterministic gate instead of replacing it
+
 ## Validation mode comparison
 
 Split packaging, full validation, and attested validation into separate measured runs with:
@@ -234,6 +278,17 @@ That command:
 - writes `validation-mode-comparison.json` under `.local/validation-mode-comparison/<timestamp>/`
 
 Use this workflow when validation is the dominant hot phase and you need to distinguish package cost from semantic replay cost.
+
+## Benchmark and stress tool selection
+
+| Goal | Preferred entrypoint | Notes |
+| --- | --- | --- |
+| One-command repeated local benchmark on the durable dataset | `tests/Invoke-BenchmarkSeries.ps1` | Use when refreshing or comparing repeatable local baselines |
+| Current branch vs. main or a one-off branch capture | `tests/Measure-BranchVsMainBenchmark.ps1` | Best for side-by-side local comparison |
+| Phase-by-phase local review | `tests/Invoke-HotPhaseReview.ps1` | Start here before heavier benchmark or Azure work |
+| Medium-dataset semantic validation during iteration | `tests/Invoke-RoutineSemanticReview.ps1` | Preferred semantic lane for routine branch work |
+| Validation cost split between packaging and semantic replay | `tests/Invoke-ValidationModeComparison.ps1` | Use when validation time dominates |
+| Custom stress capture | `tests/Measure-StressRun.ps1` | Reserve for targeted stress investigation, not routine branch validation |
 
 ## Benchmarking
 

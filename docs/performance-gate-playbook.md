@@ -52,6 +52,12 @@ Guardrails:
 - `tests/Invoke-HotPhaseReview.ps1` now defaults to artifact parity review instead of semantic replay.
 - Use `-ValidationMode semantic` only when you are intentionally investigating semantic audit cost or validating semantic changes.
 - Large local semantic runs above the configured row limit require `-AllowLargeSemanticValidation` so they are not started accidentally.
+- `tests/Invoke-HotPhaseReview.ps1`, `tests/Invoke-ValidationModeComparison.ps1`, `tests/Measure-BranchVsMainBenchmark.ps1`, `tests/Measure-StressRun.ps1`, and `tests/Invoke-WithPwshMemoryGuard.ps1` rely on Windows memory-sampling primitives.
+
+Semantic validation guardrails:
+- The default local semantic row limit is `1,000,000` rows; the routine medium dataset stays under that limit, while the standard `synthetic-50k-1_5m` sign-off lane does not.
+- Use `tests/Invoke-RoutineSemanticReview.ps1` for repeatable branch iteration and reserve `-AllowLargeSemanticValidation` for intentional final-signoff or high-risk investigations.
+- If you need browser-level hosted coverage, pair the deterministic preflight with `tests/Invoke-HostedDashboardRuntimeSmoke.ps1` on Windows instead of escalating directly to the large semantic lane.
 
 Timing interpretation:
 - Azure Automation already tracks active execution time from job start to job end.

@@ -15,6 +15,29 @@ function Resolve-RepoRelativePath {
     return [System.IO.Path]::GetFullPath((Join-Path -Path $RepoRoot -ChildPath $RelativePath))
 }
 
+function Test-ArtifactPathWithinRoot {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Root
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $resolvedRoot = [System.IO.Path]::GetFullPath($Root)
+    $comparison = [System.StringComparison]::OrdinalIgnoreCase
+
+    if ($resolvedPath.Equals($resolvedRoot, $comparison)) {
+        return $true
+    }
+
+    $rootWithSeparator = $resolvedRoot.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    return $resolvedPath.StartsWith($rootWithSeparator, $comparison)
+}
+
 function Read-PowerShellArtifactManifest {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -73,11 +96,59 @@ function Read-PowerShellArtifactManifest {
         }
     )
 
+    $relativeSourceRootCounts = @{}
+    foreach ($relativePath in @($sourceRoots | ForEach-Object { [string]$_ })) {
+        if ($relativeSourceRootCounts.ContainsKey($relativePath)) {
+            $relativeSourceRootCounts[$relativePath]++
+        }
+        else {
+            $relativeSourceRootCounts[$relativePath] = 1
+        }
+    }
+
+    $duplicateSourceRoots = @($relativeSourceRootCounts.GetEnumerator() | Where-Object { $_.Value -gt 1 } | Sort-Object Name)
+    if ($duplicateSourceRoots.Count -gt 0) {
+        $duplicateList = @($duplicateSourceRoots | ForEach-Object { $_.Name }) -join ', '
+        throw "Artifact manifest '$ManifestPath' contains duplicate sourceRoots: $duplicateList"
+    }
+
+    for ($leftIndex = 0; $leftIndex -lt $resolvedSourceRoots.Count; $leftIndex++) {
+        for ($rightIndex = $leftIndex + 1; $rightIndex -lt $resolvedSourceRoots.Count; $rightIndex++) {
+            $leftRoot = $resolvedSourceRoots[$leftIndex]
+            $rightRoot = $resolvedSourceRoots[$rightIndex]
+            if ((Test-ArtifactPathWithinRoot -Path $leftRoot -Root $rightRoot) -or (Test-ArtifactPathWithinRoot -Path $rightRoot -Root $leftRoot)) {
+                $leftRelativeRoot = [string]$sourceRoots[$leftIndex]
+                $rightRelativeRoot = [string]$sourceRoots[$rightIndex]
+                throw "Artifact manifest '$ManifestPath' contains overlapping sourceRoots '$leftRelativeRoot' and '$rightRelativeRoot'."
+            }
+        }
+    }
+
+    foreach ($sourceFile in $resolvedSourceFiles) {
+        $matchingRoots = @($resolvedSourceRoots | Where-Object { Test-ArtifactPathWithinRoot -Path $sourceFile -Root $_ })
+        if ($matchingRoots.Count -eq 0) {
+            $relativeFilePath = $sourceFile.Substring([System.IO.Path]::GetFullPath($RepoRoot).Length + 1).Replace('\', '/')
+            throw "Artifact manifest '$ManifestPath' references source file '$relativeFilePath' outside the declared sourceRoots."
+        }
+    }
+
+    $resolvedOutputPath = Resolve-RepoRelativePath -RepoRoot $RepoRoot -RelativePath ([string]$manifest.outputPath)
+    foreach ($sourceRootPath in $resolvedSourceRoots) {
+        if (Test-ArtifactPathWithinRoot -Path $resolvedOutputPath -Root $sourceRootPath) {
+            $relativeRootPath = $sourceRoots[[array]::IndexOf($resolvedSourceRoots, $sourceRootPath)]
+            throw "Artifact manifest '$ManifestPath' writes output '$($manifest.outputPath)' inside sourceRoot '$relativeRootPath'. Generated outputs must stay outside tracked source roots."
+        }
+    }
+
+    if ($resolvedSourceFiles -contains $resolvedOutputPath) {
+        throw "Artifact manifest '$ManifestPath' outputPath '$($manifest.outputPath)' conflicts with a source file entry."
+    }
+
     return [PSCustomObject]@{
         ManifestPath = [System.IO.Path]::GetFullPath($ManifestPath)
         ArtifactName = [string]$manifest.artifactName
         Description = [string]$manifest.description
-        OutputPath = Resolve-RepoRelativePath -RepoRoot $RepoRoot -RelativePath ([string]$manifest.outputPath)
+        OutputPath = $resolvedOutputPath
         OutputRelativePath = [string]$manifest.outputPath
         SourceFiles = @($resolvedSourceFiles)
         SourceRelativePaths = @($sourceFileEntries | ForEach-Object { [string]$_ })
@@ -241,6 +312,44 @@ function Test-PowerShellArtifactManifestCoverage {
     if ($orphanedFiles.Count -gt 0) {
         $orphanedList = @($orphanedFiles | ForEach-Object { $_.Substring($RepoRoot.Length + 1).Replace('\\', '/') }) -join ', '
         throw "Artifact manifest '$ManifestPath' does not include all source files under its sourceRoots. Missing entries: $orphanedList"
+    }
+
+    return $true
+}
+
+function Test-PowerShellArtifactManifestConflict {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$ManifestPaths,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $sourceFileOwners = @{}
+    $outputPathOwners = @{}
+
+    foreach ($manifestPath in $ManifestPaths) {
+        $manifest = Read-PowerShellArtifactManifest -ManifestPath $manifestPath -RepoRoot $RepoRoot
+
+        foreach ($sourceFile in $manifest.SourceFiles) {
+            if ($sourceFileOwners.ContainsKey($sourceFile)) {
+                $existingOwner = [string]$sourceFileOwners[$sourceFile]
+                $relativeSourceFile = $sourceFile.Substring([System.IO.Path]::GetFullPath($RepoRoot).Length + 1).Replace('\', '/')
+                throw "Artifact manifest '$manifestPath' reuses source file '$relativeSourceFile' already claimed by '$existingOwner'."
+            }
+
+            $sourceFileOwners[$sourceFile] = [System.IO.Path]::GetFullPath($manifestPath)
+        }
+
+        if ($outputPathOwners.ContainsKey($manifest.OutputPath)) {
+            $existingOwner = [string]$outputPathOwners[$manifest.OutputPath]
+            $relativeOutputPath = $manifest.OutputPath.Substring([System.IO.Path]::GetFullPath($RepoRoot).Length + 1).Replace('\', '/')
+            throw "Artifact manifest '$manifestPath' reuses outputPath '$relativeOutputPath' already claimed by '$existingOwner'."
+        }
+
+        $outputPathOwners[$manifest.OutputPath] = [System.IO.Path]::GetFullPath($manifestPath)
     }
 
     return $true

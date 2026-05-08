@@ -146,6 +146,14 @@ For local testing of the split-assets build, use a local HTTP server instead of 
 | `Setup-AzureResources.ps1` | Provisions Azure compute (Automation Account or Function App), storage, scheduling, and optional Container App hosting |
 | `Setup-GitHubActionServicePrincipal.ps1` | Creates the Entra app and federated credential for GitHub Actions OIDC |
 
+## Maintainer entry points
+
+The root scripts above are the primary user-facing entrypoints. Maintainer and agent workflows should use the repo-owned guides for the rest of the control plane:
+
+- [`build/README.md`](build/README.md) for build, generated-artifact, and validation entrypoints
+- [`tests/README.md`](tests/README.md) for regression, semantic-review, benchmark, and hosted-smoke lanes
+- [`docs/workflows.md`](docs/workflows.md) for GitHub Actions workflow behavior and when each workflow is expected to run
+
 ## Canonical data files
 
 | File | Purpose |

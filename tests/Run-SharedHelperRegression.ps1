@@ -44,6 +44,184 @@ function Get-OutputRecordText {
     return ($Record | Out-String).Trim()
 }
 
+function Test-ArtifactManifestRejectsOutputInsideSourceRoot {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $artifactManifestToolsPath = Join-Path $repoRoot 'build\private\ArtifactManifestTools.ps1'
+    Assert-True ((Test-Path -LiteralPath $artifactManifestToolsPath -PathType Leaf)) "Expected artifact manifest helper script at '$artifactManifestToolsPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('artifact-manifest-output-root-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path (Join-Path $tempRoot 'src\powershell\Shared') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\manifests') -ItemType Directory -Force)
+        Set-Content -LiteralPath (Join-Path $tempRoot 'src\powershell\Shared\Core.ps1') -Value 'function Invoke-TestManifestHelper { }' -Encoding utf8
+
+        $manifestPath = Join-Path $tempRoot 'build\manifests\artifact-test.json'
+        $manifest = [ordered]@{
+            artifactName = 'artifact-test'
+            outputPath = 'src/powershell/Shared/generated-helper.ps1'
+            sourceRoots = @('src/powershell/Shared')
+            sourceFiles = @('src/powershell/Shared/Core.ps1')
+        }
+        $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+
+        $failure = $null
+        try {
+            . $artifactManifestToolsPath
+            $null = Read-PowerShellArtifactManifest -ManifestPath $manifestPath -RepoRoot $tempRoot
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected manifest validation to reject generated outputs under a tracked sourceRoot.'
+        Assert-True (($failure.Exception.Message -like '*inside sourceRoot*') -or ($failure.Exception.Message -like '*Generated outputs must stay outside tracked source roots*')) 'Expected manifest validation failure to explain that generated outputs must stay outside sourceRoots.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ArtifactManifestRejectsSourceRootOverlap {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $artifactManifestToolsPath = Join-Path $repoRoot 'build\private\ArtifactManifestTools.ps1'
+    Assert-True ((Test-Path -LiteralPath $artifactManifestToolsPath -PathType Leaf)) "Expected artifact manifest helper script at '$artifactManifestToolsPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('artifact-manifest-overlap-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path (Join-Path $tempRoot 'src\powershell\Shared\Nested') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\manifests') -ItemType Directory -Force)
+        Set-Content -LiteralPath (Join-Path $tempRoot 'src\powershell\Shared\Nested\Helper.ps1') -Value 'function Invoke-TestNestedManifestHelper { }' -Encoding utf8
+
+        $manifestPath = Join-Path $tempRoot 'build\manifests\artifact-test.json'
+        $manifest = [ordered]@{
+            artifactName = 'artifact-test'
+            outputPath = 'build/generated/shared-helper.ps1'
+            sourceRoots = @(
+                'src/powershell/Shared'
+                'src/powershell/Shared/Nested'
+            )
+            sourceFiles = @('src/powershell/Shared/Nested/Helper.ps1')
+        }
+        $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+
+        $failure = $null
+        try {
+            . $artifactManifestToolsPath
+            $null = Read-PowerShellArtifactManifest -ManifestPath $manifestPath -RepoRoot $tempRoot
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected manifest validation to reject overlapping sourceRoots.'
+        Assert-True ($failure.Exception.Message -like '*overlapping sourceRoots*') 'Expected manifest validation failure to call out overlapping sourceRoots.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ArtifactManifestRejectsSourceFileOutsideSourceRoot {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $artifactManifestToolsPath = Join-Path $repoRoot 'build\private\ArtifactManifestTools.ps1'
+    Assert-True ((Test-Path -LiteralPath $artifactManifestToolsPath -PathType Leaf)) "Expected artifact manifest helper script at '$artifactManifestToolsPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('artifact-manifest-outside-root-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path (Join-Path $tempRoot 'src\powershell\Shared') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'src\powershell\Validation') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\manifests') -ItemType Directory -Force)
+        Set-Content -LiteralPath (Join-Path $tempRoot 'src\powershell\Validation\ValidationHelper.ps1') -Value 'function Invoke-TestValidationHelper { }' -Encoding utf8
+
+        $manifestPath = Join-Path $tempRoot 'build\manifests\artifact-test.json'
+        $manifest = [ordered]@{
+            artifactName = 'artifact-test'
+            outputPath = 'build/generated/shared-helper.ps1'
+            sourceRoots = @('src/powershell/Shared')
+            sourceFiles = @('src/powershell/Validation/ValidationHelper.ps1')
+        }
+        $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+
+        $failure = $null
+        try {
+            . $artifactManifestToolsPath
+            $null = Read-PowerShellArtifactManifest -ManifestPath $manifestPath -RepoRoot $tempRoot
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected manifest validation to reject source files outside the declared sourceRoots.'
+        Assert-True ($failure.Exception.Message -like '*outside the declared sourceRoots*') 'Expected manifest validation failure to explain the source-file boundary violation.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ArtifactManifestRejectsCrossArtifactSourceConflict {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $artifactManifestToolsPath = Join-Path $repoRoot 'build\private\ArtifactManifestTools.ps1'
+    Assert-True ((Test-Path -LiteralPath $artifactManifestToolsPath -PathType Leaf)) "Expected artifact manifest helper script at '$artifactManifestToolsPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('artifact-manifest-conflict-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path (Join-Path $tempRoot 'src\powershell\Shared') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\manifests') -ItemType Directory -Force)
+        Set-Content -LiteralPath (Join-Path $tempRoot 'src\powershell\Shared\SharedHelper.ps1') -Value 'function Invoke-TestConflictHelper { }' -Encoding utf8
+
+        $sharedManifestPath = Join-Path $tempRoot 'build\manifests\shared.json'
+        $validationManifestPath = Join-Path $tempRoot 'build\manifests\validation.json'
+        [ordered]@{
+            artifactName = 'shared-helpers'
+            outputPath = 'build/generated/shared-helper.ps1'
+            sourceRoots = @('src/powershell/Shared')
+            sourceFiles = @('src/powershell/Shared/SharedHelper.ps1')
+        } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $sharedManifestPath -Encoding utf8
+        [ordered]@{
+            artifactName = 'validation-helpers'
+            outputPath = 'build/generated/validation-helper.ps1'
+            sourceRoots = @('src/powershell/Shared')
+            sourceFiles = @('src/powershell/Shared/SharedHelper.ps1')
+        } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $validationManifestPath -Encoding utf8
+
+        $failure = $null
+        try {
+            . $artifactManifestToolsPath
+            $null = Test-PowerShellArtifactManifestConflict -ManifestPaths @($sharedManifestPath, $validationManifestPath) -RepoRoot $tempRoot
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected manifest conflict validation to reject shared source file ownership across artifacts.'
+        Assert-True (-not [string]::IsNullOrWhiteSpace([string]$failure.Exception.Message)) 'Expected manifest conflict validation failure to produce a useful error message.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-TestVulnRow {
     [CmdletBinding()]
     param(
@@ -4755,169 +4933,120 @@ function Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo {
     Assert-True ($summary -notlike '*rows=125.000*') 'Expected validation status summary text to avoid host-culture row count formatting.'
 }
 
+function Invoke-SharedHelperRegressionTest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$SuccessMessage
+    )
+
+    $testCommand = Get-Command -Name $Name -CommandType Function -ErrorAction Stop
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+    Write-Output ("START {0}" -f $Name)
+    & $testCommand
+    $stopwatch.Stop()
+
+    Write-Output ("  {0} ({1} ms)" -f $SuccessMessage, $stopwatch.ElapsedMilliseconds)
+}
+
 Write-Output 'Running shared-helper regression checks...'
-Test-CanonicalLayoutHelper
-Write-Output '  Canonical layout helper checks passed.'
-Test-FileSetFingerprintIgnoresTimestampChange
-Write-Output '  File-set fingerprint stability checks passed.'
-Test-NormalizedPayloadCacheRejectsManifestHashMismatch
-Write-Output '  Normalized payload cache integrity checks passed.'
-Test-NormalizedPayloadManifestSourceSummary
-Write-Output '  Normalized payload source metadata checks passed.'
-Test-SaveJSLibraryFileRefreshesEmptyCache
-Write-Output '  JavaScript library cache refresh checks passed.'
-Test-VulnContentStoreExistenceNeedsRef
-Write-Output '  Content-store existence checks passed.'
-Test-LocalExportArtifactCleanup
-Write-Output '  Local export artifact cleanup checks passed.'
-Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata
-Write-Output '  Machine store initialization checks passed.'
-Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet
-Write-Output '  Machine history cleanup empty-set checks passed.'
-Test-BulkSnapshotImportSmoke
-Write-Output '  Bulk snapshot import smoke checks passed.'
-Test-BulkSnapshotImportSingleSnapshot
-Write-Output '  Single-snapshot vulnerability import checks passed.'
-Test-BulkSnapshotImportMultipartSnapshot
-Write-Output '  Multipart vulnerability import checks passed.'
-Test-BulkSnapshotImportMergesIntoExistingCanonicalStore
-Write-Output '  Existing-store vulnerability merge checks passed.'
-Test-HttpRetryDelayHelperBehavior
-Write-Output '  Retry delay helper checks passed.'
-Test-WebRequestWithRetryTransientTransportBehavior
-Write-Output '  Web request transient transport retry checks passed.'
-Test-BulkVulnerabilitySnapshotDownloadMultipartNameUniqueness
-Write-Output '  Multipart vulnerability download naming checks passed.'
-Test-BulkVulnerabilitySnapshotDownloadStagingBehavior
-Write-Output '  Multipart vulnerability download staging checks passed.'
-Test-BulkVulnerabilitySnapshotDownloadRetriesEmptyBlob
-Write-Output '  Multipart vulnerability empty-blob retry checks passed.'
-Test-BulkVulnerabilitySnapshotDownloadEmptyBlobExhaustionBehavior
-Write-Output '  Multipart vulnerability empty-blob retry exhaustion checks passed.'
-Test-BulkVulnerabilitySnapshotDownloadMoveFailureCleanupBehavior
-Write-Output '  Multipart vulnerability move-failure cleanup checks passed.'
-Test-BulkVulnerabilitySnapshotDownloadCleanupBehavior
-Write-Output '  Multipart vulnerability failed-download cleanup checks passed.'
-Test-VulnCurrentFileRejectsDuplicateId
-Write-Output '  Current-file duplicate Id checks passed.'
-Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore
-Write-Output '  Canonical quarterly history repair skip checks passed.'
-Test-VulnStoreRequiresCanonicalRepairDetectsMalformedQuarterlyHistory
-Write-Output '  Canonical quarterly history gate checks passed.'
-Test-RepairVulnHistoryLayoutRebuildsCanonicalQuarterlyRowSidecar
-Write-Output '  Canonical quarterly rows-sidecar repair checks passed.'
-Test-RepairVulnHistoryLayoutRepairsLegacyYearlyStore
-Write-Output '  Legacy yearly history repair checks passed.'
-Test-VulnHistoryFileValidatesQuarterlyHistoryDocument
-Write-Output '  Quarterly history validation checks passed.'
-Test-VulnCanonicalSignatureStability
-Write-Output '  Canonical vulnerability signature checks passed.'
-Test-MergeVulnObservedWindowRows
-Write-Output '  Vulnerability observation merge checks passed.'
-Test-ReadNormalizedVulnStoreRow
-Write-Output '  Normalized vulnerability store reader checks passed.'
-Test-ResolveNormalizedLookupIndexListHandlesScalarAndCollectionValues
-Write-Output '  Lookup index list normalization checks passed.'
-Test-ResolveNormalizedInventoryLookupSkipsEmptyInventoryData
-Write-Output '  Inventory lookup normalization checks passed.'
-Test-AddNormalizedCveUsesStableSeverityIndexLookup
-Write-Output '  CVE severity lookup checks passed.'
-Test-GetNormalizedRecordLookupHandlesScalarPathInputs
-Write-Output '  Scalar path lookup checks passed.'
-Test-InvokeNormalizationProgressCallbackUsesCountAndHeartbeat
-Write-Output '  Normalization progress callback cadence checks passed.'
-Test-ConvertToNormalizedDataReportsContentStoreNormalizationPhase
-Write-Output '  Content-store normalization phase callback checks passed.'
-Test-ConvertToNormalizedDataUsesStableDeviceIdFallback
-Write-Output '  Stable device fallback identity checks passed.'
-Test-ConvertToNormalizedDataWritesExpectedRowCount
-Write-Output '  Normalized vuln row-count checks passed.'
-Test-ConvertToNormalizedDataWritesDirectPayload
-Write-Output '  Direct payload normalization checks passed.'
-Test-ConvertToNormalizedDataPreservesOptionalNvdFallback
-Write-Output '  Optional NVD fallback normalization checks passed.'
-Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose
-Write-Output '  Consuming payload-close lookup checks passed.'
-Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader
-Write-Output '  Content-store streaming normalization checks passed.'
-Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePayloadClose
-Write-Output '  Content-store transient context-release and hosted-memory diagnostics checks passed.'
-Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup
-Write-Output '  Repeated CVE lookup deduplication checks passed.'
-Test-ConvertToNormalizedDataReportsZeroOnboardedContentStoreDiagnostic
-Write-Output '  Zero-onboarded content-store diagnostics checks passed.'
-Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap
-Write-Output '  Advanced Hunting device-user normalization checks passed.'
-Test-WriteCombinedPayloadGzipPreservesColumnPayload
-Write-Output '  Combined payload writer column-path checks passed.'
-Test-NormalizedVulnColumnCacheRebuildsPayloadWithFreshLookups
-Write-Output '  Normalized vuln column cache reuse checks passed.'
-Test-NormalizedVulnColumnCacheRefreshesInventoryColumn
-Write-Output '  Inventory-backed normalized vuln column cache reuse checks passed.'
-Test-WriteBase64FileContentMatchesReferenceOutput
-Write-Output '  Streamed base64 writer checks passed.'
-Test-BenchmarkSeriesSummaryHandlesAzureOnlyRunMode
-Test-BenchmarkSeriesSummaryHandlesCombinedRunMode
-Test-BenchmarkSeriesSummaryHandlesLocalOnlyRunMode
-Test-BenchmarkIncludesLocalRunHandlesLegacyInferenceShape
-Test-BenchmarkModeScenarioKeyHandlesLegacyModeMapping
-Write-Output '  Benchmark series mode checks passed.'
-Test-WriteProgressMarkerIncludesEtaWhenTotalCountKnown
-Write-Output '  Progress marker ETA checks passed.'
-Test-WriteCombinedPayloadGzipCanConsumeColumnLookupData
-Write-Output '  Payload lookup consumption checks passed.'
-Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload
-Write-Output '  Embedded payload inspection checks passed.'
-Test-MeasureStressRunWritesProgressAndFinalReport
-Write-Output '  Measure-StressRun report persistence checks passed.'
-Test-ValidationHelperPayloadCanonicalization
-Write-Output '  Validation helper payload-format checks passed.'
-Test-ValidationHelperSourceCanonicalization
-Write-Output '  Validation helper source canonicalization checks passed.'
-Test-ValidationHelperStandaloneImport
-Write-Output '  Validation helper standalone import checks passed.'
-Test-DashboardValidationFailureExtendedEnrichmentGate
-Write-Output '  Validation helper failure-gate checks passed.'
-Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity
-Write-Output '  Streaming dashboard source-parity checks passed.'
-Test-StreamingDashboardAuditReusesCachedPayloadSignatureSet
-Write-Output '  Streaming dashboard payload-signature reuse checks passed.'
-Test-DashboardAuditBootstrapsSyntheticLargePayloadCacheWithNormalizationLookup
-Write-Output '  Dashboard synthetic large-dataset bootstrap checks passed.'
-Test-DashboardValidationUsesStableFallbackDeviceProfile
-Write-Output '  Dashboard validation fallback device profile checks passed.'
-Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff
-Write-Output '  Dashboard open-state audit checks passed.'
-Test-DashboardValidationPreservesNoneSeverityData
-Write-Output '  Dashboard none-severity validation checks passed.'
-Test-DashboardSplitAssetsGenerationAndValidation
-Write-Output '  Dashboard split-assets generation and validation checks passed.'
-Test-DashboardValidateOnlyFailsWhenHostedPayloadMissing
-Write-Output '  Hosted dashboard missing-payload negative checks passed.'
-Test-PackageOnlyRejectsMismatchedNormalizedPayloadManifest
-Write-Output '  Package-only manifest mismatch negative checks passed.'
-Test-DashboardDualPackagingGenerationAndValidation
-Write-Output '  Dashboard dual packaging generation and validation checks passed.'
-Test-AdvancedHuntingBundleMatchesDedicatedReaderData
-Write-Output '  Advanced Hunting bundle reader checks passed.'
-Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs
-Write-Output '  Advanced Hunting bundle sparse string-array checks passed.'
-Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup
-Write-Output '  Machine tuple reader checks passed.'
-Test-NormalizationMachineTupleExtendsLegacyTuple
-Write-Output '  Machine tuple extension checks passed.'
-Test-LegacyMachineTupleFallbackPreservesProjectedRowMetadata
-Write-Output '  Legacy tuple fallback checks passed.'
-Test-SourceCveEnrichmentReadsExploitAvailabilityFromObjectRecord
-Write-Output '  Source enrichment exploit-availability checks passed.'
-Test-VulnPropertyHelpersSupportSupportedRowShapes
-Write-Output '  Vulnerability property helper shape checks passed.'
-Test-VulnContentStoreRoundTrip
-Write-Output '  Vulnerability content store round-trip checks passed.'
-Test-VulnObservedWindowCacheRoundTrip
-Write-Output '  Observed-window cache round-trip checks passed.'
-Test-FunctionAppWriteOutputNoEnumeratePreservesJObject
-Write-Output '  Function App Write-Output -NoEnumerate checks passed.'
-Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo
-Write-Output '  Function execution status summary metadata checks passed.'
+$sharedHelperRegressionTests = @(
+    @{ Name = 'Test-ArtifactManifestRejectsOutputInsideSourceRoot'; SuccessMessage = 'Artifact manifest output-root guard checks passed.' }
+    @{ Name = 'Test-ArtifactManifestRejectsSourceRootOverlap'; SuccessMessage = 'Artifact manifest overlap guard checks passed.' }
+    @{ Name = 'Test-ArtifactManifestRejectsSourceFileOutsideSourceRoot'; SuccessMessage = 'Artifact manifest source-root boundary checks passed.' }
+    @{ Name = 'Test-ArtifactManifestRejectsCrossArtifactSourceConflict'; SuccessMessage = 'Artifact manifest cross-artifact conflict checks passed.' }
+    @{ Name = 'Test-CanonicalLayoutHelper'; SuccessMessage = 'Canonical layout helper checks passed.' }
+    @{ Name = 'Test-FileSetFingerprintIgnoresTimestampChange'; SuccessMessage = 'File-set fingerprint stability checks passed.' }
+    @{ Name = 'Test-NormalizedPayloadCacheRejectsManifestHashMismatch'; SuccessMessage = 'Normalized payload cache integrity checks passed.' }
+    @{ Name = 'Test-NormalizedPayloadManifestSourceSummary'; SuccessMessage = 'Normalized payload source metadata checks passed.' }
+    @{ Name = 'Test-SaveJSLibraryFileRefreshesEmptyCache'; SuccessMessage = 'JavaScript library cache refresh checks passed.' }
+    @{ Name = 'Test-VulnContentStoreExistenceNeedsRef'; SuccessMessage = 'Content-store existence checks passed.' }
+    @{ Name = 'Test-LocalExportArtifactCleanup'; SuccessMessage = 'Local export artifact cleanup checks passed.' }
+    @{ Name = 'Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata'; SuccessMessage = 'Machine store initialization checks passed.' }
+    @{ Name = 'Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet'; SuccessMessage = 'Machine history cleanup empty-set checks passed.' }
+    @{ Name = 'Test-BulkSnapshotImportSmoke'; SuccessMessage = 'Bulk snapshot import smoke checks passed.' }
+    @{ Name = 'Test-BulkSnapshotImportSingleSnapshot'; SuccessMessage = 'Single-snapshot vulnerability import checks passed.' }
+    @{ Name = 'Test-BulkSnapshotImportMultipartSnapshot'; SuccessMessage = 'Multipart vulnerability import checks passed.' }
+    @{ Name = 'Test-BulkSnapshotImportMergesIntoExistingCanonicalStore'; SuccessMessage = 'Existing-store vulnerability merge checks passed.' }
+    @{ Name = 'Test-HttpRetryDelayHelperBehavior'; SuccessMessage = 'Retry delay helper checks passed.' }
+    @{ Name = 'Test-WebRequestWithRetryTransientTransportBehavior'; SuccessMessage = 'Web request transient transport retry checks passed.' }
+    @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadMultipartNameUniqueness'; SuccessMessage = 'Multipart vulnerability download naming checks passed.' }
+    @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadStagingBehavior'; SuccessMessage = 'Multipart vulnerability download staging checks passed.' }
+    @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadRetriesEmptyBlob'; SuccessMessage = 'Multipart vulnerability empty-blob retry checks passed.' }
+    @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadEmptyBlobExhaustionBehavior'; SuccessMessage = 'Multipart vulnerability empty-blob retry exhaustion checks passed.' }
+    @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadMoveFailureCleanupBehavior'; SuccessMessage = 'Multipart vulnerability move-failure cleanup checks passed.' }
+    @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadCleanupBehavior'; SuccessMessage = 'Multipart vulnerability failed-download cleanup checks passed.' }
+    @{ Name = 'Test-VulnCurrentFileRejectsDuplicateId'; SuccessMessage = 'Current-file duplicate Id checks passed.' }
+    @{ Name = 'Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore'; SuccessMessage = 'Canonical quarterly history repair skip checks passed.' }
+    @{ Name = 'Test-VulnStoreRequiresCanonicalRepairDetectsMalformedQuarterlyHistory'; SuccessMessage = 'Canonical quarterly history gate checks passed.' }
+    @{ Name = 'Test-RepairVulnHistoryLayoutRebuildsCanonicalQuarterlyRowSidecar'; SuccessMessage = 'Canonical quarterly rows-sidecar repair checks passed.' }
+    @{ Name = 'Test-RepairVulnHistoryLayoutRepairsLegacyYearlyStore'; SuccessMessage = 'Legacy yearly history repair checks passed.' }
+    @{ Name = 'Test-VulnHistoryFileValidatesQuarterlyHistoryDocument'; SuccessMessage = 'Quarterly history validation checks passed.' }
+    @{ Name = 'Test-VulnCanonicalSignatureStability'; SuccessMessage = 'Canonical vulnerability signature checks passed.' }
+    @{ Name = 'Test-MergeVulnObservedWindowRows'; SuccessMessage = 'Vulnerability observation merge checks passed.' }
+    @{ Name = 'Test-ReadNormalizedVulnStoreRow'; SuccessMessage = 'Normalized vulnerability store reader checks passed.' }
+    @{ Name = 'Test-ResolveNormalizedLookupIndexListHandlesScalarAndCollectionValues'; SuccessMessage = 'Lookup index list normalization checks passed.' }
+    @{ Name = 'Test-ResolveNormalizedInventoryLookupSkipsEmptyInventoryData'; SuccessMessage = 'Inventory lookup normalization checks passed.' }
+    @{ Name = 'Test-AddNormalizedCveUsesStableSeverityIndexLookup'; SuccessMessage = 'CVE severity lookup checks passed.' }
+    @{ Name = 'Test-GetNormalizedRecordLookupHandlesScalarPathInputs'; SuccessMessage = 'Scalar path lookup checks passed.' }
+    @{ Name = 'Test-InvokeNormalizationProgressCallbackUsesCountAndHeartbeat'; SuccessMessage = 'Normalization progress callback cadence checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataReportsContentStoreNormalizationPhase'; SuccessMessage = 'Content-store normalization phase callback checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataUsesStableDeviceIdFallback'; SuccessMessage = 'Stable device fallback identity checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataWritesExpectedRowCount'; SuccessMessage = 'Normalized vuln row-count checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataWritesDirectPayload'; SuccessMessage = 'Direct payload normalization checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataPreservesOptionalNvdFallback'; SuccessMessage = 'Optional NVD fallback normalization checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose'; SuccessMessage = 'Consuming payload-close lookup checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader'; SuccessMessage = 'Content-store streaming normalization checks passed.' }
+    @{ Name = 'Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePayloadClose'; SuccessMessage = 'Content-store transient context-release and hosted-memory diagnostics checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup'; SuccessMessage = 'Repeated CVE lookup deduplication checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataReportsZeroOnboardedContentStoreDiagnostic'; SuccessMessage = 'Zero-onboarded content-store diagnostics checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap'; SuccessMessage = 'Advanced Hunting device-user normalization checks passed.' }
+    @{ Name = 'Test-WriteCombinedPayloadGzipPreservesColumnPayload'; SuccessMessage = 'Combined payload writer column-path checks passed.' }
+    @{ Name = 'Test-NormalizedVulnColumnCacheRebuildsPayloadWithFreshLookups'; SuccessMessage = 'Normalized vuln column cache reuse checks passed.' }
+    @{ Name = 'Test-NormalizedVulnColumnCacheRefreshesInventoryColumn'; SuccessMessage = 'Inventory-backed normalized vuln column cache reuse checks passed.' }
+    @{ Name = 'Test-WriteBase64FileContentMatchesReferenceOutput'; SuccessMessage = 'Streamed base64 writer checks passed.' }
+    @{ Name = 'Test-BenchmarkSeriesSummaryHandlesAzureOnlyRunMode'; SuccessMessage = 'Benchmark series mode checks passed.' }
+    @{ Name = 'Test-BenchmarkSeriesSummaryHandlesCombinedRunMode'; SuccessMessage = 'Benchmark series mode checks passed.' }
+    @{ Name = 'Test-BenchmarkSeriesSummaryHandlesLocalOnlyRunMode'; SuccessMessage = 'Benchmark series mode checks passed.' }
+    @{ Name = 'Test-BenchmarkIncludesLocalRunHandlesLegacyInferenceShape'; SuccessMessage = 'Benchmark series mode checks passed.' }
+    @{ Name = 'Test-BenchmarkModeScenarioKeyHandlesLegacyModeMapping'; SuccessMessage = 'Benchmark series mode checks passed.' }
+    @{ Name = 'Test-WriteProgressMarkerIncludesEtaWhenTotalCountKnown'; SuccessMessage = 'Progress marker ETA checks passed.' }
+    @{ Name = 'Test-WriteCombinedPayloadGzipCanConsumeColumnLookupData'; SuccessMessage = 'Payload lookup consumption checks passed.' }
+    @{ Name = 'Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload'; SuccessMessage = 'Embedded payload inspection checks passed.' }
+    @{ Name = 'Test-MeasureStressRunWritesProgressAndFinalReport'; SuccessMessage = 'Measure-StressRun report persistence checks passed.' }
+    @{ Name = 'Test-ValidationHelperPayloadCanonicalization'; SuccessMessage = 'Validation helper payload-format checks passed.' }
+    @{ Name = 'Test-ValidationHelperSourceCanonicalization'; SuccessMessage = 'Validation helper source canonicalization checks passed.' }
+    @{ Name = 'Test-ValidationHelperStandaloneImport'; SuccessMessage = 'Validation helper standalone import checks passed.' }
+    @{ Name = 'Test-DashboardValidationFailureExtendedEnrichmentGate'; SuccessMessage = 'Validation helper failure-gate checks passed.' }
+    @{ Name = 'Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity'; SuccessMessage = 'Streaming dashboard source-parity checks passed.' }
+    @{ Name = 'Test-StreamingDashboardAuditReusesCachedPayloadSignatureSet'; SuccessMessage = 'Streaming dashboard payload-signature reuse checks passed.' }
+    @{ Name = 'Test-DashboardAuditBootstrapsSyntheticLargePayloadCacheWithNormalizationLookup'; SuccessMessage = 'Dashboard synthetic large-dataset bootstrap checks passed.' }
+    @{ Name = 'Test-DashboardValidationUsesStableFallbackDeviceProfile'; SuccessMessage = 'Dashboard validation fallback device profile checks passed.' }
+    @{ Name = 'Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff'; SuccessMessage = 'Dashboard open-state audit checks passed.' }
+    @{ Name = 'Test-DashboardValidationPreservesNoneSeverityData'; SuccessMessage = 'Dashboard none-severity validation checks passed.' }
+    @{ Name = 'Test-DashboardSplitAssetsGenerationAndValidation'; SuccessMessage = 'Dashboard split-assets generation and validation checks passed.' }
+    @{ Name = 'Test-DashboardValidateOnlyFailsWhenHostedPayloadMissing'; SuccessMessage = 'Hosted dashboard missing-payload negative checks passed.' }
+    @{ Name = 'Test-PackageOnlyRejectsMismatchedNormalizedPayloadManifest'; SuccessMessage = 'Package-only manifest mismatch negative checks passed.' }
+    @{ Name = 'Test-DashboardDualPackagingGenerationAndValidation'; SuccessMessage = 'Dashboard dual packaging generation and validation checks passed.' }
+    @{ Name = 'Test-AdvancedHuntingBundleMatchesDedicatedReaderData'; SuccessMessage = 'Advanced Hunting bundle reader checks passed.' }
+    @{ Name = 'Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs'; SuccessMessage = 'Advanced Hunting bundle sparse string-array checks passed.' }
+    @{ Name = 'Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup'; SuccessMessage = 'Machine tuple reader checks passed.' }
+    @{ Name = 'Test-NormalizationMachineTupleExtendsLegacyTuple'; SuccessMessage = 'Machine tuple extension checks passed.' }
+    @{ Name = 'Test-LegacyMachineTupleFallbackPreservesProjectedRowMetadata'; SuccessMessage = 'Legacy tuple fallback checks passed.' }
+    @{ Name = 'Test-SourceCveEnrichmentReadsExploitAvailabilityFromObjectRecord'; SuccessMessage = 'Source enrichment exploit-availability checks passed.' }
+    @{ Name = 'Test-VulnPropertyHelpersSupportSupportedRowShapes'; SuccessMessage = 'Vulnerability property helper shape checks passed.' }
+    @{ Name = 'Test-VulnContentStoreRoundTrip'; SuccessMessage = 'Vulnerability content store round-trip checks passed.' }
+    @{ Name = 'Test-VulnObservedWindowCacheRoundTrip'; SuccessMessage = 'Observed-window cache round-trip checks passed.' }
+    @{ Name = 'Test-FunctionAppWriteOutputNoEnumeratePreservesJObject'; SuccessMessage = 'Function App Write-Output -NoEnumerate checks passed.' }
+    @{ Name = 'Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo'; SuccessMessage = 'Function execution status summary metadata checks passed.' }
+)
+
+foreach ($sharedHelperRegressionTest in $sharedHelperRegressionTests) {
+    Invoke-SharedHelperRegressionTest -Name $sharedHelperRegressionTest.Name -SuccessMessage $sharedHelperRegressionTest.SuccessMessage
+}
+
 Write-Output 'Shared-helper regression checks passed.'
