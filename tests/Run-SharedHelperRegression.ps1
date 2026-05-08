@@ -3733,6 +3733,17 @@ function Test-MeasureStressRunWritesProgressAndFinalReport {
 
         $process.WaitForExit()
 
+        if (-not $IsWindows) {
+            $stdoutContent = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            $stderrContent = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            $processOutput = @($stdoutContent, $stderrContent) -join [Environment]::NewLine
+
+            Assert-True ($process.ExitCode -ne 0) 'Expected Measure-StressRun regression fixture to fail fast on non-Windows platforms.'
+            Assert-True (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) 'Expected non-Windows Measure-StressRun execution to avoid writing a stress report.'
+            Assert-True ($processOutput.Contains('currently supports Windows only')) 'Expected non-Windows Measure-StressRun execution to explain the Windows-only platform guard.'
+            return
+        }
+
         $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -Depth 20
 
         Assert-True $reportSeenWhileRunning 'Expected Measure-StressRun to persist a progress report before the wrapper process exits.'
