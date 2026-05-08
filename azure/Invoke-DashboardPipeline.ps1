@@ -11303,6 +11303,28 @@ function Resolve-DashboardEmbeddedPayloadSource {
         [string]$HtmlPath
     )
 
+    function Resolve-DashboardAssetPathFromUrl {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$HtmlDirectory,
+
+            [Parameter(Mandatory = $true)]
+            [string]$AssetUrl
+        )
+
+        $assetPath = $HtmlDirectory
+        $assetSegments = @($AssetUrl -split '[\\/]' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne '.' })
+        if ($assetSegments.Count -eq 0) {
+            throw "dashboardConfig in '$HtmlPath' does not define a valid payloadUrl path."
+        }
+
+        foreach ($assetSegment in $assetSegments) {
+            $assetPath = Join-Path $assetPath $assetSegment
+        }
+
+        return [System.IO.Path]::GetFullPath($assetPath)
+    }
+
     $resolvedPath = [System.IO.Path]::GetFullPath($HtmlPath)
     $metadataContent = Get-DashboardHtmlPrefixContent -Path $resolvedPath
     $dataFormat = Get-DashboardHtmlScriptContent -Html $metadataContent -ScriptId 'dataFormat'
@@ -11325,10 +11347,9 @@ function Resolve-DashboardEmbeddedPayloadSource {
         }
 
         $htmlDirectory = Split-Path -Path $resolvedPath -Parent
-        $payloadRelativePath = $payloadUrl.Replace('/', '\')
         return [PSCustomObject]@{
             DataFormat = $dataFormat
-            PayloadPath = [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+            PayloadPath = Resolve-DashboardAssetPathFromUrl -HtmlDirectory $htmlDirectory -AssetUrl $payloadUrl
             DeleteAfterRead = $false
         }
     }
@@ -11365,10 +11386,9 @@ function Resolve-DashboardEmbeddedPayloadSource {
         }
 
         $htmlDirectory = Split-Path -Path $resolvedPath -Parent
-        $payloadRelativePath = $payloadUrl.Replace('/', '\')
         return [PSCustomObject]@{
             DataFormat = $dataFormat
-            PayloadPath = [System.IO.Path]::GetFullPath((Join-Path $htmlDirectory $payloadRelativePath))
+            PayloadPath = Resolve-DashboardAssetPathFromUrl -HtmlDirectory $htmlDirectory -AssetUrl $payloadUrl
             DeleteAfterRead = $false
         }
     }
