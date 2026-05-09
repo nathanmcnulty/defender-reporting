@@ -2797,13 +2797,324 @@ function Read-MachineData {
     }
 }
 
-function Read-NormalizationMachineLookup {
+function Get-MachineRecordSequence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$AsNormalizationTuple
+    )
+
+    $asNormalizationTupleRequested = [bool]$AsNormalizationTuple
+    $machineRecordReader = {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$SourcePath
+        )
+
+        if ($asNormalizationTupleRequested) {
+            Read-MachineNormalizationEntriesFromFile -Path $SourcePath
+        }
+        else {
+            Read-MachineRecordsFromFile -Path $SourcePath
+        }
+    }
+
+    Invoke-WithStoreLock -BasePath $Path -StoreName 'machines' -ScriptBlock {
+        Restore-StoreTransaction -BasePath $Path -StoreName 'machines'
+
+        $currentPath = Get-MachineCurrentPath -BasePath $Path
+        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
+        $currentReadPath = if (Test-Path -Path $currentPath) { $currentPath } elseif (Test-Path -Path $legacyCurrentPath) { $legacyCurrentPath } else { $null }
+        $historySourcePaths = @(Get-MachineHistorySourcePaths -BasePath $Path)
+
+        if ($null -ne $currentReadPath) {
+            Write-Information "  Using $(Split-Path -Leaf $currentReadPath)" -InformationAction Continue
+            foreach ($record in (& $machineRecordReader $currentReadPath)) {
+                $record
+            }
+            return
+        }
+
+        if ($historySourcePaths.Count -gt 0) {
+            Write-Information "  Reconstructing current state from $($historySourcePaths.Count) machine history source file(s)" -InformationAction Continue
+            foreach ($sourcePath in $historySourcePaths) {
+                foreach ($record in (& $machineRecordReader $sourcePath)) {
+                    $record
+                }
+            }
+            return
+        }
+
+        $machineFiles = @(Get-ChildItem -Path $Path -Filter 'Machines_*.json' -File | Where-Object { Test-IsLegacyMachineSnapshotFileName -Name $_.Name } | Sort-Object Name -Descending)
+        if ($machineFiles.Count -eq 0) {
+            Write-Warning 'No machine data files found. Device details may be incomplete.'
+            return
+        }
+
+        Write-Information "  Found $($machineFiles.Count) legacy machine snapshot file(s)" -InformationAction Continue
+        $emittedIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($file in $machineFiles) {
+            Write-Information "  Processing $($file.Name)..." -InformationAction Continue
+            foreach ($record in (& $machineRecordReader $file.FullName)) {
+                $recordId = [string]$record.PSObject.Properties['id']?.Value
+                if ([string]::IsNullOrWhiteSpace($recordId) -or $emittedIds.Contains($recordId)) {
+                    continue
+                }
+
+                $emittedIds.Add($recordId) | Out-Null
+                $record
+            }
+        }
+    }
+}
+
+function Test-FileBackedNormalizationMachineLookup {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Machines
+    )
+
+    return ($Machines -is [hashtable] -and $null -ne $Machines.PSObject.Properties['FileBackedPath'])
+}
+
+function Remove-FileBackedNormalizationMachineLookup {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only disposes temp file-backed machine lookups created for the current run.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [hashtable]$Machines
+    )
+
+    if (-not (Test-FileBackedNormalizationMachineLookup -Machines $Machines)) {
+        return
+    }
+
+    $fileStreamProperty = $Machines.PSObject.Properties['FileStream']
+    $pathProperty = $Machines.PSObject.Properties['FileBackedPath']
+
+    if ($null -ne $fileStreamProperty -and $null -ne $fileStreamProperty.Value) {
+        try {
+            $fileStreamProperty.Value.Dispose()
+        }
+        catch {
+            Write-Verbose ("Ignoring machine lookup stream disposal failure: {0}" -f $_.Exception.Message)
+        }
+        $fileStreamProperty.Value = $null
+    }
+
+    $lookupPath = if ($null -ne $pathProperty) { [string]$pathProperty.Value } else { $null }
+    if (-not [string]::IsNullOrWhiteSpace($lookupPath) -and (Test-Path -LiteralPath $lookupPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $lookupPath -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($null -ne $pathProperty) {
+        $pathProperty.Value = $null
+    }
+
+    $Machines.Clear()
+}
+
+function Read-FileBackedNormalizationMachineTuple {
+    [CmdletBinding()]
+    [OutputType([object[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Machines,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DeviceId
+    )
+
+    if (-not (Test-FileBackedNormalizationMachineLookup -Machines $Machines) -or [string]::IsNullOrWhiteSpace($DeviceId) -or -not $Machines.ContainsKey($DeviceId)) {
+        return $null
+    }
+
+    $offsetEntry = $Machines[$DeviceId]
+    $offset = 0L
+    $bufferLength = 0
+    if ($offsetEntry -is [System.Array] -and $offsetEntry.Length -ge 2) {
+        $offset = [int64]$offsetEntry[0]
+        $bufferLength = [int]$offsetEntry[1]
+    }
+    else {
+        $offset = [int64]$offsetEntry
+    }
+
+    $fileStreamProperty = $Machines.PSObject.Properties['FileStream']
+    $pathProperty = $Machines.PSObject.Properties['FileBackedPath']
+    $lookupPath = if ($null -ne $pathProperty) { [string]$pathProperty.Value } else { $null }
+
+    if ($null -eq $fileStreamProperty) {
+        return $null
+    }
+
+    if ($null -eq $fileStreamProperty.Value) {
+        if ([string]::IsNullOrWhiteSpace($lookupPath) -or -not (Test-Path -LiteralPath $lookupPath -PathType Leaf)) {
+            return $null
+        }
+
+        $fileStreamProperty.Value = [System.IO.File]::Open($lookupPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    }
+
+    $fileStream = $fileStreamProperty.Value
+    [void]$fileStream.Seek($offset, [System.IO.SeekOrigin]::Begin)
+    if ($bufferLength -gt 0) {
+        $buffer = [byte[]]::new($bufferLength)
+        $bytesRead = 0
+        while ($bytesRead -lt $buffer.Length) {
+            $segmentBytesRead = $fileStream.Read($buffer, $bytesRead, ($buffer.Length - $bytesRead))
+            if ($segmentBytesRead -le 0) {
+                break
+            }
+
+            $bytesRead += $segmentBytesRead
+        }
+
+        if ($bytesRead -ne $buffer.Length) {
+            return $null
+        }
+    }
+    else {
+        $lineBytes = [System.Collections.Generic.List[byte]]::new()
+        while (($nextByte = $fileStream.ReadByte()) -ge 0) {
+            if ($nextByte -eq 0x0A) {
+                break
+            }
+
+            if ($nextByte -ne 0x0D) {
+                $lineBytes.Add([byte]$nextByte) | Out-Null
+            }
+        }
+
+        if ($lineBytes.Count -eq 0) {
+            return $null
+        }
+
+        $buffer = [byte[]]$lineBytes.ToArray()
+    }
+
+    $jsonDocument = Read-JsonDocumentFromUtf8BufferSegment -Buffer $buffer -Offset 0 -Count $buffer.Length
+    try {
+        if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
+            return $null
+        }
+
+        $tupleValues = [System.Collections.Generic.List[object]]::new()
+        foreach ($element in $jsonDocument.RootElement.EnumerateArray()) {
+            if ($element.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+                $arrayValues = [System.Collections.Generic.List[string]]::new()
+                foreach ($arrayElement in $element.EnumerateArray()) {
+                    if ($arrayElement.ValueKind -eq [System.Text.Json.JsonValueKind]::Null -or $arrayElement.ValueKind -eq [System.Text.Json.JsonValueKind]::Undefined) {
+                        continue
+                    }
+
+                    $arrayValues.Add([string](Convert-JsonElementToScalarValue -Element $arrayElement)) | Out-Null
+                }
+                $tupleValues.Add([string[]]$arrayValues.ToArray()) | Out-Null
+                continue
+            }
+
+            if ($element.ValueKind -eq [System.Text.Json.JsonValueKind]::Null -or $element.ValueKind -eq [System.Text.Json.JsonValueKind]::Undefined) {
+                $tupleValues.Add($null) | Out-Null
+                continue
+            }
+
+            $tupleValues.Add((Convert-JsonElementToScalarValue -Element $element)) | Out-Null
+        }
+
+        return [object[]]$tupleValues.ToArray()
+    }
+    finally {
+        $jsonDocument.Dispose()
+    }
+}
+
+function Open-FileBackedNormalizationMachineLookup {
     [CmdletBinding()]
     [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
     )
+
+    Write-Information "Reading machine data from $Path..." -InformationAction Continue
+    $machines = @{}
+    $lookupPath = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-tuples-' + [System.Guid]::NewGuid().ToString('N') + '.ndjson')
+    $writeStream = $null
+    try {
+        $writeStream = [System.IO.File]::Open($lookupPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        foreach ($record in (Get-MachineRecordSequence -Path $Path -AsNormalizationTuple)) {
+            $recordId = [string]$record.PSObject.Properties['id']?.Value
+            if ([string]::IsNullOrWhiteSpace($recordId)) {
+                continue
+            }
+
+            if ($record.PSObject.Properties['removed']?.Value -eq $true) {
+                $machines.Remove($recordId)
+                continue
+            }
+
+            $machineTuple = $record.PSObject.Properties['tuple']?.Value
+            if ($null -eq $machineTuple) {
+                $machines.Remove($recordId)
+                continue
+            }
+
+            $tupleBytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @($machineTuple) -Compress -Depth 6))
+            $offset = [int64]$writeStream.Position
+            $writeStream.Write($tupleBytes, 0, $tupleBytes.Length)
+            $writeStream.WriteByte(0x0A)
+            $machines[$recordId] = [int64[]]@($offset, [int64]$tupleBytes.Length)
+        }
+
+        $writeStream.Flush()
+        $writeStream.Dispose()
+        $writeStream = $null
+        Add-Member -InputObject $machines -NotePropertyName FileBackedPath -NotePropertyValue $lookupPath
+        Add-Member -InputObject $machines -NotePropertyName FileStream -NotePropertyValue ([System.IO.File]::Open($lookupPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read))
+        Write-Information "  Loaded $($machines.Count) unique machines (file-backed index)" -InformationAction Continue
+        return $machines
+    }
+    catch {
+        if ($null -ne $writeStream) {
+            $writeStream.Dispose()
+            $writeStream = $null
+        }
+
+        if (Test-Path -LiteralPath $lookupPath -PathType Leaf) {
+            Remove-Item -LiteralPath $lookupPath -Force -ErrorAction SilentlyContinue
+        }
+
+        throw
+    }
+    finally {
+        if ($null -ne $writeStream) {
+            $writeStream.Dispose()
+        }
+    }
+}
+
+function Read-NormalizationMachineLookup {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$FileBacked
+    )
+
+    if ($FileBacked) {
+        return (Open-FileBackedNormalizationMachineLookup -Path $Path)
+    }
 
     return (Read-MachineData -Path $Path -AsNormalizationTuple)
 }
@@ -4434,6 +4745,34 @@ function Get-NormalizationContext {
     }
 }
 
+function Clear-NormalizationInputContext {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [pscustomobject]$Context,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$PreserveInventoryData
+    )
+
+    if ($null -eq $Context) {
+        return
+    }
+
+    if (Test-FileBackedNormalizationMachineLookup -Machines $Context.Machines) {
+        Remove-FileBackedNormalizationMachineLookup -Machines $Context.Machines
+    }
+
+    $Context.Machines = @{}
+    $Context.AdvancedHuntingData = @{}
+    $Context.AdvancedHuntingDeviceUsers = @{}
+    if (-not $PreserveInventoryData) {
+        $Context.AdvancedHuntingInventoryData = @{}
+    }
+    $Context.NvdCveData = @{}
+}
+
 function ConvertTo-NormalizedLookupRecord {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -4931,6 +5270,10 @@ function Compress-NormalizationMachineLookup {
         [hashtable]$Machines
     )
 
+    if (Test-FileBackedNormalizationMachineLookup -Machines $Machines) {
+        return $Machines
+    }
+
     if ($null -eq $Machines -or $Machines.Count -eq 0) {
         return @{}
     }
@@ -4985,8 +5328,18 @@ function Add-NormalizedDevice {
     }
 
     if (-not $deviceIndex.ContainsKey($deviceKey)) {
-        $machine = if (-not [string]::IsNullOrWhiteSpace($DeviceId)) { $Context.Machines[$DeviceId] } else { $null }
-        $machineTuple = if ($machine -is [System.Array] -and $machine.Length -ge 10) { $machine } else { $null }
+        $machine = $null
+        $machineTuple = $null
+        if (-not [string]::IsNullOrWhiteSpace($DeviceId)) {
+            if (Test-FileBackedNormalizationMachineLookup -Machines $Context.Machines) {
+                $machineTuple = Read-FileBackedNormalizationMachineTuple -Machines $Context.Machines -DeviceId $DeviceId
+            }
+            else {
+                $machine = $Context.Machines[$DeviceId]
+                $machineTuple = if ($machine -is [System.Array] -and $machine.Length -ge 10) { $machine } else { $null }
+            }
+        }
+        $hasMachineMetadata = ($null -ne $machineTuple -or $null -ne $machine)
         $machineOsVersion = if ($machineTuple -and $machineTuple.Length -ge 11) {
             [string]$machineTuple[10]
         }
@@ -5044,7 +5397,7 @@ function Add-NormalizedDevice {
             }
         }
 
-        $resolvedGroupName = if ($null -ne $machine) { $machineGroupName } else { $GroupName }
+        $resolvedGroupName = if ($hasMachineMetadata) { $machineGroupName } else { $GroupName }
         if ([string]::IsNullOrWhiteSpace([string]$resolvedGroupName)) {
             $resolvedGroupName = if ([string]::IsNullOrWhiteSpace([string]$GroupName)) { '(none)' } else { $GroupName }
         }
@@ -5053,7 +5406,7 @@ function Add-NormalizedDevice {
         $osPlat = if (-not [string]::IsNullOrWhiteSpace([string]$machinePlatform)) { $machinePlatform } else { $OsPlatform }
         $platIdx = Get-OrCreateIndex -value $osPlat -list $lookups.platforms -indexMap $platformIndex
 
-        $effectiveTags = if ($null -ne $machine -and @($machineResolvedTags).Count -gt 0) { @($machineResolvedTags) } elseif ($MachineTags) { @($MachineTags) } else { @() }
+        $effectiveTags = if ($hasMachineMetadata -and @($machineResolvedTags).Count -gt 0) { @($machineResolvedTags) } elseif ($MachineTags) { @($MachineTags) } else { @() }
         $tagIndices = [System.Collections.Generic.List[int]]::new()
         foreach ($tag in $effectiveTags) {
             $tagIdx = Get-OrCreateIndex -value $tag -list $lookups.tags -indexMap $tagIndex
@@ -5065,7 +5418,7 @@ function Add-NormalizedDevice {
         $deviceIndex[$deviceKey] = Get-NormalizedCollectionCount -Value $deviceLookupStore
 
         $machineInfo = $null
-        if ($machine -or $machineUsers.Count -gt 0) {
+        if ($hasMachineMetadata -or $machineUsers.Count -gt 0) {
             $machineLastSeen = if ($machineTuple) { $machineTuple[8] } elseif ($machine) { $machine.PSObject.Properties['lastSeen']?.Value } else { $null }
             $machineFirstSeen = if ($machineTuple) { $machineTuple[9] } elseif ($machine) { $machine.PSObject.Properties['firstSeen']?.Value } else { $null }
             $machineInfo = [PSCustomObject]@{
@@ -6317,10 +6670,7 @@ function Invoke-ContentStoreNormalization {
     # Ref streaming only needs the compact device/content lookup arrays plus
     # inventory enrichment. Release the larger source maps before processing
     # the full ref set so they do not overlap with the row stream.
-    $Context.Machines = @{}
-    $Context.AdvancedHuntingData = @{}
-    $Context.AdvancedHuntingDeviceUsers = @{}
-    $Context.NvdCveData = @{}
+    Clear-NormalizationInputContext -Context $Context -PreserveInventoryData
     Invoke-FullGarbageCollection
 
     Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
@@ -6697,11 +7047,7 @@ function Invoke-ContentStoreNormalization {
             $refPaths.Clear()
         }
 
-        $Context.Machines = @{}
-        $Context.AdvancedHuntingData = @{}
-        $Context.AdvancedHuntingDeviceUsers = @{}
-        $Context.AdvancedHuntingInventoryData = @{}
-        $Context.NvdCveData = @{}
+        Clear-NormalizationInputContext -Context $Context
 
         $dateValueCacheProperty = $Context.PSObject.Properties['DateValueCache']
         if ($null -ne $dateValueCacheProperty -and $null -ne $dateValueCacheProperty.Value) {
@@ -6728,6 +7074,7 @@ function Invoke-ContentStoreNormalization {
         if ($writerState) {
             $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups -ConsumeLookups:$consumeLookups
         }
+        Clear-NormalizationInputContext -Context $Context
     }
 
     Test-NormalizedWriterRowCount -WriterCloseResult $writerCloseResult -ExpectedRowCount $processedCountRef.Value
@@ -7194,6 +7541,7 @@ function Invoke-RawStoreNormalization {
         if ($writerState) {
             $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups -ConsumeLookups:$consumeLookups
         }
+        Clear-NormalizationInputContext -Context $Context
     }
 
     Test-NormalizedWriterRowCount -WriterCloseResult $writerCloseResult -ExpectedRowCount $processedCountRef.Value

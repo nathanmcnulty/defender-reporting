@@ -1436,7 +1436,7 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         Set-PipelineExecutionStage -Stage 'ReadNormalizationInputs' -Message 'Loading machine and Advanced Hunting inputs for dashboard normalization.'
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
-        $machines = Read-NormalizationMachineLookup -Path $tempExports
+        $machines = Read-NormalizationMachineLookup -Path $tempExports -FileBacked
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-MachineRead"
 

@@ -46,6 +46,25 @@ The raw result JSON files from the April 5, 2026 capture remain local-only under
 | --- | --- | --- | --- | --- | --- |
 | `synthetic-50k-1_5m` | `50,000` devices, `1,500,000` rows, `3,097` normalized CVE lookup entries | `monolithic-v1` | Azure Automation plus hosted Function App (`Dual`) | Function App execution accepted `2026-05-06T06:26:05Z`; dashboard blob written `2026-05-06T06:33:39Z`; blob-write interval `454s` | Treat this as the accepted Stage 1 large Azure envelope anchor until a newer accepted run replaces it. Compare future standard-dataset Azure runs against this record plus the review thresholds in `docs/performance-gate-playbook.md`, and keep the raw Azure validation artifacts local under `.local/`. |
 
+## Recent memory triage notes
+
+These notes capture recent memory experiments, including dead ends that should not be repeated and the machine-store prototype that survived large-lane validation.
+
+| Date | Experiment | Dataset / lane | Result | Keep? |
+| --- | --- | --- | --- | --- |
+| `2026-05-08` | Machine-field pooling inside `MachineStore.ps1` | `benchmark-medium-v1-cold` hot-phase review | End-to-end peak worsened from `280936448` to `285462528` bytes RSS and from `173973504` to `177254400` bytes private. | No |
+| `2026-05-08` | Advanced Hunting tuple compaction after bundle load | `benchmark-medium-v1-cold` input-load review | Post-compaction working set stayed flat at `191.0` to `191.1 MB`; GC heap moved from `60.0 MB` to `57.8 MB`, which was too small to change end-to-end normalization pressure. | No |
+| `2026-05-08` | Azure replay with `tests\Measure-RunbookOnlyAzureBenchmark.ps1 -UseExistingExportsOnly` against shared storage | Existing-export replay | The blob set drifted and replayed only a much smaller lane, so the resulting ~`300 MB` runs were not comparable to the accepted `50k / 1.5M` envelope. | No |
+| `2026-05-09` | ID-only machine index lower bound | `synthetic-50k-1_5m` large input-load review | After the same forced GC used by the runbook, retained state stayed at `437.0 MB` working set / `295.2 MB` GC heap, so it was not a useful lower-retention target. | No |
+| `2026-05-09` | File-backed normalization machine lookup using buffered `offset + length` tuple reads | `synthetic-50k-1_5m` large input-load review plus local hot-phase review | Post-machine-read GC dropped retained machine lookup state from `415.0 MB` working set / `73.4 MB` GC heap to `407.4 MB` / `31.5 MB`. The full dual-package hot-phase review then completed successfully at `0.764 GB` peak tree RSS / `0.667 GB` peak private, with `Normalize source data = 1263.71s` and `Prepare normalized payload = 116.98s`. | Yes |
+
+The next machine-store experiment should build on the stronger diagnostics instead:
+
+- On `benchmark-medium-v1-cold`, streamed vulnerability rows were **98.69%** same-device as the immediately previous row, and even an LRU cache of `1` hit the same **98.69%** rate as caches of `4`, `16`, and `64`.
+- On the same pinned synthetic dataset, content-store `deviceProfiles` matched machine-store order **exactly** (`1500 / 1500` same-position matches).
+- That order relationship did **not** hold on the local real `exports` lane (`0 / 24` same-position matches; only `20.83%` monotonic), so future machine-store offload work must tolerate out-of-order device profiles instead of assuming a pure merge stream.
+- With the buffered file-backed machine lookup in place, the latest large local hot-phase review peaked during `Write dashboard` rather than normalization, so the next likely local memory target is packaging rather than another machine-store rewrite.
+
 ## Capture notes
 
 - Date captured: `2026-04-05` for the original synthetic replay baselines.

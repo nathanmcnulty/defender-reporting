@@ -6,7 +6,7 @@ param(
     [string]$DatasetPath = (Join-Path (Split-Path -Path $PSScriptRoot -Parent) '.local\large-datasets\synthetic-50k-1_5m'),
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet('baseline', 'precompact-machines', 'gc-after-load', 'precompact-plus-gc', 'bundle-only', 'bundle-precompact', 'bundle-precompact-plus-gc')]
+    [ValidateSet('baseline', 'precompact-machines', 'gc-after-load', 'precompact-plus-gc', 'bundle-only', 'bundle-precompact', 'bundle-precompact-plus-gc', 'machine-full', 'machine-id-index', 'machine-file-backed')]
     [string]$Experiment,
 
     [Parameter(Mandatory = $false)]
@@ -384,17 +384,19 @@ function Read-AdvancedHuntingBundle {
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $snapshots = [System.Collections.Generic.List[object]]::new()
 $machines = $null
+$machineCount = 0
 $advancedHuntingData = @{}
 $advancedHuntingDeviceUsers = @{}
+$experimentDetails = [ordered]@{}
 
 Write-Output ("Running input-load experiment '{0}' against {1}" -f $Experiment, $DatasetPath)
 Add-ExperimentSnapshot -Snapshots $snapshots -Label 'Start' -Stopwatch $stopwatch
 
-$machines = Read-MachineData -Path $DatasetPath
-Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineLoad' -Stopwatch $stopwatch
-
 switch ($Experiment) {
     'baseline' {
+        $machines = Read-MachineData -Path $DatasetPath
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineLoad' -Stopwatch $stopwatch
+
         $advancedHuntingData = Read-AdvancedHuntingData -Path $DatasetPath
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostAdvancedHuntingData' -Stopwatch $stopwatch
 
@@ -403,6 +405,9 @@ switch ($Experiment) {
     }
 
     'precompact-machines' {
+        $machines = Read-MachineData -Path $DatasetPath
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineLoad' -Stopwatch $stopwatch
+
         Compress-NormalizationMachineLookup -Machines $machines | Out-Null
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineCompaction' -Stopwatch $stopwatch
 
@@ -414,6 +419,9 @@ switch ($Experiment) {
     }
 
     'gc-after-load' {
+        $machines = Read-MachineData -Path $DatasetPath
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineLoad' -Stopwatch $stopwatch
+
         $advancedHuntingData = Read-AdvancedHuntingData -Path $DatasetPath
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostAdvancedHuntingData' -Stopwatch $stopwatch
 
@@ -425,6 +433,9 @@ switch ($Experiment) {
     }
 
     'precompact-plus-gc' {
+        $machines = Read-MachineData -Path $DatasetPath
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineLoad' -Stopwatch $stopwatch
+
         Compress-NormalizationMachineLookup -Machines $machines | Out-Null
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineCompaction' -Stopwatch $stopwatch
 
@@ -439,6 +450,9 @@ switch ($Experiment) {
     }
 
     'bundle-only' {
+        $machines = Read-MachineData -Path $DatasetPath
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineLoad' -Stopwatch $stopwatch
+
         $bundle = Read-AdvancedHuntingBundle -Path $DatasetPath -IncludeDeviceUsers
         $advancedHuntingData = [hashtable]$bundle.AdvancedHuntingData
         $advancedHuntingDeviceUsers = [hashtable]$bundle.DeviceUsers
@@ -446,6 +460,9 @@ switch ($Experiment) {
     }
 
     'bundle-precompact' {
+        $machines = Read-MachineData -Path $DatasetPath
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineLoad' -Stopwatch $stopwatch
+
         Compress-NormalizationMachineLookup -Machines $machines | Out-Null
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineCompaction' -Stopwatch $stopwatch
 
@@ -456,6 +473,9 @@ switch ($Experiment) {
     }
 
     'bundle-precompact-plus-gc' {
+        $machines = Read-MachineData -Path $DatasetPath
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineLoad' -Stopwatch $stopwatch
+
         Compress-NormalizationMachineLookup -Machines $machines | Out-Null
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineCompaction' -Stopwatch $stopwatch
 
@@ -467,9 +487,51 @@ switch ($Experiment) {
         Invoke-FullGarbageCollection
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostForcedGc' -Stopwatch $stopwatch
     }
+
+    'machine-full' {
+        $machines = Read-NormalizationMachineLookup -Path $DatasetPath
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineLookupLoad' -Stopwatch $stopwatch
+        Invoke-FullGarbageCollection
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostForcedGc' -Stopwatch $stopwatch
+    }
+
+    'machine-id-index' {
+        $machines = @{}
+        foreach ($record in (Get-MachineRecordSequence -Path $DatasetPath -AsNormalizationTuple)) {
+            $recordId = [string]$record.PSObject.Properties['id']?.Value
+            if ([string]::IsNullOrWhiteSpace($recordId)) {
+                continue
+            }
+
+            if ($record.PSObject.Properties['removed']?.Value -eq $true) {
+                $machines.Remove($recordId)
+                continue
+            }
+
+            $machines[$recordId] = $true
+        }
+
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineIdIndexLoad' -Stopwatch $stopwatch
+        Invoke-FullGarbageCollection
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostForcedGc' -Stopwatch $stopwatch
+    }
+
+    'machine-file-backed' {
+        $machines = Read-NormalizationMachineLookup -Path $DatasetPath -FileBacked
+        $lookupPath = [string]$machines.PSObject.Properties['FileBackedPath']?.Value
+        if (-not [string]::IsNullOrWhiteSpace($lookupPath) -and (Test-Path -LiteralPath $lookupPath -PathType Leaf)) {
+            $experimentDetails.file_backed_lookup_path = $lookupPath
+            $experimentDetails.file_backed_lookup_bytes = [int64](Get-Item -LiteralPath $lookupPath).Length
+        }
+
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineFileBackedLoad' -Stopwatch $stopwatch
+        Invoke-FullGarbageCollection
+        Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostForcedGc' -Stopwatch $stopwatch
+    }
 }
 
 $stopwatch.Stop()
+$machineCount = if ($null -ne $machines) { $machines.Count } else { 0 }
 
 $peakWorkingSetMb = 0.0
 $peakGcHeapMb = 0.0
@@ -491,11 +553,16 @@ $result = [ordered]@{
     peak_working_set_mb = $peakWorkingSetMb
     peak_gc_heap_mb = $peakGcHeapMb
     counts = [ordered]@{
-        machines = if ($null -ne $machines) { $machines.Count } else { 0 }
+        machines = $machineCount
         advanced_hunting_cves = if ($null -ne $advancedHuntingData) { $advancedHuntingData.Count } else { 0 }
         device_users = if ($null -ne $advancedHuntingDeviceUsers) { $advancedHuntingDeviceUsers.Count } else { 0 }
     }
+    details = $experimentDetails
     snapshots = @($snapshots)
+}
+
+if (Test-FileBackedNormalizationMachineLookup -Machines $machines) {
+    Remove-FileBackedNormalizationMachineLookup -Machines $machines
 }
 
 [System.IO.File]::WriteAllText(
