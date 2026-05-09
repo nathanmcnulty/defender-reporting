@@ -57,13 +57,72 @@ These notes capture recent memory experiments, including dead ends that should n
 | `2026-05-08` | Azure replay with `tests\Measure-RunbookOnlyAzureBenchmark.ps1 -UseExistingExportsOnly` against shared storage | Existing-export replay | The blob set drifted and replayed only a much smaller lane, so the resulting ~`300 MB` runs were not comparable to the accepted `50k / 1.5M` envelope. | No |
 | `2026-05-09` | ID-only machine index lower bound | `synthetic-50k-1_5m` large input-load review | After the same forced GC used by the runbook, retained state stayed at `437.0 MB` working set / `295.2 MB` GC heap, so it was not a useful lower-retention target. | No |
 | `2026-05-09` | File-backed normalization machine lookup using buffered `offset + length` tuple reads | `synthetic-50k-1_5m` large input-load review plus local hot-phase review | Post-machine-read GC dropped retained machine lookup state from `415.0 MB` working set / `73.4 MB` GC heap to `407.4 MB` / `31.5 MB`. The full dual-package hot-phase review then completed successfully at `0.764 GB` peak tree RSS / `0.667 GB` peak private, with `Normalize source data = 1263.71s` and `Prepare normalized payload = 116.98s`. | Yes |
+| `2026-05-09` | Dictionary-backed file-backed machine index | `synthetic-50k-1_5m` large input-load review | Clean isolated rerun landed at `406.1 MB` working set / `33.7 MB` GC heap after forced GC versus the accepted hashtable-backed file-backed baseline at `396.6 MB` / `33.0 MB`, so the alternate index shape lost memory headroom. | No |
+| `2026-05-09` | Packed scalar `offset + length` entries for file-backed machine tuples | `synthetic-50k-1_5m` large input-load review | Peak load nudged down slightly to `436.6 MB`, but retained state after forced GC jumped to `429.6 MB` working set / `32.4 MB` GC heap versus the accepted `396.6 MB` / `33.0 MB` baseline, so the packed-entry variant was discarded. | No |
+| `2026-05-09` | Bucketed file-backed machine lookup | `synthetic-50k-1_5m` large input-load review plus uncached local hot-phase review | Isolated load looked excellent at `189.4 MB` peak working set / `47.1 MB` GC heap and `183.8 MB` / `25.8 MB` after forced GC, but the uncached large hot-phase run stalled in normalization for more than `3128s` without finishing. | No |
+| `2026-05-09` | Sequential profile-access probe over file-backed machine tuples | `synthetic-50k-1_5m` large profile-order review | On the exact `deviceProfiles` access pattern, the sequential cursor cut elapsed time from `188.84s` to `89.94s` with `0` misses / `0` pending spill entries, but peak memory stayed effectively flat (`446.7 MB` working set / `315.3 MB` GC heap). | Investigate |
+| `2026-05-09` | Streamed array-file parser swap for `Machines_Current.json.gz` | `synthetic-50k-1_5m` large machine-input review | Replacing the array-document parse path with per-entry streaming did not materially move the accepted load benchmarks (`441.9 MB` / `306.0 MB` on `machine-file-backed`, `444.2 MB` / `304.0 MB` on merge-style profile access), so the change was reverted. | No |
+| `2026-05-09` | Current-snapshot staged sequential machine lookup with bucket fallback | `synthetic-50k-1_5m` large profile-order review | The first implementation cut profile access time from `180.53s` to `101.48s` with `50000` sequential hits and `0` fallbacks, but peak memory regressed from `447.3 MB` / `305.5 MB` to `458.5 MB` / `311.3 MB`. A follow-up lower-allocation byte-stream reader then failed to finish the same access pass after more than `660s`, so the experiment was reverted. | No |
+| `2026-05-09` | Mismatch-only merge path with bucketed spill fallback | `synthetic-50k-1_5m` large profile-order review plus local `exports` fallback review | On the seeded large lane, exact-order merge kept spill at `0` and finished in `77.86s`, but peak still regressed slightly to `448.0 MB` / `308.0 MB` versus the fresh file-backed baseline at `444.9 MB` / `305.7 MB`. A periodic-GC follow-up held GC slightly lower (`300.5 MB`) but worsened working set to `461.7 MB`. On the local real `exports` lane, fallback worked (`20` spills across `18` buckets; `19` spill resolutions, `0` misses) but stayed near parity at `142.9 MB` / `30.0 MB` / `0.64s` versus `139.6 MB` / `30.5 MB` / `0.59s`. | No |
+| `2026-05-09` | Direct current-snapshot device-lookup projection | `synthetic-50k-1_5m` large device-profile projection review | On the real `Add-NormalizedDevice` file-backed baseline, the device-profile pass landed at `190.7 MB` working set / `56.0 MB` GC heap / `287.00s`. Replacing the machine lookup with a direct merge over the current machine snapshot plus immediate file-backed device-lookup projection cut that to `175.2 MB` / `48.2 MB` / `154.44s`. The spill-enabled wrapper preserved the same ordered-lane win at `172.1 MB` / `47.4 MB` / `152.54s` with `0` spills. | Investigate |
 
 The next machine-store experiment should build on the stronger diagnostics instead:
 
 - On `benchmark-medium-v1-cold`, streamed vulnerability rows were **98.69%** same-device as the immediately previous row, and even an LRU cache of `1` hit the same **98.69%** rate as caches of `4`, `16`, and `64`.
 - On the same pinned synthetic dataset, content-store `deviceProfiles` matched machine-store order **exactly** (`1500 / 1500` same-position matches).
+- On the large seeded synthetic lane, that same order relationship also held exactly (`50000 / 50000` same-position matches, `100%` monotonic), and a merge-style machine walk finished the profile pass in **`77.71s`** versus **`175.84s`** for the accepted file-backed random lookup path.
 - That order relationship did **not** hold on the local real `exports` lane (`0 / 24` same-position matches; only `20.83%` monotonic), so future machine-store offload work must tolerate out-of-order device profiles instead of assuming a pure merge stream.
 - With the buffered file-backed machine lookup in place, the latest large local hot-phase review peaked during `Write dashboard` rather than normalization, so the next likely local memory target is packaging rather than another machine-store rewrite.
+- Seeded current-only self-contained validation now confirms that the buffered file-backed machine lookup carries through the shared self-contained path:
+  - Azure Automation self-contained replay: **501.6 MB** working set / **123.4 MB** GC heap / **766.74 s**
+  - Function App self-contained replay: **814.8 MB** working set / **573.76 s**
+- A follow-up packaging experiment that skipped the immediate self-contained embedded-payload reinspection was measured and then discarded:
+  - rerun result: **516.3 MB** working set / **124.2 MB** GC heap / **752.80 s** in Azure Automation, and **800.1 MB** working set / **581.15 s** in Function App
+  - while Function App working set improved by about **14.7 MB**, Azure Automation working set regressed by about **14.7 MB**, and the net change was too small to justify weakening packaging-time payload validation
+- Peak-label extraction from the seeded self-contained replay showed the real Azure self-contained high-water marks still cluster around machine input preparation (`Post-MachineRead`, `Post-MachineLookupCompression`, `Post-NormalizationInputs`) rather than bundle compression or final HTML assembly, so the next meaningful Azure target should pivot back toward machine input load/compression rather than packaging shortcuts.
+- Fresh large-lane Advanced Hunting bundle reviews suggest the bundle is secondary to the remaining machine/post-normalization cliffs:
+  - on `bundle-only`, the delta from `PostMachineLoad` to `PostAdvancedHuntingBundle` was about **+26.6 MB** working set / **+19.4 MB** GC heap
+  - on `bundle-precompact`, the retained delta after machine compaction stayed in the same neighborhood at about **+19.4 MB** GC heap
+  - this is worth tracking, but it is not large enough to justify another AH-specific rewrite before we get better Azure visibility into retained post-normalization lookups
+- A follow-up seeded current-only Azure self-contained replay with richer retained-lookup telemetry confirmed that the remaining Azure cliff is still pre-normalization machine input work, not late payload retention:
+  - replay envelope stayed effectively flat at **504.0 MB** runbook working set / **124.9 MB** GC heap / **752.65 s**, with Function App at **814.4 MB** / **575.22 s**
+  - the labeled peak still occurred at `Post-MachineRead` / `Post-MachineLookupCompression` (~**504 MB**), while memory dropped to about **343.5 MB** / **79.9 MB** by `Post-NormalizationCleanup` and about **341.3 MB** / **87.4 MB** by `Post-PayloadCachePublish`
+  - that drop means retained post-normalization lookups and packaging are no longer the dominant self-contained memory cliff on the seeded Azure lane; the next architecture pass should stay focused on machine-input staging/retention before normalization begins
+- The new large-lane profile-order probes changed the shape of the next machine-input theory:
+  - low-memory bucket staging proved that deferring machine materialization can be worthwhile, but the random bucket lookup path was far too slow
+  - exact-order merge/profile passes were much faster than random file-backed lookups, but by themselves they did not lower the machine-read peak enough to keep
+  - a current-snapshot staged sequential hybrid confirmed that order-aware staged access can be fast, but not yet memory-positive: the fast version increased peak working set / GC, and the lower-allocation reader became too slow to keep
+  - a mismatch-only merge-plus-spill hybrid showed that bounded out-of-order fallback can preserve the fast ordered path and still complete the disorder case, but it still did not reduce peak memory on either lane
+  - a more aggressive direct-projection cut finally produced a simultaneous memory-and-time win on the exact-order seeded lane: skipping the machine lookup index entirely and projecting device lookups directly while streaming the current machine snapshot lowered the isolated device-profile pass by about `15.5 MB` working set / `7.8 MB` GC and about `132.56s`
+  - the next credible architecture is therefore a hybrid that combines low-retention staging with order-aware resolution and bounded fallback, rather than another pure parser tweak or another random-access bucket variant
+  - if this line is revisited, it should only be with a lower-allocation machine/device-profile streaming path; changing fallback policy alone was not enough
+  - the current spill-enabled direct-projection harness still needs a better disorder strategy before it can be treated as production-shape: the exact-order seeded lane stayed at `0` spills and won cleanly, but the first concurrent spill-reader attempt on the local `exports` lane still needs redesign
+
+## Multi-dial experiment review
+
+Use `tests\Measure-RunbookInputLoadExperiment.ps1 -CompareToPath <prior-result.json>` when comparing machine-input prototypes on the same dataset and command path.
+
+The harness now records a few derived tradeoff metrics in addition to peak memory and elapsed time:
+
+- `work_units_per_second` to show whether a slower storage strategy is recovering throughput elsewhere
+- `disk_footprint_mb` to quantify how much cold state moved off-heap
+- `peak_working_set_mb_seconds` / `peak_gc_heap_mb_seconds` as a quick peak-memory x time exposure check
+- `snapshot_working_set_area_mb_seconds` / `snapshot_gc_heap_area_mb_seconds` as a coarse time-weighted memory exposure summary across the captured phase snapshots
+- comparison deltas plus `*_mb_saved_per_added_second` when a candidate deliberately trades latency for memory
+
+Treat those derived metrics as lane-local diagnostics, not universal scores. They are most useful when the dataset, experiment mode, and storage path are otherwise held constant.
+
+## Memory reduction progression
+
+This table is the compact "how far have we moved?" view for the standard large Azure replay lane. The first row is the effective starting point before the meaningful memory reductions landed; later rows add each accepted architectural change.
+
+| Step | Change | Replay path | Peak WS | Peak private | Peak GC heap | Elapsed | Notes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| Starting point | Pre-offload replay after parser cleanup | Azure Automation replay | `579.6 MB` | `481.9 MB` | `336.8 MB` | `490.84s` | Parser cleanup improved throughput, but the true status-blob peak did not materially move. |
+| Change 1 | File-backed device lookup offload | Hosted replay | `539.7 MB` | `388.0 MB` | `173.3 MB` | `596.94s` | First meaningful normalization-memory win; peak stayed in normalization input loading. |
+| Change 1 | File-backed device lookup offload | Dual replay | `549.9 MB` | `398.7 MB` | `173.6 MB` | `672.67s` | Packaging added about `10 MB` WS and `75.73s` over hosted on the same architecture. |
+| Change 2 | Buffered file-backed machine lookup | Hosted replay | `494.7 MB` | `351.2 MB` | `123.9 MB` | `750.52s` | Another `45.0 MB` WS / `36.8 MB` private / `49.4 MB` GC improvement versus the hosted device-lookup offload run. |
+| Change 2 | Buffered file-backed machine lookup | Dual replay | `504.0 MB` | `351.8 MB` | `119.7 MB` | `1008.66s` | Another `45.9 MB` WS / `46.9 MB` private / `53.9 MB` GC improvement versus the dual device-lookup offload run, but packaging time grew sharply. |
 
 ## Capture notes
 

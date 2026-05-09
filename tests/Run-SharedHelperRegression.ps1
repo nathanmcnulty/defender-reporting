@@ -3267,6 +3267,208 @@ function Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup {
     }
 }
 
+function Test-ReadFileBackedNormalizationMachineLookupMatchesCompressedMachineLookup {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-file-backed-reader-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $fileBackedMachines = $null
+
+    try {
+        Write-NdjsonRecordsFile -Path (Get-MachineCurrentPath -BasePath $tempRoot) -Records @(
+            [PSCustomObject]@{
+                id = 'device-live'
+                computerDnsName = 'device-live.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = '10.0.0.1'
+                lastExternalIpAddress = '203.0.113.10'
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'High'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-20'
+                firstSeen = '2026-03-10'
+            }
+            [PSCustomObject]@{
+                id = 'device-sparse'
+                computerDnsName = 'device-sparse.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = $null
+                lastExternalIpAddress = $null
+                healthStatus = $null
+                riskScore = $null
+                exposureLevel = $null
+                deviceValue = $null
+                managedBy = $null
+                isAadJoined = $null
+                lastSeen = $null
+                firstSeen = $null
+            }
+            [PSCustomObject]@{
+                id = 'device-removed'
+                removed = $true
+                observedOn = '2026-03-20'
+                stateHash = 'removed'
+            }
+        )
+
+        $standardMachines = Read-MachineData -Path $tempRoot
+        $compressedMachines = @{}
+        foreach ($deviceId in @($standardMachines.Keys)) {
+            $compressedMachines[$deviceId] = $standardMachines[$deviceId]
+        }
+        Compress-NormalizationMachineLookup -Machines $compressedMachines | Out-Null
+
+        $fileBackedMachines = Read-NormalizationMachineLookup -Path $tempRoot -FileBacked
+
+        Assert-True (Test-FileBackedNormalizationMachineLookup -Machines $fileBackedMachines) 'Expected file-backed tuple-mode machine loading to return a file-backed lookup.'
+        Assert-True ((Get-NormalizationMachineLookupCount -Machines $fileBackedMachines) -eq $compressedMachines.Count) 'Expected file-backed tuple-mode machine loading to preserve the same machine count as the compressed machine lookup path.'
+
+        $expectedTuple = [object[]]$compressedMachines['device-live']
+        $actualTuple = Read-FileBackedNormalizationMachineTuple -Machines $fileBackedMachines -DeviceId 'device-live'
+        Assert-True ($actualTuple -is [System.Array]) 'Expected file-backed tuple-mode machine loading to materialize array-backed normalization tuples.'
+        Assert-True ($actualTuple.Length -eq $expectedTuple.Length) 'Expected file-backed tuple-mode machine loading to preserve the normalization tuple shape.'
+
+        $expectedSparseTuple = [object[]]$compressedMachines['device-sparse']
+        $actualSparseTuple = Read-FileBackedNormalizationMachineTuple -Machines $fileBackedMachines -DeviceId 'device-sparse'
+        Assert-True ($actualSparseTuple -is [System.Array]) 'Expected file-backed tuple-mode machine loading to materialize sparse machines as array-backed normalization tuples.'
+        Assert-True ($actualSparseTuple.Length -eq $expectedSparseTuple.Length) 'Expected file-backed tuple-mode machine loading to preserve the sparse normalization tuple shape.'
+
+        Assert-True ($null -eq (Read-FileBackedNormalizationMachineTuple -Machines $fileBackedMachines -DeviceId 'device-removed')) 'Expected file-backed tuple-mode machine loading to drop removed machines from the current lookup.'
+
+        for ($tupleIndex = 0; $tupleIndex -lt $expectedTuple.Length; $tupleIndex++) {
+            $expectedTupleValue = ConvertTo-Json -InputObject $expectedTuple[$tupleIndex] -Compress -Depth 20
+            $actualTupleValue = ConvertTo-Json -InputObject $actualTuple[$tupleIndex] -Compress -Depth 20
+            Assert-True ($actualTupleValue -eq $expectedTupleValue) "Expected file-backed tuple-mode machine loading to preserve tuple slot $tupleIndex."
+        }
+
+        for ($tupleIndex = 0; $tupleIndex -lt $expectedSparseTuple.Length; $tupleIndex++) {
+            $expectedSparseTupleValue = ConvertTo-Json -InputObject $expectedSparseTuple[$tupleIndex] -Compress -Depth 20
+            $actualSparseTupleValue = ConvertTo-Json -InputObject $actualSparseTuple[$tupleIndex] -Compress -Depth 20
+            Assert-True ($actualSparseTupleValue -eq $expectedSparseTupleValue) "Expected file-backed tuple-mode machine loading to preserve sparse tuple slot $tupleIndex."
+        }
+    }
+    finally {
+        if ($null -ne $fileBackedMachines) {
+            Remove-FileBackedNormalizationMachineLookup -Machines $fileBackedMachines
+        }
+
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ReadBucketedFileBackedNormalizationMachineLookupMatchesCompressedMachineLookup {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-bucketed-reader-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $bucketedMachines = $null
+
+    try {
+        Write-NdjsonRecordsFile -Path (Get-MachineCurrentPath -BasePath $tempRoot) -Records @(
+            [PSCustomObject]@{
+                id = 'device-live'
+                computerDnsName = 'device-live.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = '10.0.0.1'
+                lastExternalIpAddress = '203.0.113.10'
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'High'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-20'
+                firstSeen = '2026-03-10'
+            }
+            [PSCustomObject]@{
+                id = 'device-sparse'
+                computerDnsName = 'device-sparse.contoso.com'
+                rbacGroupName = 'Servers'
+                osPlatform = 'Windows'
+                osVersion = '10.0.22631'
+                machineTags = @('Prod')
+                lastIpAddress = $null
+                lastExternalIpAddress = $null
+                healthStatus = $null
+                riskScore = $null
+                exposureLevel = $null
+                deviceValue = $null
+                managedBy = $null
+                isAadJoined = $null
+                lastSeen = $null
+                firstSeen = $null
+            }
+            [PSCustomObject]@{
+                id = 'device-removed'
+                removed = $true
+                observedOn = '2026-03-20'
+                stateHash = 'removed'
+            }
+        )
+
+        $standardMachines = Read-MachineData -Path $tempRoot
+        $compressedMachines = @{}
+        foreach ($deviceId in @($standardMachines.Keys)) {
+            $compressedMachines[$deviceId] = $standardMachines[$deviceId]
+        }
+        Compress-NormalizationMachineLookup -Machines $compressedMachines | Out-Null
+
+        $bucketedMachines = Read-NormalizationMachineLookup -Path $tempRoot -FileBacked -Bucketed
+
+        Assert-True (Test-FileBackedNormalizationMachineLookup -Machines $bucketedMachines) 'Expected bucketed file-backed tuple-mode machine loading to return a file-backed lookup.'
+        Assert-True ((Get-NormalizationMachineLookupCount -Machines $bucketedMachines) -eq $compressedMachines.Count) 'Expected bucketed file-backed tuple-mode machine loading to preserve the same machine count as the compressed machine lookup path.'
+
+        $expectedTuple = [object[]]$compressedMachines['device-live']
+        $actualTuple = Read-FileBackedNormalizationMachineTuple -Machines $bucketedMachines -DeviceId 'device-live'
+        Assert-True ($actualTuple -is [System.Array]) 'Expected bucketed file-backed tuple-mode machine loading to materialize array-backed normalization tuples.'
+        Assert-True ($actualTuple.Length -eq $expectedTuple.Length) 'Expected bucketed file-backed tuple-mode machine loading to preserve the normalization tuple shape.'
+
+        $expectedSparseTuple = [object[]]$compressedMachines['device-sparse']
+        $actualSparseTuple = Read-FileBackedNormalizationMachineTuple -Machines $bucketedMachines -DeviceId 'device-sparse'
+        Assert-True ($actualSparseTuple -is [System.Array]) 'Expected bucketed file-backed tuple-mode machine loading to materialize sparse machines as array-backed normalization tuples.'
+        Assert-True ($actualSparseTuple.Length -eq $expectedSparseTuple.Length) 'Expected bucketed file-backed tuple-mode machine loading to preserve the sparse normalization tuple shape.'
+
+        Assert-True ($null -eq (Read-FileBackedNormalizationMachineTuple -Machines $bucketedMachines -DeviceId 'device-removed')) 'Expected bucketed file-backed tuple-mode machine loading to drop removed machines from the current lookup.'
+
+        for ($tupleIndex = 0; $tupleIndex -lt $expectedTuple.Length; $tupleIndex++) {
+            $expectedTupleValue = ConvertTo-Json -InputObject $expectedTuple[$tupleIndex] -Compress -Depth 20
+            $actualTupleValue = ConvertTo-Json -InputObject $actualTuple[$tupleIndex] -Compress -Depth 20
+            Assert-True ($actualTupleValue -eq $expectedTupleValue) "Expected bucketed file-backed tuple-mode machine loading to preserve tuple slot $tupleIndex."
+        }
+
+        for ($tupleIndex = 0; $tupleIndex -lt $expectedSparseTuple.Length; $tupleIndex++) {
+            $expectedSparseTupleValue = ConvertTo-Json -InputObject $expectedSparseTuple[$tupleIndex] -Compress -Depth 20
+            $actualSparseTupleValue = ConvertTo-Json -InputObject $actualSparseTuple[$tupleIndex] -Compress -Depth 20
+            Assert-True ($actualSparseTupleValue -eq $expectedSparseTupleValue) "Expected bucketed file-backed tuple-mode machine loading to preserve sparse tuple slot $tupleIndex."
+        }
+    }
+    finally {
+        if ($null -ne $bucketedMachines) {
+            Remove-FileBackedNormalizationMachineLookup -Machines $bucketedMachines
+        }
+
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-NormalizationMachineTupleExtendsLegacyTuple {
     [CmdletBinding()]
     param()
@@ -5035,6 +5237,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-AdvancedHuntingBundleMatchesDedicatedReaderData'; SuccessMessage = 'Advanced Hunting bundle reader checks passed.' }
     @{ Name = 'Test-AdvancedHuntingBundleStringArrayFiltersSparseInputs'; SuccessMessage = 'Advanced Hunting bundle sparse string-array checks passed.' }
     @{ Name = 'Test-ReadNormalizationMachineLookupMatchesCompressedMachineLookup'; SuccessMessage = 'Machine tuple reader checks passed.' }
+    @{ Name = 'Test-ReadFileBackedNormalizationMachineLookupMatchesCompressedMachineLookup'; SuccessMessage = 'File-backed machine tuple reader checks passed.' }
+    @{ Name = 'Test-ReadBucketedFileBackedNormalizationMachineLookupMatchesCompressedMachineLookup'; SuccessMessage = 'Bucketed file-backed machine tuple reader checks passed.' }
     @{ Name = 'Test-NormalizationMachineTupleExtendsLegacyTuple'; SuccessMessage = 'Machine tuple extension checks passed.' }
     @{ Name = 'Test-LegacyMachineTupleFallbackPreservesProjectedRowMetadata'; SuccessMessage = 'Legacy tuple fallback checks passed.' }
     @{ Name = 'Test-SourceCveEnrichmentReadsExploitAvailabilityFromObjectRecord'; SuccessMessage = 'Source enrichment exploit-availability checks passed.' }
