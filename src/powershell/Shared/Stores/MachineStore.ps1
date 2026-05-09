@@ -316,13 +316,9 @@ function Read-MachineNormalizationEntriesFromFile {
         }
 
         if ($readContext.Mode -eq 'Array') {
-            $rawContent = Read-JsonFileRemainingContent -Context $readContext
-            if ([string]::IsNullOrWhiteSpace($rawContent)) {
-                return
-            }
-
-            $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawContent)
-            $rawContent = $null
+            Close-JsonFileReadContext -Context $readContext
+            $readContext = $null
+            $jsonDocument = Read-JsonArrayDocumentFromPath -Path $Path
             try {
                 if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
                     return
@@ -336,7 +332,9 @@ function Read-MachineNormalizationEntriesFromFile {
                 }
             }
             finally {
-                $jsonDocument.Dispose()
+                if ($null -ne $jsonDocument) {
+                    $jsonDocument.Dispose()
+                }
             }
 
             return
@@ -747,6 +745,38 @@ function Read-JsonFileRemainingContent {
     return $builder.ToString()
 }
 
+function Read-JsonArrayDocumentFromPath {
+    [CmdletBinding()]
+    [OutputType([System.Text.Json.JsonDocument])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fileStream = $null
+    $contentStream = $null
+    try {
+        $fileStream = [System.IO.File]::OpenRead($Path)
+        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        }
+        else {
+            $fileStream
+        }
+
+        return [System.Text.Json.JsonDocument]::Parse($contentStream)
+    }
+    finally {
+        if ($null -ne $contentStream -and $contentStream -ne $fileStream) {
+            $contentStream.Dispose()
+        }
+
+        if ($null -ne $fileStream) {
+            $fileStream.Dispose()
+        }
+    }
+}
+
 function Read-JsonFileLine {
     [CmdletBinding()]
     [OutputType([string])]
@@ -787,13 +817,9 @@ function Read-MachineRecordsFromFile {
         }
 
         if ($readContext.Mode -eq 'Array') {
-            $rawContent = Read-JsonFileRemainingContent -Context $readContext
-            if ([string]::IsNullOrWhiteSpace($rawContent)) {
-                return
-            }
-
-            $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawContent)
-            $rawContent = $null
+            Close-JsonFileReadContext -Context $readContext
+            $readContext = $null
+            $jsonDocument = Read-JsonArrayDocumentFromPath -Path $Path
             try {
                 if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
                     return
@@ -807,7 +833,9 @@ function Read-MachineRecordsFromFile {
                 }
             }
             finally {
-                $jsonDocument.Dispose()
+                if ($null -ne $jsonDocument) {
+                    $jsonDocument.Dispose()
+                }
             }
 
             return
@@ -1391,22 +1419,26 @@ function Read-AdvancedHuntingRecordsFromFile {
         }
 
         if ($readContext.Mode -eq 'Array') {
-            $rawContent = Read-JsonFileRemainingContent -Context $readContext
-            if ([string]::IsNullOrWhiteSpace($rawContent)) {
-                return
-            }
+            Close-JsonFileReadContext -Context $readContext
+            $readContext = $null
+            $jsonDocument = Read-JsonArrayDocumentFromPath -Path $Path
+            try {
+                if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
+                    return
+                }
 
-            $records = $rawContent | ConvertFrom-Json
-            $rawContent = $null
-            if ($null -eq $records) { return }
-            if ($records -isnot [System.Array]) { $records = @($records) }
-
-            foreach ($record in $records) {
-                if ($null -ne $record) {
-                    $record
+                foreach ($recordElement in $jsonDocument.RootElement.EnumerateArray()) {
+                    $record = $recordElement.GetRawText() | ConvertFrom-Json
+                    if ($null -ne $record) {
+                        $record
+                    }
                 }
             }
-
+            finally {
+                if ($null -ne $jsonDocument) {
+                    $jsonDocument.Dispose()
+                }
+            }
             return
         }
 

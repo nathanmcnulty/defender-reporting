@@ -167,6 +167,14 @@ $Script:PipelineCurrentStageEnteredOnUtc = $Script:PipelineStartedOnUtc
 $Script:PipelineNormalizedPayloadCacheHit = $null
 $Script:PipelineExecutionHostDescriptor = Resolve-PipelineExecutionHostDescriptor
 $Script:PipelineExecutionHost = [string]$Script:PipelineExecutionHostDescriptor.Name
+$Script:PipelineMemorySamples = [System.Collections.Generic.List[object]]::new()
+$Script:PipelinePeakWorkingSetMb = 0.0
+$Script:PipelinePeakWorkingSetStage = $null
+$Script:PipelinePeakPrivateMemoryMb = 0.0
+$Script:PipelinePeakPrivateMemoryStage = $null
+$Script:PipelinePeakGcHeapMb = 0.0
+$Script:PipelinePeakGcHeapStage = $null
+$Script:PipelineLastNormalizedLookupCounts = $null
 
 $Script:LibraryConfig = @{
     ChartJs = @{
@@ -205,6 +213,112 @@ $Script:LibraryConfig = @{
 # HELPER FUNCTIONS - DIAGNOSTICS
 # =============================================================================
 
+function Get-PipelineMemorySnapshot {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Label = ''
+    )
+
+    $process = [System.Diagnostics.Process]::GetCurrentProcess()
+    return [PSCustomObject]@{
+        sampledOnUtc = ([datetime]::UtcNow).ToString('o')
+        stage = $Script:PipelineCurrentStage
+        label = $Label
+        workingSetMb = [math]::Round(($process.WorkingSet64 / 1MB), 1)
+        privateMemoryMb = [math]::Round(($process.PrivateMemorySize64 / 1MB), 1)
+        gcHeapMb = [math]::Round(([System.GC]::GetTotalMemory($false) / 1MB), 1)
+        handleCount = [int]$process.HandleCount
+        threadCount = [int]$process.Threads.Count
+    }
+}
+
+function Add-PipelineMemorySample {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Sample
+    )
+
+    if ($Script:PipelineMemorySamples.Count -ge 64) {
+        $Script:PipelineMemorySamples.RemoveAt(0)
+    }
+
+    $Script:PipelineMemorySamples.Add($Sample) | Out-Null
+
+    if ([double]$Sample.workingSetMb -gt $Script:PipelinePeakWorkingSetMb) {
+        $Script:PipelinePeakWorkingSetMb = [double]$Sample.workingSetMb
+        $Script:PipelinePeakWorkingSetStage = [string]$Sample.stage
+    }
+
+    if ([double]$Sample.privateMemoryMb -gt $Script:PipelinePeakPrivateMemoryMb) {
+        $Script:PipelinePeakPrivateMemoryMb = [double]$Sample.privateMemoryMb
+        $Script:PipelinePeakPrivateMemoryStage = [string]$Sample.stage
+    }
+
+    if ([double]$Sample.gcHeapMb -gt $Script:PipelinePeakGcHeapMb) {
+        $Script:PipelinePeakGcHeapMb = [double]$Sample.gcHeapMb
+        $Script:PipelinePeakGcHeapStage = [string]$Sample.stage
+    }
+
+    return $Sample
+}
+
+function Get-PipelineMemorySummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param()
+
+    return [PSCustomObject]@{
+        sampleCount = $Script:PipelineMemorySamples.Count
+        peakWorkingSetMb = [math]::Round([double]$Script:PipelinePeakWorkingSetMb, 1)
+        peakWorkingSetStage = $Script:PipelinePeakWorkingSetStage
+        peakPrivateMemoryMb = [math]::Round([double]$Script:PipelinePeakPrivateMemoryMb, 1)
+        peakPrivateMemoryStage = $Script:PipelinePeakPrivateMemoryStage
+        peakGcHeapMb = [math]::Round([double]$Script:PipelinePeakGcHeapMb, 1)
+        peakGcHeapStage = $Script:PipelinePeakGcHeapStage
+    }
+}
+
+function Update-PipelineNormalizedLookupSnapshot {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only updates in-memory pipeline diagnostics state.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Counts
+    )
+
+    if ($null -eq $Counts) {
+        return
+    }
+
+    $Script:PipelineLastNormalizedLookupCounts = [ordered]@{}
+    foreach ($property in $Counts.PSObject.Properties) {
+        $Script:PipelineLastNormalizedLookupCounts[$property.Name] = $property.Value
+    }
+}
+
+function Write-PipelineCountSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Counts
+    )
+
+    $pairs = [System.Collections.Generic.List[string]]::new()
+    foreach ($key in $Counts.Keys) {
+        $pairs.Add(("{0}={1}" -f [string]$key, [string]$Counts[$key])) | Out-Null
+    }
+
+    Write-Output ("  [{0}] Cardinality - {1}" -f $Label, ($pairs -join ' | '))
+}
+
 function Write-MemoryUsage {
     <#
     .SYNOPSIS
@@ -216,11 +330,11 @@ function Write-MemoryUsage {
         [string]$Label = ""
     )
 
-    $proc = [System.Diagnostics.Process]::GetCurrentProcess()
-    $workingSetMB = [math]::Round($proc.WorkingSet64 / 1MB, 1)
-    $gcHeapMB     = [math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
+    $snapshot = Add-PipelineMemorySample -Sample (Get-PipelineMemorySnapshot -Label $Label)
     $prefix = if ($Label) { "[$Label] " } else { "" }
-    Write-Output "  ${prefix}Memory — Working set: ${workingSetMB}MB  |  GC heap: ${gcHeapMB}MB"
+    Write-Output "  ${prefix}Memory — Working set: $($snapshot.workingSetMb)MB  |  GC heap: $($snapshot.gcHeapMb)MB"
+    Write-Output "  ${prefix}Memory details - Private: $($snapshot.privateMemoryMb)MB | Handles: $($snapshot.handleCount) | Threads: $($snapshot.threadCount)"
+    return $snapshot
 }
 
 function Set-PipelineExecutionStage {
@@ -270,8 +384,9 @@ function Write-PipelineExecutionStatus {
     $statusFilePath = Join-Path ([System.IO.Path]::GetTempPath()) ("pipeline-status-{0}.json" -f $Script:PipelineRunId)
 
     try {
+        $memorySnapshot = Add-PipelineMemorySample -Sample (Get-PipelineMemorySnapshot -Label ("status:" + $Stage))
         $statusDocument = [ordered]@{
-            version = 1
+            version = 2
             runId = $Script:PipelineRunId
             executionHost = $Script:PipelineExecutionHost
             executionHostEvidence = if ($null -ne $Script:PipelineExecutionHostDescriptor) { [string]$Script:PipelineExecutionHostDescriptor.Evidence } else { $null }
@@ -288,6 +403,9 @@ function Write-PipelineExecutionStatus {
             includeAdvancedHunting = [bool]$IncludeAdvancedHunting
             useExistingExportsOnly = [bool]$UseExistingExportsOnly
             exportTarget = $Export
+            memory = $memorySnapshot
+            memoryPeaks = Get-PipelineMemorySummary
+            memoryTimelineTail = @($Script:PipelineMemorySamples)
         }
 
         if ($Status -ne 'running') {
@@ -300,6 +418,10 @@ function Write-PipelineExecutionStatus {
 
         if ($null -ne $Script:PipelineNormalizedPayloadCacheHit) {
             $statusDocument.normalizedPayloadCacheHit = [bool]$Script:PipelineNormalizedPayloadCacheHit
+        }
+
+        if ($null -ne $Script:PipelineLastNormalizedLookupCounts) {
+            $statusDocument.normalizedLookupCounts = $Script:PipelineLastNormalizedLookupCounts
         }
 
         $statusDocument | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $statusFilePath -Encoding utf8
@@ -1336,6 +1458,18 @@ try {
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-AdvancedHuntingBundle"
         Write-MemoryUsage -Label "Post-NormalizationInputs"
+        Write-PipelineCountSummary -Label 'Normalization inputs' -Counts ([ordered]@{
+                machines = $machines.Count
+                advancedHuntingCves = $advancedHuntingData.Count
+                advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
+            })
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'ReadNormalizationInputs' -Message 'Loaded machine and Advanced Hunting inputs for dashboard normalization.' -AdditionalProperties @{
+                normalizationInputs = [ordered]@{
+                    machines = $machines.Count
+                    advancedHuntingCves = $advancedHuntingData.Count
+                    advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
+                }
+            })
 
         # Step 2: Normalize data while the working set is still lean
         Set-PipelineExecutionStage -Stage 'NormalizeDashboardData' -Message 'Normalizing export data into the compact dashboard payload model.'
@@ -1389,6 +1523,10 @@ try {
                     if ($NormalizationEvent.PSObject.Properties['MarkerType']) {
                         $additionalProperties['normalizedProgressMarkerType'] = [string]$NormalizationEvent.MarkerType
                     }
+                    if ($NormalizationEvent.PSObject.Properties['LookupCounts'] -and $null -ne $NormalizationEvent.LookupCounts) {
+                        Update-PipelineNormalizedLookupSnapshot -Counts $NormalizationEvent.LookupCounts
+                        $additionalProperties['normalizedLookupCounts'] = $NormalizationEvent.LookupCounts
+                    }
                 }
             }
 
@@ -1403,7 +1541,14 @@ try {
 
         # Step 3: Prepare payload for embedding
         Set-PipelineExecutionStage -Stage 'PrepareDashboardPayload' -Message 'Preparing and caching the normalized payload for dashboard packaging.'
-        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties @{
+                normalizedOutput = [ordered]@{
+                    vulnerabilities = [int]$normalizedResult.VulnCount
+                    devices = [int]$normalizedResult.DeviceCount
+                    cves = [int]$normalizedResult.CveCount
+                    inputsReleased = $true
+                }
+            })
         Write-Output "Preparing data for embedding..."
         $vulnCount = $normalizedResult.VulnCount
         $deviceCount = [int]$normalizedResult.DeviceCount
@@ -1437,6 +1582,15 @@ try {
             Write-Output ("  Cached normalized payload as {0}" -f $cacheEntry.Fingerprint.Substring(0, 12))
         }
         Write-MemoryUsage -Label "Post-PayloadCachePublish"
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'PrepareDashboardPayload' -Message 'Prepared the normalized payload for dashboard packaging.' -AdditionalProperties @{
+                normalizedOutput = [ordered]@{
+                    vulnerabilities = [int]$vulnCount
+                    devices = [int]$deviceCount
+                    cves = [int]$cveCount
+                }
+                payloadSizeKb = [math]::Round((Get-Item -LiteralPath $tempPayloadPath).Length / 1KB, 1)
+                payloadCachePublished = ($null -ne $cacheEntry)
+            })
     }
     Invoke-FullGarbageCollection
     Write-MemoryUsage -Label "Post-Normalize"

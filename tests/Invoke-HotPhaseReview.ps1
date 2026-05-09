@@ -279,6 +279,13 @@ function Get-LocalPhaseSummaryFromLog {
                     endWorkingSetMB = $null
                     startGcHeapMB = $null
                     endGcHeapMB = $null
+                    startPrivateMemoryMB = $null
+                    endPrivateMemoryMB = $null
+                    startHandleCount = $null
+                    endHandleCount = $null
+                    startThreadCount = $null
+                    endThreadCount = $null
+                    checkpoints = [System.Collections.Generic.List[object]]::new()
                 }
             }
 
@@ -288,7 +295,10 @@ function Get-LocalPhaseSummaryFromLog {
         if ($line -match '^\s*\[(?<name>.+?)/(?<checkpoint>start|end)\] Memory .*?Working set: (?<working>[0-9.]+)MB\s*\|\s*GC heap: (?<heap>[0-9.]+)MB\s*$') {
             $phaseName = [string]$matches.name
             if (-not $phaseByName.Contains($phaseName)) {
-                $phaseByName[$phaseName] = [ordered]@{ name = $phaseName }
+                $phaseByName[$phaseName] = [ordered]@{
+                    name = $phaseName
+                    checkpoints = [System.Collections.Generic.List[object]]::new()
+                }
             }
 
             $phaseEntry = $phaseByName[$phaseName]
@@ -307,10 +317,85 @@ function Get-LocalPhaseSummaryFromLog {
             continue
         }
 
+        if ($line -match '^\s*\[(?<name>.+?)/(?<checkpoint>start|end)\] Memory details - Private: (?<private>[0-9.]+)MB\s*\|\s*Handles: (?<handles>[0-9]+)\s*\|\s*Threads: (?<threads>[0-9]+)\s*$') {
+            $phaseName = [string]$matches.name
+            if (-not $phaseByName.Contains($phaseName)) {
+                $phaseByName[$phaseName] = [ordered]@{
+                    name = $phaseName
+                    checkpoints = [System.Collections.Generic.List[object]]::new()
+                }
+            }
+
+            $phaseEntry = $phaseByName[$phaseName]
+            $checkpoint = [string]$matches.checkpoint
+            $privateMemoryMB = [double]$matches.private
+            $handleCount = [int]$matches.handles
+            $threadCount = [int]$matches.threads
+            if ($checkpoint -eq 'start') {
+                $phaseEntry.startPrivateMemoryMB = $privateMemoryMB
+                $phaseEntry.startHandleCount = $handleCount
+                $phaseEntry.startThreadCount = $threadCount
+            }
+            else {
+                $phaseEntry.endPrivateMemoryMB = $privateMemoryMB
+                $phaseEntry.endHandleCount = $handleCount
+                $phaseEntry.endThreadCount = $threadCount
+            }
+
+            continue
+        }
+
+        if ($line -match '^\s*\[(?<name>.+?)/(?<checkpoint>.+?)\] Retained state - (?<values>.+)\s*$') {
+            $phaseName = [string]$matches.name
+            $checkpointName = [string]$matches.checkpoint
+            if (-not $phaseByName.Contains($phaseName)) {
+                $phaseByName[$phaseName] = [ordered]@{
+                    name = $phaseName
+                    checkpoints = [System.Collections.Generic.List[object]]::new()
+                }
+            }
+
+            $phaseEntry = $phaseByName[$phaseName]
+            if (-not $phaseEntry.Contains('checkpoints')) {
+                $phaseEntry.checkpoints = [System.Collections.Generic.List[object]]::new()
+            }
+
+            $parsedValues = [ordered]@{}
+            foreach ($pairText in @(([string]$matches.values) -split '\s+\|\s+')) {
+                if ([string]::IsNullOrWhiteSpace($pairText)) {
+                    continue
+                }
+
+                $pairParts = @($pairText -split '=', 2)
+                if ($pairParts.Count -ne 2) {
+                    continue
+                }
+
+                $rawKey = [string]$pairParts[0]
+                $rawValue = [string]$pairParts[1]
+                $value = switch -Regex ($rawValue) {
+                    '^(true|false)$' { [bool]::Parse($rawValue); break }
+                    '^-?\d+$' { [int64]$rawValue; break }
+                    '^-?\d+\.\d+$' { [double]$rawValue; break }
+                    default { $rawValue }
+                }
+                $parsedValues[$rawKey] = $value
+            }
+
+            $phaseEntry.checkpoints.Add([PSCustomObject]@{
+                    checkpoint = $checkpointName
+                    values = [PSCustomObject]$parsedValues
+                }) | Out-Null
+            continue
+        }
+
         if ($line -match '^\s*\[(?<name>.+?)\] Elapsed: (?<seconds>[0-9.,]+)s(?:\s*\((?<status>[^)]+)\))?\s*$') {
             $phaseName = [string]$matches.name
             if (-not $phaseByName.Contains($phaseName)) {
-                $phaseByName[$phaseName] = [ordered]@{ name = $phaseName }
+                $phaseByName[$phaseName] = [ordered]@{
+                    name = $phaseName
+                    checkpoints = [System.Collections.Generic.List[object]]::new()
+                }
             }
 
             $phaseEntry = $phaseByName[$phaseName]
@@ -329,6 +414,13 @@ function Get-LocalPhaseSummaryFromLog {
                 endWorkingSetMB = if ($phaseEntry.Contains('endWorkingSetMB')) { $phaseEntry.endWorkingSetMB } else { $null }
                 startGcHeapMB = if ($phaseEntry.Contains('startGcHeapMB')) { $phaseEntry.startGcHeapMB } else { $null }
                 endGcHeapMB = if ($phaseEntry.Contains('endGcHeapMB')) { $phaseEntry.endGcHeapMB } else { $null }
+                startPrivateMemoryMB = if ($phaseEntry.Contains('startPrivateMemoryMB')) { $phaseEntry.startPrivateMemoryMB } else { $null }
+                endPrivateMemoryMB = if ($phaseEntry.Contains('endPrivateMemoryMB')) { $phaseEntry.endPrivateMemoryMB } else { $null }
+                startHandleCount = if ($phaseEntry.Contains('startHandleCount')) { $phaseEntry.startHandleCount } else { $null }
+                endHandleCount = if ($phaseEntry.Contains('endHandleCount')) { $phaseEntry.endHandleCount } else { $null }
+                startThreadCount = if ($phaseEntry.Contains('startThreadCount')) { $phaseEntry.startThreadCount } else { $null }
+                endThreadCount = if ($phaseEntry.Contains('endThreadCount')) { $phaseEntry.endThreadCount } else { $null }
+                checkpoints = if ($phaseEntry.Contains('checkpoints')) { @($phaseEntry.checkpoints) } else { @() }
             }
         }
     )
