@@ -35,7 +35,10 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(1, 60)]
-    [int]$PollIntervalSeconds = 5
+    [int]$PollIntervalSeconds = 5,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$BucketedMachineLookup
 )
 
 Set-StrictMode -Version Latest
@@ -653,6 +656,9 @@ if ($ValidationMode -eq 'semantic' -and $SplitAssets) {
 }
 if ($ForceFullValidation) {
     $argumentList += '-ForceFullValidation'
+}
+if ($BucketedMachineLookup) {
+    $argumentList += '-BucketedMachineLookup'
 }
 
 Write-Output 'Running hot phase review...'

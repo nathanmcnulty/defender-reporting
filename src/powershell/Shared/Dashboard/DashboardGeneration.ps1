@@ -2880,7 +2880,318 @@ function Test-FileBackedNormalizationMachineLookup {
         $Machines
     )
 
-    return ($Machines -is [hashtable] -and $null -ne $Machines.PSObject.Properties['FileBackedPath'])
+    return (
+        $Machines -is [hashtable] -and (
+            $null -ne $Machines.PSObject.Properties['FileBackedPath'] -or
+            $null -ne $Machines.PSObject.Properties['FileBackedBucketDirectory']
+        )
+    )
+}
+
+function Get-NormalizationMachineLookupCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Machines
+    )
+
+    if ($null -eq $Machines) {
+        return 0
+    }
+
+    $recordCountProperty = $Machines.PSObject.Properties['RecordCount']
+    if ($null -ne $recordCountProperty -and $null -ne $recordCountProperty.Value) {
+        return [int]$recordCountProperty.Value
+    }
+
+    $countProperty = $Machines.PSObject.Properties['Count']
+    if ($null -ne $countProperty -and $null -ne $countProperty.Value) {
+        return [int]$countProperty.Value
+    }
+
+    return 0
+}
+
+function Get-NormalizationMachineBucketId {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DeviceId,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 4096)]
+        [int]$BucketCount = 64
+    )
+
+    $hashCode = [System.StringComparer]::OrdinalIgnoreCase.GetHashCode($DeviceId)
+    if ($hashCode -eq [int]::MinValue) {
+        $hashCode = 0
+    }
+    elseif ($hashCode -lt 0) {
+        $hashCode = -1 * $hashCode
+    }
+
+    return ($hashCode % $BucketCount)
+}
+
+function Touch-FileBackedNormalizationMachineBucketCacheEntry {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only updates in-memory bucket cache order.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Specialized.OrderedDictionary]$Cache,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BucketKey
+    )
+
+    if (-not $Cache.Contains($BucketKey)) {
+        return
+    }
+
+    $bucketValue = $Cache[$BucketKey]
+    $Cache.Remove($BucketKey)
+    $Cache.Add($BucketKey, $bucketValue)
+}
+
+function Get-LoadedFileBackedNormalizationMachineBucket {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Machines,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DeviceId
+    )
+
+    $bucketDirectoryProperty = $Machines.PSObject.Properties['FileBackedBucketDirectory']
+    $bucketCountProperty = $Machines.PSObject.Properties['FileBackedBucketCount']
+    $bucketCacheProperty = $Machines.PSObject.Properties['FileBackedBucketCache']
+    $bucketCacheLimitProperty = $Machines.PSObject.Properties['FileBackedBucketCacheLimit']
+
+    if ($null -eq $bucketDirectoryProperty -or [string]::IsNullOrWhiteSpace([string]$bucketDirectoryProperty.Value)) {
+        return $null
+    }
+
+    if ($null -eq $bucketCountProperty -or $null -eq $bucketCountProperty.Value) {
+        return $null
+    }
+
+    if ($null -eq $bucketCacheProperty -or $null -eq $bucketCacheProperty.Value) {
+        return $null
+    }
+
+    $bucketDirectory = [string]$bucketDirectoryProperty.Value
+    if (-not (Test-Path -LiteralPath $bucketDirectory -PathType Container)) {
+        return $null
+    }
+
+    $bucketCache = [System.Collections.Specialized.OrderedDictionary]$bucketCacheProperty.Value
+    $bucketCount = [int]$bucketCountProperty.Value
+    $bucketCacheLimit = if ($null -ne $bucketCacheLimitProperty -and $null -ne $bucketCacheLimitProperty.Value) { [int]$bucketCacheLimitProperty.Value } else { 8 }
+    $bucketId = Get-NormalizationMachineBucketId -DeviceId $DeviceId -BucketCount $bucketCount
+    $bucketKey = [string]$bucketId
+
+    if ($bucketCache.Contains($bucketKey)) {
+        Touch-FileBackedNormalizationMachineBucketCacheEntry -Cache $bucketCache -BucketKey $bucketKey
+        return [hashtable]$bucketCache[$bucketKey]
+    }
+
+    $bucketLookup = @{}
+    $bucketPath = Join-Path $bucketDirectory ('bucket-{0:D3}.ndjson' -f $bucketId)
+    if (Test-Path -LiteralPath $bucketPath -PathType Leaf) {
+        foreach ($line in [System.IO.File]::ReadLines($bucketPath)) {
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                continue
+            }
+
+            $separatorIndex = $line.IndexOf("`t")
+            if ($separatorIndex -lt 1) {
+                continue
+            }
+
+            $recordId = $line.Substring(0, $separatorIndex)
+            $tupleJson = $line.Substring($separatorIndex + 1)
+            if ([string]::IsNullOrWhiteSpace($recordId) -or [string]::IsNullOrWhiteSpace($tupleJson)) {
+                continue
+            }
+
+            $bucketLookup[$recordId] = [object[]]@($tupleJson | ConvertFrom-Json -Depth 20)
+        }
+    }
+
+    $bucketCache.Add($bucketKey, $bucketLookup)
+    while ($bucketCache.Count -gt $bucketCacheLimit) {
+        $evictKey = [string]$bucketCache.Keys[0]
+        $bucketCache.Remove($evictKey)
+    }
+
+    return $bucketLookup
+}
+
+function Open-BucketedFileBackedNormalizationMachineLookup {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(4, 512)]
+        [int]$BucketCount = 64,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 64)]
+        [int]$BucketCacheLimit = 8
+    )
+
+    Write-Information "Reading machine data from $Path..." -InformationAction Continue
+    $machines = @{}
+    $bucketDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-tuples-bucketed-' + [System.Guid]::NewGuid().ToString('N'))
+    $rawWriters = [System.Collections.Generic.List[System.IO.StreamWriter]]::new()
+    $finalWriters = [System.Collections.Generic.List[System.IO.StreamWriter]]::new()
+    try {
+        [void](New-Item -Path $bucketDirectory -ItemType Directory -Force)
+
+        for ($bucketIndex = 0; $bucketIndex -lt $BucketCount; $bucketIndex++) {
+            $rawBucketPath = Join-Path $bucketDirectory ('raw-{0:D3}.ndjson' -f $bucketIndex)
+            $rawWriter = [System.IO.StreamWriter]::new(
+                [System.IO.File]::Open($rawBucketPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read),
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            $rawWriters.Add($rawWriter) | Out-Null
+        }
+
+        foreach ($record in (Get-MachineRecordSequence -Path $Path -AsNormalizationTuple)) {
+            $recordId = [string]$record.PSObject.Properties['id']?.Value
+            if ([string]::IsNullOrWhiteSpace($recordId)) {
+                continue
+            }
+
+            $bucketId = Get-NormalizationMachineBucketId -DeviceId $recordId -BucketCount $BucketCount
+            $bucketWriter = $rawWriters[$bucketId]
+            if ($record.PSObject.Properties['removed']?.Value -eq $true) {
+                $bucketWriter.WriteLine(('R' + "`t" + $recordId))
+                continue
+            }
+
+            $machineTuple = $record.PSObject.Properties['tuple']?.Value
+            if ($null -eq $machineTuple) {
+                $bucketWriter.WriteLine(('R' + "`t" + $recordId))
+                continue
+            }
+
+            $bucketWriter.WriteLine(('T' + "`t" + $recordId + "`t" + (ConvertTo-Json -InputObject @($machineTuple) -Compress -Depth 6)))
+        }
+
+        foreach ($rawWriter in $rawWriters) {
+            $rawWriter.Flush()
+            $rawWriter.Dispose()
+        }
+        $rawWriters.Clear()
+
+        $recordCount = 0
+        for ($bucketIndex = 0; $bucketIndex -lt $BucketCount; $bucketIndex++) {
+            $rawBucketPath = Join-Path $bucketDirectory ('raw-{0:D3}.ndjson' -f $bucketIndex)
+            if (-not (Test-Path -LiteralPath $rawBucketPath -PathType Leaf)) {
+                continue
+            }
+
+            $bucketLookup = @{}
+            foreach ($line in [System.IO.File]::ReadLines($rawBucketPath)) {
+                if ([string]::IsNullOrWhiteSpace($line)) {
+                    continue
+                }
+
+                $separatorIndex = $line.IndexOf("`t")
+                if ($separatorIndex -lt 1) {
+                    continue
+                }
+
+                $recordType = $line.Substring(0, $separatorIndex)
+                $remainder = $line.Substring($separatorIndex + 1)
+                if ($recordType -eq 'R') {
+                    if (-not [string]::IsNullOrWhiteSpace($remainder)) {
+                        $bucketLookup.Remove($remainder)
+                    }
+                    continue
+                }
+
+                if ($recordType -ne 'T') {
+                    continue
+                }
+
+                $recordIdSeparatorIndex = $remainder.IndexOf("`t")
+                if ($recordIdSeparatorIndex -lt 1) {
+                    continue
+                }
+
+                $recordId = $remainder.Substring(0, $recordIdSeparatorIndex)
+                $tupleJson = $remainder.Substring($recordIdSeparatorIndex + 1)
+                if ([string]::IsNullOrWhiteSpace($recordId) -or [string]::IsNullOrWhiteSpace($tupleJson)) {
+                    $bucketLookup.Remove($recordId)
+                    continue
+                }
+
+                $bucketLookup[$recordId] = [object[]]@($tupleJson | ConvertFrom-Json -Depth 20)
+            }
+
+            Remove-Item -LiteralPath $rawBucketPath -Force -ErrorAction SilentlyContinue
+            if ($bucketLookup.Count -eq 0) {
+                continue
+            }
+
+            $finalBucketPath = Join-Path $bucketDirectory ('bucket-{0:D3}.ndjson' -f $bucketIndex)
+            $finalWriter = [System.IO.StreamWriter]::new(
+                [System.IO.File]::Open($finalBucketPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read),
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            $finalWriters.Add($finalWriter) | Out-Null
+            foreach ($deviceId in @($bucketLookup.Keys)) {
+                $finalWriter.WriteLine(($deviceId + "`t" + (ConvertTo-Json -InputObject @($bucketLookup[$deviceId]) -Compress -Depth 6)))
+            }
+
+            $finalWriter.Flush()
+            $finalWriter.Dispose()
+            [void]$finalWriters.Remove($finalWriter)
+            $recordCount += $bucketLookup.Count
+        }
+
+        Add-Member -InputObject $machines -NotePropertyName FileBackedBucketDirectory -NotePropertyValue $bucketDirectory
+        Add-Member -InputObject $machines -NotePropertyName FileBackedBucketCount -NotePropertyValue $BucketCount
+        Add-Member -InputObject $machines -NotePropertyName FileBackedBucketCacheLimit -NotePropertyValue $BucketCacheLimit
+        Add-Member -InputObject $machines -NotePropertyName FileBackedBucketCache -NotePropertyValue ([System.Collections.Specialized.OrderedDictionary]::new())
+        Add-Member -InputObject $machines -NotePropertyName RecordCount -NotePropertyValue ([int]$recordCount)
+        Write-Information "  Loaded $recordCount unique machines (bucketed file-backed index)" -InformationAction Continue
+        return $machines
+    }
+    catch {
+        foreach ($rawWriter in @($rawWriters)) {
+            try {
+                $rawWriter.Dispose()
+            }
+            catch {
+            }
+        }
+
+        foreach ($finalWriter in @($finalWriters)) {
+            try {
+                $finalWriter.Dispose()
+            }
+            catch {
+            }
+        }
+
+        if (Test-Path -LiteralPath $bucketDirectory -PathType Container) {
+            Remove-Item -LiteralPath $bucketDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        throw
+    }
 }
 
 function Remove-FileBackedNormalizationMachineLookup {
@@ -2893,6 +3204,33 @@ function Remove-FileBackedNormalizationMachineLookup {
     )
 
     if (-not (Test-FileBackedNormalizationMachineLookup -Machines $Machines)) {
+        return
+    }
+
+    $bucketDirectoryProperty = $Machines.PSObject.Properties['FileBackedBucketDirectory']
+    if ($null -ne $bucketDirectoryProperty -and -not [string]::IsNullOrWhiteSpace([string]$bucketDirectoryProperty.Value)) {
+        $bucketCacheProperty = $Machines.PSObject.Properties['FileBackedBucketCache']
+        if ($null -ne $bucketCacheProperty -and $null -ne $bucketCacheProperty.Value) {
+            $bucketCacheProperty.Value.Clear()
+            $bucketCacheProperty.Value = $null
+        }
+
+        $bucketDirectory = [string]$bucketDirectoryProperty.Value
+        if (Test-Path -LiteralPath $bucketDirectory -PathType Container) {
+            Remove-Item -LiteralPath $bucketDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        $bucketDirectoryProperty.Value = $null
+        $bucketCountProperty = $Machines.PSObject.Properties['FileBackedBucketCount']
+        if ($null -ne $bucketCountProperty) {
+            $bucketCountProperty.Value = 0
+        }
+        $recordCountProperty = $Machines.PSObject.Properties['RecordCount']
+        if ($null -ne $recordCountProperty) {
+            $recordCountProperty.Value = 0
+        }
+
+        $Machines.Clear()
         return
     }
 
@@ -2933,7 +3271,17 @@ function Read-FileBackedNormalizationMachineTuple {
     )
 
     if (-not (Test-FileBackedNormalizationMachineLookup -Machines $Machines) -or [string]::IsNullOrWhiteSpace($DeviceId) -or -not $Machines.ContainsKey($DeviceId)) {
-        return $null
+        $bucketDirectoryProperty = $Machines.PSObject.Properties['FileBackedBucketDirectory']
+        if ($null -eq $bucketDirectoryProperty -or [string]::IsNullOrWhiteSpace([string]$bucketDirectoryProperty.Value)) {
+            return $null
+        }
+
+        $bucketLookup = Get-LoadedFileBackedNormalizationMachineBucket -Machines $Machines -DeviceId $DeviceId
+        if ($null -eq $bucketLookup -or -not $bucketLookup.ContainsKey($DeviceId)) {
+            return $null
+        }
+
+        return [object[]]@($bucketLookup[$DeviceId])
     }
 
     $offsetEntry = $Machines[$DeviceId]
@@ -3079,6 +3427,7 @@ function Open-FileBackedNormalizationMachineLookup {
         $writeStream = $null
         Add-Member -InputObject $machines -NotePropertyName FileBackedPath -NotePropertyValue $lookupPath
         Add-Member -InputObject $machines -NotePropertyName FileStream -NotePropertyValue ([System.IO.File]::Open($lookupPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read))
+        Add-Member -InputObject $machines -NotePropertyName RecordCount -NotePropertyValue ([int]$machines.Count)
         Write-Information "  Loaded $($machines.Count) unique machines (file-backed index)" -InformationAction Continue
         return $machines
     }
@@ -3109,10 +3458,17 @@ function Read-NormalizationMachineLookup {
         [string]$Path,
 
         [Parameter(Mandatory = $false)]
-        [switch]$FileBacked
+        [switch]$FileBacked,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Bucketed
     )
 
     if ($FileBacked) {
+        if ($Bucketed) {
+            return (Open-BucketedFileBackedNormalizationMachineLookup -Path $Path)
+        }
+
         return (Open-FileBackedNormalizationMachineLookup -Path $Path)
     }
 
@@ -7973,7 +8329,7 @@ function ConvertTo-NormalizedData {
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
-    Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s), {3} inventory tuple(s), {4} NVD CVE(s)" -f $Machines.Count, $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count, $AdvancedHuntingInventoryData.Count, $NvdCveData.Count) -InformationAction Continue
+    Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s), {3} inventory tuple(s), {4} NVD CVE(s)" -f (Get-NormalizationMachineLookupCount -Machines $Machines), $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count, $AdvancedHuntingInventoryData.Count, $NvdCveData.Count) -InformationAction Continue
     Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
     $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
     $context = Get-NormalizationContext

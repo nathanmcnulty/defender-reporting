@@ -19381,17 +19381,36 @@ try {
         $advancedHuntingDeviceUsers = $null
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-NormalizationCleanup"
+        $retainedLookupCountsAfterInputRelease = $null
+        $postNormalizationLookupCounts = Get-NormalizedLookupCountSnapshot -Lookups $normalizedResult.Lookups
+        if ($null -ne $postNormalizationLookupCounts) {
+            $retainedLookupCountsAfterInputRelease = [ordered]@{
+                devices = $postNormalizationLookupCounts.devices
+                cves = $postNormalizationLookupCounts.cves
+                software = $postNormalizationLookupCounts.software
+                inventory = $postNormalizationLookupCounts.inventory
+                dates = $postNormalizationLookupCounts.dates
+                diskPaths = $postNormalizationLookupCounts.diskPaths
+                regPaths = $postNormalizationLookupCounts.regPaths
+            }
+            Update-PipelineNormalizedLookupSnapshot -Counts $retainedLookupCountsAfterInputRelease
+            Write-PipelineCountSummary -Label 'Retained lookups after input release' -Counts $retainedLookupCountsAfterInputRelease
+        }
 
         # Step 3: Prepare payload for embedding
         Set-PipelineExecutionStage -Stage 'PrepareDashboardPayload' -Message 'Preparing and caching the normalized payload for dashboard packaging.'
-        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties @{
+        $preparePayloadStatusProperties = @{
                 normalizedOutput = [ordered]@{
                     vulnerabilities = [int]$normalizedResult.VulnCount
                     devices = [int]$normalizedResult.DeviceCount
                     cves = [int]$normalizedResult.CveCount
                     inputsReleased = $true
                 }
-            })
+            }
+        if ($null -ne $retainedLookupCountsAfterInputRelease) {
+            $preparePayloadStatusProperties['normalizedRetainedLookups'] = $retainedLookupCountsAfterInputRelease
+        }
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties $preparePayloadStatusProperties)
         Write-Output "Preparing data for embedding..."
         $vulnCount = $normalizedResult.VulnCount
         $deviceCount = [int]$normalizedResult.DeviceCount
@@ -19411,6 +19430,21 @@ try {
         }
 
         $normalizedQuality = $normalizedResult['Quality']
+        $retainedLookupCountsBeforePayloadRelease = $null
+        $payloadLookupCounts = Get-NormalizedLookupCountSnapshot -Lookups $normalizedResult.Lookups
+        if ($null -ne $payloadLookupCounts) {
+            $retainedLookupCountsBeforePayloadRelease = [ordered]@{
+                devices = $payloadLookupCounts.devices
+                cves = $payloadLookupCounts.cves
+                software = $payloadLookupCounts.software
+                inventory = $payloadLookupCounts.inventory
+                dates = $payloadLookupCounts.dates
+                diskPaths = $payloadLookupCounts.diskPaths
+                regPaths = $payloadLookupCounts.regPaths
+            }
+            Update-PipelineNormalizedLookupSnapshot -Counts $retainedLookupCountsBeforePayloadRelease
+            Write-PipelineCountSummary -Label 'Retained lookups before payload release' -Counts $retainedLookupCountsBeforePayloadRelease
+        }
         if (-not (Test-Path -LiteralPath $tempPayloadPath -PathType Leaf)) {
             throw 'Normalization did not produce the expected payload output.'
         }
@@ -19430,9 +19464,11 @@ try {
                     vulnerabilities = [int]$vulnCount
                     devices = [int]$deviceCount
                     cves = [int]$cveCount
+                    lookupsReleased = $true
                 }
                 payloadSizeKb = [math]::Round((Get-Item -LiteralPath $tempPayloadPath).Length / 1KB, 1)
                 payloadCachePublished = ($null -ne $cacheEntry)
+                retainedLookupsBeforePayloadRelease = $retainedLookupCountsBeforePayloadRelease
             })
     }
     Invoke-FullGarbageCollection
