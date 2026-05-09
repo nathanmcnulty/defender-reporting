@@ -2563,6 +2563,392 @@ function Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryR
     }
 }
 
+function Test-ConvertToNormalizedDataSupportsDirectMergeDeviceLookup {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-direct-merge-device-lookup-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+    $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+
+    try {
+        $firstRow = Get-TestVulnRow -Id 'direct-merge-001' -CveId 'CVE-2026-0154' -SnapshotDate '2026-03-20' -Version '2.0.2'
+        $secondRow = Get-TestVulnRow -Id 'direct-merge-002' -CveId 'CVE-2026-0155' -SnapshotDate '2026-03-20' -Version '2.0.3'
+        $firstRow.DeviceId = 'direct-merge-device-001'
+        $firstRow.DeviceName = 'direct-merge-device-001.contoso.com'
+        $secondRow.DeviceId = 'direct-merge-device-002'
+        $secondRow.DeviceName = 'direct-merge-device-002.contoso.com'
+        $machineRows = @(
+            [PSCustomObject]@{
+                id = [string]$firstRow.DeviceId
+                computerDnsName = [string]$firstRow.DeviceName
+                rbacGroupName = [string]$firstRow.RbacGroupName
+                osPlatform = [string]$firstRow.OSPlatform
+                osVersion = [string]$firstRow.OSVersion
+                machineTags = @($firstRow.MachineTags)
+                lastIpAddress = '10.0.0.11'
+                lastExternalIpAddress = ''
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'Medium'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-20'
+                firstSeen = '2026-02-01'
+            }
+            [PSCustomObject]@{
+                id = [string]$secondRow.DeviceId
+                computerDnsName = [string]$secondRow.DeviceName
+                rbacGroupName = [string]$secondRow.RbacGroupName
+                osPlatform = [string]$secondRow.OSPlatform
+                osVersion = [string]$secondRow.OSVersion
+                machineTags = @($secondRow.MachineTags)
+                lastIpAddress = '10.0.0.12'
+                lastExternalIpAddress = ''
+                healthStatus = 'Active'
+                riskScore = 'Low'
+                exposureLevel = 'Low'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-20'
+                firstSeen = '2026-02-02'
+            }
+        )
+        $deviceProfiles = @(
+            [PSCustomObject]@{
+                id = [string]$firstRow.DeviceId
+                n = [string]$firstRow.DeviceName
+                g = [string]$firstRow.RbacGroupName
+                o = [string]$firstRow.OSPlatform
+                ov = [string]$firstRow.OSVersion
+                t = @($firstRow.MachineTags)
+                ob = ($firstRow.IsOnboarded -eq $true)
+            }
+            [PSCustomObject]@{
+                id = [string]$secondRow.DeviceId
+                n = [string]$secondRow.DeviceName
+                g = [string]$secondRow.RbacGroupName
+                o = [string]$secondRow.OSPlatform
+                ov = [string]$secondRow.OSVersion
+                t = @($secondRow.MachineTags)
+                ob = ($secondRow.IsOnboarded -eq $true)
+            }
+        )
+        $contentTemplates = @(
+            [PSCustomObject]@{
+                c = [string]$firstRow.CveId
+                sv = [string]$firstRow.SoftwareVendor
+                sn = [string]$firstRow.SoftwareName
+                ver = [string]$firstRow.SoftwareVersion
+                sev = [string]$firstRow.VulnerabilitySeverityLevel
+                sc = $firstRow.CvssScore
+                ex = [string]$firstRow.ExploitabilityLevel
+                rr = [string]$firstRow.RecommendationReference
+                ru = [string]$firstRow.RecommendedSecurityUpdate
+                rid = [string]$firstRow.RecommendedSecurityUpdateId
+                url = [string]$firstRow.RecommendedSecurityUpdateUrl
+                ua = ($firstRow.SecurityUpdateAvailable -eq $true)
+                dp = @($firstRow.DiskPaths)
+                rp = @($firstRow.RegistryPaths)
+                bt = [string]$firstRow.CveBatchTitle
+                bu = [string]$firstRow.CveBatchUrl
+            }
+            [PSCustomObject]@{
+                c = [string]$secondRow.CveId
+                sv = [string]$secondRow.SoftwareVendor
+                sn = [string]$secondRow.SoftwareName
+                ver = [string]$secondRow.SoftwareVersion
+                sev = [string]$secondRow.VulnerabilitySeverityLevel
+                sc = $secondRow.CvssScore
+                ex = [string]$secondRow.ExploitabilityLevel
+                rr = [string]$secondRow.RecommendationReference
+                ru = [string]$secondRow.RecommendedSecurityUpdate
+                rid = [string]$secondRow.RecommendedSecurityUpdateId
+                url = [string]$secondRow.RecommendedSecurityUpdateUrl
+                ua = ($secondRow.SecurityUpdateAvailable -eq $true)
+                dp = @($secondRow.DiskPaths)
+                rp = @($secondRow.RegistryPaths)
+                bt = [string]$secondRow.CveBatchTitle
+                bu = [string]$secondRow.CveBatchUrl
+            }
+        )
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($firstRow, $secondRow)
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), ($machineRows | ConvertTo-Json -Compress -Depth 20), [System.Text.UTF8Encoding]::new($false))
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+
+        $probeResult = Invoke-WithContentDictionaryStreamProbe -DeviceProfiles $deviceProfiles -ContentTemplates $contentTemplates -Action {
+            ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -PayloadOutputPath $payloadPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers @{} -AdvancedHuntingInventoryData @{} -NvdCveData @{} -SkipObservedWindowMerge -DirectMergeDeviceLookup
+        }
+        $result = $probeResult.Result
+        $payload = Read-GzipTextFile -Path $payloadPath | ConvertFrom-Json -Depth 100
+
+        Assert-True ($result.VulnCount -eq 2) 'Expected direct-merge device lookup projection to preserve all vulnerability rows.'
+        Assert-True ((Get-CompressedPayloadVulnCount -Path $payloadPath) -eq $result.VulnCount) 'Expected direct-merge device lookup projection to keep payload row count aligned with processed rows.'
+        Assert-True ($payload.lookups.devices.Count -eq 2) 'Expected direct-merge device lookup projection to materialize both device lookups from the current-machine stream.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ConvertToNormalizedDataDirectMergeDeviceLookupRejectsOutOfOrderMachineStream {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-direct-merge-device-order-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+
+    try {
+        $firstRow = Get-TestVulnRow -Id 'direct-merge-order-001' -CveId 'CVE-2026-0156' -SnapshotDate '2026-03-20' -Version '2.0.4'
+        $secondRow = Get-TestVulnRow -Id 'direct-merge-order-002' -CveId 'CVE-2026-0157' -SnapshotDate '2026-03-20' -Version '2.0.5'
+        $firstRow.DeviceId = 'direct-merge-order-device-001'
+        $firstRow.DeviceName = 'direct-merge-order-device-001.contoso.com'
+        $secondRow.DeviceId = 'direct-merge-order-device-002'
+        $secondRow.DeviceName = 'direct-merge-order-device-002.contoso.com'
+        $deviceProfiles = @(
+            [PSCustomObject]@{
+                id = [string]$firstRow.DeviceId
+                n = [string]$firstRow.DeviceName
+                g = [string]$firstRow.RbacGroupName
+                o = [string]$firstRow.OSPlatform
+                ov = [string]$firstRow.OSVersion
+                t = @($firstRow.MachineTags)
+                ob = ($firstRow.IsOnboarded -eq $true)
+            }
+            [PSCustomObject]@{
+                id = [string]$secondRow.DeviceId
+                n = [string]$secondRow.DeviceName
+                g = [string]$secondRow.RbacGroupName
+                o = [string]$secondRow.OSPlatform
+                ov = [string]$secondRow.OSVersion
+                t = @($secondRow.MachineTags)
+                ob = ($secondRow.IsOnboarded -eq $true)
+            }
+        )
+        $contentTemplates = @(
+            [PSCustomObject]@{
+                c = [string]$firstRow.CveId
+                sv = [string]$firstRow.SoftwareVendor
+                sn = [string]$firstRow.SoftwareName
+                ver = [string]$firstRow.SoftwareVersion
+                sev = [string]$firstRow.VulnerabilitySeverityLevel
+                sc = $firstRow.CvssScore
+                ex = [string]$firstRow.ExploitabilityLevel
+                rr = [string]$firstRow.RecommendationReference
+                ru = [string]$firstRow.RecommendedSecurityUpdate
+                rid = [string]$firstRow.RecommendedSecurityUpdateId
+                url = [string]$firstRow.RecommendedSecurityUpdateUrl
+                ua = ($firstRow.SecurityUpdateAvailable -eq $true)
+                dp = @($firstRow.DiskPaths)
+                rp = @($firstRow.RegistryPaths)
+                bt = [string]$firstRow.CveBatchTitle
+                bu = [string]$firstRow.CveBatchUrl
+            }
+            [PSCustomObject]@{
+                c = [string]$secondRow.CveId
+                sv = [string]$secondRow.SoftwareVendor
+                sn = [string]$secondRow.SoftwareName
+                ver = [string]$secondRow.SoftwareVersion
+                sev = [string]$secondRow.VulnerabilitySeverityLevel
+                sc = $secondRow.CvssScore
+                ex = [string]$secondRow.ExploitabilityLevel
+                rr = [string]$secondRow.RecommendationReference
+                ru = [string]$secondRow.RecommendedSecurityUpdate
+                rid = [string]$secondRow.RecommendedSecurityUpdateId
+                url = [string]$secondRow.RecommendedSecurityUpdateUrl
+                ua = ($secondRow.SecurityUpdateAvailable -eq $true)
+                dp = @($secondRow.DiskPaths)
+                rp = @($secondRow.RegistryPaths)
+                bt = [string]$secondRow.CveBatchTitle
+                bu = [string]$secondRow.CveBatchUrl
+            }
+        )
+        $machineRows = @(
+            [PSCustomObject]@{
+                id = [string]$secondRow.DeviceId
+                computerDnsName = [string]$secondRow.DeviceName
+                rbacGroupName = [string]$secondRow.RbacGroupName
+                osPlatform = [string]$secondRow.OSPlatform
+                osVersion = [string]$secondRow.OSVersion
+                machineTags = @($secondRow.MachineTags)
+            }
+            [PSCustomObject]@{
+                id = [string]$firstRow.DeviceId
+                computerDnsName = [string]$firstRow.DeviceName
+                rbacGroupName = [string]$firstRow.RbacGroupName
+                osPlatform = [string]$firstRow.OSPlatform
+                osVersion = [string]$firstRow.OSVersion
+                machineTags = @($firstRow.MachineTags)
+            }
+        )
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($firstRow, $secondRow)
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), ($machineRows | ConvertTo-Json -Compress -Depth 20), [System.Text.UTF8Encoding]::new($false))
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+
+        $caught = $null
+        try {
+            $null = Invoke-WithContentDictionaryStreamProbe -DeviceProfiles $deviceProfiles -ContentTemplates $contentTemplates -Action {
+                ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers @{} -AdvancedHuntingInventoryData @{} -NvdCveData @{} -SkipObservedWindowMerge -DirectMergeDeviceLookup
+            }
+        }
+        catch {
+            $caught = $_
+        }
+
+        Assert-True ($null -ne $caught) 'Expected direct-merge device lookup projection to fail fast when the machine stream order does not match content-store device profiles.'
+        Assert-True ($caught.Exception.Message -like '*requires exact current machine order*') 'Expected direct-merge order mismatch to report the exact-order contract.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ConvertToNormalizedDataDirectMergeDeviceLookupRejectsBlankDeviceId {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalized-direct-merge-blank-device-id-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $outputPath = Join-Path $tempRoot 'normalized-vulns.json'
+
+    try {
+        $firstRow = Get-TestVulnRow -Id 'direct-merge-blank-001' -CveId 'CVE-2026-0158' -SnapshotDate '2026-03-20' -Version '2.0.6'
+        $secondRow = Get-TestVulnRow -Id 'direct-merge-blank-002' -CveId 'CVE-2026-0159' -SnapshotDate '2026-03-20' -Version '2.0.7'
+        $firstRow.DeviceId = 'direct-merge-blank-device-001'
+        $firstRow.DeviceName = 'direct-merge-blank-device-001.contoso.com'
+        $secondRow.DeviceId = ''
+        $secondRow.DeviceName = 'direct-merge-blank-device-002.contoso.com'
+        $deviceProfiles = @(
+            [PSCustomObject]@{
+                id = [string]$firstRow.DeviceId
+                n = [string]$firstRow.DeviceName
+                g = [string]$firstRow.RbacGroupName
+                o = [string]$firstRow.OSPlatform
+                ov = [string]$firstRow.OSVersion
+                t = @($firstRow.MachineTags)
+                ob = ($firstRow.IsOnboarded -eq $true)
+            }
+            [PSCustomObject]@{
+                id = [string]$secondRow.DeviceId
+                n = [string]$secondRow.DeviceName
+                g = [string]$secondRow.RbacGroupName
+                o = [string]$secondRow.OSPlatform
+                ov = [string]$secondRow.OSVersion
+                t = @($secondRow.MachineTags)
+                ob = ($secondRow.IsOnboarded -eq $true)
+            }
+        )
+        $contentTemplates = @(
+            [PSCustomObject]@{
+                c = [string]$firstRow.CveId
+                sv = [string]$firstRow.SoftwareVendor
+                sn = [string]$firstRow.SoftwareName
+                ver = [string]$firstRow.SoftwareVersion
+                sev = [string]$firstRow.VulnerabilitySeverityLevel
+                sc = $firstRow.CvssScore
+                ex = [string]$firstRow.ExploitabilityLevel
+                rr = [string]$firstRow.RecommendationReference
+                ru = [string]$firstRow.RecommendedSecurityUpdate
+                rid = [string]$firstRow.RecommendedSecurityUpdateId
+                url = [string]$firstRow.RecommendedSecurityUpdateUrl
+                ua = ($firstRow.SecurityUpdateAvailable -eq $true)
+                dp = @($firstRow.DiskPaths)
+                rp = @($firstRow.RegistryPaths)
+                bt = [string]$firstRow.CveBatchTitle
+                bu = [string]$firstRow.CveBatchUrl
+            }
+            [PSCustomObject]@{
+                c = [string]$secondRow.CveId
+                sv = [string]$secondRow.SoftwareVendor
+                sn = [string]$secondRow.SoftwareName
+                ver = [string]$secondRow.SoftwareVersion
+                sev = [string]$secondRow.VulnerabilitySeverityLevel
+                sc = $secondRow.CvssScore
+                ex = [string]$secondRow.ExploitabilityLevel
+                rr = [string]$secondRow.RecommendationReference
+                ru = [string]$secondRow.RecommendedSecurityUpdate
+                rid = [string]$secondRow.RecommendedSecurityUpdateId
+                url = [string]$secondRow.RecommendedSecurityUpdateUrl
+                ua = ($secondRow.SecurityUpdateAvailable -eq $true)
+                dp = @($secondRow.DiskPaths)
+                rp = @($secondRow.RegistryPaths)
+                bt = [string]$secondRow.CveBatchTitle
+                bu = [string]$secondRow.CveBatchUrl
+            }
+        )
+        $machineRows = @(
+            [PSCustomObject]@{
+                id = [string]$firstRow.DeviceId
+                computerDnsName = [string]$firstRow.DeviceName
+                rbacGroupName = [string]$firstRow.RbacGroupName
+                osPlatform = [string]$firstRow.OSPlatform
+                osVersion = [string]$firstRow.OSVersion
+                machineTags = @($firstRow.MachineTags)
+                lastIpAddress = '10.0.0.21'
+                lastExternalIpAddress = ''
+                healthStatus = 'Active'
+                riskScore = 'Medium'
+                exposureLevel = 'Medium'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-20'
+                firstSeen = '2026-02-01'
+            }
+            [PSCustomObject]@{
+                id = 'direct-merge-blank-device-002'
+                computerDnsName = 'direct-merge-blank-device-002.contoso.com'
+                rbacGroupName = [string]$secondRow.RbacGroupName
+                osPlatform = [string]$secondRow.OSPlatform
+                osVersion = [string]$secondRow.OSVersion
+                machineTags = @($secondRow.MachineTags)
+                lastIpAddress = '10.0.0.22'
+                lastExternalIpAddress = ''
+                healthStatus = 'Active'
+                riskScore = 'Low'
+                exposureLevel = 'Low'
+                deviceValue = 'Normal'
+                managedBy = 'Intune'
+                isAadJoined = $true
+                lastSeen = '2026-03-20'
+                firstSeen = '2026-02-02'
+            }
+        )
+
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($firstRow, $secondRow)
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), ($machineRows | ConvertTo-Json -Compress -Depth 20), [System.Text.UTF8Encoding]::new($false))
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+
+        $caught = $null
+        try {
+            Invoke-WithContentDictionaryStreamProbe -DeviceProfiles $deviceProfiles -ContentTemplates $contentTemplates -Action {
+                ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath $outputPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers @{} -AdvancedHuntingInventoryData @{} -NvdCveData @{} -SkipObservedWindowMerge -DirectMergeDeviceLookup
+            } | Out-Null
+        }
+        catch {
+            $caught = $_
+        }
+
+        Assert-True ($null -ne $caught) 'Expected direct-merge device lookup to reject blank device IDs.'
+        Assert-True ($caught.Exception.Message.Contains('requires non-empty device IDs')) 'Expected direct-merge device lookup blank device ID error to explain the exact-order requirement.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePayloadClose {
     [CmdletBinding()]
     param()
@@ -5203,6 +5589,9 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-ConvertToNormalizedDataPreservesOptionalNvdFallback'; SuccessMessage = 'Optional NVD fallback normalization checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose'; SuccessMessage = 'Consuming payload-close lookup checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader'; SuccessMessage = 'Content-store streaming normalization checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataSupportsDirectMergeDeviceLookup'; SuccessMessage = 'Direct-merge device lookup success-path checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataDirectMergeDeviceLookupRejectsOutOfOrderMachineStream'; SuccessMessage = 'Direct-merge device lookup exact-order guard checks passed.' }
+    @{ Name = 'Test-ConvertToNormalizedDataDirectMergeDeviceLookupRejectsBlankDeviceId'; SuccessMessage = 'Direct-merge device lookup blank-device guard checks passed.' }
     @{ Name = 'Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePayloadClose'; SuccessMessage = 'Content-store transient context-release and hosted-memory diagnostics checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup'; SuccessMessage = 'Repeated CVE lookup deduplication checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataReportsZeroOnboardedContentStoreDiagnostic'; SuccessMessage = 'Zero-onboarded content-store diagnostics checks passed.' }

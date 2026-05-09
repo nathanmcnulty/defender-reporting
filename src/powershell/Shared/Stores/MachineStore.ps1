@@ -372,6 +372,283 @@ function Read-MachineNormalizationEntriesFromFile {
     }
 }
 
+function Read-MachineJsonTextReaderScalarValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader
+    )
+
+    switch ($Reader.TokenType) {
+        ([Newtonsoft.Json.JsonToken]::Null) { return $null }
+        ([Newtonsoft.Json.JsonToken]::String) { return [string]$Reader.Value }
+        ([Newtonsoft.Json.JsonToken]::Boolean) { return [bool]$Reader.Value }
+        ([Newtonsoft.Json.JsonToken]::Integer) { return $Reader.Value }
+        ([Newtonsoft.Json.JsonToken]::Float) { return $Reader.Value }
+        default { return $Reader.Value }
+    }
+}
+
+function Read-MachineJsonTextReaderStringArrayValue {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader
+    )
+
+    if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::Null) {
+        return [string[]]@()
+    }
+
+    if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::String) {
+        return [string[]]@(Get-NormalizedMachineTag -Tags ([string]$Reader.Value))
+    }
+
+    if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartArray) {
+        return [string[]]@(Get-NormalizedMachineTag -Tags (Read-MachineJsonTextReaderScalarValue -Reader $Reader))
+    }
+
+    $values = [System.Collections.Generic.List[string]]::new()
+    while ($Reader.Read()) {
+        if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndArray) {
+            break
+        }
+
+        $value = Read-MachineJsonTextReaderScalarValue -Reader $Reader
+        if (-not [string]::IsNullOrWhiteSpace([string]$value)) {
+            $values.Add([string]$value) | Out-Null
+        }
+    }
+
+    return [string[]]@(Get-NormalizedMachineTag -Tags @($values))
+}
+
+function ConvertFrom-MachineJsonTextReaderToNormalizationEntry {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader
+    )
+
+    $machineId = $null
+    $removed = $false
+    $ip = $null
+    $externalIp = $null
+    $healthStatus = $null
+    $riskScore = $null
+    $exposureLevel = $null
+    $deviceValue = $null
+    $managedBy = $null
+    $isAadJoined = $null
+    $lastSeen = $null
+    $firstSeen = $null
+    $osVersion = $null
+    $computerDnsName = $null
+    $rbacGroupName = $null
+    $osPlatform = $null
+    $machineTags = [string[]]@()
+
+    while ($Reader.Read()) {
+        if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndObject) {
+            break
+        }
+
+        if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) {
+            continue
+        }
+
+        $propertyName = [string]$Reader.Value
+        if (-not $Reader.Read()) {
+            throw 'Unexpected end of machine record while reading property value.'
+        }
+
+        switch ($propertyName) {
+            'id' { $machineId = [string](Read-MachineJsonTextReaderScalarValue -Reader $Reader) }
+            'removed' { $removed = ((Read-MachineJsonTextReaderScalarValue -Reader $Reader) -eq $true) }
+            'lastIpAddress' { $ip = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'lastExternalIpAddress' { $externalIp = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'healthStatus' { $healthStatus = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'riskScore' { $riskScore = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'exposureLevel' { $exposureLevel = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'deviceValue' { $deviceValue = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'managedBy' { $managedBy = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'isAadJoined' { $isAadJoined = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'lastSeen' { $lastSeen = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'firstSeen' { $firstSeen = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'osVersion' { $osVersion = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'computerDnsName' { $computerDnsName = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'rbacGroupName' { $rbacGroupName = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'osPlatform' { $osPlatform = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'machineTags' { $machineTags = Read-MachineJsonTextReaderStringArrayValue -Reader $Reader }
+            default { Skip-VulnJsonReaderValue -Reader $Reader }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($machineId)) {
+        return $null
+    }
+
+    if ($removed) {
+        return [PSCustomObject]@{
+            id = $machineId
+            removed = $true
+            tuple = $null
+        }
+    }
+
+    $tuple = [object[]]@(
+        $ip,
+        $externalIp,
+        $healthStatus,
+        $riskScore,
+        $exposureLevel,
+        $deviceValue,
+        $managedBy,
+        $isAadJoined,
+        $lastSeen,
+        $firstSeen,
+        $osVersion,
+        $computerDnsName,
+        $rbacGroupName,
+        $osPlatform,
+        @($machineTags)
+    )
+
+    $hasTupleValue = $false
+    foreach ($value in $tuple) {
+        if ($null -ne $value -and ($value -isnot [System.Array] -or $value.Length -gt 0)) {
+            $hasTupleValue = $true
+            break
+        }
+    }
+
+    return [PSCustomObject]@{
+        id = $machineId
+        removed = $false
+        tuple = if ($hasTupleValue) { $tuple } else { $null }
+    }
+}
+
+function Open-CurrentMachineNormalizationEntryReader {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $currentPath = Get-MachineCurrentPath -BasePath $BasePath
+    $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
+    $machineReadPath = if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
+        $currentPath
+    }
+    elseif (Test-Path -LiteralPath $legacyCurrentPath -PathType Leaf) {
+        $legacyCurrentPath
+    }
+    else {
+        $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($machineReadPath)) {
+        throw "No current machine source found under '$BasePath'."
+    }
+
+    $readerState = Open-VulnJsonTextReader -Path $machineReadPath
+    $jsonReader = $readerState.JsonReader
+    $jsonReader.SupportMultipleContent = $true
+
+    $mode = 'Empty'
+    $hasPendingObject = $false
+    if ($jsonReader.Read()) {
+        if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::StartArray) {
+            $mode = 'Array'
+        }
+        elseif ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::StartObject) {
+            $mode = 'Multiple'
+            $hasPendingObject = $true
+        }
+        else {
+            throw "Unsupported machine source token '$($jsonReader.TokenType)' in '$machineReadPath'."
+        }
+    }
+
+    return [PSCustomObject]@{
+        Path = $machineReadPath
+        ReaderState = $readerState
+        Mode = $mode
+        HasPendingObject = $hasPendingObject
+    }
+}
+
+function Read-NextCurrentMachineNormalizationEntry {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Reader
+    )
+
+    $jsonReader = $Reader.ReaderState.JsonReader
+    if ($Reader.Mode -eq 'Empty') {
+        return $null
+    }
+
+    while ($true) {
+        if ($Reader.Mode -eq 'Array') {
+            if (-not $jsonReader.Read()) {
+                return $null
+            }
+
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndArray) {
+                return $null
+            }
+
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::Null) {
+                continue
+            }
+
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+                throw "Unexpected token '$($jsonReader.TokenType)' while reading machine array."
+            }
+        }
+        elseif ($Reader.HasPendingObject) {
+            $Reader.HasPendingObject = $false
+        }
+        else {
+            if (-not $jsonReader.Read()) {
+                return $null
+            }
+
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::Comment) {
+                continue
+            }
+
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+                throw "Unexpected token '$($jsonReader.TokenType)' while reading machine sequence."
+            }
+        }
+
+        return (ConvertFrom-MachineJsonTextReaderToNormalizationEntry -Reader $jsonReader)
+    }
+}
+
+function Close-CurrentMachineNormalizationEntryReader {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [pscustomobject]$Reader
+    )
+
+    if ($null -eq $Reader) {
+        return
+    }
+
+    Close-VulnJsonTextReader -State $Reader.ReaderState
+}
+
 function Get-NormalizedMachineTag {
     [CmdletBinding()]
     [OutputType([string[]])]
