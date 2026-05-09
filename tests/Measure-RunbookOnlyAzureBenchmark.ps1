@@ -102,6 +102,49 @@ function Invoke-AzCli {
     return ($trimmed | ConvertFrom-Json -Depth 100)
 }
 
+function Get-RunbookExecutionStatus {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StorageAccountName
+    )
+
+    $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ('runbook-status-' + [guid]::NewGuid().ToString('N') + '.json')
+    try {
+        Invoke-AzCli -Arguments @(
+            'storage', 'blob', 'download',
+            '--account-name', $StorageAccountName,
+            '--container-name', 'dashboards',
+            '--name', '_diagnostics/ExportAndGenerate.status.json',
+            '--file', $tempPath,
+            '--overwrite', 'true',
+            '--auth-mode', 'login',
+            '-o', 'json'
+        ) -ExpectJson -AllowEmpty | Out-Null
+
+        if (-not (Test-Path -LiteralPath $tempPath -PathType Leaf)) {
+            return $null
+        }
+
+        $content = Get-Content -LiteralPath $tempPath -Raw
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            return $null
+        }
+
+        return ($content | ConvertFrom-Json -Depth 100)
+    }
+    catch {
+        Write-Verbose ("Unable to download runbook status blob: {0}" -f $_.Exception.Message)
+        return $null
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempPath -PathType Leaf) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Invoke-RepoScript {
     [CmdletBinding()]
     param(
@@ -423,6 +466,7 @@ if ($null -eq $runbookCompletedUtc) {
 
 $elapsedSeconds = [math]::Round((New-TimeSpan -Start $runbookState.creationTimeUtc -End $runbookCompletedUtc).TotalSeconds, 2)
 $runbookSummary = Get-PipelineEventSummary -Events $runbookEvents -TotalElapsedSeconds $elapsedSeconds -TotalRows $script:ExpectedTotalRows -TerminalStatus ([string]$runbookJob.status)
+$runbookStatus = Get-RunbookExecutionStatus -StorageAccountName $script:StorageAccountName
 
 $repoCommit = Invoke-GitText -RepoPath $repoFullPath -Arguments @('rev-parse', 'HEAD')
 if ([string]::IsNullOrWhiteSpace($repoCommit)) {
@@ -460,6 +504,7 @@ $result = [ordered]@{
         expected_total_rows = $script:ExpectedTotalRows
     }
     runbook_events = @($runbookEvents)
+    runbook_status = $runbookStatus
 }
 
 [System.IO.File]::WriteAllText($resultsFullPath, ($result | ConvertTo-Json -Depth 20), [System.Text.UTF8Encoding]::new($false))
