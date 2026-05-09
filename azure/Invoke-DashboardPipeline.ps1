@@ -5889,6 +5889,283 @@ function Read-MachineNormalizationEntriesFromFile {
     }
 }
 
+function Read-MachineJsonTextReaderScalarValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader
+    )
+
+    switch ($Reader.TokenType) {
+        ([Newtonsoft.Json.JsonToken]::Null) { return $null }
+        ([Newtonsoft.Json.JsonToken]::String) { return [string]$Reader.Value }
+        ([Newtonsoft.Json.JsonToken]::Boolean) { return [bool]$Reader.Value }
+        ([Newtonsoft.Json.JsonToken]::Integer) { return $Reader.Value }
+        ([Newtonsoft.Json.JsonToken]::Float) { return $Reader.Value }
+        default { return $Reader.Value }
+    }
+}
+
+function Read-MachineJsonTextReaderStringArrayValue {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader
+    )
+
+    if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::Null) {
+        return [string[]]@()
+    }
+
+    if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::String) {
+        return [string[]]@(Get-NormalizedMachineTag -Tags ([string]$Reader.Value))
+    }
+
+    if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartArray) {
+        return [string[]]@(Get-NormalizedMachineTag -Tags (Read-MachineJsonTextReaderScalarValue -Reader $Reader))
+    }
+
+    $values = [System.Collections.Generic.List[string]]::new()
+    while ($Reader.Read()) {
+        if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndArray) {
+            break
+        }
+
+        $value = Read-MachineJsonTextReaderScalarValue -Reader $Reader
+        if (-not [string]::IsNullOrWhiteSpace([string]$value)) {
+            $values.Add([string]$value) | Out-Null
+        }
+    }
+
+    return [string[]]@(Get-NormalizedMachineTag -Tags @($values))
+}
+
+function ConvertFrom-MachineJsonTextReaderToNormalizationEntry {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader
+    )
+
+    $machineId = $null
+    $removed = $false
+    $ip = $null
+    $externalIp = $null
+    $healthStatus = $null
+    $riskScore = $null
+    $exposureLevel = $null
+    $deviceValue = $null
+    $managedBy = $null
+    $isAadJoined = $null
+    $lastSeen = $null
+    $firstSeen = $null
+    $osVersion = $null
+    $computerDnsName = $null
+    $rbacGroupName = $null
+    $osPlatform = $null
+    $machineTags = [string[]]@()
+
+    while ($Reader.Read()) {
+        if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndObject) {
+            break
+        }
+
+        if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) {
+            continue
+        }
+
+        $propertyName = [string]$Reader.Value
+        if (-not $Reader.Read()) {
+            throw 'Unexpected end of machine record while reading property value.'
+        }
+
+        switch ($propertyName) {
+            'id' { $machineId = [string](Read-MachineJsonTextReaderScalarValue -Reader $Reader) }
+            'removed' { $removed = ((Read-MachineJsonTextReaderScalarValue -Reader $Reader) -eq $true) }
+            'lastIpAddress' { $ip = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'lastExternalIpAddress' { $externalIp = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'healthStatus' { $healthStatus = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'riskScore' { $riskScore = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'exposureLevel' { $exposureLevel = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'deviceValue' { $deviceValue = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'managedBy' { $managedBy = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'isAadJoined' { $isAadJoined = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'lastSeen' { $lastSeen = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'firstSeen' { $firstSeen = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'osVersion' { $osVersion = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'computerDnsName' { $computerDnsName = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'rbacGroupName' { $rbacGroupName = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'osPlatform' { $osPlatform = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'machineTags' { $machineTags = Read-MachineJsonTextReaderStringArrayValue -Reader $Reader }
+            default { Skip-VulnJsonReaderValue -Reader $Reader }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($machineId)) {
+        return $null
+    }
+
+    if ($removed) {
+        return [PSCustomObject]@{
+            id = $machineId
+            removed = $true
+            tuple = $null
+        }
+    }
+
+    $tuple = [object[]]@(
+        $ip,
+        $externalIp,
+        $healthStatus,
+        $riskScore,
+        $exposureLevel,
+        $deviceValue,
+        $managedBy,
+        $isAadJoined,
+        $lastSeen,
+        $firstSeen,
+        $osVersion,
+        $computerDnsName,
+        $rbacGroupName,
+        $osPlatform,
+        @($machineTags)
+    )
+
+    $hasTupleValue = $false
+    foreach ($value in $tuple) {
+        if ($null -ne $value -and ($value -isnot [System.Array] -or $value.Length -gt 0)) {
+            $hasTupleValue = $true
+            break
+        }
+    }
+
+    return [PSCustomObject]@{
+        id = $machineId
+        removed = $false
+        tuple = if ($hasTupleValue) { $tuple } else { $null }
+    }
+}
+
+function Open-CurrentMachineNormalizationEntryReader {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $currentPath = Get-MachineCurrentPath -BasePath $BasePath
+    $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
+    $machineReadPath = if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
+        $currentPath
+    }
+    elseif (Test-Path -LiteralPath $legacyCurrentPath -PathType Leaf) {
+        $legacyCurrentPath
+    }
+    else {
+        $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($machineReadPath)) {
+        throw "No current machine source found under '$BasePath'."
+    }
+
+    $readerState = Open-VulnJsonTextReader -Path $machineReadPath
+    $jsonReader = $readerState.JsonReader
+    $jsonReader.SupportMultipleContent = $true
+
+    $mode = 'Empty'
+    $hasPendingObject = $false
+    if ($jsonReader.Read()) {
+        if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::StartArray) {
+            $mode = 'Array'
+        }
+        elseif ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::StartObject) {
+            $mode = 'Multiple'
+            $hasPendingObject = $true
+        }
+        else {
+            throw "Unsupported machine source token '$($jsonReader.TokenType)' in '$machineReadPath'."
+        }
+    }
+
+    return [PSCustomObject]@{
+        Path = $machineReadPath
+        ReaderState = $readerState
+        Mode = $mode
+        HasPendingObject = $hasPendingObject
+    }
+}
+
+function Read-NextCurrentMachineNormalizationEntry {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Reader
+    )
+
+    $jsonReader = $Reader.ReaderState.JsonReader
+    if ($Reader.Mode -eq 'Empty') {
+        return $null
+    }
+
+    while ($true) {
+        if ($Reader.Mode -eq 'Array') {
+            if (-not $jsonReader.Read()) {
+                return $null
+            }
+
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndArray) {
+                return $null
+            }
+
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::Null) {
+                continue
+            }
+
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+                throw "Unexpected token '$($jsonReader.TokenType)' while reading machine array."
+            }
+        }
+        elseif ($Reader.HasPendingObject) {
+            $Reader.HasPendingObject = $false
+        }
+        else {
+            if (-not $jsonReader.Read()) {
+                return $null
+            }
+
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::Comment) {
+                continue
+            }
+
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+                throw "Unexpected token '$($jsonReader.TokenType)' while reading machine sequence."
+            }
+        }
+
+        return (ConvertFrom-MachineJsonTextReaderToNormalizationEntry -Reader $jsonReader)
+    }
+}
+
+function Close-CurrentMachineNormalizationEntryReader {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [pscustomobject]$Reader
+    )
+
+    if ($null -eq $Reader) {
+        return
+    }
+
+    Close-VulnJsonTextReader -State $Reader.ReaderState
+}
+
 function Get-NormalizedMachineTag {
     [CmdletBinding()]
     [OutputType([string[]])]
@@ -10106,6 +10383,55 @@ function Write-FileContent {
     }
 }
 
+function Open-SequentialTextFileReader {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [int]$BufferSize = 65536
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $fileStream = [System.IO.FileStream]::new(
+        $resolvedPath,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        [System.IO.FileShare]::Read,
+        $BufferSize,
+        [System.IO.FileOptions]::SequentialScan)
+    $reader = [System.IO.StreamReader]::new($fileStream, [System.Text.Encoding]::UTF8, $true, $BufferSize, $false)
+    return [pscustomobject]@{
+        Path = $resolvedPath
+        FileStream = $fileStream
+        Reader = $reader
+    }
+}
+
+function Close-SequentialTextFileReader {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [pscustomobject]$ReaderState
+    )
+
+    if ($null -eq $ReaderState) {
+        return
+    }
+
+    if ($ReaderState.Reader) {
+        $ReaderState.Reader.Dispose()
+        return
+    }
+
+    if ($ReaderState.FileStream) {
+        $ReaderState.FileStream.Dispose()
+    }
+}
+
 function Compress-FileGzip {
     [CmdletBinding()]
     [OutputType([string])]
@@ -10566,19 +10892,19 @@ function Write-NormalizedDeviceLookupsToWriter {
             return
         }
 
-        $deviceReader = $null
+        $deviceReaderState = $null
         $deviceJsonReader = $null
         try {
-            $deviceReader = [System.IO.StreamReader]::new($storePath, [System.Text.Encoding]::UTF8)
-            $deviceJsonReader = [Newtonsoft.Json.JsonTextReader]::new($deviceReader)
+            $deviceReaderState = Open-SequentialTextFileReader -Path $storePath
+            $deviceJsonReader = [Newtonsoft.Json.JsonTextReader]::new($deviceReaderState.Reader)
             $Writer.WriteToken($deviceJsonReader)
         }
         finally {
             if ($null -ne $deviceJsonReader) {
                 $deviceJsonReader.Close()
             }
-            elseif ($null -ne $deviceReader) {
-                $deviceReader.Dispose()
+            elseif ($null -ne $deviceReaderState) {
+                Close-SequentialTextFileReader -ReaderState $deviceReaderState
             }
 
             Remove-NormalizedLookupFileStore -Store $Devices
@@ -11789,15 +12115,31 @@ function Write-CombinedPayloadLookupsValue {
         else {
             $lookupValue = $Lookups.PSObject.Properties[$lookupPropertyName].Value
         }
+        if (($lookupPropertyName -in @('devices', 'inventory', 'software', 'cves')) -and (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue)) {
+            $lookupCount = Get-NormalizedCollectionCount -Value $lookupValue
+            $null = Write-MemoryUsage -Label ("PayloadLookup {0} Start ({1})" -f $lookupPropertyName, $lookupCount)
+        }
         if ($lookupPropertyName -eq 'devices') {
             Write-NormalizedDeviceLookupsToWriter -Writer $Writer -Devices $lookupValue
         }
         else {
             Write-JsonValueToWriter -Writer $Writer -Value $lookupValue
         }
+        if (($lookupPropertyName -in @('devices', 'inventory', 'software', 'cves')) -and (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue)) {
+            $null = Write-MemoryUsage -Label ("PayloadLookup {0} End" -f $lookupPropertyName)
+        }
 
         if ($ConsumeLookups) {
             Set-NormalizedLookupPropertyValue -Lookups $Lookups -Name $lookupPropertyName -Value $null
+            if (($lookupPropertyName -eq 'batchTitles') -and (Get-Command -Name Invoke-FullGarbageCollection -ErrorAction SilentlyContinue)) {
+                if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+                    $null = Write-MemoryUsage -Label 'PayloadClose PreDeviceGc'
+                }
+                Invoke-FullGarbageCollection
+                if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+                    $null = Write-MemoryUsage -Label 'PayloadClose PostPreDeviceGc'
+                }
+            }
             if ($lookupPropertyName -in @('devices', 'inventory', 'software', 'cves')) {
                 Invoke-FullGarbageCollection
             }
@@ -11864,8 +12206,17 @@ function Close-CombinedPayloadWriter {
     )
 
     try {
+        if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+            $null = Write-MemoryUsage -Label 'PayloadClose Start'
+        }
         Update-NormalizedAffectedSoftwareLookup -Lookups $Lookups
+        if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+            $null = Write-MemoryUsage -Label 'PayloadClose PostAffectedSoftware'
+        }
         Write-CombinedPayloadLookups -Writer $WriterState.JsonWriter -Lookups $Lookups -ConsumeLookups:$ConsumeLookups
+        if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+            $null = Write-MemoryUsage -Label 'PayloadClose PostLookups'
+        }
         $WriterState.JsonWriter.WriteEndObject()
         $WriterState.JsonWriter.Flush()
     }
@@ -12259,6 +12610,7 @@ function Write-CombinedPayloadGzip {
 
     $payloadWriter = $null
     $columnReaders = [System.Collections.Generic.List[System.IDisposable]]::new()
+    $columnReaderStates = [System.Collections.Generic.List[pscustomobject]]::new()
     $jsonWriter = $null
     $activeColumnPaths = $null
 
@@ -12271,10 +12623,10 @@ function Write-CombinedPayloadGzip {
             $jsonWriter.WriteStartObject()
             foreach ($columnName in @('d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp', 'iv')) {
                 $jsonWriter.WritePropertyName($columnName)
-                $columnReader = [System.IO.StreamReader]::new([string]$activeColumnPaths[$columnName], [System.Text.Encoding]::UTF8)
-                $columnJsonReader = [Newtonsoft.Json.JsonTextReader]::new($columnReader)
+                $columnReaderState = Open-SequentialTextFileReader -Path ([string]$activeColumnPaths[$columnName])
+                $columnJsonReader = [Newtonsoft.Json.JsonTextReader]::new($columnReaderState.Reader)
+                [void]$columnReaderStates.Add($columnReaderState)
                 [void]$columnReaders.Add($columnJsonReader)
-                [void]$columnReaders.Add($columnReader)
                 $jsonWriter.WriteToken($columnJsonReader)
             }
             $jsonWriter.WriteEndObject()
@@ -12284,10 +12636,10 @@ function Write-CombinedPayloadGzip {
                 throw 'Write-CombinedPayloadGzip requires either -VulnsPath or -VulnColumnPaths.'
             }
 
-            $vulnsReader = [System.IO.StreamReader]::new($VulnsPath, [System.Text.Encoding]::UTF8)
-            $vulnsJsonReader = [Newtonsoft.Json.JsonTextReader]::new($vulnsReader)
+            $vulnsReaderState = Open-SequentialTextFileReader -Path $VulnsPath
+            $vulnsJsonReader = [Newtonsoft.Json.JsonTextReader]::new($vulnsReaderState.Reader)
+            [void]$columnReaderStates.Add($vulnsReaderState)
             [void]$columnReaders.Add($vulnsJsonReader)
-            [void]$columnReaders.Add($vulnsReader)
             $jsonWriter.WriteToken($vulnsJsonReader)
         }
 
@@ -12297,6 +12649,9 @@ function Write-CombinedPayloadGzip {
     finally {
         foreach ($columnDisposable in $columnReaders) {
             $columnDisposable.Dispose()
+        }
+        foreach ($readerState in $columnReaderStates) {
+            Close-SequentialTextFileReader -ReaderState $readerState
         }
         if ($payloadWriter) {
             Close-CombinedPayloadWriter -WriterState $payloadWriter -Lookups $Lookups
@@ -12752,7 +13107,318 @@ function Test-FileBackedNormalizationMachineLookup {
         $Machines
     )
 
-    return ($Machines -is [hashtable] -and $null -ne $Machines.PSObject.Properties['FileBackedPath'])
+    return (
+        $Machines -is [hashtable] -and (
+            $null -ne $Machines.PSObject.Properties['FileBackedPath'] -or
+            $null -ne $Machines.PSObject.Properties['FileBackedBucketDirectory']
+        )
+    )
+}
+
+function Get-NormalizationMachineLookupCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Machines
+    )
+
+    if ($null -eq $Machines) {
+        return 0
+    }
+
+    $recordCountProperty = $Machines.PSObject.Properties['RecordCount']
+    if ($null -ne $recordCountProperty -and $null -ne $recordCountProperty.Value) {
+        return [int]$recordCountProperty.Value
+    }
+
+    $countProperty = $Machines.PSObject.Properties['Count']
+    if ($null -ne $countProperty -and $null -ne $countProperty.Value) {
+        return [int]$countProperty.Value
+    }
+
+    return 0
+}
+
+function Get-NormalizationMachineBucketId {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DeviceId,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 4096)]
+        [int]$BucketCount = 64
+    )
+
+    $hashCode = [System.StringComparer]::OrdinalIgnoreCase.GetHashCode($DeviceId)
+    if ($hashCode -eq [int]::MinValue) {
+        $hashCode = 0
+    }
+    elseif ($hashCode -lt 0) {
+        $hashCode = -1 * $hashCode
+    }
+
+    return ($hashCode % $BucketCount)
+}
+
+function Touch-FileBackedNormalizationMachineBucketCacheEntry {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only updates in-memory bucket cache order.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.Specialized.OrderedDictionary]$Cache,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BucketKey
+    )
+
+    if (-not $Cache.Contains($BucketKey)) {
+        return
+    }
+
+    $bucketValue = $Cache[$BucketKey]
+    $Cache.Remove($BucketKey)
+    $Cache.Add($BucketKey, $bucketValue)
+}
+
+function Get-LoadedFileBackedNormalizationMachineBucket {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Machines,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DeviceId
+    )
+
+    $bucketDirectoryProperty = $Machines.PSObject.Properties['FileBackedBucketDirectory']
+    $bucketCountProperty = $Machines.PSObject.Properties['FileBackedBucketCount']
+    $bucketCacheProperty = $Machines.PSObject.Properties['FileBackedBucketCache']
+    $bucketCacheLimitProperty = $Machines.PSObject.Properties['FileBackedBucketCacheLimit']
+
+    if ($null -eq $bucketDirectoryProperty -or [string]::IsNullOrWhiteSpace([string]$bucketDirectoryProperty.Value)) {
+        return $null
+    }
+
+    if ($null -eq $bucketCountProperty -or $null -eq $bucketCountProperty.Value) {
+        return $null
+    }
+
+    if ($null -eq $bucketCacheProperty -or $null -eq $bucketCacheProperty.Value) {
+        return $null
+    }
+
+    $bucketDirectory = [string]$bucketDirectoryProperty.Value
+    if (-not (Test-Path -LiteralPath $bucketDirectory -PathType Container)) {
+        return $null
+    }
+
+    $bucketCache = [System.Collections.Specialized.OrderedDictionary]$bucketCacheProperty.Value
+    $bucketCount = [int]$bucketCountProperty.Value
+    $bucketCacheLimit = if ($null -ne $bucketCacheLimitProperty -and $null -ne $bucketCacheLimitProperty.Value) { [int]$bucketCacheLimitProperty.Value } else { 8 }
+    $bucketId = Get-NormalizationMachineBucketId -DeviceId $DeviceId -BucketCount $bucketCount
+    $bucketKey = [string]$bucketId
+
+    if ($bucketCache.Contains($bucketKey)) {
+        Touch-FileBackedNormalizationMachineBucketCacheEntry -Cache $bucketCache -BucketKey $bucketKey
+        return [hashtable]$bucketCache[$bucketKey]
+    }
+
+    $bucketLookup = @{}
+    $bucketPath = Join-Path $bucketDirectory ('bucket-{0:D3}.ndjson' -f $bucketId)
+    if (Test-Path -LiteralPath $bucketPath -PathType Leaf) {
+        foreach ($line in [System.IO.File]::ReadLines($bucketPath)) {
+            if ([string]::IsNullOrWhiteSpace($line)) {
+                continue
+            }
+
+            $separatorIndex = $line.IndexOf("`t")
+            if ($separatorIndex -lt 1) {
+                continue
+            }
+
+            $recordId = $line.Substring(0, $separatorIndex)
+            $tupleJson = $line.Substring($separatorIndex + 1)
+            if ([string]::IsNullOrWhiteSpace($recordId) -or [string]::IsNullOrWhiteSpace($tupleJson)) {
+                continue
+            }
+
+            $bucketLookup[$recordId] = [object[]]@($tupleJson | ConvertFrom-Json -Depth 20)
+        }
+    }
+
+    $bucketCache.Add($bucketKey, $bucketLookup)
+    while ($bucketCache.Count -gt $bucketCacheLimit) {
+        $evictKey = [string]$bucketCache.Keys[0]
+        $bucketCache.Remove($evictKey)
+    }
+
+    return $bucketLookup
+}
+
+function Open-BucketedFileBackedNormalizationMachineLookup {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(4, 512)]
+        [int]$BucketCount = 64,
+
+        [Parameter(Mandatory = $false)]
+        [ValidateRange(1, 64)]
+        [int]$BucketCacheLimit = 8
+    )
+
+    Write-Information "Reading machine data from $Path..." -InformationAction Continue
+    $machines = @{}
+    $bucketDirectory = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-tuples-bucketed-' + [System.Guid]::NewGuid().ToString('N'))
+    $rawWriters = [System.Collections.Generic.List[System.IO.StreamWriter]]::new()
+    $finalWriters = [System.Collections.Generic.List[System.IO.StreamWriter]]::new()
+    try {
+        [void](New-Item -Path $bucketDirectory -ItemType Directory -Force)
+
+        for ($bucketIndex = 0; $bucketIndex -lt $BucketCount; $bucketIndex++) {
+            $rawBucketPath = Join-Path $bucketDirectory ('raw-{0:D3}.ndjson' -f $bucketIndex)
+            $rawWriter = [System.IO.StreamWriter]::new(
+                [System.IO.File]::Open($rawBucketPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read),
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            $rawWriters.Add($rawWriter) | Out-Null
+        }
+
+        foreach ($record in (Get-MachineRecordSequence -Path $Path -AsNormalizationTuple)) {
+            $recordId = [string]$record.PSObject.Properties['id']?.Value
+            if ([string]::IsNullOrWhiteSpace($recordId)) {
+                continue
+            }
+
+            $bucketId = Get-NormalizationMachineBucketId -DeviceId $recordId -BucketCount $BucketCount
+            $bucketWriter = $rawWriters[$bucketId]
+            if ($record.PSObject.Properties['removed']?.Value -eq $true) {
+                $bucketWriter.WriteLine(('R' + "`t" + $recordId))
+                continue
+            }
+
+            $machineTuple = $record.PSObject.Properties['tuple']?.Value
+            if ($null -eq $machineTuple) {
+                $bucketWriter.WriteLine(('R' + "`t" + $recordId))
+                continue
+            }
+
+            $bucketWriter.WriteLine(('T' + "`t" + $recordId + "`t" + (ConvertTo-Json -InputObject @($machineTuple) -Compress -Depth 6)))
+        }
+
+        foreach ($rawWriter in $rawWriters) {
+            $rawWriter.Flush()
+            $rawWriter.Dispose()
+        }
+        $rawWriters.Clear()
+
+        $recordCount = 0
+        for ($bucketIndex = 0; $bucketIndex -lt $BucketCount; $bucketIndex++) {
+            $rawBucketPath = Join-Path $bucketDirectory ('raw-{0:D3}.ndjson' -f $bucketIndex)
+            if (-not (Test-Path -LiteralPath $rawBucketPath -PathType Leaf)) {
+                continue
+            }
+
+            $bucketLookup = @{}
+            foreach ($line in [System.IO.File]::ReadLines($rawBucketPath)) {
+                if ([string]::IsNullOrWhiteSpace($line)) {
+                    continue
+                }
+
+                $separatorIndex = $line.IndexOf("`t")
+                if ($separatorIndex -lt 1) {
+                    continue
+                }
+
+                $recordType = $line.Substring(0, $separatorIndex)
+                $remainder = $line.Substring($separatorIndex + 1)
+                if ($recordType -eq 'R') {
+                    if (-not [string]::IsNullOrWhiteSpace($remainder)) {
+                        $bucketLookup.Remove($remainder)
+                    }
+                    continue
+                }
+
+                if ($recordType -ne 'T') {
+                    continue
+                }
+
+                $recordIdSeparatorIndex = $remainder.IndexOf("`t")
+                if ($recordIdSeparatorIndex -lt 1) {
+                    continue
+                }
+
+                $recordId = $remainder.Substring(0, $recordIdSeparatorIndex)
+                $tupleJson = $remainder.Substring($recordIdSeparatorIndex + 1)
+                if ([string]::IsNullOrWhiteSpace($recordId) -or [string]::IsNullOrWhiteSpace($tupleJson)) {
+                    $bucketLookup.Remove($recordId)
+                    continue
+                }
+
+                $bucketLookup[$recordId] = [object[]]@($tupleJson | ConvertFrom-Json -Depth 20)
+            }
+
+            Remove-Item -LiteralPath $rawBucketPath -Force -ErrorAction SilentlyContinue
+            if ($bucketLookup.Count -eq 0) {
+                continue
+            }
+
+            $finalBucketPath = Join-Path $bucketDirectory ('bucket-{0:D3}.ndjson' -f $bucketIndex)
+            $finalWriter = [System.IO.StreamWriter]::new(
+                [System.IO.File]::Open($finalBucketPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read),
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            $finalWriters.Add($finalWriter) | Out-Null
+            foreach ($deviceId in @($bucketLookup.Keys)) {
+                $finalWriter.WriteLine(($deviceId + "`t" + (ConvertTo-Json -InputObject @($bucketLookup[$deviceId]) -Compress -Depth 6)))
+            }
+
+            $finalWriter.Flush()
+            $finalWriter.Dispose()
+            [void]$finalWriters.Remove($finalWriter)
+            $recordCount += $bucketLookup.Count
+        }
+
+        Add-Member -InputObject $machines -NotePropertyName FileBackedBucketDirectory -NotePropertyValue $bucketDirectory
+        Add-Member -InputObject $machines -NotePropertyName FileBackedBucketCount -NotePropertyValue $BucketCount
+        Add-Member -InputObject $machines -NotePropertyName FileBackedBucketCacheLimit -NotePropertyValue $BucketCacheLimit
+        Add-Member -InputObject $machines -NotePropertyName FileBackedBucketCache -NotePropertyValue ([System.Collections.Specialized.OrderedDictionary]::new())
+        Add-Member -InputObject $machines -NotePropertyName RecordCount -NotePropertyValue ([int]$recordCount)
+        Write-Information "  Loaded $recordCount unique machines (bucketed file-backed index)" -InformationAction Continue
+        return $machines
+    }
+    catch {
+        foreach ($rawWriter in @($rawWriters)) {
+            try {
+                $rawWriter.Dispose()
+            }
+            catch {
+            }
+        }
+
+        foreach ($finalWriter in @($finalWriters)) {
+            try {
+                $finalWriter.Dispose()
+            }
+            catch {
+            }
+        }
+
+        if (Test-Path -LiteralPath $bucketDirectory -PathType Container) {
+            Remove-Item -LiteralPath $bucketDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        throw
+    }
 }
 
 function Remove-FileBackedNormalizationMachineLookup {
@@ -12765,6 +13431,33 @@ function Remove-FileBackedNormalizationMachineLookup {
     )
 
     if (-not (Test-FileBackedNormalizationMachineLookup -Machines $Machines)) {
+        return
+    }
+
+    $bucketDirectoryProperty = $Machines.PSObject.Properties['FileBackedBucketDirectory']
+    if ($null -ne $bucketDirectoryProperty -and -not [string]::IsNullOrWhiteSpace([string]$bucketDirectoryProperty.Value)) {
+        $bucketCacheProperty = $Machines.PSObject.Properties['FileBackedBucketCache']
+        if ($null -ne $bucketCacheProperty -and $null -ne $bucketCacheProperty.Value) {
+            $bucketCacheProperty.Value.Clear()
+            $bucketCacheProperty.Value = $null
+        }
+
+        $bucketDirectory = [string]$bucketDirectoryProperty.Value
+        if (Test-Path -LiteralPath $bucketDirectory -PathType Container) {
+            Remove-Item -LiteralPath $bucketDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        $bucketDirectoryProperty.Value = $null
+        $bucketCountProperty = $Machines.PSObject.Properties['FileBackedBucketCount']
+        if ($null -ne $bucketCountProperty) {
+            $bucketCountProperty.Value = 0
+        }
+        $recordCountProperty = $Machines.PSObject.Properties['RecordCount']
+        if ($null -ne $recordCountProperty) {
+            $recordCountProperty.Value = 0
+        }
+
+        $Machines.Clear()
         return
     }
 
@@ -12805,7 +13498,17 @@ function Read-FileBackedNormalizationMachineTuple {
     )
 
     if (-not (Test-FileBackedNormalizationMachineLookup -Machines $Machines) -or [string]::IsNullOrWhiteSpace($DeviceId) -or -not $Machines.ContainsKey($DeviceId)) {
-        return $null
+        $bucketDirectoryProperty = $Machines.PSObject.Properties['FileBackedBucketDirectory']
+        if ($null -eq $bucketDirectoryProperty -or [string]::IsNullOrWhiteSpace([string]$bucketDirectoryProperty.Value)) {
+            return $null
+        }
+
+        $bucketLookup = Get-LoadedFileBackedNormalizationMachineBucket -Machines $Machines -DeviceId $DeviceId
+        if ($null -eq $bucketLookup -or -not $bucketLookup.ContainsKey($DeviceId)) {
+            return $null
+        }
+
+        return [object[]]@($bucketLookup[$DeviceId])
     }
 
     $offsetEntry = $Machines[$DeviceId]
@@ -12951,6 +13654,7 @@ function Open-FileBackedNormalizationMachineLookup {
         $writeStream = $null
         Add-Member -InputObject $machines -NotePropertyName FileBackedPath -NotePropertyValue $lookupPath
         Add-Member -InputObject $machines -NotePropertyName FileStream -NotePropertyValue ([System.IO.File]::Open($lookupPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read))
+        Add-Member -InputObject $machines -NotePropertyName RecordCount -NotePropertyValue ([int]$machines.Count)
         Write-Information "  Loaded $($machines.Count) unique machines (file-backed index)" -InformationAction Continue
         return $machines
     }
@@ -12981,10 +13685,17 @@ function Read-NormalizationMachineLookup {
         [string]$Path,
 
         [Parameter(Mandatory = $false)]
-        [switch]$FileBacked
+        [switch]$FileBacked,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Bucketed
     )
 
     if ($FileBacked) {
+        if ($Bucketed) {
+            return (Open-BucketedFileBackedNormalizationMachineLookup -Path $Path)
+        }
+
         return (Open-FileBackedNormalizationMachineLookup -Path $Path)
     }
 
@@ -16376,6 +17087,90 @@ function Get-NoOnboardedVulnerabilityMessage {
     return ($messageParts -join ' ')
 }
 
+function Invoke-DirectMergeDeviceProfileProjection {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DataPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DictionaryPath,
+
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Context
+    )
+
+    $includeInventoryIdentity = ($Context.AdvancedHuntingInventoryData.Count -gt 0)
+    $deviceProfileIds = if ($includeInventoryIdentity) { [System.Collections.Generic.List[string]]::new() } else { $null }
+    $deviceLookupIndices = [System.Collections.Generic.List[int]]::new()
+    $deviceOnboardedFlags = [System.Collections.Generic.List[bool]]::new()
+    $machineReader = $null
+    $currentMachineEntry = $null
+    $matchedMachineCount = 0
+
+    try {
+        $machineReader = Open-CurrentMachineNormalizationEntryReader -BasePath $DataPath
+        Read-VulnContentDictionaryArrayEntries -Path $DictionaryPath -PropertyName 'deviceProfiles' | ForEach-Object {
+            $deviceProfile = $_
+            $deviceId = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'id')
+            if ($includeInventoryIdentity) {
+                $deviceProfileIds.Add($deviceId) | Out-Null
+            }
+
+            while ($null -eq $currentMachineEntry -or ($null -ne $currentMachineEntry -and $currentMachineEntry.removed -eq $true)) {
+                $currentMachineEntry = Read-NextCurrentMachineNormalizationEntry -Reader $machineReader
+                if ($null -eq $currentMachineEntry) {
+                    break
+                }
+            }
+
+            $Context.Machines = @{}
+            if ([string]::IsNullOrWhiteSpace($deviceId)) {
+                throw ("Experimental direct-merge device lookup requires non-empty device IDs to preserve exact current machine order in '{0}'." -f [string]$machineReader.Path)
+            }
+
+            if ($null -eq $currentMachineEntry) {
+                throw "Experimental direct-merge device lookup requires exact current machine order, but the machine stream ended before matching device profile '$deviceId'."
+            }
+
+            if ([string]$currentMachineEntry.id -ne $deviceId) {
+                throw ("Experimental direct-merge device lookup requires exact current machine order. First mismatch expected '{0}' but found '{1}' in '{2}'." -f $deviceId, [string]$currentMachineEntry.id, [string]$machineReader.Path)
+            }
+
+            if ($null -ne $currentMachineEntry.tuple) {
+                $Context.Machines[$deviceId] = [object[]]$currentMachineEntry.tuple
+            }
+
+            $matchedMachineCount++
+            $currentMachineEntry = $null
+
+            $deviceLookupIndices.Add((Add-NormalizedDevice `
+                    -DeviceId $deviceId `
+                    -DeviceName ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'n')) `
+                    -GroupName ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'g')) `
+                    -OsPlatform ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'o')) `
+                    -OsVersion ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'ov')) `
+                    -MachineTags @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $deviceProfile -Name 't')) `
+                    -Context $Context)) | Out-Null
+            $deviceOnboardedFlags.Add(((Get-VulnPropertyValue -InputObject $deviceProfile -Name 'ob') -eq $true)) | Out-Null
+        }
+
+        $Context.Machines = @{}
+        return [PSCustomObject]@{
+            DeviceProfileIds = if ($includeInventoryIdentity) { [string[]]$deviceProfileIds.ToArray() } else { $null }
+            DeviceLookupIndices = [int[]]$deviceLookupIndices.ToArray()
+            DeviceOnboardedFlags = [bool[]]$deviceOnboardedFlags.ToArray()
+            MatchedMachineCount = $matchedMachineCount
+            MachineSourcePath = [string]$machineReader.Path
+        }
+    }
+    finally {
+        $Context.Machines = @{}
+        Close-CurrentMachineNormalizationEntryReader -Reader $machineReader
+    }
+}
+
 function Invoke-ContentStoreNormalization {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -16420,7 +17215,10 @@ function Invoke-ContentStoreNormalization {
         [string]$PayloadOutputPath,
 
         [Parameter(Mandatory = $false)]
-        [switch]$ConsumeLookupsOnPayloadClose
+        [switch]$ConsumeLookupsOnPayloadClose,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$DirectMergeDeviceLookup
     )
 
     $lookups = $Context.Lookups
@@ -16440,11 +17238,8 @@ function Invoke-ContentStoreNormalization {
 
     $hasInventoryIdentity = ($Context.AdvancedHuntingInventoryData.Count -gt 0)
     $deviceProfileIds = $null
-    if ($hasInventoryIdentity) {
-        $deviceProfileIds = [System.Collections.Generic.List[string]]::new()
-    }
-    $deviceLookupIndices = [System.Collections.Generic.List[int]]::new()
-    $deviceOnboardedFlags = [System.Collections.Generic.List[bool]]::new()
+    $deviceLookupIndices = $null
+    $deviceOnboardedFlags = $null
     $contentLookupCache = [System.Collections.Generic.List[object]]::new()
     $contentLookupSwIndex = 0
     $contentLookupCveIndex = 1
@@ -16467,26 +17262,48 @@ function Invoke-ContentStoreNormalization {
             Message = 'Loading content-store device profiles into normalization lookups.'
         })
 
-    Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles' | ForEach-Object {
-        $deviceProfile = $_
-        $deviceId = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'id')
+    if ($DirectMergeDeviceLookup) {
+        Write-Information '  Experimental direct-merge device lookup projection enabled.' -InformationAction Continue
+        $directMergeResult = Invoke-DirectMergeDeviceProfileProjection -DataPath $DataPath -DictionaryPath $dictionaryPath -Context $Context
+        Write-Information ("  Direct-merge device projection matched {0} device profile(s) from {1}" -f [int]$directMergeResult.MatchedMachineCount, [string]$directMergeResult.MachineSourcePath) -InformationAction Continue
+        $deviceProfileIds = $directMergeResult.DeviceProfileIds
+        $deviceLookupIndices = [int[]]$directMergeResult.DeviceLookupIndices
+        $deviceOnboardedFlags = [bool[]]$directMergeResult.DeviceOnboardedFlags
+    }
+    else {
         if ($hasInventoryIdentity) {
-            $deviceProfileIds.Add($deviceId) | Out-Null
+            $deviceProfileIds = [System.Collections.Generic.List[string]]::new()
         }
-        $deviceLookupIndices.Add((Add-NormalizedDevice `
-                -DeviceId $deviceId `
-                -DeviceName ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'n')) `
-                -GroupName ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'g')) `
-                -OsPlatform ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'o')) `
-                -OsVersion ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'ov')) `
-                -MachineTags @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $deviceProfile -Name 't')) `
-                -Context $Context)) | Out-Null
-        $deviceOnboardedFlags.Add(((Get-VulnPropertyValue -InputObject $deviceProfile -Name 'ob') -eq $true)) | Out-Null
+        $deviceLookupIndices = [System.Collections.Generic.List[int]]::new()
+        $deviceOnboardedFlags = [System.Collections.Generic.List[bool]]::new()
+        Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles' | ForEach-Object {
+            $deviceProfile = $_
+            $deviceId = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'id')
+            if ($hasInventoryIdentity) {
+                $deviceProfileIds.Add($deviceId) | Out-Null
+            }
+            $deviceLookupIndices.Add((Add-NormalizedDevice `
+                    -DeviceId $deviceId `
+                    -DeviceName ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'n')) `
+                    -GroupName ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'g')) `
+                    -OsPlatform ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'o')) `
+                    -OsVersion ([string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'ov')) `
+                    -MachineTags @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $deviceProfile -Name 't')) `
+                    -Context $Context)) | Out-Null
+            $deviceOnboardedFlags.Add(((Get-VulnPropertyValue -InputObject $deviceProfile -Name 'ob') -eq $true)) | Out-Null
+        }
+
+        if ($hasInventoryIdentity) {
+            $deviceProfileIds = $deviceProfileIds.ToArray()
+        }
+        else {
+            $deviceProfileIds = $null
+        }
+        $deviceLookupIndices = $deviceLookupIndices.ToArray()
+        $deviceOnboardedFlags = $deviceOnboardedFlags.ToArray()
     }
 
     $deviceProfiles = Get-ContentStoreDeviceProfileIdentityCache -IncludeInventoryIdentity:$hasInventoryIdentity -DeviceProfileIds $deviceProfileIds
-    $deviceLookupIndices = $deviceLookupIndices.ToArray()
-    $deviceOnboardedFlags = $deviceOnboardedFlags.ToArray()
     $deviceProfileCount = $deviceLookupIndices.Length
     $onboardedDeviceProfileCount = @($deviceOnboardedFlags | Where-Object { $_ }).Count
     $deviceProfileIds = $null
@@ -17841,11 +18658,14 @@ function ConvertTo-NormalizedData {
         [switch]$ConsumeLookupsOnPayloadClose,
 
         [Parameter(Mandatory = $false)]
-        [scriptblock]$NormalizationProgressCallback
+        [scriptblock]$NormalizationProgressCallback,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$DirectMergeDeviceLookup
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
-    Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s), {3} inventory tuple(s), {4} NVD CVE(s)" -f $Machines.Count, $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count, $AdvancedHuntingInventoryData.Count, $NvdCveData.Count) -InformationAction Continue
+    Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s), {3} inventory tuple(s), {4} NVD CVE(s)" -f (Get-NormalizationMachineLookupCount -Machines $Machines), $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count, $AdvancedHuntingInventoryData.Count, $NvdCveData.Count) -InformationAction Continue
     Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
     $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
     $context = Get-NormalizationContext
@@ -17897,7 +18717,7 @@ function ConvertTo-NormalizedData {
         else {
             Write-Information '  Content-store detected; using fast path (no merge).' -InformationAction Continue
         }
-        $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -MergedRefPaths $mergedRefPaths -NormalizationProgressState $normalizationProgressState -NormalizationProgressCallback $NormalizationProgressCallback -PayloadOutputPath $PayloadOutputPath -ConsumeLookupsOnPayloadClose:$consumeLookups
+        $rawNormalizationResult = Invoke-ContentStoreNormalization -DataPath $DataPath -VulnOutputPath $VulnOutputPath -VulnColumnDirectoryPath $VulnColumnDirectoryPath -Context $context -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -MergedRefPaths $mergedRefPaths -NormalizationProgressState $normalizationProgressState -NormalizationProgressCallback $NormalizationProgressCallback -PayloadOutputPath $PayloadOutputPath -ConsumeLookupsOnPayloadClose:$consumeLookups -DirectMergeDeviceLookup:$DirectMergeDeviceLookup
         $processedCount = [int]$rawNormalizationResult.ProcessedCount
         $firstLastSwappedCount = [int]$rawNormalizationResult.FirstLastSwappedCount
         $hasNoTags = ($rawNormalizationResult.HasNoTags -eq $true)
@@ -19290,7 +20110,7 @@ try {
         $advancedHuntingDeviceUsers = [hashtable]$advancedHuntingBundle.DeviceUsers
         $sourceMetadata = Get-DashboardSourceSummary `
             -BasePath $tempExports `
-            -MachineCount $machines.Count `
+            -MachineCount (Get-NormalizationMachineLookupCount -Machines $machines) `
             -AdvancedHuntingCveCount $advancedHuntingData.Count `
             -AdvancedHuntingDeviceUserCount $advancedHuntingDeviceUsers.Count `
             -AdvancedHuntingInventoryTupleCount 0 `
@@ -19302,13 +20122,13 @@ try {
         Write-MemoryUsage -Label "Post-AdvancedHuntingBundle"
         Write-MemoryUsage -Label "Post-NormalizationInputs"
         Write-PipelineCountSummary -Label 'Normalization inputs' -Counts ([ordered]@{
-                machines = $machines.Count
+                machines = Get-NormalizationMachineLookupCount -Machines $machines
                 advancedHuntingCves = $advancedHuntingData.Count
                 advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
             })
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'ReadNormalizationInputs' -Message 'Loaded machine and Advanced Hunting inputs for dashboard normalization.' -AdditionalProperties @{
                 normalizationInputs = [ordered]@{
-                    machines = $machines.Count
+                    machines = Get-NormalizationMachineLookupCount -Machines $machines
                     advancedHuntingCves = $advancedHuntingData.Count
                     advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
                 }

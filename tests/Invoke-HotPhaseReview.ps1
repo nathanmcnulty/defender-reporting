@@ -38,7 +38,10 @@ param(
     [int]$PollIntervalSeconds = 5,
 
     [Parameter(Mandatory = $false)]
-    [switch]$BucketedMachineLookup
+    [switch]$BucketedMachineLookup,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$DirectMergeDeviceLookup
 )
 
 Set-StrictMode -Version Latest
@@ -659,6 +662,9 @@ if ($ForceFullValidation) {
 }
 if ($BucketedMachineLookup) {
     $argumentList += '-BucketedMachineLookup'
+}
+if ($DirectMergeDeviceLookup) {
+    $argumentList += '-DirectMergeDeviceLookup'
 }
 
 Write-Output 'Running hot phase review...'
