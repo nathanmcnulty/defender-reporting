@@ -154,12 +154,20 @@ This table is the compact "how far have we moved?" view for the standard large A
 | Change 2 | Buffered file-backed machine lookup | Hosted replay | `494.7 MB` | `351.2 MB` | `123.9 MB` | `750.52s` | Another `45.0 MB` WS / `36.8 MB` private / `49.4 MB` GC improvement versus the hosted device-lookup offload run. |
 | Change 2 | Buffered file-backed machine lookup | Dual replay | `504.0 MB` | `351.8 MB` | `119.7 MB` | `1008.66s` | Another `45.9 MB` WS / `46.9 MB` private / `53.9 MB` GC improvement versus the dual device-lookup offload run, but packaging time grew sharply. |
 
+Measured but not yet promoted to the default path:
+
+| Step | Change | Replay path | Peak WS | Peak private | Peak GC heap | Elapsed | Notes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| Experiment | Azure-only `UseDirectMergeDeviceLookup` | Hosted replay (warm reruns) | `358.9-368.4 MB` | `207.3-210.4 MB` | `137.2-138.2 MB` | `461.05-586.12s` | Both warm reruns beat the accepted hosted file-backed machine lookup run on working set, private bytes, and elapsed (`-126.3` to `-135.8 MB` WS, `-140.8` to `-143.9 MB` private, `-289.47` to `-164.40 s`), but GC rose by about `13-14 MB` and the first post-deploy replay was a `1325.57s` outlier. Keep this as a promising Azure-specific mode until the latency variance story is better understood. |
+| Experiment | Azure-only `UseDirectMergeDeviceLookup` | Dual replay | `370.4 MB` | `213.3 MB` | `137.3 MB` | `699.84s` | Beat the accepted dual file-backed machine lookup run on working set, private bytes, and elapsed (`-133.6 MB` WS / `-138.5 MB` private / `-308.82 s`), but GC rose by `17.6 MB`. This suggests the Azure-specific direct-merge win survives packaging on the seeded replay lane. |
+
 ## Capture notes
 
 - Date captured: `2026-04-05` for the original synthetic replay baselines.
 - Date captured: `2026-04-20` for the hosted `review-synthetic-medium` Azure acceptance replay.
 - Date captured: `2026-04-20` for the durable `benchmark-medium-v1` three-iteration hosted benchmark series.
 - Date captured: `2026-05-06` for the accepted standard large-dataset Azure envelope on `synthetic-50k-1_5m`.
+- Date captured: `2026-05-10` for the hosted and dual `UseDirectMergeDeviceLookup` Azure experiment series on `synthetic-50k-1_5m` (one slow post-deploy hosted replay, two warm hosted reruns, and one dual replay).
 - Branch intent: current branch only, no `main` comparison.
 - Dataset shapes:
   - `benchmark-medium-v1`: standard durable benchmark dataset generated from the catalog entry in `tests/benchmark-datasets.json` with preset `BalancedMediumHeavy`, seed `20260322`, `120000` rows, and `1500` devices.
@@ -175,6 +183,8 @@ This table is the compact "how far have we moved?" view for the standard large A
 - Synthetic benchmark artifacts now publish `uniqueCveIdCount`, `normalizedCveLookupCount`, and `contentTemplateCount` in both `synthetic-manifest.json` and `benchmark-dataset.json`. `normalizedCveLookupCount` is the same breadth surfaced as `CVEs` in the Azure acceptance summaries above.
 - `benchmark-large-50k-v1` regenerates from the mutable `exports` source path, so its breadth counters can drift even when the dataset id, seed, device target, and row target stay fixed. Use the manifest breadth counters rather than assuming the accepted May 6 anchor's normalized CVE count will remain constant across later refreshes.
 - The standard large Azure entry intentionally records the accepted invocation and blob-write markers that are already tracked in-repo. Preserve the raw Azure validation artifacts under `.local/` when refreshing this section so future updates can add comparable working-set or execution-unit detail without reconstructing the run later.
+- Prefer the persisted `runbook_status.memoryPeaks` metrics from the benchmark result JSON when comparing Azure envelopes. The event-summary headline can under-report the true sampled status-blob peak on long runs.
+- A follow-up attempt to reuse a single projected-machine hashtable inside the exact-order direct-merge loop was measured locally and reverted after regressing the isolated `device-lookup-direct-merge` pass from **`175.2 MB` / `48.2 MB` / `154.44 s`** to **`177.8 MB` / `55.1 MB` / `157.68 s`**.
 
 ## Regenerating the baseline
 

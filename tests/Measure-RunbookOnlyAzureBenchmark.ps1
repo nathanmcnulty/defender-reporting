@@ -25,6 +25,9 @@ param(
     [switch]$UseExistingExportsOnly,
 
     [Parameter(Mandatory = $false)]
+    [switch]$UseDirectMergeDeviceLookup,
+
+    [Parameter(Mandatory = $false)]
     [int]$ExpectedTotalRows = 1500000,
 
     [Parameter(Mandatory = $false)]
@@ -51,6 +54,7 @@ $script:RunbookName = $RunbookName
 $script:StorageAccountName = $StorageAccountName
 $script:DashboardDeliveryMode = $DashboardDeliveryMode
 $script:UseExistingExportsOnly = if ($PSBoundParameters.ContainsKey('UseExistingExportsOnly')) { [bool]$UseExistingExportsOnly } else { $true }
+$script:UseDirectMergeDeviceLookup = if ($PSBoundParameters.ContainsKey('UseDirectMergeDeviceLookup')) { [bool]$UseDirectMergeDeviceLookup } else { $false }
 $script:ExpectedTotalRows = $ExpectedTotalRows
 $script:PollIntervalSeconds = $PollIntervalSeconds
 . (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
@@ -222,6 +226,9 @@ function Start-RunbookBenchmark {
     $parameterPairs = @("DashboardDeliveryMode=$script:DashboardDeliveryMode")
     if ($script:UseExistingExportsOnly) {
         $parameterPairs += 'UseExistingExportsOnly=true'
+    }
+    if ($script:UseDirectMergeDeviceLookup) {
+        $parameterPairs += 'UseDirectMergeDeviceLookup=true'
     }
 
     $arguments = @(
@@ -467,6 +474,17 @@ if ($null -eq $runbookCompletedUtc) {
 $elapsedSeconds = [math]::Round((New-TimeSpan -Start $runbookState.creationTimeUtc -End $runbookCompletedUtc).TotalSeconds, 2)
 $runbookSummary = Get-PipelineEventSummary -Events $runbookEvents -TotalElapsedSeconds $elapsedSeconds -TotalRows $script:ExpectedTotalRows -TerminalStatus ([string]$runbookJob.status)
 $runbookStatus = Get-RunbookExecutionStatus -StorageAccountName $script:StorageAccountName
+$runbookStatusSummary = $null
+if ($null -ne $runbookStatus -and $runbookStatus.PSObject.Properties['memoryPeaks'] -and $null -ne $runbookStatus.memoryPeaks) {
+    $runbookStatusSummary = [ordered]@{
+        peak_working_set_mb = [math]::Round([double]$runbookStatus.memoryPeaks.peakWorkingSetMb, 1)
+        peak_working_set_stage = [string]$runbookStatus.memoryPeaks.peakWorkingSetStage
+        peak_private_memory_mb = [math]::Round([double]$runbookStatus.memoryPeaks.peakPrivateMemoryMb, 1)
+        peak_private_memory_stage = [string]$runbookStatus.memoryPeaks.peakPrivateMemoryStage
+        peak_gc_heap_mb = [math]::Round([double]$runbookStatus.memoryPeaks.peakGcHeapMb, 1)
+        peak_gc_heap_stage = [string]$runbookStatus.memoryPeaks.peakGcHeapStage
+    }
+}
 
 $repoCommit = Invoke-GitText -RepoPath $repoFullPath -Arguments @('rev-parse', 'HEAD')
 if ([string]::IsNullOrWhiteSpace($repoCommit)) {
@@ -501,16 +519,25 @@ $result = [ordered]@{
     parameters = [ordered]@{
         dashboard_delivery_mode = $script:DashboardDeliveryMode
         use_existing_exports_only = $script:UseExistingExportsOnly
+        use_direct_merge_device_lookup = $script:UseDirectMergeDeviceLookup
         expected_total_rows = $script:ExpectedTotalRows
     }
     runbook_events = @($runbookEvents)
     runbook_status = $runbookStatus
+    runbook_status_summary = $runbookStatusSummary
 }
 
 [System.IO.File]::WriteAllText($resultsFullPath, ($result | ConvertTo-Json -Depth 20), [System.Text.UTF8Encoding]::new($false))
 
 Write-Host ''
-Write-Host ("Runbook peak working set: {0}MB" -f $runbookSummary.peak_working_set_mb) -ForegroundColor Green
-Write-Host ("Runbook peak GC heap: {0}MB" -f $runbookSummary.peak_gc_heap_mb) -ForegroundColor Green
+if ($null -ne $runbookStatusSummary) {
+    Write-Host ("Runbook status-blob peak working set: {0}MB ({1})" -f $runbookStatusSummary.peak_working_set_mb, $runbookStatusSummary.peak_working_set_stage) -ForegroundColor Green
+    Write-Host ("Runbook status-blob peak private memory: {0}MB ({1})" -f $runbookStatusSummary.peak_private_memory_mb, $runbookStatusSummary.peak_private_memory_stage) -ForegroundColor Green
+    Write-Host ("Runbook status-blob peak GC heap: {0}MB ({1})" -f $runbookStatusSummary.peak_gc_heap_mb, $runbookStatusSummary.peak_gc_heap_stage) -ForegroundColor Green
+}
+else {
+    Write-Host ("Runbook peak working set: {0}MB" -f $runbookSummary.peak_working_set_mb) -ForegroundColor Green
+    Write-Host ("Runbook peak GC heap: {0}MB" -f $runbookSummary.peak_gc_heap_mb) -ForegroundColor Green
+}
 Write-Host ("Runbook elapsed: {0}s" -f $runbookSummary.elapsed_seconds) -ForegroundColor Green
 Write-Host ("Results written to {0}" -f $resultsFullPath) -ForegroundColor Green
