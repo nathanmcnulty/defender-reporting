@@ -629,7 +629,16 @@ function Get-MdeMachineRefreshPublishPlan {
                     $machineCount++
 
                     $existing = $CurrentRecords[$snapshotId]
-                    if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
+                    $existingStateHash = if ($existing -is [string]) {
+                        $existing
+                    }
+                    elseif ($null -ne $existing) {
+                        [string]$existing.stateHash
+                    }
+                    else {
+                        $null
+                    }
+                    if (($null -eq $existing) -or ($existingStateHash -ne [string]$snapshot.stateHash)) {
                         if ($null -eq $historyJsonWriter) {
                             $historyFileName = New-MachineHistorySegmentFileName
                             $stageDirectory = Split-Path -Path $StagedCurrentPath -Parent
@@ -840,7 +849,7 @@ function Invoke-MdeMachineStoreRefresh {
     return Invoke-WithStoreLock -BasePath $resolvedOutputPath -StoreName 'machines' -ScriptBlock {
         Restore-StoreTransaction -BasePath $resolvedOutputPath -StoreName 'machines'
 
-        $store = Initialize-MachineHistoryStore -Path $resolvedOutputPath -RemoveLegacyFiles
+        $store = Initialize-MachineHistoryStore -Path $resolvedOutputPath -RemoveLegacyFiles -LoadCurrentRecordsStateHashOnly
         $stagedCurrentPath = Join-Path $resolvedOutputPath ('.machine-current-staged-' + [guid]::NewGuid().ToString('N') + '.json.gz')
         $refreshPlan = Get-MdeMachineRefreshPublishPlan -Headers $resolvedHeaders -BaseApiUrl $resolvedBaseApiUrl -ObservedOn $resolvedObservedOn -CurrentRecords $store.CurrentRecords -StagedCurrentPath $stagedCurrentPath
         $store.CurrentRecords = $null

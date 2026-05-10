@@ -316,13 +316,9 @@ function Read-MachineNormalizationEntriesFromFile {
         }
 
         if ($readContext.Mode -eq 'Array') {
-            $rawContent = Read-JsonFileRemainingContent -Context $readContext
-            if ([string]::IsNullOrWhiteSpace($rawContent)) {
-                return
-            }
-
-            $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawContent)
-            $rawContent = $null
+            Close-JsonFileReadContext -Context $readContext
+            $readContext = $null
+            $jsonDocument = Read-JsonArrayDocumentFromPath -Path $Path
             try {
                 if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
                     return
@@ -336,7 +332,9 @@ function Read-MachineNormalizationEntriesFromFile {
                 }
             }
             finally {
-                $jsonDocument.Dispose()
+                if ($null -ne $jsonDocument) {
+                    $jsonDocument.Dispose()
+                }
             }
 
             return
@@ -372,6 +370,283 @@ function Read-MachineNormalizationEntriesFromFile {
     finally {
         Close-JsonFileReadContext -Context $readContext
     }
+}
+
+function Read-MachineJsonTextReaderScalarValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader
+    )
+
+    switch ($Reader.TokenType) {
+        ([Newtonsoft.Json.JsonToken]::Null) { return $null }
+        ([Newtonsoft.Json.JsonToken]::String) { return [string]$Reader.Value }
+        ([Newtonsoft.Json.JsonToken]::Boolean) { return [bool]$Reader.Value }
+        ([Newtonsoft.Json.JsonToken]::Integer) { return $Reader.Value }
+        ([Newtonsoft.Json.JsonToken]::Float) { return $Reader.Value }
+        default { return $Reader.Value }
+    }
+}
+
+function Read-MachineJsonTextReaderStringArrayValue {
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader
+    )
+
+    if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::Null) {
+        return [string[]]@()
+    }
+
+    if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::String) {
+        return [string[]]@(Get-NormalizedMachineTag -Tags ([string]$Reader.Value))
+    }
+
+    if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartArray) {
+        return [string[]]@(Get-NormalizedMachineTag -Tags (Read-MachineJsonTextReaderScalarValue -Reader $Reader))
+    }
+
+    $values = [System.Collections.Generic.List[string]]::new()
+    while ($Reader.Read()) {
+        if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndArray) {
+            break
+        }
+
+        $value = Read-MachineJsonTextReaderScalarValue -Reader $Reader
+        if (-not [string]::IsNullOrWhiteSpace([string]$value)) {
+            $values.Add([string]$value) | Out-Null
+        }
+    }
+
+    return [string[]]@(Get-NormalizedMachineTag -Tags @($values))
+}
+
+function ConvertFrom-MachineJsonTextReaderToNormalizationEntry {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [Newtonsoft.Json.JsonTextReader]$Reader
+    )
+
+    $machineId = $null
+    $removed = $false
+    $ip = $null
+    $externalIp = $null
+    $healthStatus = $null
+    $riskScore = $null
+    $exposureLevel = $null
+    $deviceValue = $null
+    $managedBy = $null
+    $isAadJoined = $null
+    $lastSeen = $null
+    $firstSeen = $null
+    $osVersion = $null
+    $computerDnsName = $null
+    $rbacGroupName = $null
+    $osPlatform = $null
+    $machineTags = [string[]]@()
+
+    while ($Reader.Read()) {
+        if ($Reader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndObject) {
+            break
+        }
+
+        if ($Reader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) {
+            continue
+        }
+
+        $propertyName = [string]$Reader.Value
+        if (-not $Reader.Read()) {
+            throw 'Unexpected end of machine record while reading property value.'
+        }
+
+        switch ($propertyName) {
+            'id' { $machineId = [string](Read-MachineJsonTextReaderScalarValue -Reader $Reader) }
+            'removed' { $removed = ((Read-MachineJsonTextReaderScalarValue -Reader $Reader) -eq $true) }
+            'lastIpAddress' { $ip = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'lastExternalIpAddress' { $externalIp = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'healthStatus' { $healthStatus = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'riskScore' { $riskScore = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'exposureLevel' { $exposureLevel = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'deviceValue' { $deviceValue = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'managedBy' { $managedBy = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'isAadJoined' { $isAadJoined = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'lastSeen' { $lastSeen = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'firstSeen' { $firstSeen = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'osVersion' { $osVersion = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'computerDnsName' { $computerDnsName = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'rbacGroupName' { $rbacGroupName = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'osPlatform' { $osPlatform = Read-MachineJsonTextReaderScalarValue -Reader $Reader }
+            'machineTags' { $machineTags = Read-MachineJsonTextReaderStringArrayValue -Reader $Reader }
+            default { Skip-VulnJsonReaderValue -Reader $Reader }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($machineId)) {
+        return $null
+    }
+
+    if ($removed) {
+        return [PSCustomObject]@{
+            id = $machineId
+            removed = $true
+            tuple = $null
+        }
+    }
+
+    $tuple = [object[]]@(
+        $ip,
+        $externalIp,
+        $healthStatus,
+        $riskScore,
+        $exposureLevel,
+        $deviceValue,
+        $managedBy,
+        $isAadJoined,
+        $lastSeen,
+        $firstSeen,
+        $osVersion,
+        $computerDnsName,
+        $rbacGroupName,
+        $osPlatform,
+        @($machineTags)
+    )
+
+    $hasTupleValue = $false
+    foreach ($value in $tuple) {
+        if ($null -ne $value -and ($value -isnot [System.Array] -or $value.Length -gt 0)) {
+            $hasTupleValue = $true
+            break
+        }
+    }
+
+    return [PSCustomObject]@{
+        id = $machineId
+        removed = $false
+        tuple = if ($hasTupleValue) { $tuple } else { $null }
+    }
+}
+
+function Open-CurrentMachineNormalizationEntryReader {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $currentPath = Get-MachineCurrentPath -BasePath $BasePath
+    $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
+    $machineReadPath = if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
+        $currentPath
+    }
+    elseif (Test-Path -LiteralPath $legacyCurrentPath -PathType Leaf) {
+        $legacyCurrentPath
+    }
+    else {
+        $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($machineReadPath)) {
+        throw "No current machine source found under '$BasePath'."
+    }
+
+    $readerState = Open-VulnJsonTextReader -Path $machineReadPath
+    $jsonReader = $readerState.JsonReader
+    $jsonReader.SupportMultipleContent = $true
+
+    $mode = 'Empty'
+    $hasPendingObject = $false
+    if ($jsonReader.Read()) {
+        if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::StartArray) {
+            $mode = 'Array'
+        }
+        elseif ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::StartObject) {
+            $mode = 'Multiple'
+            $hasPendingObject = $true
+        }
+        else {
+            throw "Unsupported machine source token '$($jsonReader.TokenType)' in '$machineReadPath'."
+        }
+    }
+
+    return [PSCustomObject]@{
+        Path = $machineReadPath
+        ReaderState = $readerState
+        Mode = $mode
+        HasPendingObject = $hasPendingObject
+    }
+}
+
+function Read-NextCurrentMachineNormalizationEntry {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Reader
+    )
+
+    $jsonReader = $Reader.ReaderState.JsonReader
+    if ($Reader.Mode -eq 'Empty') {
+        return $null
+    }
+
+    while ($true) {
+        if ($Reader.Mode -eq 'Array') {
+            if (-not $jsonReader.Read()) {
+                return $null
+            }
+
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::EndArray) {
+                return $null
+            }
+
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::Null) {
+                continue
+            }
+
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+                throw "Unexpected token '$($jsonReader.TokenType)' while reading machine array."
+            }
+        }
+        elseif ($Reader.HasPendingObject) {
+            $Reader.HasPendingObject = $false
+        }
+        else {
+            if (-not $jsonReader.Read()) {
+                return $null
+            }
+
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::Comment) {
+                continue
+            }
+
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+                throw "Unexpected token '$($jsonReader.TokenType)' while reading machine sequence."
+            }
+        }
+
+        return (ConvertFrom-MachineJsonTextReaderToNormalizationEntry -Reader $jsonReader)
+    }
+}
+
+function Close-CurrentMachineNormalizationEntryReader {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [pscustomobject]$Reader
+    )
+
+    if ($null -eq $Reader) {
+        return
+    }
+
+    Close-VulnJsonTextReader -State $Reader.ReaderState
 }
 
 function Get-NormalizedMachineTag {
@@ -747,6 +1022,38 @@ function Read-JsonFileRemainingContent {
     return $builder.ToString()
 }
 
+function Read-JsonArrayDocumentFromPath {
+    [CmdletBinding()]
+    [OutputType([System.Text.Json.JsonDocument])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $fileStream = $null
+    $contentStream = $null
+    try {
+        $fileStream = [System.IO.File]::OpenRead($Path)
+        $contentStream = if ($Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) {
+            [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        }
+        else {
+            $fileStream
+        }
+
+        return [System.Text.Json.JsonDocument]::Parse($contentStream)
+    }
+    finally {
+        if ($null -ne $contentStream -and $contentStream -ne $fileStream) {
+            $contentStream.Dispose()
+        }
+
+        if ($null -ne $fileStream) {
+            $fileStream.Dispose()
+        }
+    }
+}
+
 function Read-JsonFileLine {
     [CmdletBinding()]
     [OutputType([string])]
@@ -787,13 +1094,9 @@ function Read-MachineRecordsFromFile {
         }
 
         if ($readContext.Mode -eq 'Array') {
-            $rawContent = Read-JsonFileRemainingContent -Context $readContext
-            if ([string]::IsNullOrWhiteSpace($rawContent)) {
-                return
-            }
-
-            $jsonDocument = [System.Text.Json.JsonDocument]::Parse($rawContent)
-            $rawContent = $null
+            Close-JsonFileReadContext -Context $readContext
+            $readContext = $null
+            $jsonDocument = Read-JsonArrayDocumentFromPath -Path $Path
             try {
                 if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
                     return
@@ -807,7 +1110,9 @@ function Read-MachineRecordsFromFile {
                 }
             }
             finally {
-                $jsonDocument.Dispose()
+                if ($null -ne $jsonDocument) {
+                    $jsonDocument.Dispose()
+                }
             }
 
             return
@@ -1091,6 +1396,36 @@ function Add-InitializedMachineRecordToCurrentMap {
     $CurrentRecords[$machineId] = $Record
 }
 
+function Add-InitializedMachineStateHashToCurrentMap {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$CurrentRecords,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [psobject]$Record
+    )
+
+    if ($null -eq $Record) { return }
+
+    $properties = $Record.PSObject.Properties
+    $machineId = [string]$properties['id']?.Value
+    if ([string]::IsNullOrWhiteSpace($machineId)) { return }
+
+    if ($properties['removed']?.Value -eq $true) {
+        $CurrentRecords.Remove($machineId)
+        return
+    }
+
+    $stateHash = [string]$properties['stateHash']?.Value
+    if ([string]::IsNullOrWhiteSpace($stateHash)) {
+        $stateHash = [string](Get-MachineStateHash -Machine $Record)
+    }
+
+    $CurrentRecords[$machineId] = $stateHash
+}
+
 function Initialize-MachineHistoryStore {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -1099,7 +1434,10 @@ function Initialize-MachineHistoryStore {
         [string]$Path,
 
         [Parameter(Mandatory = $false)]
-        [switch]$RemoveLegacyFiles
+        [switch]$RemoveLegacyFiles,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$LoadCurrentRecordsStateHashOnly
     )
 
     $currentPath = Get-MachineCurrentPath -BasePath $Path
@@ -1121,12 +1459,22 @@ function Initialize-MachineHistoryStore {
 
     if ($null -ne $currentReadPath) {
         foreach ($record in Read-MachineRecordsFromFile -Path $currentReadPath) {
-            Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
+            if ($LoadCurrentRecordsStateHashOnly) {
+                Add-InitializedMachineStateHashToCurrentMap -CurrentRecords $currentRecords -Record $record
+            }
+            else {
+                Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
+            }
         }
     } elseif ($historySourcePaths.Count -gt 0) {
         foreach ($sourcePath in $historySourcePaths) {
             foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
-                Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
+                if ($LoadCurrentRecordsStateHashOnly) {
+                    Add-InitializedMachineStateHashToCurrentMap -CurrentRecords $currentRecords -Record $record
+                }
+                else {
+                    Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
+                }
             }
         }
     }
@@ -1138,10 +1486,24 @@ function Initialize-MachineHistoryStore {
                 if (-not $record.id) { continue }
                 $snapshot = New-MachineSnapshotRecord -Machine $record -ObservedOn $observedOn
                 $existing = $currentRecords[$snapshot.id]
-                if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
+                $existingStateHash = if ($LoadCurrentRecordsStateHashOnly) {
+                    [string]$existing
+                }
+                elseif ($null -ne $existing) {
+                    [string]$existing.stateHash
+                }
+                else {
+                    $null
+                }
+                if (($null -eq $existing) -or ($existingStateHash -ne [string]$snapshot.stateHash)) {
                     Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $snapshot
                 }
-                $currentRecords[$snapshot.id] = $snapshot
+                if ($LoadCurrentRecordsStateHashOnly) {
+                    $currentRecords[$snapshot.id] = [string]$snapshot.stateHash
+                }
+                else {
+                    $currentRecords[$snapshot.id] = $snapshot
+                }
             }
         }
         if ($RemoveLegacyFiles) {
@@ -1150,7 +1512,7 @@ function Initialize-MachineHistoryStore {
         $migratedLegacy = $true
     }
 
-    if (($historyRecordsByPeriod.Count -eq 0) -and $currentRecords.Count -gt 0) {
+    if ((-not $LoadCurrentRecordsStateHashOnly) -and ($historyRecordsByPeriod.Count -eq 0) -and $currentRecords.Count -gt 0) {
         foreach ($record in $currentRecords.Values) {
             Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $record
         }
@@ -1391,22 +1753,26 @@ function Read-AdvancedHuntingRecordsFromFile {
         }
 
         if ($readContext.Mode -eq 'Array') {
-            $rawContent = Read-JsonFileRemainingContent -Context $readContext
-            if ([string]::IsNullOrWhiteSpace($rawContent)) {
-                return
-            }
+            Close-JsonFileReadContext -Context $readContext
+            $readContext = $null
+            $jsonDocument = Read-JsonArrayDocumentFromPath -Path $Path
+            try {
+                if ($jsonDocument.RootElement.ValueKind -ne [System.Text.Json.JsonValueKind]::Array) {
+                    return
+                }
 
-            $records = $rawContent | ConvertFrom-Json
-            $rawContent = $null
-            if ($null -eq $records) { return }
-            if ($records -isnot [System.Array]) { $records = @($records) }
-
-            foreach ($record in $records) {
-                if ($null -ne $record) {
-                    $record
+                foreach ($recordElement in $jsonDocument.RootElement.EnumerateArray()) {
+                    $record = $recordElement.GetRawText() | ConvertFrom-Json
+                    if ($null -ne $record) {
+                        $record
+                    }
                 }
             }
-
+            finally {
+                if ($null -ne $jsonDocument) {
+                    $jsonDocument.Dispose()
+                }
+            }
             return
         }
 

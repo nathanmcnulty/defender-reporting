@@ -65,6 +65,9 @@ param(
     [bool]$UseExistingExportsOnly = $false,
 
     [Parameter(Mandatory = $false)]
+    [bool]$UseDirectMergeDeviceLookup = $false,
+
+    [Parameter(Mandatory = $false)]
     [ValidateSet('BlobStorage', 'SharePoint', 'StaticWebApp')]
     [string]$Export = 'BlobStorage'
 )
@@ -167,6 +170,14 @@ $Script:PipelineCurrentStageEnteredOnUtc = $Script:PipelineStartedOnUtc
 $Script:PipelineNormalizedPayloadCacheHit = $null
 $Script:PipelineExecutionHostDescriptor = Resolve-PipelineExecutionHostDescriptor
 $Script:PipelineExecutionHost = [string]$Script:PipelineExecutionHostDescriptor.Name
+$Script:PipelineMemorySamples = [System.Collections.Generic.List[object]]::new()
+$Script:PipelinePeakWorkingSetMb = 0.0
+$Script:PipelinePeakWorkingSetStage = $null
+$Script:PipelinePeakPrivateMemoryMb = 0.0
+$Script:PipelinePeakPrivateMemoryStage = $null
+$Script:PipelinePeakGcHeapMb = 0.0
+$Script:PipelinePeakGcHeapStage = $null
+$Script:PipelineLastNormalizedLookupCounts = $null
 
 $Script:LibraryConfig = @{
     ChartJs = @{
@@ -205,6 +216,112 @@ $Script:LibraryConfig = @{
 # HELPER FUNCTIONS - DIAGNOSTICS
 # =============================================================================
 
+function Get-PipelineMemorySnapshot {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$Label = ''
+    )
+
+    $process = [System.Diagnostics.Process]::GetCurrentProcess()
+    return [PSCustomObject]@{
+        sampledOnUtc = ([datetime]::UtcNow).ToString('o')
+        stage = $Script:PipelineCurrentStage
+        label = $Label
+        workingSetMb = [math]::Round(($process.WorkingSet64 / 1MB), 1)
+        privateMemoryMb = [math]::Round(($process.PrivateMemorySize64 / 1MB), 1)
+        gcHeapMb = [math]::Round(([System.GC]::GetTotalMemory($false) / 1MB), 1)
+        handleCount = [int]$process.HandleCount
+        threadCount = [int]$process.Threads.Count
+    }
+}
+
+function Add-PipelineMemorySample {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$Sample
+    )
+
+    if ($Script:PipelineMemorySamples.Count -ge 64) {
+        $Script:PipelineMemorySamples.RemoveAt(0)
+    }
+
+    $Script:PipelineMemorySamples.Add($Sample) | Out-Null
+
+    if ([double]$Sample.workingSetMb -gt $Script:PipelinePeakWorkingSetMb) {
+        $Script:PipelinePeakWorkingSetMb = [double]$Sample.workingSetMb
+        $Script:PipelinePeakWorkingSetStage = [string]$Sample.stage
+    }
+
+    if ([double]$Sample.privateMemoryMb -gt $Script:PipelinePeakPrivateMemoryMb) {
+        $Script:PipelinePeakPrivateMemoryMb = [double]$Sample.privateMemoryMb
+        $Script:PipelinePeakPrivateMemoryStage = [string]$Sample.stage
+    }
+
+    if ([double]$Sample.gcHeapMb -gt $Script:PipelinePeakGcHeapMb) {
+        $Script:PipelinePeakGcHeapMb = [double]$Sample.gcHeapMb
+        $Script:PipelinePeakGcHeapStage = [string]$Sample.stage
+    }
+
+    return $Sample
+}
+
+function Get-PipelineMemorySummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param()
+
+    return [PSCustomObject]@{
+        sampleCount = $Script:PipelineMemorySamples.Count
+        peakWorkingSetMb = [math]::Round([double]$Script:PipelinePeakWorkingSetMb, 1)
+        peakWorkingSetStage = $Script:PipelinePeakWorkingSetStage
+        peakPrivateMemoryMb = [math]::Round([double]$Script:PipelinePeakPrivateMemoryMb, 1)
+        peakPrivateMemoryStage = $Script:PipelinePeakPrivateMemoryStage
+        peakGcHeapMb = [math]::Round([double]$Script:PipelinePeakGcHeapMb, 1)
+        peakGcHeapStage = $Script:PipelinePeakGcHeapStage
+    }
+}
+
+function Update-PipelineNormalizedLookupSnapshot {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only updates in-memory pipeline diagnostics state.')]
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Counts
+    )
+
+    if ($null -eq $Counts) {
+        return
+    }
+
+    $Script:PipelineLastNormalizedLookupCounts = [ordered]@{}
+    foreach ($property in $Counts.PSObject.Properties) {
+        $Script:PipelineLastNormalizedLookupCounts[$property.Name] = $property.Value
+    }
+}
+
+function Write-PipelineCountSummary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Counts
+    )
+
+    $pairs = [System.Collections.Generic.List[string]]::new()
+    foreach ($key in $Counts.Keys) {
+        $pairs.Add(("{0}={1}" -f [string]$key, [string]$Counts[$key])) | Out-Null
+    }
+
+    Write-Output ("  [{0}] Cardinality - {1}" -f $Label, ($pairs -join ' | '))
+}
+
 function Write-MemoryUsage {
     <#
     .SYNOPSIS
@@ -216,11 +333,11 @@ function Write-MemoryUsage {
         [string]$Label = ""
     )
 
-    $proc = [System.Diagnostics.Process]::GetCurrentProcess()
-    $workingSetMB = [math]::Round($proc.WorkingSet64 / 1MB, 1)
-    $gcHeapMB     = [math]::Round([System.GC]::GetTotalMemory($false) / 1MB, 1)
+    $snapshot = Add-PipelineMemorySample -Sample (Get-PipelineMemorySnapshot -Label $Label)
     $prefix = if ($Label) { "[$Label] " } else { "" }
-    Write-Output "  ${prefix}Memory — Working set: ${workingSetMB}MB  |  GC heap: ${gcHeapMB}MB"
+    Write-Output "  ${prefix}Memory — Working set: $($snapshot.workingSetMb)MB  |  GC heap: $($snapshot.gcHeapMb)MB"
+    Write-Output "  ${prefix}Memory details - Private: $($snapshot.privateMemoryMb)MB | Handles: $($snapshot.handleCount) | Threads: $($snapshot.threadCount)"
+    return $snapshot
 }
 
 function Set-PipelineExecutionStage {
@@ -270,8 +387,9 @@ function Write-PipelineExecutionStatus {
     $statusFilePath = Join-Path ([System.IO.Path]::GetTempPath()) ("pipeline-status-{0}.json" -f $Script:PipelineRunId)
 
     try {
+        $memorySnapshot = Add-PipelineMemorySample -Sample (Get-PipelineMemorySnapshot -Label ("status:" + $Stage))
         $statusDocument = [ordered]@{
-            version = 1
+            version = 2
             runId = $Script:PipelineRunId
             executionHost = $Script:PipelineExecutionHost
             executionHostEvidence = if ($null -ne $Script:PipelineExecutionHostDescriptor) { [string]$Script:PipelineExecutionHostDescriptor.Evidence } else { $null }
@@ -288,6 +406,9 @@ function Write-PipelineExecutionStatus {
             includeAdvancedHunting = [bool]$IncludeAdvancedHunting
             useExistingExportsOnly = [bool]$UseExistingExportsOnly
             exportTarget = $Export
+            memory = $memorySnapshot
+            memoryPeaks = Get-PipelineMemorySummary
+            memoryTimelineTail = @($Script:PipelineMemorySamples)
         }
 
         if ($Status -ne 'running') {
@@ -300,6 +421,10 @@ function Write-PipelineExecutionStatus {
 
         if ($null -ne $Script:PipelineNormalizedPayloadCacheHit) {
             $statusDocument.normalizedPayloadCacheHit = [bool]$Script:PipelineNormalizedPayloadCacheHit
+        }
+
+        if ($null -ne $Script:PipelineLastNormalizedLookupCounts) {
+            $statusDocument.normalizedLookupCounts = $Script:PipelineLastNormalizedLookupCounts
         }
 
         $statusDocument | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $statusFilePath -Encoding utf8
@@ -1299,6 +1424,7 @@ try {
     $machines = $null
     $advancedHuntingData = $null
     $normalizedQuality = $null
+    $useDirectMergeDeviceLookupForRun = $false
     if ($payloadCacheEntry) {
         Set-PipelineExecutionStage -Stage 'PrepareDashboardPayload' -Message 'Reusing the cached normalized payload for dashboard packaging.'
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
@@ -1314,7 +1440,14 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         Set-PipelineExecutionStage -Stage 'ReadNormalizationInputs' -Message 'Loading machine and Advanced Hunting inputs for dashboard normalization.'
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
-        $machines = Read-NormalizationMachineLookup -Path $tempExports
+        $useDirectMergeDeviceLookupForRun = ($UseDirectMergeDeviceLookup -and (Sync-VulnContentStoreSidecar -BasePath $tempExports))
+        if ($useDirectMergeDeviceLookupForRun) {
+            Write-Output "  Experimental direct-merge device lookup enabled for Azure runbook; skipping preloaded machine lookup."
+            $machines = @{}
+        }
+        else {
+            $machines = Read-NormalizationMachineLookup -Path $tempExports -FileBacked
+        }
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-MachineRead"
 
@@ -1325,7 +1458,7 @@ try {
         $advancedHuntingDeviceUsers = [hashtable]$advancedHuntingBundle.DeviceUsers
         $sourceMetadata = Get-DashboardSourceSummary `
             -BasePath $tempExports `
-            -MachineCount $machines.Count `
+            -MachineCount (Get-NormalizationMachineLookupCount -Machines $machines) `
             -AdvancedHuntingCveCount $advancedHuntingData.Count `
             -AdvancedHuntingDeviceUserCount $advancedHuntingDeviceUsers.Count `
             -AdvancedHuntingInventoryTupleCount 0 `
@@ -1336,6 +1469,19 @@ try {
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-AdvancedHuntingBundle"
         Write-MemoryUsage -Label "Post-NormalizationInputs"
+        Write-PipelineCountSummary -Label 'Normalization inputs' -Counts ([ordered]@{
+                machines = Get-NormalizationMachineLookupCount -Machines $machines
+                advancedHuntingCves = $advancedHuntingData.Count
+                advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
+            })
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'ReadNormalizationInputs' -Message 'Loaded machine and Advanced Hunting inputs for dashboard normalization.' -AdditionalProperties @{
+                normalizationInputs = [ordered]@{
+                    machines = Get-NormalizationMachineLookupCount -Machines $machines
+                    advancedHuntingCves = $advancedHuntingData.Count
+                    advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
+                    directMergeDeviceLookup = $useDirectMergeDeviceLookupForRun
+                }
+            })
 
         # Step 2: Normalize data while the working set is still lean
         Set-PipelineExecutionStage -Stage 'NormalizeDashboardData' -Message 'Normalizing export data into the compact dashboard payload model.'
@@ -1351,7 +1497,12 @@ try {
             PhaseRowCountBase = 0L
             LastReportedRowCount = 0L
         }
-        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -NormalizationProgressCallback {
+        $invokeNormalization = {
+            param(
+                [bool]$UseDirectMergeDeviceLookupForAttempt
+            )
+
+            ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DirectMergeDeviceLookup:$UseDirectMergeDeviceLookupForAttempt -NormalizationProgressCallback {
             param($NormalizationEvent)
 
             if ($null -eq $NormalizationEvent) {
@@ -1389,21 +1540,105 @@ try {
                     if ($NormalizationEvent.PSObject.Properties['MarkerType']) {
                         $additionalProperties['normalizedProgressMarkerType'] = [string]$NormalizationEvent.MarkerType
                     }
+                    if ($NormalizationEvent.PSObject.Properties['LookupCounts'] -and $null -ne $NormalizationEvent.LookupCounts) {
+                        Update-PipelineNormalizedLookupSnapshot -Counts $NormalizationEvent.LookupCounts
+                        $additionalProperties['normalizedLookupCounts'] = $NormalizationEvent.LookupCounts
+                    }
                 }
             }
 
             [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'NormalizeDashboardData' -Message $statusMessage -AdditionalProperties $additionalProperties)
         }
+        }
+        $normalizedResult = $null
+        $directMergeFallbackReason = $null
+        try {
+            $normalizedResult = & $invokeNormalization $useDirectMergeDeviceLookupForRun
+        }
+        catch {
+            $directMergeGuardMessage = [string]$_.Exception.Message
+            if ((-not $useDirectMergeDeviceLookupForRun) -or ($directMergeGuardMessage -notlike 'Experimental direct-merge device lookup requires*')) {
+                throw
+            }
+
+            $directMergeFallbackReason = if ($directMergeGuardMessage -like '*exact current machine order*') { 'file-backed-order-mismatch' } else { 'file-backed-direct-merge-guard' }
+            Write-Warning ("Experimental direct-merge device lookup failed Azure normalization ({0}); retrying with the file-backed machine lookup. Details: {1}" -f $directMergeFallbackReason, $directMergeGuardMessage)
+            foreach ($transientOutputPath in @($tempVulnsPath, $tempPayloadPath)) {
+                if (Test-Path -LiteralPath $transientOutputPath -PathType Leaf) {
+                    Remove-Item -LiteralPath $transientOutputPath -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            $machines = Read-NormalizationMachineLookup -Path $tempExports -FileBacked
+            $sourceMetadata = Get-DashboardSourceSummary `
+                -BasePath $tempExports `
+                -MachineCount (Get-NormalizationMachineLookupCount -Machines $machines) `
+                -AdvancedHuntingCveCount $advancedHuntingData.Count `
+                -AdvancedHuntingDeviceUserCount $advancedHuntingDeviceUsers.Count `
+                -AdvancedHuntingInventoryTupleCount 0 `
+                -NvdCveCount 0 `
+                -NormalizationMode 'azure-runbook-normalization' `
+                -SkipObservedWindowMerge:$skipObservedWindowMerge
+            Invoke-FullGarbageCollection
+            Write-MemoryUsage -Label "Post-DirectMergeFallbackMachineRead"
+            [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'NormalizeDashboardData' -Message 'Direct-merge exact-order guard failed; retrying Azure normalization with the file-backed machine lookup.' -AdditionalProperties @{
+                    normalizationInputs = [ordered]@{
+                        machines = Get-NormalizationMachineLookupCount -Machines $machines
+                        advancedHuntingCves = $advancedHuntingData.Count
+                        advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
+                        directMergeDeviceLookup = $true
+                        directMergeFallback = $directMergeFallbackReason
+                    }
+                })
+
+            $normalizationStatusState = @{
+                SubPhase = $null
+                PhaseMessage = $Script:PipelineCurrentStageMessage
+                PhaseStartedOnUtc = [datetime]::UtcNow
+                PhaseRowCountBase = 0L
+                LastReportedRowCount = 0L
+            }
+            $normalizedResult = & $invokeNormalization $false
+        }
         Write-MemoryUsage -Label "Post-ConvertToNormalizedData"
+        if (Test-FileBackedNormalizationMachineLookup -Machines $machines) {
+            Remove-FileBackedNormalizationMachineLookup -Machines $machines
+        }
         $machines = $null
         $advancedHuntingData = $null
         $advancedHuntingDeviceUsers = $null
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-NormalizationCleanup"
+        $retainedLookupCountsAfterInputRelease = $null
+        $postNormalizationLookupCounts = Get-NormalizedLookupCountSnapshot -Lookups $normalizedResult.Lookups
+        if ($null -ne $postNormalizationLookupCounts) {
+            $retainedLookupCountsAfterInputRelease = [ordered]@{
+                devices = $postNormalizationLookupCounts.devices
+                cves = $postNormalizationLookupCounts.cves
+                software = $postNormalizationLookupCounts.software
+                inventory = $postNormalizationLookupCounts.inventory
+                dates = $postNormalizationLookupCounts.dates
+                diskPaths = $postNormalizationLookupCounts.diskPaths
+                regPaths = $postNormalizationLookupCounts.regPaths
+            }
+            Update-PipelineNormalizedLookupSnapshot -Counts $retainedLookupCountsAfterInputRelease
+            Write-PipelineCountSummary -Label 'Retained lookups after input release' -Counts $retainedLookupCountsAfterInputRelease
+        }
 
         # Step 3: Prepare payload for embedding
         Set-PipelineExecutionStage -Stage 'PrepareDashboardPayload' -Message 'Preparing and caching the normalized payload for dashboard packaging.'
-        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
+        $preparePayloadStatusProperties = @{
+                normalizedOutput = [ordered]@{
+                    vulnerabilities = [int]$normalizedResult.VulnCount
+                    devices = [int]$normalizedResult.DeviceCount
+                    cves = [int]$normalizedResult.CveCount
+                    inputsReleased = $true
+                }
+            }
+        if ($null -ne $retainedLookupCountsAfterInputRelease) {
+            $preparePayloadStatusProperties['normalizedRetainedLookups'] = $retainedLookupCountsAfterInputRelease
+        }
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties $preparePayloadStatusProperties)
         Write-Output "Preparing data for embedding..."
         $vulnCount = $normalizedResult.VulnCount
         $deviceCount = [int]$normalizedResult.DeviceCount
@@ -1423,6 +1658,21 @@ try {
         }
 
         $normalizedQuality = $normalizedResult['Quality']
+        $retainedLookupCountsBeforePayloadRelease = $null
+        $payloadLookupCounts = Get-NormalizedLookupCountSnapshot -Lookups $normalizedResult.Lookups
+        if ($null -ne $payloadLookupCounts) {
+            $retainedLookupCountsBeforePayloadRelease = [ordered]@{
+                devices = $payloadLookupCounts.devices
+                cves = $payloadLookupCounts.cves
+                software = $payloadLookupCounts.software
+                inventory = $payloadLookupCounts.inventory
+                dates = $payloadLookupCounts.dates
+                diskPaths = $payloadLookupCounts.diskPaths
+                regPaths = $payloadLookupCounts.regPaths
+            }
+            Update-PipelineNormalizedLookupSnapshot -Counts $retainedLookupCountsBeforePayloadRelease
+            Write-PipelineCountSummary -Label 'Retained lookups before payload release' -Counts $retainedLookupCountsBeforePayloadRelease
+        }
         if (-not (Test-Path -LiteralPath $tempPayloadPath -PathType Leaf)) {
             throw 'Normalization did not produce the expected payload output.'
         }
@@ -1437,6 +1687,17 @@ try {
             Write-Output ("  Cached normalized payload as {0}" -f $cacheEntry.Fingerprint.Substring(0, 12))
         }
         Write-MemoryUsage -Label "Post-PayloadCachePublish"
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'PrepareDashboardPayload' -Message 'Prepared the normalized payload for dashboard packaging.' -AdditionalProperties @{
+                normalizedOutput = [ordered]@{
+                    vulnerabilities = [int]$vulnCount
+                    devices = [int]$deviceCount
+                    cves = [int]$cveCount
+                    lookupsReleased = $true
+                }
+                payloadSizeKb = [math]::Round((Get-Item -LiteralPath $tempPayloadPath).Length / 1KB, 1)
+                payloadCachePublished = ($null -ne $cacheEntry)
+                retainedLookupsBeforePayloadRelease = $retainedLookupCountsBeforePayloadRelease
+            })
     }
     Invoke-FullGarbageCollection
     Write-MemoryUsage -Label "Post-Normalize"
