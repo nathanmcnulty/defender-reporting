@@ -2053,6 +2053,10 @@ function Close-CombinedPayloadWriter {
         [object]$Lookups,
 
         [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.Generic.HashSet[string]]$UsedVendorMatchKeys,
+
+        [Parameter(Mandatory = $false)]
         [switch]$ConsumeLookups
     )
 
@@ -2060,7 +2064,7 @@ function Close-CombinedPayloadWriter {
         if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
             $null = Write-MemoryUsage -Label 'PayloadClose Start'
         }
-        Update-NormalizedAffectedSoftwareLookup -Lookups $Lookups
+        Update-NormalizedAffectedSoftwareLookup -Lookups $Lookups -UsedVendorMatchKeys $UsedVendorMatchKeys
         if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
             $null = Write-MemoryUsage -Label 'PayloadClose PostAffectedSoftware'
         }
@@ -2085,7 +2089,11 @@ function Update-NormalizedAffectedSoftwareLookup {
     param(
         [Parameter(Mandatory = $false)]
         [AllowNull()]
-        [object]$Lookups
+        [object]$Lookups,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.Generic.HashSet[string]]$UsedVendorMatchKeys
     )
 
     if ($null -eq $Lookups) {
@@ -2111,9 +2119,18 @@ function Update-NormalizedAffectedSoftwareLookup {
     }
 
     $datasetVendors = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($vendor in @($vendors)) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$vendor)) {
-            [void]$datasetVendors.Add((Get-VendorMatchKey -Vendor $vendor))
+    if ($null -ne $UsedVendorMatchKeys) {
+        foreach ($vendorMatchKey in $UsedVendorMatchKeys) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$vendorMatchKey)) {
+                [void]$datasetVendors.Add([string]$vendorMatchKey)
+            }
+        }
+    }
+    if ($datasetVendors.Count -eq 0) {
+        foreach ($vendor in @($vendors)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$vendor)) {
+                [void]$datasetVendors.Add((Get-VendorMatchKey -Vendor $vendor))
+            }
         }
     }
 
@@ -2246,6 +2263,10 @@ function Close-NormalizedVulnWriter {
         [object]$Lookups,
 
         [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.Generic.HashSet[string]]$UsedVendorMatchKeys,
+
+        [Parameter(Mandatory = $false)]
         [switch]$ConsumeLookups
     )
 
@@ -2262,7 +2283,7 @@ function Close-NormalizedVulnWriter {
 
     if ($WriterState.Mode -eq 'payload') {
         $WriterState.JsonWriter.WriteEndArray()
-        Close-CombinedPayloadWriter -WriterState $WriterState.PayloadWriter -Lookups $Lookups -ConsumeLookups:$ConsumeLookups
+        Close-CombinedPayloadWriter -WriterState $WriterState.PayloadWriter -Lookups $Lookups -UsedVendorMatchKeys $UsedVendorMatchKeys -ConsumeLookups:$ConsumeLookups
         return [PSCustomObject]@{
             Mode = 'payload'
             VulnsPath = $null
@@ -5179,6 +5200,7 @@ function Get-NormalizationContext {
         NvdCveData = @{}
         SeverityIndexByName = $severityIndexByName
         HasNoTags = $false
+        UsedVendorMatchKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     }
 }
 
@@ -6310,6 +6332,10 @@ function Get-NormalizedContentLookupCacheEntry {
     [OutputType([object[]])]
     param(
         [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$VendorMatchKey,
+
+        [Parameter(Mandatory = $false)]
         [switch]$IncludeInventoryIdentity,
 
         [Parameter(Mandatory = $false)]
@@ -6328,6 +6354,7 @@ function Get-NormalizedContentLookupCacheEntry {
     $cacheEntry.Add($ContentLookup.ua) | Out-Null
     $cacheEntry.Add($ContentLookup.dp) | Out-Null
     $cacheEntry.Add($ContentLookup.rp) | Out-Null
+    $cacheEntry.Add($VendorMatchKey) | Out-Null
 
     if ($IncludeInventoryIdentity) {
         $cacheEntry.Add($SoftwareInventoryIdentityKey) | Out-Null
@@ -6791,6 +6818,14 @@ function Write-NormalizedSourceRow {
         -SecurityUpdateAvailable $SecurityUpdateAvailable `
         -Context $Context
 
+    $usedVendorSet = $Context.UsedVendorMatchKeys
+    if ($null -ne $usedVendorSet) {
+        $vendorMatchKey = Get-VendorMatchKey -Vendor ([string]($SoftwareVendor ?? ''))
+        if (-not [string]::IsNullOrWhiteSpace($vendorMatchKey)) {
+            [void]$usedVendorSet.Add($vendorMatchKey)
+        }
+    }
+
     $ProcessedCount.Value++
 
     Write-NormalizedCompactRecordFromLookup `
@@ -7108,7 +7143,8 @@ function Invoke-ContentStoreNormalization {
     $contentLookupUpdateAvailableIndex = 4
     $contentLookupDiskPathIndex = 5
     $contentLookupRegistryPathIndex = 6
-    $contentLookupSoftwareIdentityKeyIndex = 7
+    $contentLookupVendorMatchKeyIndex = 7
+    $contentLookupSoftwareIdentityKeyIndex = 8
     $processedCountRef = [ref]0
     $firstLastSwappedCountRef = [ref]0
     $writerState = $null
@@ -7177,6 +7213,7 @@ function Invoke-ContentStoreNormalization {
     Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'contentTemplates' | ForEach-Object {
         $contentTemplate = $_
         $softwareVendor = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sv')
+        $vendorMatchKey = Get-VendorMatchKey -Vendor $softwareVendor
         $softwareName = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sn')
         $softwareVersion = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'ver')
         $softwareInventoryIdentityKey = if ($hasInventoryIdentity -and -not [string]::IsNullOrWhiteSpace($softwareName)) {
@@ -7191,6 +7228,7 @@ function Invoke-ContentStoreNormalization {
         }
 
         $contentLookupCache.Add((Get-NormalizedContentLookupCacheEntry `
+            -VendorMatchKey $vendorMatchKey `
             -IncludeInventoryIdentity:$hasInventoryIdentity `
             -SoftwareInventoryIdentityKey $softwareInventoryIdentityKey `
             -ContentLookup (Resolve-NormalizedContentLookup `
@@ -7353,6 +7391,13 @@ function Invoke-ContentStoreNormalization {
                             if (-not $lastSeen) { $lastSeen = '' }
 
                             $contentLookup = $contentLookupCache[$contentTemplateIndexValue]
+                            $usedVendorSet = $Context.UsedVendorMatchKeys
+                            if ($null -ne $usedVendorSet) {
+                                $vendorMatchKey = [string]($contentLookup[$contentLookupVendorMatchKeyIndex] ?? '')
+                                if (-not [string]::IsNullOrWhiteSpace($vendorMatchKey)) {
+                                    [void]$usedVendorSet.Add($vendorMatchKey)
+                                }
+                            }
                             $compactRecord[0] = $deviceLookupIndices[$deviceProfileIndexValue]
                             $compactRecord[1] = $contentLookup[$contentLookupCveIndex]
                             $compactRecord[2] = $contentLookup[$contentLookupSwIndex]
@@ -7479,6 +7524,13 @@ function Invoke-ContentStoreNormalization {
                                 if (-not $lastSeen) { $lastSeen = '' }
 
                                 $contentLookup = $contentLookupCache[$ctv]
+                                $usedVendorSet = $Context.UsedVendorMatchKeys
+                                if ($null -ne $usedVendorSet) {
+                                    $vendorMatchKey = [string]($contentLookup[$contentLookupVendorMatchKeyIndex] ?? '')
+                                    if (-not [string]::IsNullOrWhiteSpace($vendorMatchKey)) {
+                                        [void]$usedVendorSet.Add($vendorMatchKey)
+                                    }
+                                }
                                 $compactRecord[0] = $deviceLookupIndices[$dpv]
                                 $compactRecord[1] = $contentLookup[$contentLookupCveIndex]
                                 $compactRecord[2] = $contentLookup[$contentLookupSwIndex]
@@ -7621,7 +7673,7 @@ function Invoke-ContentStoreNormalization {
     }
     finally {
         if ($writerState) {
-            $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups -ConsumeLookups:$consumeLookups
+            $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups -UsedVendorMatchKeys $Context.UsedVendorMatchKeys -ConsumeLookups:$consumeLookups
         }
         Clear-NormalizationInputContext -Context $Context
     }
@@ -8088,7 +8140,7 @@ function Invoke-RawStoreNormalization {
     }
     finally {
         if ($writerState) {
-            $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups -ConsumeLookups:$consumeLookups
+            $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $Context.Lookups -UsedVendorMatchKeys $Context.UsedVendorMatchKeys -ConsumeLookups:$consumeLookups
         }
         Clear-NormalizationInputContext -Context $Context
     }
@@ -8670,7 +8722,7 @@ function ConvertTo-NormalizedData {
                 if ($consumeLookups) {
                     $lookupCountSummary = Get-NormalizedLookupCountSummary -Lookups $context.Lookups
                 }
-                $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $context.Lookups -ConsumeLookups:$consumeLookups
+                $writerCloseResult = Close-NormalizedVulnWriter -WriterState $writerState -Lookups $context.Lookups -UsedVendorMatchKeys $context.UsedVendorMatchKeys -ConsumeLookups:$consumeLookups
             }
         }
         $hasNoTags = $context.HasNoTags
@@ -8709,7 +8761,7 @@ function ConvertTo-NormalizedData {
 
     $lookupRecord = $null
     if (-not $consumeLookups) {
-        Update-NormalizedAffectedSoftwareLookup -Lookups $lookups
+        Update-NormalizedAffectedSoftwareLookup -Lookups $lookups -UsedVendorMatchKeys $context.UsedVendorMatchKeys
         $lookupRecord = ConvertTo-NormalizedLookupRecord -Lookups $lookups -NoTagsIdx $noTagsIdx
     }
 
