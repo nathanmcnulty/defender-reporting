@@ -158,7 +158,7 @@ function Get-ExperimentSnapshotAreaSummary {
     }
 }
 
-function Get-ExperimentDiskFootprintBytes {
+function Get-ExperimentDiskFootprintByteCount {
     [CmdletBinding()]
     [OutputType([int64])]
     param(
@@ -207,7 +207,7 @@ function Get-ExperimentTradeoffSummary {
     $counts = Get-ExperimentPropertyValue -InputObject $Result -Name 'counts'
     $snapshots = @(Get-ExperimentPropertyValue -InputObject $Result -Name 'snapshots')
     $snapshotArea = Get-ExperimentSnapshotAreaSummary -Snapshots $snapshots -ElapsedSeconds $elapsedSeconds
-    $diskFootprintBytes = Get-ExperimentDiskFootprintBytes -Details $details
+    $diskFootprintBytes = Get-ExperimentDiskFootprintByteCount -Details $details
 
     $workUnitLabel = $null
     $workUnitCount = 0
@@ -354,7 +354,7 @@ function Get-ExperimentComparisonSummary {
     }
 }
 
-function Read-ContentStoreDeviceProfileIds {
+function Read-ContentStoreDeviceProfileIdList {
     [CmdletBinding()]
     [OutputType([string[]])]
     param(
@@ -712,6 +712,7 @@ function Invoke-DeviceLookupFileBackedPass {
             Remove-NormalizedLookupFileStore -Store $context.Lookups.devices
         }
         catch {
+            Write-Verbose "Failed to dispose the direct machine-profile access lookup store during cleanup."
         }
     }
 }
@@ -759,11 +760,10 @@ function Invoke-DeviceLookupDirectMergePass {
 
             $context.Machines = @{}
             if ($null -ne $currentMachineEntry) {
-                $currentMachineId = [string]$currentMachineEntry.id
-                if ($currentMachineEntry.removed -eq $true) {
+                while ($null -ne $currentMachineEntry -and $currentMachineEntry.removed -eq $true) {
                     $currentMachineEntry = Read-NextMachineNormalizationEntryFromJsonReader -Reader $machineReader
-                    $currentMachineId = if ($null -ne $currentMachineEntry) { [string]$currentMachineEntry.id } else { $null }
                 }
+                $currentMachineId = if ($null -ne $currentMachineEntry) { [string]$currentMachineEntry.id } else { $null }
 
                 if (-not [string]::IsNullOrWhiteSpace($currentMachineId) -and $currentMachineId -eq $deviceId) {
                     if ($null -ne $currentMachineEntry.tuple) {
@@ -810,6 +810,7 @@ function Invoke-DeviceLookupDirectMergePass {
             Remove-NormalizedLookupFileStore -Store $context.Lookups.devices
         }
         catch {
+            Write-Verbose "Failed to dispose the direct-merge device lookup store during cleanup."
         }
     }
 }
@@ -855,8 +856,7 @@ function Invoke-DeviceLookupDirectMergeSpillPass {
     $spillResolveCount = 0
     $bucketLoadCount = 0
     $spillBytes = [int64]0
-    $firstMismatchExpected = $null
-    $firstMismatchActual = $null
+    $firstMismatch = $null
     try {
         [void](New-Item -Path $bucketDirectory -ItemType Directory -Force)
         for ($bucketIndex = 0; $bucketIndex -lt $BucketCount; $bucketIndex++) {
@@ -913,9 +913,11 @@ function Invoke-DeviceLookupDirectMergeSpillPass {
                         break
                     }
 
-                    if ($null -eq $firstMismatchExpected) {
-                        $firstMismatchExpected = $deviceId
-                        $firstMismatchActual = $currentMachineId
+                    if ($null -eq $firstMismatch) {
+                        $firstMismatch = [PSCustomObject]@{
+                            Expected = $deviceId
+                            Actual = $currentMachineId
+                        }
                     }
 
                     if ($null -ne $currentMachineEntry.tuple) {
@@ -980,8 +982,8 @@ function Invoke-DeviceLookupDirectMergeSpillPass {
             SpillBytes = $spillBytes
             SpillBucketFileCount = $bucketFileCount
             SpillBucketLoadCount = $bucketLoadCount
-            FirstMismatchExpected = $firstMismatchExpected
-            FirstMismatchActual = $firstMismatchActual
+            FirstMismatchExpected = if ($null -ne $firstMismatch) { $firstMismatch.Expected } else { $null }
+            FirstMismatchActual = if ($null -ne $firstMismatch) { $firstMismatch.Actual } else { $null }
             DeviceLookupCount = [int]$context.Lookups.devices.Count
             DeviceLookupStorePath = $deviceLookupStorePath
             DeviceLookupBytes = if (Test-Path -LiteralPath $deviceLookupStorePath -PathType Leaf) { [int64](Get-Item -LiteralPath $deviceLookupStorePath).Length } else { 0L }
@@ -993,6 +995,7 @@ function Invoke-DeviceLookupDirectMergeSpillPass {
                 $bucketWriter.Dispose()
             }
             catch {
+                Write-Verbose "Failed to dispose a spill bucket writer during direct-merge spill cleanup."
             }
         }
         Close-MachineNormalizationEntryJsonReader -Reader $machineReader
@@ -1002,6 +1005,7 @@ function Invoke-DeviceLookupDirectMergeSpillPass {
             Remove-NormalizedLookupFileStore -Store $context.Lookups.devices
         }
         catch {
+            Write-Verbose "Failed to dispose the direct-merge spill lookup store during cleanup."
         }
     }
 }
@@ -1128,6 +1132,7 @@ function Read-SequentialMachineAccessCursorTuple {
 }
 
 function Remove-SequentialMachineAccessCursor {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Benchmark cleanup helper only disposes temp cursor artifacts created for the current run.')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
@@ -1144,6 +1149,7 @@ function Remove-SequentialMachineAccessCursor {
             $Cursor.Reader.Dispose()
         }
         catch {
+            Write-Verbose "Failed to dispose the sequential machine access cursor reader during cleanup."
         }
     }
 
@@ -1282,6 +1288,7 @@ function Get-LoadedSpillMachineBucket {
 }
 
 function Remove-SpillMachineBucketDirectory {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Benchmark cleanup helper only removes temp spill directories created for the current run.')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
@@ -1447,6 +1454,7 @@ function Invoke-MergeSpillMachineProfileAccess {
                 $bucketWriter.Dispose()
             }
             catch {
+                Write-Verbose "Failed to dispose a merge-spill bucket writer during cleanup."
             }
         }
 
@@ -1935,7 +1943,7 @@ switch ($Experiment) {
         }
 
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineFileBackedLoad' -Stopwatch $stopwatch
-        $deviceProfileIds = @(Read-ContentStoreDeviceProfileIds -Path $DatasetPath)
+        $deviceProfileIds = @(Read-ContentStoreDeviceProfileIdList -Path $DatasetPath)
         $lookupMissCount = 0
         foreach ($deviceId in $deviceProfileIds) {
             if ($null -eq (Read-FileBackedNormalizationMachineTuple -Machines $machines -DeviceId $deviceId)) {
@@ -1958,7 +1966,7 @@ switch ($Experiment) {
         }
 
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostMachineSequentialLoad' -Stopwatch $stopwatch
-        $deviceProfileIds = @(Read-ContentStoreDeviceProfileIds -Path $DatasetPath)
+        $deviceProfileIds = @(Read-ContentStoreDeviceProfileIdList -Path $DatasetPath)
         foreach ($deviceId in $deviceProfileIds) {
             [void](Read-SequentialMachineAccessCursorTuple -Cursor $machineCursor -DeviceId $deviceId)
         }
@@ -1972,7 +1980,7 @@ switch ($Experiment) {
     }
 
     'machine-merge-profile-access' {
-        $deviceProfileIds = @(Read-ContentStoreDeviceProfileIds -Path $DatasetPath)
+        $deviceProfileIds = @(Read-ContentStoreDeviceProfileIdList -Path $DatasetPath)
         $experimentDetails.device_profile_count = $deviceProfileIds.Count
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostDeviceProfileRead' -Stopwatch $stopwatch
 
@@ -1989,7 +1997,7 @@ switch ($Experiment) {
     }
 
     'machine-merge-spill-profile-access' {
-        $deviceProfileIds = @(Read-ContentStoreDeviceProfileIds -Path $DatasetPath)
+        $deviceProfileIds = @(Read-ContentStoreDeviceProfileIdList -Path $DatasetPath)
         $experimentDetails.device_profile_count = $deviceProfileIds.Count
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostDeviceProfileRead' -Stopwatch $stopwatch
 
@@ -2013,7 +2021,7 @@ switch ($Experiment) {
     }
 
     'machine-merge-spill-profile-access-gc' {
-        $deviceProfileIds = @(Read-ContentStoreDeviceProfileIds -Path $DatasetPath)
+        $deviceProfileIds = @(Read-ContentStoreDeviceProfileIdList -Path $DatasetPath)
         $experimentDetails.device_profile_count = $deviceProfileIds.Count
         Add-ExperimentSnapshot -Snapshots $snapshots -Label 'PostDeviceProfileRead' -Stopwatch $stopwatch
 
