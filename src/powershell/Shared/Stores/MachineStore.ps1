@@ -1396,6 +1396,36 @@ function Add-InitializedMachineRecordToCurrentMap {
     $CurrentRecords[$machineId] = $Record
 }
 
+function Add-InitializedMachineStateHashToCurrentMap {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$CurrentRecords,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [psobject]$Record
+    )
+
+    if ($null -eq $Record) { return }
+
+    $properties = $Record.PSObject.Properties
+    $machineId = [string]$properties['id']?.Value
+    if ([string]::IsNullOrWhiteSpace($machineId)) { return }
+
+    if ($properties['removed']?.Value -eq $true) {
+        $CurrentRecords.Remove($machineId)
+        return
+    }
+
+    $stateHash = [string]$properties['stateHash']?.Value
+    if ([string]::IsNullOrWhiteSpace($stateHash)) {
+        $stateHash = [string](Get-MachineStateHash -Machine $Record)
+    }
+
+    $CurrentRecords[$machineId] = $stateHash
+}
+
 function Initialize-MachineHistoryStore {
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -1404,7 +1434,10 @@ function Initialize-MachineHistoryStore {
         [string]$Path,
 
         [Parameter(Mandatory = $false)]
-        [switch]$RemoveLegacyFiles
+        [switch]$RemoveLegacyFiles,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$LoadCurrentRecordsStateHashOnly
     )
 
     $currentPath = Get-MachineCurrentPath -BasePath $Path
@@ -1426,12 +1459,22 @@ function Initialize-MachineHistoryStore {
 
     if ($null -ne $currentReadPath) {
         foreach ($record in Read-MachineRecordsFromFile -Path $currentReadPath) {
-            Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
+            if ($LoadCurrentRecordsStateHashOnly) {
+                Add-InitializedMachineStateHashToCurrentMap -CurrentRecords $currentRecords -Record $record
+            }
+            else {
+                Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
+            }
         }
     } elseif ($historySourcePaths.Count -gt 0) {
         foreach ($sourcePath in $historySourcePaths) {
             foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
-                Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
+                if ($LoadCurrentRecordsStateHashOnly) {
+                    Add-InitializedMachineStateHashToCurrentMap -CurrentRecords $currentRecords -Record $record
+                }
+                else {
+                    Add-InitializedMachineRecordToCurrentMap -CurrentRecords $currentRecords -Record $record -DefaultObservedOn $defaultObservedOn
+                }
             }
         }
     }
@@ -1443,10 +1486,16 @@ function Initialize-MachineHistoryStore {
                 if (-not $record.id) { continue }
                 $snapshot = New-MachineSnapshotRecord -Machine $record -ObservedOn $observedOn
                 $existing = $currentRecords[$snapshot.id]
-                if (($null -eq $existing) -or ($existing.stateHash -ne $snapshot.stateHash)) {
+                $existingStateHash = if ($LoadCurrentRecordsStateHashOnly) { [string]$existing } else { [string]$existing?.stateHash }
+                if (($null -eq $existing) -or ($existingStateHash -ne [string]$snapshot.stateHash)) {
                     Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $snapshot
                 }
-                $currentRecords[$snapshot.id] = $snapshot
+                if ($LoadCurrentRecordsStateHashOnly) {
+                    $currentRecords[$snapshot.id] = [string]$snapshot.stateHash
+                }
+                else {
+                    $currentRecords[$snapshot.id] = $snapshot
+                }
             }
         }
         if ($RemoveLegacyFiles) {
@@ -1455,7 +1504,7 @@ function Initialize-MachineHistoryStore {
         $migratedLegacy = $true
     }
 
-    if (($historyRecordsByPeriod.Count -eq 0) -and $currentRecords.Count -gt 0) {
+    if ((-not $LoadCurrentRecordsStateHashOnly) -and ($historyRecordsByPeriod.Count -eq 0) -and $currentRecords.Count -gt 0) {
         foreach ($record in $currentRecords.Values) {
             Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $record
         }
