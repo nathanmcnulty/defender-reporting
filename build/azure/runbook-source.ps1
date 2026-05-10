@@ -1497,7 +1497,12 @@ try {
             PhaseRowCountBase = 0L
             LastReportedRowCount = 0L
         }
-        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DirectMergeDeviceLookup:$useDirectMergeDeviceLookupForRun -NormalizationProgressCallback {
+        $invokeNormalization = {
+            param(
+                [bool]$UseDirectMergeDeviceLookupForAttempt
+            )
+
+            ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DirectMergeDeviceLookup:$UseDirectMergeDeviceLookupForAttempt -NormalizationProgressCallback {
             param($NormalizationEvent)
 
             if ($null -eq $NormalizationEvent) {
@@ -1543,6 +1548,57 @@ try {
             }
 
             [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'NormalizeDashboardData' -Message $statusMessage -AdditionalProperties $additionalProperties)
+        }
+        }
+        $normalizedResult = $null
+        $directMergeFallbackReason = $null
+        try {
+            $normalizedResult = & $invokeNormalization $useDirectMergeDeviceLookupForRun
+        }
+        catch {
+            $directMergeGuardMessage = [string]$_.Exception.Message
+            if ((-not $useDirectMergeDeviceLookupForRun) -or ($directMergeGuardMessage -notlike 'Experimental direct-merge device lookup requires*')) {
+                throw
+            }
+
+            $directMergeFallbackReason = if ($directMergeGuardMessage -like '*exact current machine order*') { 'file-backed-order-mismatch' } else { 'file-backed-direct-merge-guard' }
+            Write-Warning ("Experimental direct-merge device lookup failed Azure normalization ({0}); retrying with the file-backed machine lookup. Details: {1}" -f $directMergeFallbackReason, $directMergeGuardMessage)
+            foreach ($transientOutputPath in @($tempVulnsPath, $tempPayloadPath)) {
+                if (Test-Path -LiteralPath $transientOutputPath -PathType Leaf) {
+                    Remove-Item -LiteralPath $transientOutputPath -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            $machines = Read-NormalizationMachineLookup -Path $tempExports -FileBacked
+            $sourceMetadata = Get-DashboardSourceSummary `
+                -BasePath $tempExports `
+                -MachineCount (Get-NormalizationMachineLookupCount -Machines $machines) `
+                -AdvancedHuntingCveCount $advancedHuntingData.Count `
+                -AdvancedHuntingDeviceUserCount $advancedHuntingDeviceUsers.Count `
+                -AdvancedHuntingInventoryTupleCount 0 `
+                -NvdCveCount 0 `
+                -NormalizationMode 'azure-runbook-normalization' `
+                -SkipObservedWindowMerge:$skipObservedWindowMerge
+            Invoke-FullGarbageCollection
+            Write-MemoryUsage -Label "Post-DirectMergeFallbackMachineRead"
+            [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'NormalizeDashboardData' -Message 'Direct-merge exact-order guard failed; retrying Azure normalization with the file-backed machine lookup.' -AdditionalProperties @{
+                    normalizationInputs = [ordered]@{
+                        machines = Get-NormalizationMachineLookupCount -Machines $machines
+                        advancedHuntingCves = $advancedHuntingData.Count
+                        advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
+                        directMergeDeviceLookup = $true
+                        directMergeFallback = $directMergeFallbackReason
+                    }
+                })
+
+            $normalizationStatusState = @{
+                SubPhase = $null
+                PhaseMessage = $Script:PipelineCurrentStageMessage
+                PhaseStartedOnUtc = [datetime]::UtcNow
+                PhaseRowCountBase = 0L
+                LastReportedRowCount = 0L
+            }
+            $normalizedResult = & $invokeNormalization $false
         }
         Write-MemoryUsage -Label "Post-ConvertToNormalizedData"
         $machines = $null
