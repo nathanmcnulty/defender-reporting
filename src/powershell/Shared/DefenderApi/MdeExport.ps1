@@ -629,7 +629,15 @@ function Get-MdeMachineRefreshPublishPlan {
                     $machineCount++
 
                     $existing = $CurrentRecords[$snapshotId]
-                    $existingStateHash = if ($existing -is [string]) { $existing } else { [string]$existing?.stateHash }
+                    $existingStateHash = if ($existing -is [string]) {
+                        $existing
+                    }
+                    elseif ($null -ne $existing) {
+                        [string]$existing.stateHash
+                    }
+                    else {
+                        $null
+                    }
                     if (($null -eq $existing) -or ($existingStateHash -ne [string]$snapshot.stateHash)) {
                         if ($null -eq $historyJsonWriter) {
                             $historyFileName = New-MachineHistorySegmentFileName

@@ -1486,7 +1486,15 @@ function Initialize-MachineHistoryStore {
                 if (-not $record.id) { continue }
                 $snapshot = New-MachineSnapshotRecord -Machine $record -ObservedOn $observedOn
                 $existing = $currentRecords[$snapshot.id]
-                $existingStateHash = if ($LoadCurrentRecordsStateHashOnly) { [string]$existing } else { [string]$existing?.stateHash }
+                $existingStateHash = if ($LoadCurrentRecordsStateHashOnly) {
+                    [string]$existing
+                }
+                elseif ($null -ne $existing) {
+                    [string]$existing.stateHash
+                }
+                else {
+                    $null
+                }
                 if (($null -eq $existing) -or ($existingStateHash -ne [string]$snapshot.stateHash)) {
                     Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $snapshot
                 }
