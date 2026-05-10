@@ -65,6 +65,9 @@ param(
     [bool]$UseExistingExportsOnly = $false,
 
     [Parameter(Mandatory = $false)]
+    [bool]$UseDirectMergeDeviceLookup = $false,
+
+    [Parameter(Mandatory = $false)]
     [ValidateSet('BlobStorage', 'SharePoint', 'StaticWebApp')]
     [string]$Export = 'BlobStorage'
 )
@@ -1421,6 +1424,7 @@ try {
     $machines = $null
     $advancedHuntingData = $null
     $normalizedQuality = $null
+    $useDirectMergeDeviceLookupForRun = $false
     if ($payloadCacheEntry) {
         Set-PipelineExecutionStage -Stage 'PrepareDashboardPayload' -Message 'Reusing the cached normalized payload for dashboard packaging.'
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
@@ -1436,7 +1440,14 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         Set-PipelineExecutionStage -Stage 'ReadNormalizationInputs' -Message 'Loading machine and Advanced Hunting inputs for dashboard normalization.'
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
-        $machines = Read-NormalizationMachineLookup -Path $tempExports -FileBacked
+        $useDirectMergeDeviceLookupForRun = ($UseDirectMergeDeviceLookup -and (Sync-VulnContentStoreSidecar -BasePath $tempExports))
+        if ($useDirectMergeDeviceLookupForRun) {
+            Write-Output "  Experimental direct-merge device lookup enabled for Azure runbook; skipping preloaded machine lookup."
+            $machines = @{}
+        }
+        else {
+            $machines = Read-NormalizationMachineLookup -Path $tempExports -FileBacked
+        }
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-MachineRead"
 
@@ -1468,6 +1479,7 @@ try {
                     machines = Get-NormalizationMachineLookupCount -Machines $machines
                     advancedHuntingCves = $advancedHuntingData.Count
                     advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
+                    directMergeDeviceLookup = $useDirectMergeDeviceLookupForRun
                 }
             })
 
@@ -1485,7 +1497,7 @@ try {
             PhaseRowCountBase = 0L
             LastReportedRowCount = 0L
         }
-        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -NormalizationProgressCallback {
+        $normalizedResult = ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DirectMergeDeviceLookup:$useDirectMergeDeviceLookupForRun -NormalizationProgressCallback {
             param($NormalizationEvent)
 
             if ($null -eq $NormalizationEvent) {
