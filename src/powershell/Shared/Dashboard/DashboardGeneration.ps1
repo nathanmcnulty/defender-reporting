@@ -3016,6 +3016,7 @@ function Get-NormalizationMachineBucketId {
 }
 
 function Touch-FileBackedNormalizationMachineBucketCacheEntry {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '', Justification = 'Internal helper updates bucket-cache recency without exposing a public cmdlet surface.')]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper only updates in-memory bucket cache order.')]
     [CmdletBinding()]
     param(
@@ -3253,6 +3254,7 @@ function Open-BucketedFileBackedNormalizationMachineLookup {
                 $rawWriter.Dispose()
             }
             catch {
+                Write-Verbose "Failed to dispose a raw bucket writer during bucketed machine lookup cleanup."
             }
         }
 
@@ -3261,6 +3263,7 @@ function Open-BucketedFileBackedNormalizationMachineLookup {
                 $finalWriter.Dispose()
             }
             catch {
+                Write-Verbose "Failed to dispose a finalized bucket writer during bucketed machine lookup cleanup."
             }
         }
 

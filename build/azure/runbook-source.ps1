@@ -1601,6 +1601,9 @@ try {
             $normalizedResult = & $invokeNormalization $false
         }
         Write-MemoryUsage -Label "Post-ConvertToNormalizedData"
+        if (Test-FileBackedNormalizationMachineLookup -Machines $machines) {
+            Remove-FileBackedNormalizationMachineLookup -Machines $machines
+        }
         $machines = $null
         $advancedHuntingData = $null
         $advancedHuntingDeviceUsers = $null
