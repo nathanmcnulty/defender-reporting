@@ -693,6 +693,110 @@ function Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata {
     }
 }
 
+function Test-InitializeMachineHistoryStoreSupportsStateHashOnlyCurrentMap {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Regression test name intentionally refers to current records and metadata fields as a set.')]
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-store-statehash-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $machineRecord = Get-TestMachineRecord -Id 'machine-001'
+        Write-NdjsonRecordsFile -Path (Get-MachineCurrentPath -BasePath $tempRoot) -Records @(
+            $machineRecord,
+            [PSCustomObject]@{
+                id = 'machine-002'
+                removed = $true
+            }
+        )
+
+        $store = Initialize-MachineHistoryStore -Path $tempRoot -LoadCurrentRecordsStateHashOnly
+        $currentRecordStateHash = [string]$store.CurrentRecords['machine-001']
+
+        Assert-True ($store.CurrentRecords.Count -eq 1) 'Expected removal records to be excluded from the current machine stateHash map.'
+        Assert-True (-not [string]::IsNullOrWhiteSpace($currentRecordStateHash)) 'Expected stateHash-only initialization to preserve the surviving machine state hash.'
+        Assert-True ($currentRecordStateHash -eq [string](Get-MachineStateHash -Machine $machineRecord)) 'Expected stateHash-only initialization to compute the same current-machine state hash as the full-record path.'
+        Assert-True ($store.HistoryRecordsByPeriod.Count -eq 0) 'Expected stateHash-only initialization to skip synthetic history seeding when the current map does not retain full snapshot records.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-MdeMachineRefreshPublishPlanSupportsStateHashOnlyCurrentMap {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-refresh-plan-statehash-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalRestMethod = (Get-Command -Name Invoke-RestMethodWithRetry -CommandType Function).ScriptBlock
+
+    try {
+        Write-NdjsonRecordsFile -Path (Get-MachineCurrentPath -BasePath $tempRoot) -Records @(
+            (Get-TestMachineRecord -Id 'machine-001'),
+            (Get-TestMachineRecord -Id 'machine-002')
+        )
+
+        $store = Initialize-MachineHistoryStore -Path $tempRoot -LoadCurrentRecordsStateHashOnly
+        $changedMachine = Get-TestMachineRecord -Id 'machine-002'
+        $changedMachine.riskScore = 'High'
+        $newMachine = Get-TestMachineRecord -Id 'machine-003'
+        $script:MockMachineRefreshPlanResponses = @(
+            [PSCustomObject]@{
+                value = @(
+                    Get-TestMachineRecord -Id 'machine-001'
+                    $changedMachine
+                    $newMachine
+                )
+            }
+        )
+        $script:MockMachineRefreshPlanIndex = 0
+
+        Set-Item -Path Function:Invoke-RestMethodWithRetry -Value {
+            param(
+                [string]$Uri,
+                [hashtable]$Headers,
+                [string]$Method
+            )
+
+            [void]$Uri
+            [void]$Headers
+            [void]$Method
+
+            if ($script:MockMachineRefreshPlanIndex -ge $script:MockMachineRefreshPlanResponses.Count) {
+                throw 'Mock machine refresh plan responses were exhausted unexpectedly.'
+            }
+
+            $response = $script:MockMachineRefreshPlanResponses[$script:MockMachineRefreshPlanIndex]
+            $script:MockMachineRefreshPlanIndex++
+            return $response
+        }
+
+        $stagedCurrentPath = Join-Path $tempRoot 'Machines_Current.staged.json.gz'
+        $refreshPlan = Get-MdeMachineRefreshPublishPlan -Headers @{ Authorization = 'Bearer test' } -BaseApiUrl 'https://example.invalid' -ObservedOn '2026-05-10' -CurrentRecords $store.CurrentRecords -StagedCurrentPath $stagedCurrentPath
+        $stagedCurrentRecords = @(Read-MachineRecordsFromFile -Path $refreshPlan.StagedCurrentPath)
+        $stagedHistoryRecords = @(Read-MachineRecordsFromFile -Path $refreshPlan.StagedHistoryPath)
+
+        Assert-True ($refreshPlan.MachineCount -eq 3) 'Expected the refresh plan to preserve all fetched machine rows when the current map is stateHash-only.'
+        Assert-True ($refreshPlan.ChangeCount -eq 2) 'Expected the refresh plan to detect one changed machine and one new machine when current rows are represented by state hashes.'
+        Assert-True ($refreshPlan.PageCount -eq 1) 'Expected the refresh plan to consume the mocked single-page machine response.'
+        Assert-True ($store.CurrentRecords.Count -eq 0) 'Expected the refresh plan to remove every surviving current-machine entry from the stateHash-only map.'
+        Assert-True ($stagedCurrentRecords.Count -eq 3) 'Expected the staged current machine file to include every fetched machine row.'
+        Assert-True ($stagedHistoryRecords.Count -eq 2) 'Expected the staged history file to include only the changed and new machine rows.'
+    }
+    finally {
+        Set-Item -Path Function:Invoke-RestMethodWithRetry -Value $originalRestMethod
+        Remove-Variable -Name MockMachineRefreshPlanResponses -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name MockMachineRefreshPlanIndex -Scope Script -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet {
     [CmdletBinding()]
     param()
@@ -5555,6 +5659,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-VulnContentStoreExistenceNeedsRef'; SuccessMessage = 'Content-store existence checks passed.' }
     @{ Name = 'Test-LocalExportArtifactCleanup'; SuccessMessage = 'Local export artifact cleanup checks passed.' }
     @{ Name = 'Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata'; SuccessMessage = 'Machine store initialization checks passed.' }
+    @{ Name = 'Test-InitializeMachineHistoryStoreSupportsStateHashOnlyCurrentMap'; SuccessMessage = 'Machine store stateHash-only initialization checks passed.' }
+    @{ Name = 'Test-MdeMachineRefreshPublishPlanSupportsStateHashOnlyCurrentMap'; SuccessMessage = 'Machine refresh plan stateHash-only checks passed.' }
     @{ Name = 'Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet'; SuccessMessage = 'Machine history cleanup empty-set checks passed.' }
     @{ Name = 'Test-BulkSnapshotImportSmoke'; SuccessMessage = 'Bulk snapshot import smoke checks passed.' }
     @{ Name = 'Test-BulkSnapshotImportSingleSnapshot'; SuccessMessage = 'Single-snapshot vulnerability import checks passed.' }
