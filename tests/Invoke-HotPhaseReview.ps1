@@ -41,7 +41,10 @@ param(
     [switch]$BucketedMachineLookup,
 
     [Parameter(Mandatory = $false)]
-    [switch]$DirectMergeDeviceLookup
+    [switch]$DirectMergeDeviceLookup,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$RebuildLookupsBeforePayload
 )
 
 Set-StrictMode -Version Latest
@@ -665,6 +668,9 @@ if ($BucketedMachineLookup) {
 }
 if ($DirectMergeDeviceLookup) {
     $argumentList += '-DirectMergeDeviceLookup'
+}
+if ($RebuildLookupsBeforePayload) {
+    $argumentList += '-RebuildLookupsBeforePayload'
 }
 
 Write-Output 'Running hot phase review...'
