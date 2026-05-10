@@ -15430,7 +15430,16 @@ function Clear-NormalizationInputContext {
         [pscustomobject]$Context,
 
         [Parameter(Mandatory = $false)]
-        [switch]$PreserveInventoryData
+        [switch]$PreserveInventoryData,
+
+        # When set, mutates the original input hashtables via .Clear() before replacing
+        # the context references. This frees the hashtable values across ALL call-stack
+        # references (outer-scope parameters, closures) so the GC can collect them as
+        # soon as the pre-streaming clear completes, rather than waiting until the full
+        # normalization call returns. Only safe when the caller no longer needs the
+        # input data after this point (i.e. payload / consume-lookups mode).
+        [Parameter(Mandatory = $false)]
+        [switch]$EarlyReleaseInputData
     )
 
     if ($null -eq $Context) {
@@ -15439,6 +15448,15 @@ function Clear-NormalizationInputContext {
 
     if (Test-FileBackedNormalizationMachineLookup -Machines $Context.Machines) {
         Remove-FileBackedNormalizationMachineLookup -Machines $Context.Machines
+    }
+
+    if ($EarlyReleaseInputData) {
+        if ($null -ne $Context.AdvancedHuntingData) { $Context.AdvancedHuntingData.Clear() }
+        if ($null -ne $Context.AdvancedHuntingDeviceUsers) { $Context.AdvancedHuntingDeviceUsers.Clear() }
+        if ($null -ne $Context.NvdCveData) { $Context.NvdCveData.Clear() }
+        if (-not $PreserveInventoryData -and $null -ne $Context.AdvancedHuntingInventoryData) {
+            $Context.AdvancedHuntingInventoryData.Clear()
+        }
     }
 
     $Context.Machines = @{}
@@ -17475,7 +17493,12 @@ function Invoke-ContentStoreNormalization {
     # Ref streaming only needs the compact device/content lookup arrays plus
     # inventory enrichment. Release the larger source maps before processing
     # the full ref set so they do not overlap with the row stream.
-    Clear-NormalizationInputContext -Context $Context -PreserveInventoryData
+    # EarlyReleaseInputData mutates the original AH hashtables via .Clear() so
+    # that all call-stack references (outer params, Azure pipeline closure) see
+    # empty collections immediately, letting the GC reclaim CVE descriptions and
+    # device-user lists before the ref stream runs. Only enabled in payload mode
+    # ($consumeLookups), where the caller never needs the input data again.
+    Clear-NormalizationInputContext -Context $Context -PreserveInventoryData -EarlyReleaseInputData:$consumeLookups
     Invoke-FullGarbageCollection
 
     Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
