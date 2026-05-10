@@ -5263,7 +5263,10 @@ function Restore-ContentStoreNormalizedLookupsFromColumnCache {
         [hashtable]$NvdCveData = @{},
 
         [Parameter(Mandatory = $false)]
-        [object[]]$CachedDates = @()
+        [object[]]$CachedDates = @(),
+
+        [Parameter(Mandatory = $false)]
+        [string]$DeviceLookupStorePath
     )
 
     $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $DataPath
@@ -5274,6 +5277,9 @@ function Restore-ContentStoreNormalizedLookupsFromColumnCache {
     Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
 
     $context = Get-NormalizationContext
+    if (-not [string]::IsNullOrWhiteSpace($DeviceLookupStorePath)) {
+        $context.Lookups.devices = Open-NormalizedLookupFileStore -Path $DeviceLookupStorePath
+    }
     $context.Machines = $Machines
     $context.AdvancedHuntingData = $AdvancedHuntingData
     $context.AdvancedHuntingDeviceUsers = $AdvancedHuntingDeviceUsers
