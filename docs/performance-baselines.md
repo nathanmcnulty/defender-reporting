@@ -23,6 +23,7 @@ The raw result JSON files from the April 5, 2026 capture remain local-only under
 | `exports-synthetic` | `current-only` | `476.63s` | `250.45s` | `239.45s` | legacy `invoke-to-finish` |
 | `exports-synthetic-live` | `current-only` | `2081.27s` | `957.14s` | `683.21s` | legacy `invoke-to-finish` |
 | `review-synthetic-medium` | `current-only` Azure acceptance replay, 2 captures | `153.06s to 177.83s` | `96.94s to 105.19s` | `41.59s to 43.32s` | legacy `invoke-to-finish` |
+| `benchmark-large-50k-v1` | `current-only` large-lane instrumentation series, 2 runbook captures + 1 function app capture | N/A | `689.73s to 733.05s` total; Generate dashboard `644.52s to 644.58s` (very consistent) | `597.66s` | `active-execution`; end-to-end `599.56s`; pickup delay `1.90s`; 50K devices / 1.5M rows |
 
 ## Persistent local cache workflow
 
@@ -40,6 +41,7 @@ The raw result JSON files from the April 5, 2026 capture remain local-only under
 | `exports-synthetic` | `966336512` bytes | `921878528` bytes | `569.5 MB` | `286.8 MB` | `1800.9 MB` | `1276.2 MB` | `504217600` |
 | `exports-synthetic-live` | `710160384` bytes | `616402944` bytes | `593.3 MB` | `298.2 MB` | `1029.2 MB` | `1029.2 MB` | `1172889600` |
 | `review-synthetic-medium` | `333520896 to 341286912` bytes | `236150784 to 242094080` bytes | `407.6 to 412.5 MB` | `85.2 to 95.0 MB` | `580.6 to 587.6 MB` | `580.2 to 587.6 MB` | `0.0` |
+| `benchmark-large-50k-v1` | N/A | N/A | `525.9 to 537.1 MB` | `113.8 to 113.9 MB` | `820.1 MB` | `820.1 MB` | `1,158,758,400` |
 
 ## Standard large Azure acceptance
 
@@ -138,6 +140,7 @@ The next machine-store experiment should build on the stronger diagnostics inste
   - the post-analysis conclusion is that the production no-DM private peak of `181–182 MB` (at VulnCurrentRefs End and Q2 End) is dominated by the pre-normalization live set (~`164 MB`) plus the inherent streaming overhead; no single code-level change is expected to cut more than `5–10 MB` from this without architectural changes to data volume or dedup structure
 - to enable future streaming spike characterization, intra-streaming `Write-MemoryUsage` markers were added every `500K` onboarded records inside the `100K` GC cycle (firing at `500K`, `1M`, `1.5M`, …) so each file's memory profile can be seen as a series of post-GC snapshots rather than just Start/End; the pipeline memory sample cap was simultaneously raised from `64` to `128` to preserve the full timeline across runs with expanded instrumentation
 - a subsequent fresh-export monitoring run on the live tenant confirmed the instrumentation adds no measurable overhead (325.9 MB WS / 180.0 MB private / 103.2 MB GC / 88.28 s — essentially identical to the PR #47 no-DM baseline at 324.6 / 181.0 / 102.3 / 91.23 s); the `500K` milestone markers did not fire because the live tenant's VulnCurrentRefs has fewer than `100K` onboarded records — the marker threshold is only relevant for large tenants with `500K+` onboarded device-CVE pairs, such as those run through the `synthetic-50k-1_5m` or `benchmark-medium-v1` large dataset lanes; the live tenant completes VulnCurrentRefs in a single burst with no intra-streaming GC triggers, and both the VulnCurrentRefs spike (+`29.2 MB` private, `150.2` → `179.4 MB`) and the Q2 spike (+`12.6 MB` private, `167.4` → `180.0 MB`) are data-driven and consistent with the prior per-stage hotspot analysis
+- a two-run `benchmark-large-50k-v1` instrumentation baseline was established on the Azure large lane (50K devices / 1.5M rows); the Generate dashboard stage clocked at `644.52–644.58 s` across both runbook runs — extremely consistent — with peak WS `525.9–537.1 MB` and peak GC heap `113.8–113.9 MB`; runbook total elapsed varied between `689.73 s` and `733.05 s` because auth and download stage latency was noisier in run 2 (Azure service variance), not normalization; Function App run 1 failed immediately due to a pre-existing strict-mode bug in `Build-FunctionApp.ps1` (`$UseDirectMergeDeviceLookup` was not initialized in the function app entry-point header — fixed in PR #48); Function App run 2 completed in `597.66 s` active / `599.56 s` end-to-end with peak WS `820.1 MB` via Azure Monitor; the Function App is measurably faster than the runbook on this lane (`597.66 s` vs `644.5 s` dashboard stage), consistent with the pattern observed on smaller datasets; the `500K` intra-streaming markers are embedded in the code path and will activate for large deployments but the current benchmark harness captures only peak values from the output stream, not marker-labeled timeline samples — future large-lane comparisons should use the series dir `.local/benchmark-series/benchmark-large-50k-v1-streaming-monitors-20260510-204728/` as the reference envelope
 
 ## Multi-dial experiment review
 
@@ -199,6 +202,7 @@ Measured but not yet promoted to the default path:
   - `exports-synthetic-live`: shifted synthetic live-export dataset with a latest snapshot date of `2026-04-05`.
   - `review-synthetic-medium`: `BalancedMediumHeavy` review dataset with `120000` rows and `1500` devices, validated against Azure Automation `aa-defender-reporting` and Function App `func-defender-reporting-parallel-0404a`.
   - `synthetic-50k-1_5m`: standard large Azure acceptance dataset rooted at `.local\large-datasets\synthetic-50k-1_5m`.
+  - `benchmark-large-50k-v1`: durable large benchmark catalog entry (preset `BalancedMediumHeavy`, seed `20260322`, `1,500,000` rows, `50,000` devices) that resolves to the same `.local\large-datasets\synthetic-50k-1_5m` path. Use the manifest breadth counters rather than assuming a fixed CVE count across captures.
 - `benchmark-medium-v1` is now the standard durable dataset for merge-tracked baseline refreshes and supersedes `review-synthetic-medium` for future benchmark-series captures.
 - `benchmark-medium-v1` Function App headline timing now uses active execution time from the runtime status blob; end-to-end invocation time and pickup delay are recorded separately for queue and cold-start review.
 - The durable `benchmark-medium-v1` persistent local cache reuse pass was effectively stable across reruns (`45.44s` to `45.49s`) and is the preferred baseline for normalized-column cache reuse.
@@ -210,6 +214,7 @@ Measured but not yet promoted to the default path:
 - Prefer the persisted `runbook_status.memoryPeaks` metrics from the benchmark result JSON when comparing Azure envelopes. The event-summary headline can under-report the true sampled status-blob peak on long runs.
 - A follow-up attempt to reuse a single projected-machine hashtable inside the exact-order direct-merge loop was measured locally and reverted after regressing the isolated `device-lookup-direct-merge` pass from **`175.2 MB` / `48.2 MB` / `154.44 s`** to **`177.8 MB` / `55.1 MB` / `157.68 s`**.
 - Date captured: `2026-05-11` for the streaming-monitors fresh-export confirmation run on the live tenant: `325.9 MB` WS / `180.0 MB` private / `103.2 MB` GC / `88.28 s`. The `500K` intra-streaming milestone markers did not fire (live tenant has fewer than `100K` onboarded records in VulnCurrentRefs); the markers are intended for large-deployment observability only. No instrumentation overhead. Per-file private deltas: VulnCurrentRefs +`29.2 MB` (`150.2` → `179.4 MB`), Q1 `0.0 MB`, Q2 +`12.6 MB` (`167.4` → `180.0 MB`).
+- Date captured: `2026-05-11` for the large-lane instrumentation baseline on `benchmark-large-50k-v1` (50K devices / 1.5M rows): 2 runbook runs (`689.73 s` and `733.05 s` total; Generate dashboard `644.52–644.58 s`; peak WS `525.9–537.1 MB`; peak GC `113.8–113.9 MB`) and 1 successful Function App run (`597.66 s` active; peak WS `820.1 MB`). Run 1 Function App failed due to a pre-existing `$UseDirectMergeDeviceLookup` strict-mode bug in `Build-FunctionApp.ps1`, fixed in PR #48. Raw series artifacts under `.local/benchmark-series/benchmark-large-50k-v1-streaming-monitors-20260510-204728/`.
 
 ## Regenerating the baseline
 
