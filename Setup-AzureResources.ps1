@@ -1164,8 +1164,10 @@ try {
             }
         }
 
-        # Poll to verify role assignments are effective
-        Wait-WithPolling -Description "RBAC propagation" -IntervalSeconds 5 -TimeoutSeconds 30 -Condition {
+        # Poll until ARM reflects the role assignment records. Storage data-plane
+        # authorization can still lag behind ARM visibility, so the zip deployment
+        # loop also retries storage 403s with backoff.
+        Wait-WithPolling -Description "RBAC records visible in ARM" -IntervalSeconds 5 -TimeoutSeconds 120 -Condition {
             $saResource = Invoke-ArmApi -Path "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName/providers/Microsoft.Authorization/roleAssignments?api-version=$($Script:ArmApiVersions.RoleAssignment)&`$filter=principalId eq '$miPrincipalId'" -Method GET -Description "Check RBAC"
             return ($saResource.value.Count -ge 3)
         } | Out-Null
@@ -1526,7 +1528,7 @@ try {
             }
 
             try {
-                $maxAttempts = 3
+                $maxAttempts = 5
                 $deployed = $false
                 for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
                     $deployOutput = @(az functionapp deployment source config-zip `
@@ -1573,6 +1575,13 @@ try {
                     if ($attempt -lt $maxAttempts -and $deployText -match 'BadGatewayConnection|Bad Gateway') {
                         Write-Warning ("Function App zip deployment hit a transient gateway error (attempt {0}/{1}). Retrying..." -f $attempt, $maxAttempts)
                         Start-Sleep -Seconds (5 * $attempt)
+                        continue
+                    }
+
+                    if ($attempt -lt $maxAttempts -and $deployText -match 'InaccessibleStorageException|BlobUploadFailed|403|inaccessible') {
+                        $waitSeconds = 60 * $attempt
+                        Write-Warning ("Function App zip deployment hit a storage access error (attempt {0}/{1}). Waiting {2}s for storage RBAC propagation before retrying..." -f $attempt, $maxAttempts, $waitSeconds)
+                        Start-Sleep -Seconds $waitSeconds
                         continue
                     }
 
