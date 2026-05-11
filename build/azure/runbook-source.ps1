@@ -245,7 +245,7 @@ function Add-PipelineMemorySample {
         [pscustomobject]$Sample
     )
 
-    if ($Script:PipelineMemorySamples.Count -ge 64) {
+    if ($Script:PipelineMemorySamples.Count -ge 128) {
         $Script:PipelineMemorySamples.RemoveAt(0)
     }
 

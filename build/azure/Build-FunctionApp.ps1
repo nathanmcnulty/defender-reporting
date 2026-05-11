@@ -69,6 +69,7 @@ $functionAppHeader = @'
         INCLUDE_ADVANCED_HUNTING    - true (default) or false
         USE_EXISTING_EXPORTS_ONLY   - true or false (default)
         EXPORT_TARGET               - BlobStorage (default), SharePoint, or StaticWebApp
+    Note: UseDirectMergeDeviceLookup is always false for Function App runs (not configurable via env var).
         PIPELINE_FILE_TRACE_ENABLED - true to mirror pipeline output into tmp/FunctionsData
 #>
 
@@ -84,6 +85,7 @@ $StorageAccountName = $env:STORAGE_ACCOUNT_NAME
 $DashboardDeliveryMode = if ($env:DASHBOARD_DELIVERY_MODE) { $env:DASHBOARD_DELIVERY_MODE } else { 'SelfContained' }
 $IncludeAdvancedHunting = ($env:INCLUDE_ADVANCED_HUNTING -ne 'false')
 $UseExistingExportsOnly = ($env:USE_EXISTING_EXPORTS_ONLY -eq 'true')
+$UseDirectMergeDeviceLookup = $false
 $Export = if ($env:EXPORT_TARGET) { $env:EXPORT_TARGET } else { 'BlobStorage' }
 
 $script:PipelineFileTraceEnabled = ($env:PIPELINE_FILE_TRACE_ENABLED -eq 'true')

@@ -17718,6 +17718,9 @@ function Invoke-ContentStoreNormalization {
                             if (($processedCountRef.Value % 100000) -eq 0) {
                                 Sync-NormalizedVulnWriter -WriterState $writerState
                                 Invoke-FullGarbageCollection
+                                if (($processedCountRef.Value % 500000) -eq 0 -and (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue)) {
+                                    $null = Write-MemoryUsage -Label ("ContentStoreRefs " + $refPath.Label + " " + ($processedCountRef.Value / 1000) + "K post-GC")
+                                }
                             }
                         }
                         finally {
@@ -19058,7 +19061,7 @@ function Add-PipelineMemorySample {
         [pscustomobject]$Sample
     )
 
-    if ($Script:PipelineMemorySamples.Count -ge 64) {
+    if ($Script:PipelineMemorySamples.Count -ge 128) {
         $Script:PipelineMemorySamples.RemoveAt(0)
     }
 
