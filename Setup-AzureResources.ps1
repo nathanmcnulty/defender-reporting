@@ -561,7 +561,16 @@ $Script:DashboardBlobName = 'VulnerabilityDashboard.html'
 $Script:DashboardAssetsDirectoryName = ([System.IO.Path]::GetFileNameWithoutExtension($Script:DashboardBlobName) + '.assets')
 $Script:HostedDashboardBlobName = 'VulnerabilityDashboard.Hosted.html'
 $Script:HostedDashboardAssetsDirectoryName = ([System.IO.Path]::GetFileNameWithoutExtension($Script:HostedDashboardBlobName) + '.assets')
-$Script:DashboardHostedAssetFileNames = @('dashboard.css', 'dashboard.js', 'pako.js', 'chart.js', 'pdf-export.bundle.js', 'payload.json.gz')
+$Script:DashboardHostedAssetRelativePaths = @(
+    'runtime/dashboard.css',
+    'runtime/dashboard.js',
+    'runtime/pako.js',
+    'vendor/chart.js',
+    'data/summary.json',
+    'optional/pdf-export.runtime.js',
+    'optional/pdf-export.bundle.js',
+    'data/payload.json.gz'
+)
 $Script:ProvisioningTags = @{
     workload = 'defender-reporting'
 }
@@ -1994,18 +2003,18 @@ try {
         else {
             $Script:DashboardAssetsDirectoryName
         }
-        $containerAppDashboardAssetFileNames = if ($effectiveDashboardDeliveryMode -in @('Hosted', 'Dual')) {
-            $Script:DashboardHostedAssetFileNames
+        $containerAppDashboardAssetRelativePaths = if ($effectiveDashboardDeliveryMode -in @('Hosted', 'Dual')) {
+            $Script:DashboardHostedAssetRelativePaths
         }
         else {
             @()
         }
         $assetDownloadLines = @(
-            foreach ($assetFileName in $containerAppDashboardAssetFileNames) {
-                                '  download_blob /data/{0}/{1} "{0}/{1}" || true' -f $containerAppDashboardAssetsDirectoryName, $assetFileName
+            foreach ($assetRelativePath in $containerAppDashboardAssetRelativePaths) {
+                                '  download_blob /data/{0}/{1} "{0}/{1}" || true' -f $containerAppDashboardAssetsDirectoryName, $assetRelativePath
             }
         ) -join "`n"
-        $assetDownloadBlock = if ($containerAppDashboardAssetFileNames.Count -gt 0) {
+        $assetDownloadBlock = if ($containerAppDashboardAssetRelativePaths.Count -gt 0) {
 @"
         mkdir -p "/data/$containerAppDashboardAssetsDirectoryName"
 $assetDownloadLines

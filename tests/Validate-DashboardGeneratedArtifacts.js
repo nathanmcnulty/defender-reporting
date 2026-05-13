@@ -12,7 +12,11 @@ const reportOptions = [
 
 const requiredElementIds = [
     'dashboardMain',
+    'reportSelectorShell',
+    'reportSelectorButton',
     'reportSelector',
+    'reportSelectorPopover',
+    'reportSelectorOptions',
     'exportPdfButton',
     'dashboardStatus',
     'statsSummary',
@@ -56,12 +60,14 @@ const activeVulnerabilityColumnLabels = [
 ];
 
 const hostedAssets = [
-    'dashboard.css',
-    'dashboard.js',
-    'pako.js',
-    'chart.js',
-    'pdf-export.bundle.js',
-    'payload.json.gz'
+    'runtime/dashboard.css',
+    'runtime/dashboard.js',
+    'runtime/pako.js',
+    'vendor/chart.js',
+    'data/summary.json',
+    'optional/pdf-export.runtime.js',
+    'optional/pdf-export.bundle.js',
+    'data/payload.json.gz'
 ];
 
 function assertFileExists(filePath, message) {
@@ -109,15 +115,12 @@ function validateCommonHtml(html, label) {
         assertContains(html, columnLabel, `${label}: missing Active Vulnerabilities column label '${columnLabel}'.`);
     });
 
-    ['Critical', 'High', 'Medium', 'Low', 'Report:', 'Export to PDF', 'Dashboard filters'].forEach(text => {
+    ['Critical', 'High', 'Medium', 'Low', 'Report', 'Export PDF', 'Dashboard filters', 'Clear All'].forEach(text => {
         assertContains(html, text, `${label}: missing required text '${text}'.`);
     });
 
-    assertContains(html, 'class="dashboard-header"', `${label}: missing dashboard header shell.`);
-    assert(
-        !/<h1[\s\S]*report-selector-container[\s\S]*<\/h1>/i.test(html),
-        `${label}: report selector controls should not be nested inside the h1.`
-    );
+    assertContains(html, 'class="filter-toolbar"', `${label}: missing filter toolbar shell.`);
+    assertContains(html, 'class="report-selector-shell"', `${label}: missing report selector shell.`);
 }
 
 function validateSelfContained(selfContainedPath) {
@@ -127,7 +130,7 @@ function validateSelfContained(selfContainedPath) {
     assertContains(html, '<style>', 'self-contained: expected embedded CSS block.');
     assertContains(html, '<script id="chartJsLib" type="application/gzip-base64">', 'self-contained: missing embedded Chart.js payload.');
     assertContains(html, '<script id="pdfExportBundleLib" type="application/gzip-base64">', 'self-contained: missing embedded PDF export payload.');
-    assert(!html.includes('.assets/dashboard.js'), 'self-contained: should not reference hosted dashboard asset paths.');
+    assert(!html.includes('.assets/'), 'self-contained: should not reference hosted dashboard asset paths.');
 }
 
 function validateHosted(hostedPath) {
@@ -145,19 +148,30 @@ function validateHosted(hostedPath) {
         assertContains(html, `${hostedDirectoryName}/${assetName}`, `hosted: expected HTML to reference '${assetName}'.`);
     });
 
+    const hostedRuntimeJs = readUtf8(path.join(hostedDirectoryPath, 'runtime/dashboard.js'));
+    const hostedPdfRuntimeJs = readUtf8(path.join(hostedDirectoryPath, 'optional/pdf-export.runtime.js'));
+    const hostedSummaryJson = JSON.parse(readUtf8(path.join(hostedDirectoryPath, 'data/summary.json')));
+    assert(hostedSummaryJson && hostedSummaryJson.filterCatalog, 'hosted: expected summary asset to contain hosted filter catalog data.');
+    assert(Array.isArray(hostedSummaryJson.filterCatalog.devices), 'hosted: expected summary asset to contain filter catalog devices.');
+    assertContains(html, `"payloadSummaryUrl":"${hostedDirectoryName}/data/summary.json"`, 'hosted: expected hosted summary payload URL to be configured.');
+    assertContains(html, '"pdfExportRuntimeMode":"external"', 'hosted: expected hosted PDF export controller to be deferred.');
+    assertContains(html, `"pdfExportRuntimeUrl":"${hostedDirectoryName}/optional/pdf-export.runtime.js"`, 'hosted: expected hosted PDF export controller URL to be configured.');
+    assert(!hostedRuntimeJs.includes('async function exportToPDF'), 'hosted: expected runtime/dashboard.js to exclude the deferred PDF export controller.');
+    assertContains(hostedPdfRuntimeJs, 'async function exportToPDF', 'hosted: expected optional PDF runtime asset to contain the export controller.');
+
     assertContains(
         html,
-        `<link rel="stylesheet" href="${hostedDirectoryName}/dashboard.css">`,
+        `<link rel="stylesheet" href="${hostedDirectoryName}/runtime/dashboard.css">`,
         'hosted: expected external stylesheet reference.'
     );
     assertContains(
         html,
-        `<script src="${hostedDirectoryName}/pako.js"></script>`,
+        `<script src="${hostedDirectoryName}/runtime/pako.js"></script>`,
         'hosted: expected external pako reference.'
     );
     assertContains(
         html,
-        `<script src="${hostedDirectoryName}/dashboard.js"></script>`,
+        `<script src="${hostedDirectoryName}/runtime/dashboard.js"></script>`,
         'hosted: expected external dashboard script reference.'
     );
     assert(!html.includes('<style>'), 'hosted: should not contain embedded stylesheet markup.');

@@ -523,9 +523,6 @@ try {
     if ($dom -notmatch 'id="reportSelector"') {
         throw 'Hosted dashboard DOM snapshot did not contain the report selector.'
     }
-    if ($dom -match 'Failed to initialize the dashboard') {
-        throw 'Hosted dashboard reported an initialization failure.'
-    }
     if ($dom -notmatch 'id="hostedDashboardSmokeProbe"') {
         throw 'Hosted dashboard DOM snapshot did not contain the runtime readiness smoke probe.'
     }

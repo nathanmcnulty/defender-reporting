@@ -56,7 +56,7 @@ Prefer the lightest level that covers the change you made, then escalate only wh
 
 ## Fast maintenance loops
 
-When you change `templates/dashboard.js`, run the focused dashboard assertions before the heavier preflight path:
+When you change `templates/dashboard.modules.json` or any file under `templates/dashboard/`, run the focused dashboard assertions before the heavier preflight path:
 
 ```powershell
 node .\tests\Assert-DashboardActiveChartSeries.js

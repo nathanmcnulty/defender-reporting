@@ -80,9 +80,38 @@ function createDocumentStub() {
     };
 }
 
+function loadDashboardSource() {
+    const templatesRoot = path.join(__dirname, '..', '..', 'templates');
+    const manifestPath = path.join(templatesRoot, 'dashboard.modules.json');
+    if (fs.existsSync(manifestPath)) {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        const modulePaths = Array.isArray(manifest.modules) ? manifest.modules : [];
+        if (modulePaths.length === 0) {
+            throw new Error(`No dashboard modules were defined in ${manifestPath}`);
+        }
+
+        const dashboardSource = modulePaths
+            .map((relativePath) => {
+                const modulePath = path.join(templatesRoot, ...String(relativePath).split(/[\\/]/));
+                return fs.readFileSync(modulePath, 'utf8');
+            })
+            .join('\n\n');
+
+        return {
+            dashboardPath: manifestPath,
+            dashboardSource
+        };
+    }
+
+    const dashboardPath = path.join(templatesRoot, 'dashboard.js');
+    return {
+        dashboardPath,
+        dashboardSource: fs.readFileSync(dashboardPath, 'utf8')
+    };
+}
+
 function loadDashboardHarness(exportSource, sandboxOverrides = {}) {
-    const dashboardPath = path.join(__dirname, '..', '..', 'templates', 'dashboard.js');
-    const dashboardSource = fs.readFileSync(dashboardPath, 'utf8');
+    const { dashboardPath, dashboardSource } = loadDashboardSource();
     const documentStub = createDocumentStub();
 
     const sandbox = {
@@ -128,5 +157,6 @@ function loadDashboardHarness(exportSource, sandboxOverrides = {}) {
 module.exports = {
     createStubElement,
     createDocumentStub,
+    loadDashboardSource,
     loadDashboardHarness
 };
