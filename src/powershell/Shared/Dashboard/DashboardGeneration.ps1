@@ -31,11 +31,11 @@ function Get-DashboardTemplateJavaScriptContent {
         [string]$TemplatesDirectory
     )
 
-    $moduleContentsByRelativePath = Get-DashboardTemplateJavaScriptModules -TemplatesDirectory $TemplatesDirectory
-    return (Join-DashboardTemplateJavaScriptModules -ModuleContentsByRelativePath $moduleContentsByRelativePath)
+    $moduleContentsByRelativePath = Get-DashboardTemplateJavaScriptModuleMap -TemplatesDirectory $TemplatesDirectory
+    return (Join-DashboardTemplateJavaScriptModuleBundle -ModuleContentsByRelativePath $moduleContentsByRelativePath)
 }
 
-function Get-DashboardTemplateJavaScriptModules {
+function Get-DashboardTemplateJavaScriptModuleMap {
     [CmdletBinding()]
     [OutputType([System.Collections.IDictionary])]
     param(
@@ -82,7 +82,7 @@ function Get-DashboardTemplateJavaScriptModules {
     throw "Template file not found: $legacyJsPath (or module manifest $jsManifestPath)"
 }
 
-function Join-DashboardTemplateJavaScriptModules {
+function Join-DashboardTemplateJavaScriptModuleBundle {
     [CmdletBinding()]
     [OutputType([string])]
     param(
@@ -176,8 +176,8 @@ function Get-DashboardTemplateContent {
         throw "Template file not found: $cssPath"
     }
 
-    $templates.JsModules = Get-DashboardTemplateJavaScriptModules -TemplatesDirectory $templatesDirectory
-    $templates.Js = Join-DashboardTemplateJavaScriptModules -ModuleContentsByRelativePath $templates.JsModules
+    $templates.JsModules = Get-DashboardTemplateJavaScriptModuleMap -TemplatesDirectory $templatesDirectory
+    $templates.Js = Join-DashboardTemplateJavaScriptModuleBundle -ModuleContentsByRelativePath $templates.JsModules
 
     return $templates
 }
@@ -2974,10 +2974,10 @@ function Write-DashboardArtifactBundle {
     }
 
     if ($SplitAssets -and $null -ne $TemplateJsModules -and $TemplateJsModules.Count -gt 0 -and $TemplateJsModules.Contains($deferredHostedPdfExportModulePath)) {
-        $hostedDashboardJsContent = Join-DashboardTemplateJavaScriptModules `
+        $hostedDashboardJsContent = Join-DashboardTemplateJavaScriptModuleBundle `
             -ModuleContentsByRelativePath $TemplateJsModules `
             -ExcludeRelativePaths @($deferredHostedPdfExportModulePath)
-        $hostedPdfExportRuntimeContent = Join-DashboardTemplateJavaScriptModules `
+        $hostedPdfExportRuntimeContent = Join-DashboardTemplateJavaScriptModuleBundle `
             -ModuleContentsByRelativePath $TemplateJsModules `
             -IncludeRelativePaths @($deferredHostedPdfExportModulePath)
         if (-not [string]::IsNullOrWhiteSpace($hostedPdfExportRuntimeContent)) {
