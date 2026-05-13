@@ -3,9 +3,9 @@
     Uploads dashboard template files to Azure Blob Storage.
 
 .DESCRIPTION
-    One-time helper script to upload the HTML, CSS, and JavaScript template files
-    from the local templates/ directory to the 'templates' blob container in Azure
-    Blob Storage. Re-run this script after making changes to any template file.
+    One-time helper script to upload the dashboard template tree from the local
+    templates/ directory to the 'templates' blob container in Azure Blob Storage.
+    Re-run this script after making changes to any template file or JavaScript module.
     
     Uses Entra ID authentication (bearer token) since the storage account has
     shared key access disabled.
@@ -122,12 +122,27 @@ if (-not (Test-Path -Path $TemplatesPath -PathType Container)) {
     throw "Templates directory not found: $TemplatesPath"
 }
 
-# Template files to upload with their content types
-$templateFiles = @(
-    @{ Name = "dashboard.html"; ContentType = "text/html" }
-    @{ Name = "dashboard.css";  ContentType = "text/css" }
-    @{ Name = "dashboard.js";   ContentType = "application/javascript" }
-)
+function Get-TemplateContentType {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo]$File
+    )
+
+    switch ($File.Extension.ToLowerInvariant()) {
+        '.html' { return 'text/html' }
+        '.css' { return 'text/css' }
+        '.js' { return 'application/javascript' }
+        '.json' { return 'application/json' }
+        default { return 'application/octet-stream' }
+    }
+}
+
+$templateFiles = Get-ChildItem -Path $TemplatesPath -File -Recurse | Sort-Object FullName
+if ($templateFiles.Count -eq 0) {
+    throw "No template files found under: $TemplatesPath"
+}
 
 # Get bearer token for blob storage
 Write-Host "Authenticating to Azure Storage..." -ForegroundColor Cyan
@@ -139,17 +154,12 @@ $blobApiVersion = '2021-12-02'
 Write-Host "`nUploading templates to '$ContainerName' container..." -ForegroundColor Cyan
 
 foreach ($file in $templateFiles) {
-    $localPath = Join-Path -Path $TemplatesPath -ChildPath $file.Name
+    $relativePath = [System.IO.Path]::GetRelativePath($TemplatesPath, $file.FullName).Replace('\', '/')
+    $blobUri = "$baseUrl/$ContainerName/$relativePath"
+    $fileSize = [math]::Round($file.Length / 1KB, 1)
+    $contentType = Get-TemplateContentType -File $file
 
-    if (-not (Test-Path -Path $localPath)) {
-        Write-Warning "File not found, skipping: $localPath"
-        continue
-    }
-
-    $blobUri = "$baseUrl/$ContainerName/$($file.Name)"
-    $fileSize = [math]::Round((Get-Item $localPath).Length / 1KB, 1)
-
-    Write-Host "  Uploading $($file.Name) (${fileSize}KB)..." -ForegroundColor Gray
+    Write-Host "  Uploading $relativePath (${fileSize}KB)..." -ForegroundColor Gray
 
     $headers = @{
         'Authorization'    = "Bearer $storageToken"
@@ -162,13 +172,13 @@ foreach ($file in $templateFiles) {
     $retryDelay = 2
     for ($attempt = 1; $attempt -le $maxRetries; $attempt++) {
         try {
-            Invoke-RestMethod -Uri $blobUri -Method Put -Headers $headers -InFile $localPath -ContentType $file.ContentType
+            Invoke-RestMethod -Uri $blobUri -Method Put -Headers $headers -InFile $file.FullName -ContentType $contentType
             Write-Host "    Uploaded" -ForegroundColor Green
             break
         }
         catch {
             if ($attempt -eq $maxRetries) {
-                Write-Error "    Failed to upload $($file.Name) after $maxRetries attempts: $_"
+                Write-Error "    Failed to upload $relativePath after $maxRetries attempts: $_"
                 throw
             }
             Write-Host "    Attempt $attempt failed, retrying in ${retryDelay}s..." -ForegroundColor Yellow

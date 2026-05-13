@@ -35,6 +35,24 @@ Standard large Azure acceptance dataset:
 - Accepted architecture anchor: `monolithic-v1`
 - Compare future hosted Azure acceptance runs against the latest accepted envelope in `docs/performance-baselines.md`
 
+## Hosted local runtime checkpoints
+
+Use the local `exports\` lane as a quick browser/runtime checkpoint before escalating to Azure or the large semantic lanes.
+
+Current local reference points on the generated hosted dashboard:
+
+- Critical hosted assets (HTML + `runtime/dashboard.css` + `runtime/dashboard.js` + `runtime/pako.js` + `vendor/chart.js` + `data/summary.json` + `data/payload.json.gz`) are about `1.48 MB` on the local `exports\` lane, with `data/summary.json` contributing only about `2.6 KB`.
+- Optional hosted PDF/export assets (`optional/pdf-export.runtime.js` + `optional/pdf-export.bundle.js`) are about `2.39 MB` and should stay off the initial interaction path.
+- Hosted Edge headless readiness on the local `exports\` lane is about `12.0 s` (`loadData ~= 28 ms`, `denormalize ~= 12.0 s`, `init ~= 12.0 s`) after the cache/digest/worker hardening work.
+- Local dual-package `Write dashboard` is about `2.5 s to 3.1 s` on the same lane.
+
+Review guidance for this lane:
+
+- Investigate if the critical hosted asset set grows by more than `10%` without a deliberate product reason.
+- Investigate if hosted readiness on the local `exports\` lane regresses above `15 s` or if `tests\Invoke-HostedDashboardRuntimeSmoke.ps1` stops reaching `dashboard-ready`.
+- Investigate if the optional PDF bundle is pulled back onto the initial path instead of remaining on-demand.
+- Investigate if local dual-package `Write dashboard` regresses above `10%` on the same lane.
+
 ## Recommended workflow
 
 1. Run the deterministic preflight.

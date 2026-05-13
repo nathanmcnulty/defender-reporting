@@ -8,21 +8,6 @@ __CSS_BLOCK__
 </head>
 <body>
     <main class="container" id="dashboardMain">
-        <header class="dashboard-header">
-            <h1>🛡️ Vulnerability Dashboard</h1>
-            <div class="report-selector-container">
-                <label for="reportSelector">Report:</label>
-                <select id="reportSelector">
-                    <option value="active-vulnerabilities">Active Vulnerabilities</option>
-                    <option value="remediation-activity">Remediation Activity</option>
-                    <option value="impact-analysis">Impact Analysis</option>
-                    <option value="devices-by-remediation">Devices by Remediation</option>
-                    <option value="remediations-by-device">Remediations by Device</option>
-                </select>
-                <button id="exportPdfButton" type="button" class="export-pdf-btn">📄 Export to PDF</button>
-            </div>
-        </header>
-
         <div id="dashboardStatus" class="dashboard-status" role="status" aria-live="polite" hidden></div>
 
         <!-- Stats Summary -->
@@ -46,23 +31,54 @@ __CSS_BLOCK__
         </div>
 
         <div class="filter-toolbar" id="filterToolbar" role="region" aria-label="Dashboard filters">
-            <div class="filter-pill-row" id="filterPillRow">
+            <div class="filter-pill-row filter-pill-row-top" id="filterPillRowTop">
                 <button id="filterPillDate" type="button" class="filter-pill" data-filter-key="date" aria-haspopup="dialog" aria-expanded="false">
                     <span class="filter-pill-label">Date</span>
                     <span class="filter-pill-value">1 Week</span>
                 </button>
                 <button id="filterPillRbacGroup" type="button" class="filter-pill" data-filter-key="filterRbacGroup" aria-haspopup="dialog" aria-expanded="false">
-                    <span class="filter-pill-label">Device Groups</span>
+                    <span class="filter-pill-label">Groups</span>
                     <span class="filter-pill-value">All</span>
                 </button>
                 <button id="filterPillDeviceTags" type="button" class="filter-pill" data-filter-key="filterDeviceTags" aria-haspopup="dialog" aria-expanded="false">
-                    <span class="filter-pill-label">Device Tags</span>
+                    <span class="filter-pill-label">Tags</span>
                     <span class="filter-pill-value">All</span>
                 </button>
                 <button id="filterPillOSPlatform" type="button" class="filter-pill" data-filter-key="filterOSPlatform" aria-haspopup="dialog" aria-expanded="false">
                     <span class="filter-pill-label">Platform</span>
                     <span class="filter-pill-value">All</span>
                 </button>
+            </div>
+            <div class="toolbar-control-group toolbar-control-group-top-right">
+                <div class="report-selector-shell" id="reportSelectorShell">
+                    <button
+                        id="reportSelectorButton"
+                        type="button"
+                        class="filter-pill report-selector-pill"
+                        aria-label="Report"
+                        aria-haspopup="dialog"
+                        aria-expanded="false"
+                        aria-controls="reportSelectorPopover">
+                        <span class="filter-pill-label">Report</span>
+                        <span id="reportSelectorValue" class="filter-pill-value">Active Vulnerabilities</span>
+                    </button>
+                    <div id="reportSelectorPopover" class="report-selector-popover" role="dialog" aria-modal="false" aria-labelledby="reportSelectorPopoverTitle" aria-hidden="true" hidden>
+                        <div class="filter-popover-header">
+                            <div id="reportSelectorPopoverTitle" class="filter-popover-title">Report</div>
+                            <button id="reportSelectorPopoverCloseButton" type="button" class="filter-popover-close" aria-label="Close report selector">&times;</button>
+                        </div>
+                        <div id="reportSelectorOptions" class="report-selector-options" role="listbox" aria-label="Reports"></div>
+                    </div>
+                    <select id="reportSelector" class="report-selector-native" aria-label="Report" hidden>
+                        <option value="active-vulnerabilities">Active Vulnerabilities</option>
+                        <option value="remediation-activity">Remediation Activity</option>
+                        <option value="impact-analysis">Impact Analysis</option>
+                        <option value="devices-by-remediation">Devices by Remediation</option>
+                        <option value="remediations-by-device">Remediations by Device</option>
+                    </select>
+                </div>
+            </div>
+            <div class="filter-pill-row filter-pill-row-bottom" id="filterPillRowBottom">
                 <button id="filterPillSeverity" type="button" class="filter-pill" data-filter-key="filterSeverity" aria-haspopup="dialog" aria-expanded="false">
                     <span class="filter-pill-label">Severity</span>
                     <span class="filter-pill-value">All</span>
@@ -72,6 +88,9 @@ __CSS_BLOCK__
                     <span class="filter-pill-value">All</span>
                 </button>
                 <button id="clearAllFiltersButton" type="button" class="clear-filters-btn">Clear All</button>
+            </div>
+            <div class="toolbar-control-group toolbar-control-group-bottom-right">
+                <button id="exportPdfButton" type="button" class="export-pdf-btn toolbar-pill-button">Export PDF</button>
             </div>
 
             <div id="filterPopover" class="filter-popover" role="dialog" aria-modal="false" aria-labelledby="filterPopoverTitle" aria-hidden="true" hidden>
@@ -216,15 +235,18 @@ __CSS_BLOCK__
                 <summary>Data Quality Diagnostics</summary>
 __DATA_QUALITY_SECTION__
             </details>
-            <div id="remediationReportToolbar" class="report-mode-toolbar" hidden>
-                <div class="report-mode-group" role="group" aria-labelledby="remediationModeLabel">
-                    <span id="remediationModeLabel" class="report-mode-label">Include resolved vulnerabilities</span>
-                    <div class="report-mode-buttons">
-                        <button id="remediationModeRangeButton" type="button" class="report-mode-button" data-remediation-report-mode="range" aria-pressed="false">Yes</button>
-                        <button id="remediationModeSnapshotButton" type="button" class="report-mode-button is-active" data-remediation-report-mode="snapshot" aria-pressed="true">No</button>
+            <div class="dashboard-footer-actions">
+                <button id="copyViewLinkButton" type="button" class="footer-action-button" hidden>Copy View Link</button>
+                <div id="remediationReportToolbar" class="report-mode-toolbar" hidden>
+                    <div class="report-mode-group" role="group" aria-labelledby="remediationModeLabel">
+                        <span id="remediationModeLabel" class="report-mode-label">Include resolved vulnerabilities</span>
+                        <div class="report-mode-buttons">
+                            <button id="remediationModeRangeButton" type="button" class="report-mode-button" data-remediation-report-mode="range" aria-pressed="false">Yes</button>
+                            <button id="remediationModeSnapshotButton" type="button" class="report-mode-button is-active" data-remediation-report-mode="snapshot" aria-pressed="true">No</button>
+                        </div>
                     </div>
+                    <div id="remediationModeSummary" class="report-mode-summary" aria-live="polite"></div>
                 </div>
-                <div id="remediationModeSummary" class="report-mode-summary" aria-live="polite"></div>
             </div>
         </div>
 
