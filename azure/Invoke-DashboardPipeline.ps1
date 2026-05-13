@@ -13093,9 +13093,9 @@ function Get-DashboardPayloadSummaryJson {
     }
     finally {
         if ($jsonReader) { $jsonReader.Close() }
-        elseif ($reader) { $reader.Dispose() }
-        elseif ($gzip) { $gzip.Dispose() }
-        elseif ($fileStream) { $fileStream.Dispose() }
+        if ($reader) { $reader.Dispose() }
+        if ($gzip) { $gzip.Dispose() }
+        if ($fileStream) { $fileStream.Dispose() }
     }
 }
 
