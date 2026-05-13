@@ -1,5 +1,130 @@
 ﻿# Shared generator/runbook helpers used for dashboard normalization and HTML assembly.
 
+function Join-DashboardTemplateRelativePath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TemplatesDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RelativePath
+    )
+
+    $resolvedPath = $TemplatesDirectory
+    foreach ($segment in ([string]$RelativePath -split '[\\/]')) {
+        if ([string]::IsNullOrWhiteSpace($segment)) {
+            continue
+        }
+
+        $resolvedPath = Join-Path -Path $resolvedPath -ChildPath $segment
+    }
+
+    return $resolvedPath
+}
+
+function Get-DashboardTemplateJavaScriptContent {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TemplatesDirectory
+    )
+
+    $moduleContentsByRelativePath = Get-DashboardTemplateJavaScriptModules -TemplatesDirectory $TemplatesDirectory
+    return (Join-DashboardTemplateJavaScriptModules -ModuleContentsByRelativePath $moduleContentsByRelativePath)
+}
+
+function Get-DashboardTemplateJavaScriptModules {
+    [CmdletBinding()]
+    [OutputType([System.Collections.IDictionary])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TemplatesDirectory
+    )
+
+    $jsManifestPath = Join-Path -Path $TemplatesDirectory -ChildPath 'dashboard.modules.json'
+    $legacyJsPath = Join-Path -Path $TemplatesDirectory -ChildPath 'dashboard.js'
+
+    if (Test-Path -Path $jsManifestPath -PathType Leaf) {
+        Write-Host '  Loading JavaScript template modules...' -ForegroundColor Gray
+        $moduleManifest = Get-Content -Path $jsManifestPath -Raw | ConvertFrom-Json -AsHashtable
+        $moduleRelativePaths = @()
+        if ($moduleManifest.ContainsKey('modules') -and $null -ne $moduleManifest.modules) {
+            $moduleRelativePaths = @($moduleManifest.modules | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        }
+
+        if ($moduleRelativePaths.Count -eq 0) {
+            throw "No JavaScript template modules were defined in: $jsManifestPath"
+        }
+
+        $moduleContentsByRelativePath = [ordered]@{}
+        foreach ($moduleRelativePath in $moduleRelativePaths) {
+            $normalizedRelativePath = ([string]$moduleRelativePath -replace '\\', '/').TrimStart('/')
+            $modulePath = Join-DashboardTemplateRelativePath -TemplatesDirectory $TemplatesDirectory -RelativePath $normalizedRelativePath
+            if (-not (Test-Path -Path $modulePath -PathType Leaf)) {
+                throw "Template module not found: $modulePath"
+            }
+
+            $moduleContentsByRelativePath[$normalizedRelativePath] = Get-Content -Path $modulePath -Raw
+        }
+
+        return $moduleContentsByRelativePath
+    }
+
+    if (Test-Path -Path $legacyJsPath -PathType Leaf) {
+        Write-Host '  Loading JavaScript template...' -ForegroundColor Gray
+        return [ordered]@{
+            'dashboard.js' = (Get-Content -Path $legacyJsPath -Raw)
+        }
+    }
+
+    throw "Template file not found: $legacyJsPath (or module manifest $jsManifestPath)"
+}
+
+function Join-DashboardTemplateJavaScriptModules {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$ModuleContentsByRelativePath,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$IncludeRelativePaths = @(),
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$ExcludeRelativePaths = @()
+    )
+
+    $normalizedIncludeRelativePaths = @($IncludeRelativePaths | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { ([string]$_ -replace '\\', '/').TrimStart('/') })
+    $normalizedExcludeRelativePaths = @($ExcludeRelativePaths | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { ([string]$_ -replace '\\', '/').TrimStart('/') })
+
+    $selectedRelativePaths = @(
+        if ($normalizedIncludeRelativePaths.Count -gt 0) {
+            foreach ($includeRelativePath in $normalizedIncludeRelativePaths) {
+                if (-not $ModuleContentsByRelativePath.Contains($includeRelativePath)) {
+                    throw "Template module not found in content map: $includeRelativePath"
+                }
+
+                $includeRelativePath
+            }
+        }
+        else {
+            @($ModuleContentsByRelativePath.Keys)
+        }
+    )
+
+    if ($normalizedExcludeRelativePaths.Count -gt 0) {
+        $selectedRelativePaths = @($selectedRelativePaths | Where-Object { $normalizedExcludeRelativePaths -notcontains $_ })
+    }
+
+    if ($selectedRelativePaths.Count -eq 0) {
+        return ''
+    }
+
+    return (@($selectedRelativePaths | ForEach-Object { [string]$ModuleContentsByRelativePath[$_] }) -join "`r`n`r`n")
+}
+
 function Get-DashboardTemplateContent {
     <#
     .SYNOPSIS
@@ -30,12 +155,11 @@ function Get-DashboardTemplateContent {
         Html = $null
         Css = $null
         Js = $null
+        JsModules = $null
     }
 
     $htmlPath = Join-Path -Path $templatesDirectory -ChildPath 'dashboard.html'
     $cssPath = Join-Path -Path $templatesDirectory -ChildPath 'dashboard.css'
-    $jsPath = Join-Path -Path $templatesDirectory -ChildPath 'dashboard.js'
-
     if (Test-Path -Path $htmlPath) {
         Write-Host '  Loading HTML template...' -ForegroundColor Gray
         $templates.Html = Get-Content -Path $htmlPath -Raw
@@ -52,13 +176,8 @@ function Get-DashboardTemplateContent {
         throw "Template file not found: $cssPath"
     }
 
-    if (Test-Path -Path $jsPath) {
-        Write-Host '  Loading JavaScript template...' -ForegroundColor Gray
-        $templates.Js = Get-Content -Path $jsPath -Raw
-    }
-    else {
-        throw "Template file not found: $jsPath"
-    }
+    $templates.JsModules = Get-DashboardTemplateJavaScriptModules -TemplatesDirectory $templatesDirectory
+    $templates.Js = Join-DashboardTemplateJavaScriptModules -ModuleContentsByRelativePath $templates.JsModules
 
     return $templates
 }
@@ -1371,9 +1490,9 @@ function Get-CompressedPayloadVulnCount {
     }
     finally {
         if ($jsonReader) { $jsonReader.Close() }
-        elseif ($reader) { $reader.Dispose() }
-        elseif ($gzip) { $gzip.Dispose() }
-        elseif ($fileStream) { $fileStream.Dispose() }
+        if ($reader) { $reader.Dispose() }
+        if ($gzip) { $gzip.Dispose() }
+        if ($fileStream) { $fileStream.Dispose() }
     }
 }
 
@@ -2631,6 +2750,128 @@ function Get-DashboardAssetsDirectoryName {
     return ([System.IO.Path]::GetFileNameWithoutExtension([System.IO.Path]::GetFullPath($HtmlPath)) + '.assets')
 }
 
+function Get-DashboardHostedAssetLayout {
+    [CmdletBinding()]
+    [OutputType([System.Collections.Specialized.OrderedDictionary])]
+    param()
+
+    return [ordered]@{
+        Css = 'runtime/dashboard.css'
+        DashboardJs = 'runtime/dashboard.js'
+        Pako = 'runtime/pako.js'
+        ChartJs = 'vendor/chart.js'
+        PayloadSummary = 'data/summary.json'
+        Payload = 'data/payload.json.gz'
+        PdfExportRuntime = 'optional/pdf-export.runtime.js'
+        PdfExportBundle = 'optional/pdf-export.bundle.js'
+    }
+}
+
+function Get-DashboardPayloadSummaryJson {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PayloadPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [psobject]$PayloadManifest
+    )
+
+    $fileStream = $null
+    $gzip = $null
+    $reader = $null
+    $jsonReader = $null
+
+    try {
+        $fileStream = [System.IO.File]::OpenRead($PayloadPath)
+        $gzip = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        $reader = [System.IO.StreamReader]::new($gzip, [System.Text.Encoding]::UTF8)
+        $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
+
+        $lookupsToken = $null
+        while ($jsonReader.Read()) {
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) {
+                continue
+            }
+
+            if ([string]$jsonReader.Value -ne 'lookups') {
+                continue
+            }
+
+            [void]$jsonReader.Read()
+            $lookupsToken = [Newtonsoft.Json.Linq.JToken]::ReadFrom($jsonReader)
+            break
+        }
+
+        if ($null -eq $lookupsToken) {
+            throw "Unable to extract lookups from dashboard payload '$PayloadPath'."
+        }
+
+        $summaryObject = [Newtonsoft.Json.Linq.JObject]::new()
+        $summaryObject.Add([Newtonsoft.Json.Linq.JProperty]::new('version', [Newtonsoft.Json.Linq.JValue]::new(1)))
+
+        $metaObject = [Newtonsoft.Json.Linq.JObject]::new()
+        if ($null -ne $PayloadManifest) {
+            if ($PayloadManifest.PSObject.Properties['GeneratedOnUtc']) {
+                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('generatedOnUtc', [Newtonsoft.Json.Linq.JValue]::new([string]$PayloadManifest.GeneratedOnUtc)))
+            }
+            if ($PayloadManifest.PSObject.Properties['PayloadSha256']) {
+                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('payloadSha256', [Newtonsoft.Json.Linq.JValue]::new([string]$PayloadManifest.PayloadSha256)))
+            }
+            if ($PayloadManifest.PSObject.Properties['VulnCount']) {
+                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('vulnCount', [Newtonsoft.Json.Linq.JValue]::new([int]$PayloadManifest.VulnCount)))
+            }
+            if ($PayloadManifest.PSObject.Properties['DeviceCount']) {
+                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('deviceCount', [Newtonsoft.Json.Linq.JValue]::new([int]$PayloadManifest.DeviceCount)))
+            }
+            if ($PayloadManifest.PSObject.Properties['CveCount']) {
+                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('cveCount', [Newtonsoft.Json.Linq.JValue]::new([int]$PayloadManifest.CveCount)))
+            }
+        }
+
+        $lookupsObject = [Newtonsoft.Json.Linq.JObject]$lookupsToken
+        $filterCatalogObject = [Newtonsoft.Json.Linq.JObject]::new()
+        $groupsToken = $lookupsObject.GetValue('groups')
+        $tagsToken = $lookupsObject.GetValue('tags')
+        $devicesToken = $lookupsObject.GetValue('devices')
+
+        $filterCatalogObject.Add([Newtonsoft.Json.Linq.JProperty]::new('groups', $(if ($null -ne $groupsToken) { $groupsToken.DeepClone() } else { [Newtonsoft.Json.Linq.JArray]::new() })))
+        $filterCatalogObject.Add([Newtonsoft.Json.Linq.JProperty]::new('tags', $(if ($null -ne $tagsToken) { $tagsToken.DeepClone() } else { [Newtonsoft.Json.Linq.JArray]::new() })))
+
+        $summaryDevices = [Newtonsoft.Json.Linq.JArray]::new()
+        if ($devicesToken -is [Newtonsoft.Json.Linq.JArray]) {
+            foreach ($deviceToken in $devicesToken) {
+                if ($deviceToken -isnot [Newtonsoft.Json.Linq.JObject]) {
+                    continue
+                }
+
+                $summaryDevice = [Newtonsoft.Json.Linq.JObject]::new()
+                foreach ($propertyName in @('id', 'n', 'g', 't')) {
+                    $propertyToken = $deviceToken.GetValue($propertyName)
+                    if ($null -ne $propertyToken) {
+                        $summaryDevice.Add([Newtonsoft.Json.Linq.JProperty]::new($propertyName, $propertyToken.DeepClone()))
+                    }
+                }
+
+                $summaryDevices.Add($summaryDevice)
+            }
+        }
+
+        $filterCatalogObject.Add([Newtonsoft.Json.Linq.JProperty]::new('devices', $summaryDevices))
+        $summaryObject.Add([Newtonsoft.Json.Linq.JProperty]::new('meta', $metaObject))
+        $summaryObject.Add([Newtonsoft.Json.Linq.JProperty]::new('filterCatalog', $filterCatalogObject))
+        return $summaryObject.ToString([Newtonsoft.Json.Formatting]::None)
+    }
+    finally {
+        if ($jsonReader) { $jsonReader.Close() }
+        elseif ($reader) { $reader.Dispose() }
+        elseif ($gzip) { $gzip.Dispose() }
+        elseif ($fileStream) { $fileStream.Dispose() }
+    }
+}
+
 function Get-DashboardAssetUrl {
     [CmdletBinding()]
     [OutputType([string])]
@@ -2639,10 +2880,12 @@ function Get-DashboardAssetUrl {
         [string]$HtmlPath,
 
         [Parameter(Mandatory = $true)]
-        [string]$AssetFileName
+        [Alias('AssetFileName')]
+        [string]$AssetRelativePath
     )
 
-    return ((Get-DashboardAssetsDirectoryName -HtmlPath $HtmlPath) + '/' + $AssetFileName)
+    $normalizedRelativePath = ($AssetRelativePath -replace '\\', '/').TrimStart('/')
+    return ((Get-DashboardAssetsDirectoryName -HtmlPath $HtmlPath) + '/' + $normalizedRelativePath)
 }
 
 function Write-DashboardArtifactBundle {
@@ -2657,6 +2900,10 @@ function Write-DashboardArtifactBundle {
 
         [Parameter(Mandatory = $true)]
         [string]$TemplateJs,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [System.Collections.IDictionary]$TemplateJsModules,
 
         [Parameter(Mandatory = $true)]
         [string]$PakoLibraryPath,
@@ -2677,6 +2924,10 @@ function Write-DashboardArtifactBundle {
 
         [Parameter(Mandatory = $true)]
         [string]$PayloadPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [psobject]$PayloadManifest,
 
         [Parameter(Mandatory = $true)]
         [string]$OutputPath,
@@ -2711,11 +2962,27 @@ function Write-DashboardArtifactBundle {
     }
 
     $dataFormatMarker = if ($SplitAssets) { 'external-compressed' } else { 'compressed' }
+    $deferredHostedPdfExportModulePath = 'dashboard/90-pdf-export.js'
+    $hostedDashboardJsContent = $TemplateJs
+    $hostedPdfExportRuntimeContent = ''
     $dashboardAssetsConfig = [ordered]@{
         deliveryMode = if ($SplitAssets) { 'split-assets' } else { 'self-contained' }
         chartJsMode = if ($SplitAssets) { 'external' } else { 'embedded' }
+        pdfExportRuntimeMode = 'embedded'
         pdfExportBundleMode = if ($SplitAssets) { 'external' } else { 'embedded' }
         debugLogging = $false
+    }
+
+    if ($SplitAssets -and $null -ne $TemplateJsModules -and $TemplateJsModules.Count -gt 0 -and $TemplateJsModules.Contains($deferredHostedPdfExportModulePath)) {
+        $hostedDashboardJsContent = Join-DashboardTemplateJavaScriptModules `
+            -ModuleContentsByRelativePath $TemplateJsModules `
+            -ExcludeRelativePaths @($deferredHostedPdfExportModulePath)
+        $hostedPdfExportRuntimeContent = Join-DashboardTemplateJavaScriptModules `
+            -ModuleContentsByRelativePath $TemplateJsModules `
+            -IncludeRelativePaths @($deferredHostedPdfExportModulePath)
+        if (-not [string]::IsNullOrWhiteSpace($hostedPdfExportRuntimeContent)) {
+            $dashboardAssetsConfig.pdfExportRuntimeMode = 'external'
+        }
     }
 
     $cssBlock = $null
@@ -2730,34 +2997,60 @@ function Write-DashboardArtifactBundle {
         $dashboardAssetsPath = Get-DashboardAssetsDirectoryPath -HtmlPath $OutputPath
         [void](New-Item -Path $dashboardAssetsPath -ItemType Directory -Force)
 
-        $cssAssetFileName = 'dashboard.css'
-        $jsAssetFileName = 'dashboard.js'
-        $pakoAssetFileName = 'pako.js'
-        $chartJsAssetFileName = 'chart.js'
-        $pdfBundleAssetFileName = 'pdf-export.bundle.js'
-        $payloadAssetFileName = 'payload.json.gz'
+        $hostedAssetRelativePaths = Get-DashboardHostedAssetLayout
+        $cssAssetRelativePath = [string]$hostedAssetRelativePaths.Css
+        $jsAssetRelativePath = [string]$hostedAssetRelativePaths.DashboardJs
+        $pakoAssetRelativePath = [string]$hostedAssetRelativePaths.Pako
+        $chartJsAssetRelativePath = [string]$hostedAssetRelativePaths.ChartJs
+        $payloadSummaryAssetRelativePath = [string]$hostedAssetRelativePaths.PayloadSummary
+        $pdfRuntimeAssetRelativePath = [string]$hostedAssetRelativePaths.PdfExportRuntime
+        $pdfBundleAssetRelativePath = [string]$hostedAssetRelativePaths.PdfExportBundle
+        $payloadAssetRelativePath = [string]$hostedAssetRelativePaths.Payload
 
-        $cssAssetPath = Join-Path $dashboardAssetsPath $cssAssetFileName
-        $jsAssetPath = Join-Path $dashboardAssetsPath $jsAssetFileName
-        $pakoAssetPath = Join-Path $dashboardAssetsPath $pakoAssetFileName
-        $chartJsAssetPath = Join-Path $dashboardAssetsPath $chartJsAssetFileName
-        $pdfBundleAssetPath = Join-Path $dashboardAssetsPath $pdfBundleAssetFileName
-        $payloadAssetPath = Join-Path $dashboardAssetsPath $payloadAssetFileName
+        $cssAssetPath = Join-Path $dashboardAssetsPath ($cssAssetRelativePath -replace '/', '\')
+        $jsAssetPath = Join-Path $dashboardAssetsPath ($jsAssetRelativePath -replace '/', '\')
+        $pakoAssetPath = Join-Path $dashboardAssetsPath ($pakoAssetRelativePath -replace '/', '\')
+        $chartJsAssetPath = Join-Path $dashboardAssetsPath ($chartJsAssetRelativePath -replace '/', '\')
+        $payloadSummaryAssetPath = Join-Path $dashboardAssetsPath ($payloadSummaryAssetRelativePath -replace '/', '\')
+        $pdfRuntimeAssetPath = Join-Path $dashboardAssetsPath ($pdfRuntimeAssetRelativePath -replace '/', '\')
+        $pdfBundleAssetPath = Join-Path $dashboardAssetsPath ($pdfBundleAssetRelativePath -replace '/', '\')
+        $payloadAssetPath = Join-Path $dashboardAssetsPath ($payloadAssetRelativePath -replace '/', '\')
+
+        $assetPaths = @($cssAssetPath, $jsAssetPath, $pakoAssetPath, $chartJsAssetPath, $payloadSummaryAssetPath, $pdfBundleAssetPath, $payloadAssetPath)
+        if ($dashboardAssetsConfig.pdfExportRuntimeMode -eq 'external') {
+            $assetPaths += $pdfRuntimeAssetPath
+        }
+
+        foreach ($assetPath in $assetPaths) {
+            $assetParentPath = Split-Path -Path $assetPath -Parent
+            if (-not [string]::IsNullOrWhiteSpace($assetParentPath) -and -not (Test-Path -LiteralPath $assetParentPath -PathType Container)) {
+                [void](New-Item -Path $assetParentPath -ItemType Directory -Force)
+            }
+        }
 
         Write-Utf8File -Path $cssAssetPath -Content $TemplateCss
-        Write-Utf8File -Path $jsAssetPath -Content $TemplateJs
+        Write-Utf8File -Path $jsAssetPath -Content $hostedDashboardJsContent
         Copy-Item -LiteralPath $PakoLibraryPath -Destination $pakoAssetPath -Force
         Copy-Item -LiteralPath $ChartJsLibraryPath -Destination $chartJsAssetPath -Force
+        Write-Utf8File -Path $payloadSummaryAssetPath -Content (Get-DashboardPayloadSummaryJson -PayloadPath $PayloadPath -PayloadManifest $PayloadManifest)
+        if ($dashboardAssetsConfig.pdfExportRuntimeMode -eq 'external') {
+            Write-Utf8File -Path $pdfRuntimeAssetPath -Content $hostedPdfExportRuntimeContent
+        }
         Copy-Item -LiteralPath $PdfExportBundleSourcePath -Destination $pdfBundleAssetPath -Force
         Copy-Item -LiteralPath $PayloadPath -Destination $payloadAssetPath -Force
 
-        $dashboardAssetsConfig.payloadUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $payloadAssetFileName
-        $dashboardAssetsConfig.chartJsUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $chartJsAssetFileName
-        $dashboardAssetsConfig.pdfExportBundleUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $pdfBundleAssetFileName
+        $dashboardAssetsConfig.hostedAssetLayout = 'grouped-v1'
+        $dashboardAssetsConfig.payloadSummaryUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $payloadSummaryAssetRelativePath
+        $dashboardAssetsConfig.payloadUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $payloadAssetRelativePath
+        $dashboardAssetsConfig.chartJsUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $chartJsAssetRelativePath
+        if ($dashboardAssetsConfig.pdfExportRuntimeMode -eq 'external') {
+            $dashboardAssetsConfig.pdfExportRuntimeUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $pdfRuntimeAssetRelativePath
+        }
+        $dashboardAssetsConfig.pdfExportBundleUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $pdfBundleAssetRelativePath
 
-        $cssBlock = '<link rel="stylesheet" href="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $cssAssetFileName) + '">'
-        $pakoBlock = '<script src="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $pakoAssetFileName) + '"></script>'
-        $dashboardJsBlock = '<script src="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetFileName $jsAssetFileName) + '"></script>'
+        $cssBlock = '<link rel="stylesheet" href="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $cssAssetRelativePath) + '">'
+        $pakoBlock = '<script src="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $pakoAssetRelativePath) + '"></script>'
+        $dashboardJsBlock = '<script src="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $jsAssetRelativePath) + '"></script>'
         $vulnsDataSegment = @{ Placeholder = '__VULNS_DATA__'; Value = '' }
         $chartJsSegment = @{ Placeholder = '__CHARTJS_CONTENT__'; Value = '' }
         $pdfExportBundleSegment = @{ Placeholder = '__PDF_EXPORT_BUNDLE_CONTENT__'; Value = '' }

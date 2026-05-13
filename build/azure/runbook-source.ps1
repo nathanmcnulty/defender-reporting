@@ -157,7 +157,16 @@ $Script:HostedDashboardBlobName = 'VulnerabilityDashboard.Hosted.html'
 $Script:HostedDashboardAssetsDirectoryName = ([System.IO.Path]::GetFileNameWithoutExtension($Script:HostedDashboardBlobName) + '.assets')
 $Script:DashboardTrackedBlobNames = @($Script:DashboardBlobName, $Script:HostedDashboardBlobName)
 $Script:DashboardTrackedAssetDirectories = @($Script:DashboardAssetsDirectoryName, $Script:HostedDashboardAssetsDirectoryName)
-$Script:DashboardHostedAssetFileNames = @('dashboard.css', 'dashboard.js', 'pako.js', 'chart.js', 'pdf-export.bundle.js', 'payload.json.gz')
+$Script:DashboardHostedAssetRelativePaths = @(
+    'runtime/dashboard.css',
+    'runtime/dashboard.js',
+    'runtime/pako.js',
+    'vendor/chart.js',
+    'data/summary.json',
+    'optional/pdf-export.runtime.js',
+    'optional/pdf-export.bundle.js',
+    'data/payload.json.gz'
+)
 $Script:PipelineControlBlobName = '_diagnostics/ExportAndGenerate.control.json'
 $Script:PipelineStatusBlobName = '_diagnostics/ExportAndGenerate.status.json'
 $Script:PipelineRunId = [guid]::NewGuid().ToString('N')
@@ -1685,6 +1694,22 @@ try {
         $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempExports -PayloadPath $tempPayloadPath -VulnCount $vulnCount -DeviceCount $deviceCount -CveCount $cveCount -Quality $normalizedQuality -SourceMetadata $sourceMetadata -SkipObservedWindowMerge:$skipObservedWindowMerge
         if ($cacheEntry) {
             Write-Output ("  Cached normalized payload as {0}" -f $cacheEntry.Fingerprint.Substring(0, 12))
+            $payloadManifest = $cacheEntry.Manifest
+        }
+        else {
+            $payloadManifest = [PSCustomObject]@{
+                Version = 'dashboard-payload-cache-v6'
+                Fingerprint = $null
+                GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
+                PayloadSha256 = (Get-FileSha256Hex -Path $tempPayloadPath)
+                VulnCount = $vulnCount
+                DeviceCount = $deviceCount
+                CveCount = $cveCount
+                Quality = $normalizedQuality
+                SourceMetadata = $sourceMetadata
+                SkipObservedWindowMerge = ($skipObservedWindowMerge -eq $true)
+                SemanticValidationAttestation = $null
+            }
         }
         Write-MemoryUsage -Label "Post-PayloadCachePublish"
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'PrepareDashboardPayload' -Message 'Prepared the normalized payload for dashboard packaging.' -AdditionalProperties @{
@@ -1741,17 +1766,12 @@ try {
     Set-PipelineExecutionStage -Stage 'LoadDashboardTemplates' -Message 'Loading dashboard templates before final artifact assembly.'
     [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
     Write-Output "Loading templates..."
-    $htmlTemplatePath = Join-Path -Path $tempTemplates -ChildPath "dashboard.html"
-    $cssTemplatePath = Join-Path -Path $tempTemplates -ChildPath "dashboard.css"
-    $jsTemplatePath = Join-Path -Path $tempTemplates -ChildPath "dashboard.js"
-
-    if (-not (Test-Path $htmlTemplatePath)) { throw "Template not found: dashboard.html" }
-    if (-not (Test-Path $cssTemplatePath)) { throw "Template not found: dashboard.css" }
-    if (-not (Test-Path $jsTemplatePath)) { throw "Template not found: dashboard.js" }
-
-    $htmlTemplate = Get-Content -Path $htmlTemplatePath -Raw
-    $cssContent = Get-Content -Path $cssTemplatePath -Raw
-    $jsContent = Get-Content -Path $jsTemplatePath -Raw
+    $templates = Get-DashboardTemplateContent -TemplatesPath $tempTemplates -DefaultRootPath $PSScriptRoot
+    $htmlTemplate = $templates.Html
+    $cssContent = $templates.Css
+    $jsContent = $templates.Js
+    $jsModules = $templates.JsModules
+    $templates = $null
 
     $lookupsJsonEscaped = ""
     $generatedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
@@ -1777,6 +1797,18 @@ try {
     Write-MemoryUsage -Label "Post-Compress"
     Invoke-PhaseTransitionGarbageCollection -MemoryLabel 'Pre-Assembly'
 
+    $payloadManifestRecord = ConvertTo-NormalizedPayloadManifestRecord -Manifest $payloadManifest
+    if (-not $payloadManifestRecord.Contains('PayloadSha256') -or [string]::IsNullOrWhiteSpace([string]$payloadManifestRecord.PayloadSha256)) {
+        $payloadManifestRecord.PayloadSha256 = Get-FileSha256Hex -Path $tempPayloadPath
+    }
+    if (-not $payloadManifestRecord.Contains('SkipObservedWindowMerge')) {
+        $payloadManifestRecord.SkipObservedWindowMerge = ($skipObservedWindowMerge -eq $true)
+    }
+    if (-not $payloadManifestRecord.Contains('SourceMetadata') -or $null -eq $payloadManifestRecord.SourceMetadata) {
+        $payloadManifestRecord.SourceMetadata = $sourceMetadata
+    }
+    $payloadManifest = [PSCustomObject]$payloadManifestRecord
+
     # Step 8: Assemble final HTML
     Write-Output "Assembling dashboard HTML..."
     $dashboardArtifacts = $null
@@ -1791,12 +1823,14 @@ try {
             -TemplateHtml $htmlTemplate `
             -TemplateCss $cssContent `
             -TemplateJs $jsContent `
+            -TemplateJsModules $jsModules `
             -PakoLibraryPath $pakoLibraryPath `
             -ChartJsLibraryPath $chartJsLibraryPath `
             -ChartJsBundlePath $chartJsBundlePath `
             -PdfExportBundleSourcePath $pdfExportBundleSourcePath `
             -PdfExportBundlePath $pdfExportBundlePath `
             -PayloadPath $tempPayloadPath `
+            -PayloadManifest $payloadManifest `
             -OutputPath $hostedDashboardOutputPath `
             -LookupsJsonEscaped $lookupsJsonEscaped `
             -DataQualitySectionHtml $dataQualitySectionHtml `
@@ -1832,12 +1866,14 @@ try {
             -TemplateHtml $htmlTemplate `
             -TemplateCss $cssContent `
             -TemplateJs $jsContent `
+            -TemplateJsModules $jsModules `
             -PakoLibraryPath $pakoLibraryPath `
             -ChartJsLibraryPath $chartJsLibraryPath `
             -ChartJsBundlePath $chartJsBundlePath `
             -PdfExportBundleSourcePath $pdfExportBundleSourcePath `
             -PdfExportBundlePath $pdfExportBundlePath `
             -PayloadPath $tempPayloadPath `
+            -PayloadManifest $payloadManifest `
             -OutputPath $selfContainedDashboardOutputPath `
             -LookupsJsonEscaped $lookupsJsonEscaped `
             -DataQualitySectionHtml $dataQualitySectionHtml `

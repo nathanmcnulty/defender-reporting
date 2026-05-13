@@ -5159,6 +5159,16 @@ function Test-DashboardSplitAssetsGenerationAndValidation {
     $auditPath = Join-Path $tempRoot 'audit.json'
     $validateOnlyAuditPath = Join-Path $tempRoot 'audit-validate-only.json'
     $assetsPath = Join-Path $tempRoot 'dashboard.assets'
+    $expectedHostedAssetRelativePaths = @(
+        'runtime\dashboard.css'
+        'runtime\dashboard.js'
+        'runtime\pako.js'
+        'vendor\chart.js'
+        'data\summary.json'
+        'optional\pdf-export.runtime.js'
+        'optional\pdf-export.bundle.js'
+        'data\payload.json.gz'
+    )
 
     try {
         Copy-Item -Path (Join-Path $fixturePath '*') -Destination $tempRoot -Recurse -Force
@@ -5174,14 +5184,14 @@ function Test-DashboardSplitAssetsGenerationAndValidation {
         Assert-True ((Test-Path -LiteralPath $outputPath -PathType Leaf)) 'Expected split-assets generation to write the dashboard HTML.'
         Assert-True ((Test-Path -LiteralPath $assetsPath -PathType Container)) 'Expected split-assets generation to create the sibling asset directory.'
 
-        foreach ($assetFileName in @('dashboard.css', 'dashboard.js', 'pako.js', 'chart.js', 'pdf-export.bundle.js', 'payload.json.gz')) {
-            Assert-True ((Test-Path -LiteralPath (Join-Path $assetsPath $assetFileName) -PathType Leaf)) ("Expected split-assets generation to write '{0}'." -f $assetFileName)
+        foreach ($assetRelativePath in $expectedHostedAssetRelativePaths) {
+            Assert-True ((Test-Path -LiteralPath (Join-Path $assetsPath $assetRelativePath) -PathType Leaf)) ("Expected split-assets generation to write '{0}'." -f $assetRelativePath)
         }
 
         $dashboardHtml = Get-Content -LiteralPath $outputPath -Raw
-        Assert-True ($dashboardHtml.Contains('dashboard.assets/dashboard.css')) 'Expected split-assets dashboard HTML to reference the external stylesheet.'
-        Assert-True ($dashboardHtml.Contains('dashboard.assets/dashboard.js')) 'Expected split-assets dashboard HTML to reference the external dashboard script.'
-        Assert-True ($dashboardHtml.Contains('dashboard.assets/payload.json.gz')) 'Expected split-assets dashboard HTML to reference the external payload.'
+        Assert-True ($dashboardHtml.Contains('dashboard.assets/runtime/dashboard.css')) 'Expected split-assets dashboard HTML to reference the external stylesheet.'
+        Assert-True ($dashboardHtml.Contains('dashboard.assets/runtime/dashboard.js')) 'Expected split-assets dashboard HTML to reference the external dashboard script.'
+        Assert-True ($dashboardHtml.Contains('dashboard.assets/data/payload.json.gz')) 'Expected split-assets dashboard HTML to reference the external payload.'
         Assert-True ($dashboardHtml.Contains('external-compressed')) 'Expected split-assets dashboard HTML to advertise the external-compressed payload mode.'
 
         $audit = Get-Content -LiteralPath $auditPath -Raw | ConvertFrom-Json -Depth 100
@@ -5223,7 +5233,7 @@ function Test-DashboardValidateOnlyFailsWhenHostedPayloadMissing {
 
         & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -SplitAssets | Out-Null
 
-        $payloadAssetPath = Join-Path $assetsPath 'payload.json.gz'
+        $payloadAssetPath = Join-Path $assetsPath 'data\payload.json.gz'
         Assert-True ((Test-Path -LiteralPath $payloadAssetPath -PathType Leaf)) 'Expected split-assets generation to write a hosted payload before the negative validation step.'
         Remove-Item -LiteralPath $payloadAssetPath -Force
 
@@ -5318,6 +5328,16 @@ function Test-DashboardDualPackagingGenerationAndValidation {
     $selfContainedOutputPath = Join-Path $tempRoot 'dashboard.html'
     $hostedOutputPath = Join-Path $tempRoot 'dashboard.Hosted.html'
     $hostedAssetsPath = Join-Path $tempRoot 'dashboard.Hosted.assets'
+    $expectedHostedAssetRelativePaths = @(
+        'runtime\dashboard.css'
+        'runtime\dashboard.js'
+        'runtime\pako.js'
+        'vendor\chart.js'
+        'data\summary.json'
+        'optional\pdf-export.runtime.js'
+        'optional\pdf-export.bundle.js'
+        'data\payload.json.gz'
+    )
     $normalizedPayloadPath = Join-Path $tempRoot '.local\payload\dashboard-payload.json.gz'
     $selfAuditPath = Join-Path $tempRoot 'audit.json'
     $hostedAuditPath = Join-Path $tempRoot 'audit.hosted.json'
@@ -5356,8 +5376,8 @@ function Test-DashboardDualPackagingGenerationAndValidation {
         Assert-True ($selfContainedWriteMessageIndex -ge 0) 'Expected dual packaging output to announce self-contained dashboard generation.'
         Assert-True ($hostedWriteMessageIndex -lt $selfContainedWriteMessageIndex) 'Expected dual packaging to write the hosted dashboard before the self-contained dashboard.'
 
-        foreach ($assetFileName in @('dashboard.css', 'dashboard.js', 'pako.js', 'chart.js', 'pdf-export.bundle.js', 'payload.json.gz')) {
-            Assert-True ((Test-Path -LiteralPath (Join-Path $hostedAssetsPath $assetFileName) -PathType Leaf)) ("Expected dual packaging to write '{0}' to the hosted asset directory." -f $assetFileName)
+        foreach ($assetRelativePath in $expectedHostedAssetRelativePaths) {
+            Assert-True ((Test-Path -LiteralPath (Join-Path $hostedAssetsPath $assetRelativePath) -PathType Leaf)) ("Expected dual packaging to write '{0}' to the hosted asset directory." -f $assetRelativePath)
         }
 
         Assert-True ((Test-Path -LiteralPath ($selfContainedOutputPath + '.validation.json') -PathType Leaf)) 'Expected dual packaging to write a self-contained validation sidecar.'
@@ -5368,9 +5388,9 @@ function Test-DashboardDualPackagingGenerationAndValidation {
         Assert-True ($selfContainedHtml.Contains('compressed')) 'Expected the self-contained dashboard to advertise the embedded compressed payload mode.'
 
         $hostedHtml = Get-Content -LiteralPath $hostedOutputPath -Raw
-        Assert-True ($hostedHtml.Contains('dashboard.Hosted.assets/dashboard.css')) 'Expected the hosted dual-packaged dashboard to reference the hosted stylesheet.'
-        Assert-True ($hostedHtml.Contains('dashboard.Hosted.assets/dashboard.js')) 'Expected the hosted dual-packaged dashboard to reference the hosted dashboard script.'
-        Assert-True ($hostedHtml.Contains('dashboard.Hosted.assets/payload.json.gz')) 'Expected the hosted dual-packaged dashboard to reference the hosted payload.'
+        Assert-True ($hostedHtml.Contains('dashboard.Hosted.assets/runtime/dashboard.css')) 'Expected the hosted dual-packaged dashboard to reference the hosted stylesheet.'
+        Assert-True ($hostedHtml.Contains('dashboard.Hosted.assets/runtime/dashboard.js')) 'Expected the hosted dual-packaged dashboard to reference the hosted dashboard script.'
+        Assert-True ($hostedHtml.Contains('dashboard.Hosted.assets/data/payload.json.gz')) 'Expected the hosted dual-packaged dashboard to reference the hosted payload.'
         Assert-True ($hostedHtml.Contains('external-compressed')) 'Expected the hosted dual-packaged dashboard to advertise the external-compressed payload mode.'
 
         $selfAudit = Get-Content -LiteralPath $selfAuditPath -Raw | ConvertFrom-Json -Depth 100
