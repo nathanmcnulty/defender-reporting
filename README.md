@@ -56,7 +56,12 @@ $secret = Read-Host -AsSecureString -Prompt 'Enter client secret'
     -Validate
 ```
 
-Recommended convention: keep `VulnerabilityDashboard.html` as the direct-open artifact, and use `VulnerabilityDashboard.Hosted.html` for the hosted build. The hosted build writes a sibling `VulnerabilityDashboard.Hosted.assets\` directory containing the dashboard CSS, JavaScript, libraries, and compressed payload.
+Recommended convention: keep `VulnerabilityDashboard.html` as the direct-open artifact, and use `VulnerabilityDashboard.Hosted.html` for the hosted build. The hosted build writes a sibling `VulnerabilityDashboard.Hosted.assets\` directory with grouped hosted assets:
+
+- `runtime\` for the core dashboard CSS/JS plus `pako`
+- `vendor\` for chart runtime assets
+- `data\summary.json` for the lightweight hosted filter catalog and `data\payload.json.gz` for the full compressed row payload
+- `optional\` for the lazily loaded PDF export controller and bundle
 
 4. Generate both outputs from one normalized payload when you need to support hosted and non-hosted consumers at the same time.
 
@@ -70,6 +75,10 @@ Recommended convention: keep `VulnerabilityDashboard.html` as the direct-open ar
 ```
 
 This writes `VulnerabilityDashboard.html` plus `VulnerabilityDashboard.Hosted.html` and `VulnerabilityDashboard.Hosted.assets\` from the same normalized payload.
+
+Hosted dashboards now support URL-based shared view state. When you change the report, filters, or remediation mode, the hosted URL keeps that state in a `view=` query parameter, and the footer exposes **Copy View Link** so you can share the current dashboard view directly. If no `view=` parameter is present, the dashboard opens with the normal clean default state.
+
+Hosted dashboards now also use a summary-first load path: the browser fetches the small `data\summary.json` filter catalog first so the toolbar/filter shell can initialize sooner, while the full `data\payload.json.gz` continues loading in parallel for row materialization and report data.
 
 5. Re-run validation later without regenerating the HTML.
 
@@ -109,7 +118,7 @@ For managed identity auth, Azure provisioning, and GitHub workflow setup, use th
 `Generate-VulnerabilityDashboard.ps1` supports three delivery modes:
 
 - Default: a self-contained HTML dashboard that can be opened directly from disk and works well for offline or file-share workflows.
-- `-SplitAssets`: a hosted variant that writes relative asset files beside the HTML so browsers can cache the CSS, JavaScript, libraries, and compressed payload independently.
+- `-SplitAssets`: a hosted variant that writes relative asset files beside the HTML so browsers can cache the CSS, JavaScript, libraries, summary catalog, and compressed payload independently.
 - `-DualPackage`: writes both outputs from one normalized payload so offline users can keep the self-contained HTML while hosted users get the split-assets variant.
 
 Recommended project convention:

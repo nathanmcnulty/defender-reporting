@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "modules": [
+    "dashboard/00-core.js",
+    "dashboard/05-indexeddb-cache.js",
+    "dashboard/06-worker-runtime.js",
+    "dashboard/07-modal-virtualization.js",
+    "dashboard/08-data-loading.js",
+    "dashboard/09-paginated-renderer.js",
+    "dashboard/10-initialization.js",
+    "dashboard/20-report-navigation.js",
+    "dashboard/30-filters-and-stats.js",
+    "dashboard/40-selection-and-activity.js",
+    "dashboard/41-active-chart-series.js",
+    "dashboard/42-formatters-and-lookups.js",
+    "dashboard/43-remediation-helpers.js",
+    "dashboard/50-active-vulnerabilities.js",
+    "dashboard/60-remediation-activity.js",
+    "dashboard/70-impact-analysis.js",
+    "dashboard/80-device-reports.js",
+    "dashboard/85-modals.js",
+    "dashboard/90-pdf-export.js",
+    "dashboard/99-init.js"
+  ]
+}
