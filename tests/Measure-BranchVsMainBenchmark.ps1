@@ -2058,6 +2058,31 @@ function Get-EnvironmentSnapshotDeltaSummary {
     }
 }
 
+function Get-BaselineExecutionOrderDescription {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Alternate', 'CurrentThenMain', 'MainThenCurrent')]
+        [string]$Order
+    )
+
+    switch ($Order) {
+        'Alternate' { return 'flip who runs first across captures to reduce warm-start bias' }
+        'CurrentThenMain' { return 'always run the current branch first and main second' }
+        'MainThenCurrent' { return 'always run main first and the current branch second' }
+        default { throw "Unsupported baseline execution order '$Order'." }
+    }
+}
+
+function Get-BenchmarkDeltaLegend {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+
+    return 'current-minus-main deltas: negative elapsed or memory values favor the branch; positive values mean the branch was slower or higher.'
+}
+
 function Invoke-LocalPersistentCacheWorkflow {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -2803,6 +2828,10 @@ $baselineExecutionPlan = Get-BenchmarkBaselineExecutionPlan -RequestedOrder $Bas
 
 Write-Host ("Dataset preflight passed: {0} rows, {1:N2} GB on disk, {2} GB free memory, {3} GB free disk." -f $totalRows, ($datasetPreflight.datasetBytes / 1GB), $datasetPreflight.availableMemoryGB, $datasetPreflight.freeDiskGB)
 Write-Host ("Benchmark execution order: {0} ({1}; {2})" -f ((@($baselineExecutionPlan.sequence) | ForEach-Object { "{0} [{1}]" -f $_.baseline_name, $_.role }) -join ' -> '), $baselineExecutionPlan.effective_order, $baselineExecutionPlan.reason)
+Write-Host ("Execution-order modes: Alternate = {0}; CurrentThenMain = {1}; MainThenCurrent = {2}" -f (Get-BaselineExecutionOrderDescription -Order 'Alternate'), (Get-BaselineExecutionOrderDescription -Order 'CurrentThenMain'), (Get-BaselineExecutionOrderDescription -Order 'MainThenCurrent'))
+if (-not $CurrentOnly) {
+    Write-Host ("Delta legend: {0}" -f (Get-BenchmarkDeltaLegend))
+}
 
 $subscription = if ($LocalOnly) { $null } else { Invoke-AzCli -Arguments @('account', 'show', '-o', 'json') -ExpectJson }
 $functionHostName = if ($LocalOnly) { $null } else { Get-FunctionHostName }
@@ -2865,6 +2894,7 @@ $result = [PSCustomObject]@{
     baseline_execution_order_requested = $baselineExecutionPlan.requested_order
     baseline_execution_order_effective = $baselineExecutionPlan.effective_order
     baseline_execution_order_reason = $baselineExecutionPlan.reason
+    baseline_execution_order_requested_description = Get-BaselineExecutionOrderDescription -Order $baselineExecutionPlan.requested_order
     baseline_execution_sequence = @(
         foreach ($baselineStep in @($baselineExecutionPlan.sequence)) {
             [PSCustomObject]@{
@@ -2950,7 +2980,7 @@ if ($null -ne $mainResult) {
 }
 if ($null -ne $result.comparison) {
     Write-Host ''
-    Write-Host 'Comparison summary (branch vs main; current minus main deltas)' -ForegroundColor Cyan
+    Write-Host 'Comparison summary (branch vs main; current-minus-main deltas; negative elapsed/memory favors the branch)' -ForegroundColor Cyan
     Write-Host ("Execution order: {0}" -f ((@($baselineExecutionPlan.sequence) | ForEach-Object { "{0} [{1}]" -f $_.baseline_name, $_.role }) -join ' -> '))
     if ($null -ne $result.comparison.local) {
         $localDirection = if ($result.comparison.local.elapsed_seconds_delta -lt 0) { 'faster' } elseif ($result.comparison.local.elapsed_seconds_delta -gt 0) { 'slower' } else { 'unchanged' }

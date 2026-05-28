@@ -108,7 +108,7 @@ This makes dependency order explicit, lets the regression preflight catch orphan
 
 These checks now fail fast in the build helpers and in the deterministic preflight so manifest drift is easier to catch before CI.
 
-Generated helper artifacts now also carry an embedded content fingerprint derived from the manifest, build script, and ordered source files. Import wrappers rebuild when that fingerprint no longer matches, so helper freshness no longer depends on filesystem timestamps alone.
+Generated helper artifacts now also carry an embedded content fingerprint derived from the output path, manifest, build script, and ordered source files. The output path is intentional: the fingerprint attests that the helper was built for a specific generated destination, so moving or renaming the artifact should force a rebuild instead of silently reusing a fingerprint from a different path. Import wrappers rebuild when that fingerprint no longer matches, so helper freshness no longer depends on filesystem timestamps alone.
 
 ## Agent-safe maintenance patterns
 

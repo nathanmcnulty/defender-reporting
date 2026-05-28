@@ -226,6 +226,8 @@ function Get-BenchmarkHistoryEntry {
         benchmark_mode = [string](Get-ObjectPropertyValue -InputObject $Result -Name 'benchmark_mode')
         baseline_execution_order_requested = [string](Get-ObjectPropertyValue -InputObject $Result -Name 'baseline_execution_order_requested')
         baseline_execution_order_effective = [string](Get-ObjectPropertyValue -InputObject $Result -Name 'baseline_execution_order_effective')
+        baseline_execution_order_reason = [string](Get-ObjectPropertyValue -InputObject $Result -Name 'baseline_execution_order_reason')
+        baseline_execution_order_requested_description = [string](Get-ObjectPropertyValue -InputObject $Result -Name 'baseline_execution_order_requested_description')
         baseline_execution_sequence = @(
             @(Get-ObjectPropertyValue -InputObject $Result -Name 'baseline_execution_sequence') |
                 ForEach-Object { [string](Get-ObjectPropertyValue -InputObject $_ -Name 'baseline_name') }
@@ -528,7 +530,18 @@ function Write-BenchmarkHistorySummary {
         $lines.Add(('- Function end-to-end / pickup delay: {0} / {1}' -f (Format-SecondsValue -Value $Entry.current.function_end_to_end_elapsed_seconds), (Format-SecondsValue -Value $Entry.current.function_pickup_delay_seconds))) | Out-Null
     }
     if (@($Entry.baseline_execution_sequence).Count -gt 0) {
-        $lines.Add(('- Baseline execution order: `{0}` ({1})' -f (@($Entry.baseline_execution_sequence) -join ' -> '), $(if ([string]::IsNullOrWhiteSpace([string]$Entry.baseline_execution_order_effective)) { 'unspecified' } else { [string]$Entry.baseline_execution_order_effective }))) | Out-Null
+        $requestedOrderValue = Get-ObjectPropertyValue -InputObject $Entry -Name 'baseline_execution_order_requested'
+        $effectiveOrderValue = Get-ObjectPropertyValue -InputObject $Entry -Name 'baseline_execution_order_effective'
+        $orderReasonValue = Get-ObjectPropertyValue -InputObject $Entry -Name 'baseline_execution_order_reason'
+        $requestedDescriptionValue = Get-ObjectPropertyValue -InputObject $Entry -Name 'baseline_execution_order_requested_description'
+        $requestedOrder = if ([string]::IsNullOrWhiteSpace([string]$requestedOrderValue)) { 'unspecified' } else { [string]$requestedOrderValue }
+        $effectiveOrder = if ([string]::IsNullOrWhiteSpace([string]$effectiveOrderValue)) { 'unspecified' } else { [string]$effectiveOrderValue }
+        $orderReason = if ([string]::IsNullOrWhiteSpace([string]$orderReasonValue)) { 'reason unavailable' } else { [string]$orderReasonValue }
+        $requestedDescription = if ([string]::IsNullOrWhiteSpace([string]$requestedDescriptionValue)) { $null } else { [string]$requestedDescriptionValue }
+        $lines.Add(('- Baseline execution order: `{0}` (requested `{1}` -> effective `{2}`; {3})' -f (@($Entry.baseline_execution_sequence) -join ' -> '), $requestedOrder, $effectiveOrder, $orderReason)) | Out-Null
+        if ($null -ne $requestedDescription) {
+            $lines.Add(('- Requested-order meaning: {0}' -f $requestedDescription)) | Out-Null
+        }
     }
     if ($Entry.persistent_local_workflow) {
         $lines.Add(('- Persistent local prime/reuse: {0} / {1}' -f (Format-SecondsValue -Value $Entry.current.persistent_prime_elapsed_seconds), (Format-SecondsValue -Value $Entry.current.persistent_reuse_elapsed_seconds))) | Out-Null
@@ -543,7 +556,7 @@ function Write-BenchmarkHistorySummary {
         $lines.Add('') | Out-Null
         $lines.Add('Current vs main baseline') | Out-Null
         $lines.Add('') | Out-Null
-        $lines.Add('- Delta semantics: current minus main; negative elapsed values mean the current branch is faster.') | Out-Null
+        $lines.Add('- Delta semantics: current minus main; negative elapsed or memory deltas favor the current branch, positive deltas mean the branch was slower or higher.') | Out-Null
         $lines.Add(('- Local elapsed delta: {0}' -f (Format-SignedSecondsDeltaValue -Value $Entry.comparison.local.elapsed_seconds_delta))) | Out-Null
         $lines.Add(('- Local peak RSS / private delta: {0} / {1}' -f (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.peak_rss_gb_delta -Suffix 'GB' -Decimals 3), (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.peak_private_gb_delta -Suffix 'GB' -Decimals 3))) | Out-Null
         $lines.Add(('- Local phase deltas: {0}' -f (Format-PhaseDeltaSummaryValue -PhaseSummary $Entry.comparison.local.phase_elapsed_seconds_delta))) | Out-Null
