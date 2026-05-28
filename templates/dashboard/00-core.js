@@ -1519,6 +1519,19 @@ function clearDashboardStatus() {
     setDashboardStatus('');
 }
 
+function unloadExternalScript(url) {
+    if (!url) {
+        return;
+    }
+
+    loadedScriptPromises.delete(url);
+    Array.from(document.querySelectorAll('script[data-runtime-src]')).forEach(script => {
+        if (script.dataset.runtimeSrc === url) {
+            script.remove();
+        }
+    });
+}
+
 function loadExternalScript(url) {
     if (!url) {
         return Promise.reject(new Error('A script URL is required.'));
@@ -1572,6 +1585,9 @@ function ensureChartJsLoaded() {
             Chart.defaults.animation = false;
         })
         .catch(error => {
+            if (chartJsMode === 'external') {
+                unloadExternalScript(dashboardConfig.chartJsUrl);
+            }
             chartJsLoadPromise = null;
             throw error;
         });
@@ -1600,6 +1616,7 @@ function ensurePdfExportRuntimeLoaded() {
             }
         })
         .catch(error => {
+            unloadExternalScript(dashboardConfig.pdfExportRuntimeUrl);
             pdfExportRuntimeLoadPromise = null;
             throw error;
         });

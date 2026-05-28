@@ -11,6 +11,13 @@ function hasPdfLibrariesAvailable() {
         && typeof html2canvas === 'function';
 }
 
+function resetPdfLibraryLoadState() {
+    pdfLibrariesLoaded = false;
+    if ((dashboardConfig.pdfExportBundleMode || 'embedded') === 'external') {
+        unloadExternalScript(dashboardConfig.pdfExportBundleUrl);
+    }
+}
+
 /**
  * Load PDF libraries on demand.
  * The embedded bundle contains html2canvas + pdfmake + vfs_fonts.
@@ -31,13 +38,17 @@ function loadPdfLibraries() {
                 loadExternalScript(dashboardConfig.pdfExportBundleUrl)
                     .then(() => {
                         if (!hasPdfLibrariesAvailable()) {
+                            resetPdfLibraryLoadState();
                             throw new Error('PDF export bundle did not initialize correctly.');
                         }
                         pdfLibrariesLoaded = true;
                         logDebug('PDF libraries loaded successfully');
                         resolve();
                     })
-                    .catch(reject);
+                    .catch(error => {
+                        resetPdfLibraryLoadState();
+                        reject(error);
+                    });
                 return;
             }
 
@@ -62,10 +73,14 @@ function loadPdfLibraries() {
                 }
             }, 100);
         } catch (error) {
+            resetPdfLibraryLoadState();
             console.error('Failed to load PDF libraries:', error);
             reject(error);
         }
     }).catch(error => {
+        if (!hasPdfLibrariesAvailable()) {
+            resetPdfLibraryLoadState();
+        }
         pdfLibrariesLoadPromise = null;
         throw error;
     });
