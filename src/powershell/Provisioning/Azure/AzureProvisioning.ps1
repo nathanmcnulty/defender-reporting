@@ -1,5 +1,7 @@
 ﻿# Source-first Azure provisioning helpers used by Setup-AzureResources.ps1.
 
+$script:LastArmTokenSource = $null
+
 function Write-ProvisioningLogLine {
     [CmdletBinding()]
     param(
@@ -94,30 +96,39 @@ function Invoke-ArmApi {
 
     $response = $null
     $shouldFallbackToExplicitToken = $false
+    $fallbackReason = $null
     try {
         $response = Invoke-AzRestMethod @params
     }
     catch {
         Write-Verbose ("Invoke-AzRestMethod could not complete '{0}': {1}" -f $Description, $_.Exception.Message)
         $shouldFallbackToExplicitToken = $true
+        $fallbackReason = $_.Exception.Message
     }
 
     if ($null -eq $response) {
         Write-Verbose ("Invoke-AzRestMethod returned no response for '{0}'. Falling back to explicit token acquisition." -f $Description)
         $shouldFallbackToExplicitToken = $true
+        if ([string]::IsNullOrWhiteSpace($fallbackReason)) {
+            $fallbackReason = 'Invoke-AzRestMethod returned no response.'
+        }
     }
 
     if ($null -ne $response -and [int]$response.StatusCode -eq 401) {
         Write-Verbose ("Invoke-AzRestMethod returned HTTP 401 for '{0}'. Falling back to explicit token acquisition." -f $Description)
         $shouldFallbackToExplicitToken = $true
+        $fallbackReason = 'Invoke-AzRestMethod returned HTTP 401.'
     }
 
     if ($shouldFallbackToExplicitToken) {
+        $accessToken = Get-ArmToken
+        $tokenSource = if ([string]::IsNullOrWhiteSpace($script:LastArmTokenSource)) { 'explicit bearer token' } else { $script:LastArmTokenSource }
+        Write-ProvisioningLogLine -Message ("  ARM auth fallback for {0}: {1} Token source: {2}." -f $Description, $fallbackReason, $tokenSource) -ForegroundColor Yellow
         $fallbackParams = @{
             Uri = $requestUri
             Method = $Method
             Headers = @{
-                Authorization = "Bearer $(Get-ArmToken)"
+                Authorization = "Bearer $accessToken"
             }
             ErrorAction = 'Stop'
             SkipHttpErrorCheck = $true
@@ -250,8 +261,10 @@ function Get-ArmToken {
         [string]$ResourceUrl = 'https://management.azure.com/'
     )
 
+    $script:LastArmTokenSource = $null
     try {
         $tokenResponse = Get-AzAccessToken -ResourceUrl $ResourceUrl -AsSecureString -ErrorAction Stop
+        $script:LastArmTokenSource = 'Az.Accounts Get-AzAccessToken'
         $ssPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResponse.Token)
         try { return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ssPtr) }
         finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ssPtr) }
@@ -264,6 +277,8 @@ function Get-ArmToken {
         try {
             $azAccessToken = (& az 'account' 'get-access-token' '--resource' $ResourceUrl '--query' 'accessToken' '-o' 'tsv' 2>&1 | Out-String)
             if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($azAccessToken)) {
+                $script:LastArmTokenSource = 'Azure CLI az account get-access-token'
+                Write-ProvisioningLogLine -Message ("  Token fallback for resource {0}: using Azure CLI access token." -f $ResourceUrl) -ForegroundColor Yellow
                 return $azAccessToken.Trim()
             }
 
