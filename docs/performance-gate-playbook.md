@@ -75,6 +75,7 @@ Guardrails:
 Semantic validation guardrails:
 - The default local semantic row limit is `1,000,000` rows; the routine medium dataset stays under that limit, while the standard `synthetic-50k-1_5m` sign-off lane does not.
 - Use `tests/Invoke-RoutineSemanticReview.ps1` for repeatable branch iteration and reserve `-AllowLargeSemanticValidation` for intentional final-signoff or high-risk investigations.
+- Run the large sign-off wrapper as `pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -SkipSyntheticGeneration -SyntheticOutputPath .\.local\large-datasets\synthetic-50k-1_5m -Validate -ValidationMode semantic -ForceFullValidation` so semantic sign-off always means a fresh replay instead of attestation reuse.
 - If you need browser-level hosted coverage, pair the deterministic preflight with `tests/Invoke-HostedDashboardRuntimeSmoke.ps1` on Windows instead of escalating directly to the large semantic lane.
 
 Timing interpretation:

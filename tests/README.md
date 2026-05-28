@@ -106,10 +106,10 @@ That command:
 Reserve the semantic replay for milestone or final local sign-off:
 
 ```powershell
-pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -Validate -ValidationMode semantic
+pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -Validate -ValidationMode semantic -ForceFullValidation
 ```
 
-That semantic mode additionally writes `dashboard-audit.json` under `exports-synthetic/`.
+That semantic mode additionally writes `dashboard-audit.json` under `exports-synthetic/` and forces a fresh full semantic replay instead of reusing an attested validation sidecar.
 
 Supported presets:
 - `DeviceCardinalityFirst`
@@ -183,7 +183,7 @@ pwsh -NoProfile -File .\tests\New-SyntheticLiveExport.ps1 -SourcePath .\.local\l
 pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -SkipSyntheticGeneration -SyntheticOutputPath .\.local\large-datasets\synthetic-raw-live -Validate -ValidationMode artifacts
 ```
 
-Switch that final command to `-ValidationMode semantic` only when you need the full streaming semantic replay before sign-off.
+Switch that final command to `-ValidationMode semantic -ForceFullValidation` only when you need the full streaming semantic replay before sign-off.
 
 Standalone legacy vulnerability snapshot materialization from that raw live dataset:
 

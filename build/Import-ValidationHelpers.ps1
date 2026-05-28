@@ -17,7 +17,7 @@ if (-not (Test-Path -LiteralPath $__validationManifestToolsPath -PathType Leaf))
 . $__validationSharedImportPath
 . $__validationManifestToolsPath
 
-$__validationGeneratedHelperPath = Resolve-PowerShellArtifactOutputPath -ManifestPath (Join-Path $__validationBuildRoot 'manifests\validation-helpers.json') -RepoRoot $__validationRepoRoot -BuildScriptPath (Join-Path $__validationBuildRoot 'Build-ValidationHelpers.ps1') -BuildScriptNotFoundMessage "Validation helper build script not found at '{0}'." -MissingOutputMessage "Validation helpers were not generated at '{0}'."
+$__validationGeneratedHelperPath = Resolve-PowerShellArtifactOutputPath -ManifestPath (Join-Path $__validationBuildRoot 'manifests\validation-helpers.json') -RepoRoot $__validationRepoRoot -BuildScriptPath (Join-Path $__validationBuildRoot 'Build-ValidationHelpers.ps1') -BuildScriptNotFoundMessage "Validation helper build script not found at '{0}'. Run '.\\build\\Build-ValidationHelpers.ps1' from the repo root to regenerate validation helpers." -MissingOutputMessage "Validation helpers were not generated at '{0}'. Run '.\\build\\Build-ValidationHelpers.ps1' from the repo root to regenerate them."
 
 . $__validationGeneratedHelperPath
 Remove-Variable -Name __validationRepoRoot -ErrorAction Ignore
