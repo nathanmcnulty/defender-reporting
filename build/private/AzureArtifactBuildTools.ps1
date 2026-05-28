@@ -150,22 +150,55 @@ function Get-AzAccountsModuleStagingSummary {
         throw "No Az.Accounts module manifest was found under '$ModuleRoot'."
     }
 
+    $manifestValidationFailures = [System.Collections.Generic.List[object]]::new()
     $validManifests = foreach ($manifestCandidate in $manifestCandidates) {
+        $manifestDisplayPath = if (-not [string]::IsNullOrWhiteSpace($RepoRoot) -and (Test-ArtifactPathWithinRoot -Path $manifestCandidate.FullName -Root $RepoRoot)) {
+            Get-RepoRelativeDisplayPath -Path $manifestCandidate.FullName -RepoRoot $RepoRoot
+        }
+        else {
+            $manifestCandidate.FullName
+        }
+
         try {
             $moduleManifest = Test-ModuleManifest -Path $manifestCandidate.FullName -ErrorAction Stop
             [PSCustomObject]@{
                 Path = $manifestCandidate.FullName
+                DisplayPath = $manifestDisplayPath
                 ModuleVersion = [version]$moduleManifest.Version
             }
         }
         catch {
+            $validationMessage = if ($_.Exception -and -not [string]::IsNullOrWhiteSpace([string]$_.Exception.Message)) {
+                [string]$_.Exception.Message
+            }
+            else {
+                [string]$_
+            }
+
+            $manifestValidationFailures.Add([PSCustomObject]@{
+                    Path = $manifestCandidate.FullName
+                    DisplayPath = $manifestDisplayPath
+                    Error = (($validationMessage -replace '\s+', ' ').Trim())
+                }) | Out-Null
             continue
         }
     }
 
     $selectedManifest = $validManifests | Sort-Object -Property ModuleVersion -Descending | Select-Object -First 1
     if ($null -eq $selectedManifest) {
-        throw "Az.Accounts staging under '$ModuleRoot' does not contain a valid module manifest."
+        $failurePreview = @(
+            $manifestValidationFailures |
+                Select-Object -First 5 |
+                ForEach-Object { "'$($_.DisplayPath)': $($_.Error)" }
+        )
+        $failureSuffix = if ($failurePreview.Count -gt 0) {
+            " Validation failures: {0}{1}" -f ($failurePreview -join '; '), $(if ($manifestValidationFailures.Count -gt $failurePreview.Count) { '; ...' } else { '' })
+        }
+        else {
+            ''
+        }
+
+        throw "Az.Accounts staging under '$ModuleRoot' does not contain a valid module manifest after checking $($manifestCandidates.Count) candidate(s).$failureSuffix"
     }
 
     $fileCount = @(Get-ChildItem -LiteralPath $ModuleRoot -Recurse -File -ErrorAction Stop).Count
@@ -173,12 +206,7 @@ function Get-AzAccountsModuleStagingSummary {
         throw "Az.Accounts staging under '$ModuleRoot' is incomplete (found $fileCount file(s))."
     }
 
-    $manifestDisplayPath = if (-not [string]::IsNullOrWhiteSpace($RepoRoot) -and (Test-ArtifactPathWithinRoot -Path $selectedManifest.Path -Root $RepoRoot)) {
-        Get-RepoRelativeDisplayPath -Path $selectedManifest.Path -RepoRoot $RepoRoot
-    }
-    else {
-        $selectedManifest.Path
-    }
+    $manifestDisplayPath = [string]$selectedManifest.DisplayPath
 
     return [PSCustomObject]@{
         ModuleRoot = $ModuleRoot
@@ -186,6 +214,7 @@ function Get-AzAccountsModuleStagingSummary {
         ManifestDisplayPath = $manifestDisplayPath
         ModuleVersion = $selectedManifest.ModuleVersion.ToString()
         FileCount = $fileCount
+        InvalidManifestCandidateCount = $manifestValidationFailures.Count
     }
 }
 

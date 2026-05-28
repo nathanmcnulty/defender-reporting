@@ -139,6 +139,9 @@ function Get-PowerShellArtifactFingerprint {
 
     $builder = [System.Text.StringBuilder]::new()
     [void]$builder.AppendLine("artifact:$($manifest.ArtifactName)")
+    # The output path is part of the trust contract so a renamed or moved generated
+    # artifact must be rebuilt instead of silently reusing a fingerprint from a
+    # different destination.
     [void]$builder.AppendLine("output:$($manifest.OutputRelativePath)")
     [void]$builder.AppendLine("build:$((Get-RepoRelativeDisplayPath -Path $BuildScriptPath -RepoRoot $RepoRoot))")
     [void]$builder.AppendLine("build-hash:$(Get-FileContentSha256Hex -Path $BuildScriptPath)")

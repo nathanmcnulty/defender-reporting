@@ -353,7 +353,12 @@ That command:
 
 `Measure-BranchVsMainBenchmark.ps1` and `Invoke-BenchmarkSeries.ps1` default to Azure-only capture. Add `-IncludeLocalBenchmark` when you also want local timings in the same run, or `-LocalOnly` when you want to skip Azure entirely.
 
-For branch-vs-main captures, `Measure-BranchVsMainBenchmark.ps1` now records both the requested and effective baseline execution order plus `comparison.delta_basis = current-minus-main`. Negative elapsed deltas mean the current branch is faster than main. The default `-BaselineExecutionOrder Alternate` flips first-run order across repeated captures so one branch is not always measured first.
+For branch-vs-main captures, `Measure-BranchVsMainBenchmark.ps1` now records both the requested and effective baseline execution order plus `comparison.delta_basis = current-minus-main`.
+
+- `-BaselineExecutionOrder Alternate` (default) flips who runs first across repeated captures so one branch is not always measured first.
+- `-BaselineExecutionOrder CurrentThenMain` always runs the current branch first.
+- `-BaselineExecutionOrder MainThenCurrent` always runs main first.
+- Negative elapsed or memory deltas favor the current branch; positive deltas mean the branch was slower or used more memory.
 
 Function App timing semantics:
 - `function_app.elapsed_seconds` now tracks active execution time when the runtime status blob is available
