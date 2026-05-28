@@ -650,6 +650,10 @@ try {
     Write-Host "  Azure Resource Setup" -ForegroundColor Cyan
     Write-Host "========================================`n" -ForegroundColor Cyan
 
+    $resourceGroupNameSource = if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) { 'pending auto-discovery or required input' } else { 'explicit parameter' }
+    $storageAccountNameSource = if ([string]::IsNullOrWhiteSpace($StorageAccountName)) { 'pending auto-discovery or required input' } else { 'explicit parameter' }
+    $locationSource = if ($PSBoundParameters.ContainsKey('Location')) { 'explicit parameter' } else { 'default parameter value' }
+
     # -------------------------------------------------------------------------
     # Step 1: Verify Azure connection and set subscription
     # -------------------------------------------------------------------------
@@ -698,12 +702,14 @@ try {
             $discoveredRG = ($found.id -split '/resourceGroups/|/providers/')[1]
             if (-not $ResourceGroupName) {
                 $ResourceGroupName = $discoveredRG
+                $resourceGroupNameSource = "auto-discovered from existing $ComputeType '$computeName'"
                 Write-Host "  Auto-detected resource group: $ResourceGroupName" -ForegroundColor Green
             }
 
             # Auto-detect location from existing resource if not explicitly provided
             if (-not $PSBoundParameters.ContainsKey('Location') -and $found.location) {
                 $Location = $found.location
+                $locationSource = "auto-discovered from existing $ComputeType '$computeName'"
                 Write-Host "  Auto-detected location: $Location" -ForegroundColor Green
             }
 
@@ -714,6 +720,12 @@ try {
                     $StorageAccountName = $appSettings.properties.STORAGE_ACCOUNT_NAME
                     if (-not $StorageAccountName) {
                         $StorageAccountName = $appSettings.properties.'AzureWebJobsStorage__accountName'
+                        if ($StorageAccountName) {
+                            $storageAccountNameSource = "auto-discovered from Function App setting 'AzureWebJobsStorage__accountName'"
+                        }
+                    }
+                    else {
+                        $storageAccountNameSource = "auto-discovered from Function App setting 'STORAGE_ACCOUNT_NAME'"
                     }
                 } else {
                     # Automation Account: look up the StorageAccountName variable
@@ -723,8 +735,11 @@ try {
                         $saVar = Invoke-ArmApi -Path $varPath -Method GET -Description 'Read StorageAccountName variable'
                         # Variable values are JSON-encoded strings (e.g. '"stname"')
                         $StorageAccountName = ($saVar.properties.value | ConvertFrom-Json)
+                        if ($StorageAccountName) {
+                            $storageAccountNameSource = "auto-discovered from Automation variable 'StorageAccountName'"
+                        }
                     } catch {
-                        Write-Verbose "StorageAccountName variable not found on Automation Account: $_"
+                        Write-Warning ("StorageAccountName variable not found on Automation Account '{0}': {1}" -f $AutomationAccountName, $_.Exception.Message)
                     }
                 }
 
@@ -744,6 +759,11 @@ try {
             }
         }
         } finally { $WhatIfPreference = $savedWhatIf }
+
+        Write-Host "  Parameter resolution summary:" -ForegroundColor Gray
+        Write-Host ("    ResourceGroupName: {0} ({1})" -f $ResourceGroupName, $resourceGroupNameSource) -ForegroundColor Gray
+        Write-Host ("    StorageAccountName: {0} ({1})" -f $StorageAccountName, $storageAccountNameSource) -ForegroundColor Gray
+        Write-Host ("    Location: {0} ({1})" -f $Location, $locationSource) -ForegroundColor Gray
     }
 
     # -------------------------------------------------------------------------

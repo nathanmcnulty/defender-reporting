@@ -37,4 +37,7 @@ if (-not $assemblyInput.RunbookSource.Contains($assemblyInput.NormalizedMarker))
 $assembled = $assemblyInput.RunbookSource.Replace($assemblyInput.NormalizedMarker, $assemblyInput.NormalizedSharedHelpers + $assemblyInput.LineEnding + $assemblyInput.LineEnding)
 Write-Utf8BomFile -Path $buildContext.RunbookOutputPath -Content $assembled
 
+$runbookFingerprintState = Assert-AzureArtifactFingerprint -ArtifactPath $buildContext.RunbookOutputPath -ExpectedFingerprint $assemblyInput.SharedHelpersFingerprint -ArtifactDescription 'Azure Automation runbook artifact'
+
 Write-Output "Generated runbook: $($buildContext.RunbookOutputPath)"
+Write-Output "Runbook shared-helper fingerprint: $($runbookFingerprintState.Fingerprint)"

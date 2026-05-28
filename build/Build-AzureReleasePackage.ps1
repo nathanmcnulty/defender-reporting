@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 
 $buildRoot = $PSScriptRoot
 $repoRoot = Split-Path -Path $buildRoot -Parent
+$azureBuildContext = Get-AzureArtifactBuildContext -BuildScriptRoot (Join-Path $buildRoot 'azure')
 $azureProvisioningSourcePath = Join-Path $repoRoot 'src\powershell\Provisioning\Azure\AzureProvisioning.ps1'
 
 if (-not $PSBoundParameters.ContainsKey('OutputPath')) {
@@ -47,6 +48,15 @@ foreach ($path in $requiredContainerPaths) {
     Assert-BuildPath -Path $path -PathType Container
 }
 
+$sharedHelpersFingerprint = Read-PowerShellArtifactEmbeddedFingerprint -Path $azureBuildContext.SharedHelpersPath
+if ([string]::IsNullOrWhiteSpace($sharedHelpersFingerprint)) {
+    throw "Generated shared helpers '$($azureBuildContext.SharedHelpersPath)' are missing fingerprint metadata."
+}
+$runbookFingerprintState = Assert-AzureArtifactFingerprint -ArtifactPath $azureBuildContext.RunbookOutputPath -ExpectedFingerprint $sharedHelpersFingerprint -ArtifactDescription 'Azure Automation runbook artifact'
+$functionAppEntryPointPath = Join-Path $azureBuildContext.FunctionAppRoot 'ExportAndGenerate\run.ps1'
+$functionAppFingerprintState = Assert-AzureArtifactFingerprint -ArtifactPath $functionAppEntryPointPath -ExpectedFingerprint $sharedHelpersFingerprint -ArtifactDescription 'Azure Function App entry point artifact'
+$stagedModuleSummary = Get-AzAccountsModuleStagingSummary -ModuleRoot (Join-Path $azureBuildContext.FunctionAppRoot 'Modules\Az.Accounts') -RepoRoot $repoRoot
+
 Initialize-ParentDirectory -Path $OutputPath
 if (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
     Remove-Item -LiteralPath $OutputPath -Force
@@ -74,5 +84,42 @@ finally {
 }
 
 $outputItem = Get-Item -LiteralPath $OutputPath
+$manifestPath = Join-Path (Split-Path -Path $OutputPath -Parent) (([System.IO.Path]::GetFileNameWithoutExtension($OutputPath)) + '.manifest.json')
+$packageManifest = [PSCustomObject]@{
+    generatedOnUtc = [datetime]::UtcNow.ToString('o')
+    packagePath = $outputItem.FullName
+    packageSha256 = Get-FileContentSha256Hex -Path $outputItem.FullName
+    packageSizeBytes = $outputItem.Length
+    sharedHelpersFingerprint = $sharedHelpersFingerprint
+    runbookFingerprint = $runbookFingerprintState.Fingerprint
+    functionAppFingerprint = $functionAppFingerprintState.Fingerprint
+    stagedAzAccountsModule = [PSCustomObject]@{
+        version = $stagedModuleSummary.ModuleVersion
+        fileCount = $stagedModuleSummary.FileCount
+        manifestPath = $stagedModuleSummary.ManifestDisplayPath
+    }
+    payloadFiles = @(
+        [PSCustomObject]@{
+            path = 'Setup-AzureResources.ps1'
+            sha256 = Get-FileContentSha256Hex -Path (Join-Path $repoRoot 'Setup-AzureResources.ps1')
+        }
+        [PSCustomObject]@{
+            path = 'azure/Invoke-DashboardPipeline.ps1'
+            sha256 = Get-FileContentSha256Hex -Path $azureBuildContext.RunbookOutputPath
+        }
+        [PSCustomObject]@{
+            path = 'azure/function-app/ExportAndGenerate/run.ps1'
+            sha256 = Get-FileContentSha256Hex -Path $functionAppEntryPointPath
+        }
+        [PSCustomObject]@{
+            path = 'src/powershell/Provisioning/Azure/AzureProvisioning.ps1'
+            sha256 = Get-FileContentSha256Hex -Path $azureProvisioningSourcePath
+        }
+    )
+}
+Write-Utf8BomFile -Path $manifestPath -Content (($packageManifest | ConvertTo-Json -Depth 10) + [Environment]::NewLine)
 Write-Output ("Created Azure release package: {0}" -f $outputItem.FullName)
 Write-Output ("Package size: {0:N2} MB" -f ($outputItem.Length / 1MB))
+Write-Output ("Shared helper fingerprint: {0}" -f $sharedHelpersFingerprint)
+Write-Output ("Staged Az.Accounts module: v{0} ({1} files)" -f $stagedModuleSummary.ModuleVersion, $stagedModuleSummary.FileCount)
+Write-Output ("Azure package manifest: {0}" -f $manifestPath)

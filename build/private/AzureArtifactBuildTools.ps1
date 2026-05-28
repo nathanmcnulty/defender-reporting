@@ -1,4 +1,6 @@
-﻿Set-StrictMode -Version Latest
+﻿. (Join-Path -Path $PSScriptRoot -ChildPath 'ArtifactManifestTools.ps1')
+
+Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Get-AzureArtifactBuildContext {
@@ -69,6 +71,10 @@ function Get-AzureSharedAssemblyInput {
     & $BuildContext.BuildSharedHelpersPath
 
     Assert-BuildPath -Path $BuildContext.SharedHelpersPath -PathType Leaf
+    $sharedHelpersFingerprint = Read-PowerShellArtifactEmbeddedFingerprint -Path $BuildContext.SharedHelpersPath
+    if ([string]::IsNullOrWhiteSpace($sharedHelpersFingerprint)) {
+        throw "Generated shared helpers '$($BuildContext.SharedHelpersPath)' are missing fingerprint metadata. Re-run '$($BuildContext.BuildSharedHelpersPath)'."
+    }
 
     $runbookSource = Get-Content -Path $BuildContext.RunbookSourcePath -Raw
     $sharedHelpers = Get-Content -Path $BuildContext.SharedHelpersPath -Raw
@@ -86,6 +92,100 @@ function Get-AzureSharedAssemblyInput {
         LineEnding = $lineEnding
         NormalizedMarker = $normalizedMarker
         NormalizedSharedHelpers = ($sharedHelpersText -replace "`r?`n", $lineEnding).TrimEnd()
+        SharedHelpersFingerprint = $sharedHelpersFingerprint
+    }
+}
+
+function Assert-AzureArtifactFingerprint {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArtifactPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedFingerprint,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ArtifactDescription
+    )
+
+    Assert-BuildPath -Path $ArtifactPath -PathType Leaf
+    $artifactContent = Get-Content -LiteralPath $ArtifactPath -Raw -ErrorAction Stop
+    $embeddedFingerprint = $null
+    $fingerprintMatches = [System.Text.RegularExpressions.Regex]::Matches($artifactContent, '(?m)^# ArtifactFingerprint:\s*([0-9a-f]{64})\s*$')
+    if ($fingerprintMatches.Count -gt 0) {
+        $embeddedFingerprint = $fingerprintMatches[$fingerprintMatches.Count - 1].Groups[1].Value.ToLowerInvariant()
+    }
+    if ([string]::IsNullOrWhiteSpace($embeddedFingerprint)) {
+        throw "$ArtifactDescription '$ArtifactPath' is missing embedded fingerprint metadata."
+    }
+
+    if ($embeddedFingerprint -ne $ExpectedFingerprint) {
+        throw "$ArtifactDescription '$ArtifactPath' does not match the current shared-helper fingerprint. Expected '$ExpectedFingerprint' but found '$embeddedFingerprint'."
+    }
+
+    return [PSCustomObject]@{
+        ArtifactPath = $ArtifactPath
+        Fingerprint = $embeddedFingerprint
+    }
+}
+
+function Get-AzAccountsModuleStagingSummary {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ModuleRoot,
+
+        [Parameter(Mandatory = $false)]
+        [string]$RepoRoot
+    )
+
+    Assert-BuildPath -Path $ModuleRoot -PathType Container
+    $manifestCandidates = @(
+        Get-ChildItem -LiteralPath $ModuleRoot -Filter 'Az.Accounts.psd1' -Recurse -File -ErrorAction Stop
+    )
+    if ($manifestCandidates.Count -eq 0) {
+        throw "No Az.Accounts module manifest was found under '$ModuleRoot'."
+    }
+
+    $validManifests = foreach ($manifestCandidate in $manifestCandidates) {
+        try {
+            $moduleManifest = Test-ModuleManifest -Path $manifestCandidate.FullName -ErrorAction Stop
+            [PSCustomObject]@{
+                Path = $manifestCandidate.FullName
+                ModuleVersion = [version]$moduleManifest.Version
+            }
+        }
+        catch {
+            continue
+        }
+    }
+
+    $selectedManifest = $validManifests | Sort-Object -Property ModuleVersion -Descending | Select-Object -First 1
+    if ($null -eq $selectedManifest) {
+        throw "Az.Accounts staging under '$ModuleRoot' does not contain a valid module manifest."
+    }
+
+    $fileCount = @(Get-ChildItem -LiteralPath $ModuleRoot -Recurse -File -ErrorAction Stop).Count
+    if ($fileCount -lt 5) {
+        throw "Az.Accounts staging under '$ModuleRoot' is incomplete (found $fileCount file(s))."
+    }
+
+    $manifestDisplayPath = if (-not [string]::IsNullOrWhiteSpace($RepoRoot) -and (Test-ArtifactPathWithinRoot -Path $selectedManifest.Path -Root $RepoRoot)) {
+        Get-RepoRelativeDisplayPath -Path $selectedManifest.Path -RepoRoot $RepoRoot
+    }
+    else {
+        $selectedManifest.Path
+    }
+
+    return [PSCustomObject]@{
+        ModuleRoot = $ModuleRoot
+        ManifestPath = $selectedManifest.Path
+        ManifestDisplayPath = $manifestDisplayPath
+        ModuleVersion = $selectedManifest.ModuleVersion.ToString()
+        FileCount = $fileCount
     }
 }
 

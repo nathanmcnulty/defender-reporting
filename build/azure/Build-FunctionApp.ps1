@@ -32,6 +32,7 @@ $ErrorActionPreference = 'Stop'
 $buildContext = Get-AzureArtifactBuildContext -BuildScriptRoot $PSScriptRoot
 $outputPath = Join-Path -Path $buildContext.FunctionAppRoot -ChildPath 'ExportAndGenerate' | Join-Path -ChildPath 'run.ps1'
 $modulesRoot = Join-Path -Path $buildContext.FunctionAppRoot -ChildPath 'Modules'
+$moduleSummary = $null
 $marker = @'
 # =============================================================================
 # SHARED HELPERS INSERTED BY build/azure/Build-Runbook.ps1
@@ -251,7 +252,8 @@ if (-not $SkipModuleStaging) {
 
     New-Item -Path $targetAzAccountsRoot -ItemType Directory -Force | Out-Null
     Copy-Item -Path (Join-Path -Path $azAccountsModuleRoot -ChildPath '*') -Destination $targetAzAccountsRoot -Recurse -Force
-    $stagedModuleSummary = "Staged Az.Accounts module $($azAccountsModule.Version) into $targetAzAccountsRoot"
+    $moduleSummary = Get-AzAccountsModuleStagingSummary -ModuleRoot $targetAzAccountsRoot -RepoRoot $buildContext.RepoRoot
+    $stagedModuleSummary = "Staged Az.Accounts module $($moduleSummary.ModuleVersion) into $targetAzAccountsRoot"
 }
 
 # -------------------------------------------------------------------------
@@ -259,6 +261,12 @@ if (-not $SkipModuleStaging) {
 # -------------------------------------------------------------------------
 
 Write-Utf8BomFile -Path $outputPath -Content $assembled
+$functionArtifactFingerprintState = Assert-AzureArtifactFingerprint -ArtifactPath $outputPath -ExpectedFingerprint $assemblyInput.SharedHelpersFingerprint -ArtifactDescription 'Azure Function App entry point artifact'
 
 Write-Output "Generated function app entry point: $outputPath"
+Write-Output "Function App shared-helper fingerprint: $($functionArtifactFingerprintState.Fingerprint)"
 Write-Output $stagedModuleSummary
+if ($null -ne $moduleSummary) {
+    Write-Output ("Az.Accounts staged manifest: {0}" -f $moduleSummary.ManifestDisplayPath)
+    Write-Output ("Az.Accounts staged file count: {0}" -f $moduleSummary.FileCount)
+}
