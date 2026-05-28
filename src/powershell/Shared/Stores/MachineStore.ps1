@@ -1450,11 +1450,25 @@ function Initialize-MachineHistoryStore {
     $historyRecordsByPeriod = @{}
     $historyRecordKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $defaultObservedOn = Get-Date -Format 'yyyy-MM-dd'
+    $legacyMigrationPaths = [System.Collections.Generic.List[string]]::new()
+
+    if (($currentReadPath -eq $legacyCurrentPath) -and -not [string]::IsNullOrWhiteSpace($legacyCurrentPath)) {
+        $legacyMigrationPaths.Add($legacyCurrentPath)
+    }
+    foreach ($legacyFile in $legacyFiles) {
+        if ($null -ne $legacyFile) {
+            $legacyMigrationPaths.Add($legacyFile.FullName)
+        }
+    }
 
     foreach ($sourcePath in $historySourcePaths) {
         foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
             Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $record
         }
+    }
+
+    if ($legacyMigrationPaths.Count -gt 0) {
+        Assert-LegacyMigrationAllowed -FeatureName 'machine snapshot compatibility' -LegacyPaths $legacyMigrationPaths
     }
 
     if ($null -ne $currentReadPath) {
@@ -1810,6 +1824,20 @@ function Initialize-AdvancedHuntingStore {
     $currentRecords = @{}
     $migratedLegacy = $false
     $legacyFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File | Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } | Sort-Object Name)
+    $legacyMigrationPaths = [System.Collections.Generic.List[string]]::new()
+
+    if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
+        $legacyMigrationPaths.Add($legacyCurrentPath)
+    }
+    foreach ($legacyFile in $legacyFiles) {
+        if ($null -ne $legacyFile) {
+            $legacyMigrationPaths.Add($legacyFile.FullName)
+        }
+    }
+
+    if ($legacyMigrationPaths.Count -gt 0) {
+        Assert-LegacyMigrationAllowed -FeatureName 'Advanced Hunting snapshot compatibility' -LegacyPaths $legacyMigrationPaths
+    }
 
     if (Test-Path -Path $currentPath) {
         foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $currentPath) {

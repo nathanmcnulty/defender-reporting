@@ -27,6 +27,68 @@ $Script:NvdCveCurrentFileName = 'NvdCve_Current.json.gz'
 $Script:LegacyVulnMigrationRemovalDate = '2026-07-01'
 $Script:VulnDiskPartitionCount = 128
 
+function Get-LegacyMigrationRemovalDateUtc {
+    [CmdletBinding()]
+    [OutputType([datetime])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$RemovalDate = $Script:LegacyVulnMigrationRemovalDate
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RemovalDate)) {
+        throw 'Legacy migration removal date is not configured.'
+    }
+
+    try {
+        return [datetime]::SpecifyKind([datetime]::ParseExact($RemovalDate, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture), [System.DateTimeKind]::Utc)
+    }
+    catch {
+        throw "Legacy migration removal date '$RemovalDate' is not in the expected yyyy-MM-dd format."
+    }
+}
+
+function Assert-LegacyMigrationAllowed {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FeatureName,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$LegacyPaths = @(),
+
+        [Parameter(Mandatory = $false)]
+        [datetime]$CurrentUtc = ([datetime]::UtcNow)
+    )
+
+    $resolvedLegacyPaths = [System.Collections.Generic.List[string]]::new()
+    foreach ($legacyPath in @($LegacyPaths)) {
+        if (-not [string]::IsNullOrWhiteSpace($legacyPath)) {
+            $resolvedLegacyPaths.Add($legacyPath)
+        }
+    }
+
+    if ($resolvedLegacyPaths.Count -eq 0) {
+        return
+    }
+
+    $removalDateUtc = Get-LegacyMigrationRemovalDateUtc
+    if ($CurrentUtc -lt $removalDateUtc) {
+        return
+    }
+
+    $samplePaths = @($resolvedLegacyPaths | Select-Object -First 3 | ForEach-Object { Split-Path -Leaf $_ })
+    $sampleSuffix = if ($samplePaths.Count -gt 0) {
+        " Example legacy artifact(s): $($samplePaths -join ', ')."
+    }
+    else {
+        ''
+    }
+
+    throw ("Legacy {0} support expired on {1}. Rebuild the canonical store and remove legacy compatibility artifacts before continuing.{2}" -f $FeatureName, $Script:LegacyVulnMigrationRemovalDate, $sampleSuffix)
+}
+
 function Get-StoreLockName {
     [CmdletBinding()]
     [OutputType([string])]
@@ -761,6 +823,128 @@ function Get-StoreTransactionJournalPath {
     return Join-Path -Path $BasePath -ChildPath (".{0}.transaction.json" -f $StoreName)
 }
 
+function Get-NormalizedAbsolutePath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+
+    return [System.IO.Path]::GetFullPath($Path)
+}
+
+function Test-PathIsUnderRoot {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$RootPath
+    )
+
+    $normalizedPath = Get-NormalizedAbsolutePath -Path $Path
+    $normalizedRoot = Get-NormalizedAbsolutePath -Path $RootPath
+    if ([string]::IsNullOrWhiteSpace($normalizedPath) -or [string]::IsNullOrWhiteSpace($normalizedRoot)) {
+        return $false
+    }
+
+    $trimmedRoot = $normalizedRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    if ([string]::Equals($normalizedPath, $trimmedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    $rootPrefix = $trimmedRoot + [System.IO.Path]::DirectorySeparatorChar
+    return $normalizedPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-StoreTransactionStateIsValid {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $State,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StoreName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$JournalPath
+    )
+
+    if ($null -eq $State) {
+        throw "Transaction journal '$JournalPath' is empty."
+    }
+
+    $journalLabel = "Transaction journal '$JournalPath'"
+    $phase = [string]$State.PSObject.Properties['Phase']?.Value
+    if ($phase -notin @('Prepared', 'Committed')) {
+        throw "$journalLabel has invalid phase '$phase'."
+    }
+
+    $stateStoreName = [string]$State.PSObject.Properties['StoreName']?.Value
+    if (-not [string]::IsNullOrWhiteSpace($stateStoreName) -and -not [string]::Equals($stateStoreName, $StoreName, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$journalLabel targets store '$stateStoreName' instead of '$StoreName'."
+    }
+
+    $transactionRoot = [string]$State.PSObject.Properties['TransactionRoot']?.Value
+    if (-not (Test-PathIsUnderRoot -Path $transactionRoot -RootPath $BasePath)) {
+        throw "$journalLabel references transaction root '$transactionRoot' outside '$BasePath'."
+    }
+
+    $targetPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $fileEntries = @($State.PSObject.Properties['Files']?.Value)
+    $removedEntries = @($State.PSObject.Properties['RemovedFiles']?.Value)
+    if (($fileEntries.Count + $removedEntries.Count) -eq 0) {
+        throw "$journalLabel does not contain any staged or removed file entries."
+    }
+
+    foreach ($entry in $fileEntries) {
+        $targetPath = [string]$entry.PSObject.Properties['TargetPath']?.Value
+        $stagePath = [string]$entry.PSObject.Properties['StagePath']?.Value
+        $backupPath = [string]$entry.PSObject.Properties['BackupPath']?.Value
+
+        if (-not (Test-PathIsUnderRoot -Path $targetPath -RootPath $BasePath)) {
+            throw "$journalLabel references staged target '$targetPath' outside '$BasePath'."
+        }
+        if (-not (Test-PathIsUnderRoot -Path $stagePath -RootPath $transactionRoot)) {
+            throw "$journalLabel references staged file '$stagePath' outside '$transactionRoot'."
+        }
+        if (-not (Test-PathIsUnderRoot -Path $backupPath -RootPath $transactionRoot)) {
+            throw "$journalLabel references backup file '$backupPath' outside '$transactionRoot'."
+        }
+        if (-not $targetPaths.Add((Get-NormalizedAbsolutePath -Path $targetPath))) {
+            throw "$journalLabel contains duplicate target path '$targetPath'."
+        }
+    }
+
+    foreach ($entry in $removedEntries) {
+        $targetPath = [string]$entry.PSObject.Properties['TargetPath']?.Value
+        $backupPath = [string]$entry.PSObject.Properties['BackupPath']?.Value
+
+        if (-not (Test-PathIsUnderRoot -Path $targetPath -RootPath $BasePath)) {
+            throw "$journalLabel references removed target '$targetPath' outside '$BasePath'."
+        }
+        if (-not (Test-PathIsUnderRoot -Path $backupPath -RootPath $transactionRoot)) {
+            throw "$journalLabel references removed-file backup '$backupPath' outside '$transactionRoot'."
+        }
+        if (-not $targetPaths.Add((Get-NormalizedAbsolutePath -Path $targetPath))) {
+            throw "$journalLabel contains duplicate target path '$targetPath'."
+        }
+    }
+}
+
 function Write-StoreTransactionState {
     [CmdletBinding()]
     param(
@@ -825,6 +1009,8 @@ function Restore-StoreTransaction {
     if ($null -eq $state) {
         return
     }
+
+    Assert-StoreTransactionStateIsValid -State $state -BasePath $BasePath -StoreName $StoreName -JournalPath $journalPath
 
     $phase = [string]$state.Phase
     if ($phase -eq 'Committed') {
@@ -1809,9 +1995,11 @@ function Get-VulnLegacySnapshotFile {
         [string[]]$LegacyFilePaths
     )
 
-    if ($null -ne $LegacyFilePaths -and $LegacyFilePaths.Count -gt 0) {
+    $resolvedLegacyFilePaths = @($LegacyFilePaths | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+
+    if ($resolvedLegacyFilePaths.Count -gt 0) {
         return [System.IO.FileInfo[]]@(
-            $LegacyFilePaths |
+            $resolvedLegacyFilePaths |
                 ForEach-Object {
                     if (Test-Path -LiteralPath $_ -PathType Leaf) {
                         Get-Item -LiteralPath $_
