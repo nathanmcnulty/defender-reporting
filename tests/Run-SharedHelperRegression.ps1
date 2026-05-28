@@ -6026,6 +6026,37 @@ function Test-HotPhaseReviewArtifactsModeSmoke {
     try {
         [void](New-Item -Path $tempRoot -ItemType Directory -Force)
         $outputRoot = Join-Path $tempRoot 'review'
+        $stdoutPath = Join-Path $tempRoot 'stdout.log'
+        $stderrPath = Join-Path $tempRoot 'stderr.log'
+
+        if (-not $IsWindows) {
+            $pwshCommand = Get-Command -Name 'pwsh' -ErrorAction Stop
+            $argumentList = @(
+                '-NoProfile'
+                '-File'
+                $reviewScriptPath
+                '-DirectoryPath'
+                (Join-Path $repoRoot 'exports')
+                '-OutputRoot'
+                $outputRoot
+                '-ValidationMode'
+                'artifacts'
+                '-PollIntervalSeconds'
+                '1'
+            )
+
+            $process = Start-Process -FilePath $pwshCommand.Source -ArgumentList $argumentList -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+            $process.WaitForExit()
+
+            $stdoutContent = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            $stderrContent = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            $processOutput = @($stdoutContent, $stderrContent) -join [Environment]::NewLine
+
+            Assert-True ($process.ExitCode -ne 0) 'Expected Invoke-HotPhaseReview regression smoke to fail fast on non-Windows platforms.'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $outputRoot 'hot-phase-review.json') -PathType Leaf)) 'Expected non-Windows hot-phase review execution to avoid writing a review report.'
+            Assert-True ($processOutput.Contains('currently supports Windows only')) 'Expected non-Windows hot-phase review execution to explain the Windows-only platform guard.'
+            return
+        }
 
         & $reviewScriptPath `
             -DirectoryPath (Join-Path $repoRoot 'exports') `
