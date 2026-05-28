@@ -13,6 +13,7 @@ function Resolve-AdvancedHuntingBundleSourceFileList {
     $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
 
     if ((-not (Test-Path -LiteralPath $currentPath -PathType Leaf)) -and (Test-Path -LiteralPath $legacyCurrentPath -PathType Leaf)) {
+        Assert-LegacyMigrationAllowed -FeatureName 'Advanced Hunting snapshot compatibility' -LegacyPaths @($legacyCurrentPath)
         $currentPath = $legacyCurrentPath
     }
 
@@ -20,9 +21,11 @@ function Resolve-AdvancedHuntingBundleSourceFileList {
         return @((Get-Item -LiteralPath $currentPath))
     }
 
-    return @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File -ErrorAction SilentlyContinue |
+    $legacyFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File -ErrorAction SilentlyContinue |
         Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
         Sort-Object Name -Descending)
+    Assert-LegacyMigrationAllowed -FeatureName 'Advanced Hunting snapshot compatibility' -LegacyPaths @($legacyFiles | ForEach-Object { $_.FullName })
+    return @($legacyFiles)
 }
 
 function ConvertTo-AdvancedHuntingBundleStringArray {
@@ -268,7 +271,7 @@ function ConvertTo-AdvancedHuntingBundleLoggedOnUserList {
     $values = [System.Collections.Generic.List[string]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     Add-AdvancedHuntingBundleLoggedOnUserValue -Value $Value -Values $values -Seen $seen
-    return ,([string[]]$values.ToArray())
+    return [string[]]$values.ToArray()
 }
 
 function Read-AdvancedHuntingBundle {
@@ -486,27 +489,16 @@ function Read-AdvancedHuntingData {
 
         $ahData = @{}
         $parseErrors = 0
-        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
-        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
-
-        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
-            $currentPath = $legacyCurrentPath
+        $sourceFiles = @(Resolve-AdvancedHuntingBundleSourceFileList -Path $Path)
+        if ($sourceFiles.Count -eq 0) {
+            Write-Warning 'No Advanced Hunting data files found. CVE enrichment will be skipped.'
+            return @{}
         }
 
-        if (Test-Path -Path $currentPath) {
-            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
-            $sourceFiles = @(Get-Item -Path $currentPath)
+        if ($sourceFiles.Count -eq 1) {
+            Write-Information "  Using $($sourceFiles[0].Name)" -InformationAction Continue
         }
         else {
-            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
-                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
-                Sort-Object Name -Descending)
-
-            if ($sourceFiles.Count -eq 0) {
-                Write-Warning 'No Advanced Hunting data files found. CVE enrichment will be skipped.'
-                return @{}
-            }
-
             Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
         }
 
@@ -562,27 +554,16 @@ function Read-AdvancedHuntingInventoryData {
 
         $inventoryData = @{}
         $parseErrors = 0
-        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
-        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
-
-        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
-            $currentPath = $legacyCurrentPath
+        $sourceFiles = @(Resolve-AdvancedHuntingBundleSourceFileList -Path $Path)
+        if ($sourceFiles.Count -eq 0) {
+            Write-Information '  No Advanced Hunting software inventory data files found.' -InformationAction Continue
+            return @{}
         }
 
-        if (Test-Path -Path $currentPath) {
-            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
-            $sourceFiles = @(Get-Item -Path $currentPath)
+        if ($sourceFiles.Count -eq 1) {
+            Write-Information "  Using $($sourceFiles[0].Name)" -InformationAction Continue
         }
         else {
-            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
-                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
-                Sort-Object Name -Descending)
-
-            if ($sourceFiles.Count -eq 0) {
-                Write-Information '  No Advanced Hunting software inventory data files found.' -InformationAction Continue
-                return @{}
-            }
-
             Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
         }
 
@@ -643,122 +624,6 @@ function Read-AdvancedHuntingDeviceUserMap {
         [string]$Path
     )
 
-    function Add-AdvancedHuntingLoggedOnUserValue {
-        [CmdletBinding()]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            $Value,
-
-            [Parameter(Mandatory = $true)]
-            [AllowEmptyCollection()]
-            [System.Collections.Generic.List[string]]$Values,
-
-            [Parameter(Mandatory = $true)]
-            [AllowEmptyCollection()]
-            [System.Collections.Generic.HashSet[string]]$Seen
-        )
-
-        if ($null -eq $Value) {
-            return
-        }
-
-        if ($Value -is [string]) {
-            $text = $Value.Trim()
-            if ([string]::IsNullOrWhiteSpace($text)) {
-                return
-            }
-
-            if ((($text.StartsWith('[') -and $text.EndsWith(']')) -or ($text.StartsWith('{') -and $text.EndsWith('}')))) {
-                try {
-                    $parsedValue = $text | ConvertFrom-Json -Depth 20
-                    Add-AdvancedHuntingLoggedOnUserValue -Value $parsedValue -Values $Values -Seen $Seen
-                    return
-                }
-                catch {
-                    Write-Verbose ("Falling back to raw LoggedOnUsers text after JSON parse failed: {0}" -f $_.Exception.Message)
-                }
-            }
-
-            if ($Seen.Add($text)) {
-                $Values.Add($text)
-            }
-            return
-        }
-
-        if ($Value -is [pscustomobject] -or $Value -is [System.Collections.IDictionary]) {
-            $propertyBag = $Value.PSObject.Properties
-            $upn = [string]$propertyBag['UserPrincipalName']?.Value
-            $domainName = [string]$propertyBag['DomainName']?.Value
-            $accountName = [string]$propertyBag['AccountName']?.Value
-            $userName = [string]$propertyBag['UserName']?.Value
-            $displayName = [string]$propertyBag['Name']?.Value
-
-            $resolvedName = $null
-            if (-not [string]::IsNullOrWhiteSpace($upn)) {
-                $resolvedName = $upn.Trim()
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace($accountName)) {
-                $resolvedName = if (-not [string]::IsNullOrWhiteSpace($domainName)) {
-                    $domainName.Trim() + '\' + $accountName.Trim()
-                }
-                else {
-                    $accountName.Trim()
-                }
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace($userName)) {
-                $resolvedName = if (-not [string]::IsNullOrWhiteSpace($domainName)) {
-                    $domainName.Trim() + '\' + $userName.Trim()
-                }
-                else {
-                    $userName.Trim()
-                }
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace($displayName)) {
-                $resolvedName = $displayName.Trim()
-            }
-
-            if (-not [string]::IsNullOrWhiteSpace($resolvedName)) {
-                if ($Seen.Add($resolvedName)) {
-                    $Values.Add($resolvedName)
-                }
-                return
-            }
-
-            foreach ($property in $propertyBag) {
-                Add-AdvancedHuntingLoggedOnUserValue -Value $property.Value -Values $Values -Seen $Seen
-            }
-            return
-        }
-
-        if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
-            foreach ($item in $Value) {
-                Add-AdvancedHuntingLoggedOnUserValue -Value $item -Values $Values -Seen $Seen
-            }
-            return
-        }
-
-        $fallbackText = [string]$Value
-        if (-not [string]::IsNullOrWhiteSpace($fallbackText) -and $Seen.Add($fallbackText)) {
-            $Values.Add($fallbackText)
-        }
-    }
-
-    function ConvertTo-AdvancedHuntingLoggedOnUserList {
-        [CmdletBinding()]
-        [OutputType([string[]])]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            $Value
-        )
-
-        $values = [System.Collections.Generic.List[string]]::new()
-        $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        Add-AdvancedHuntingLoggedOnUserValue -Value $Value -Values $values -Seen $seen
-        return [string[]]$values.ToArray()
-    }
-
     return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
         Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
 
@@ -766,27 +631,16 @@ function Read-AdvancedHuntingDeviceUserMap {
 
         $deviceUsers = @{}
         $parseErrors = 0
-        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
-        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
-
-        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
-            $currentPath = $legacyCurrentPath
+        $sourceFiles = @(Resolve-AdvancedHuntingBundleSourceFileList -Path $Path)
+        if ($sourceFiles.Count -eq 0) {
+            Write-Information '  No Advanced Hunting device-user data files found.' -InformationAction Continue
+            return @{}
         }
 
-        if (Test-Path -Path $currentPath) {
-            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
-            $sourceFiles = @(Get-Item -Path $currentPath)
+        if ($sourceFiles.Count -eq 1) {
+            Write-Information "  Using $($sourceFiles[0].Name)" -InformationAction Continue
         }
         else {
-            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
-                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
-                Sort-Object Name -Descending)
-
-            if ($sourceFiles.Count -eq 0) {
-                Write-Information '  No Advanced Hunting device-user data files found.' -InformationAction Continue
-                return @{}
-            }
-
             Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
         }
 
@@ -803,7 +657,7 @@ function Read-AdvancedHuntingDeviceUserMap {
                         continue
                     }
 
-                    $loggedOnUsers = @(ConvertTo-AdvancedHuntingLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
+                    $loggedOnUsers = @(ConvertTo-AdvancedHuntingBundleLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
                     if ($loggedOnUsers.Count -gt 0) {
                         $deviceUsers[$deviceId] = @($loggedOnUsers)
                     }

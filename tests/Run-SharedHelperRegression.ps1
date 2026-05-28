@@ -916,6 +916,227 @@ function Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet {
     }
 }
 
+function Test-RestoreStoreTransactionRejectsInvalidJournalShape {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('store-transaction-invalid-' + [guid]::NewGuid().ToString('N'))
+    $externalTransactionRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('store-transaction-external-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    [void](New-Item -Path $externalTransactionRoot -ItemType Directory -Force)
+
+    try {
+        $journalPath = Get-StoreTransactionJournalPath -BasePath $tempRoot -StoreName 'machines'
+        Write-StoreTransactionState -Path $journalPath -State ([PSCustomObject]@{
+                StoreName = 'machines'
+                TransactionRoot = $externalTransactionRoot
+                Phase = 'Prepared'
+                Files = @([PSCustomObject]@{
+                        TargetPath = Get-MachineCurrentPath -BasePath $tempRoot
+                        StagePath = Join-Path $externalTransactionRoot 'Machines_Current.json.gz'
+                        BackupPath = Join-Path $externalTransactionRoot 'replace-0-Machines_Current.json.gz.bak'
+                        TargetExisted = $false
+                    })
+                RemovedFiles = @()
+            })
+
+        $failure = $null
+        try {
+            Restore-StoreTransaction -BasePath $tempRoot -StoreName 'machines'
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected invalid transaction journals to be rejected before rollback begins.'
+        Assert-True ($failure.Exception.Message -like "*references transaction root*$externalTransactionRoot*outside*") 'Expected invalid transaction journal failures to explain that the transaction root escaped the store base path.'
+        Assert-True ((Test-Path -LiteralPath $journalPath -PathType Leaf)) 'Expected invalid transaction journals to remain on disk for manual inspection.'
+    }
+    finally {
+        foreach ($path in @($tempRoot, $externalTransactionRoot)) {
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+function Test-InitializeMachineHistoryStoreRejectsExpiredLegacyMigration {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-store-expired-legacy-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalRemovalDate = $Script:LegacyVulnMigrationRemovalDate
+
+    try {
+        Write-NdjsonRecordsFile -Path (Join-Path $tempRoot 'Machines_2026-05-01.json') -Records @(
+            (Get-TestMachineRecord -Id 'machine-001')
+        )
+        $Script:LegacyVulnMigrationRemovalDate = '2000-01-01'
+
+        $failure = $null
+        try {
+            $null = Initialize-MachineHistoryStore -Path $tempRoot
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected expired machine legacy migration support to fail fast.'
+        Assert-True ($failure.Exception.Message -like '*Legacy machine snapshot compatibility support expired on 2000-01-01*') 'Expected machine legacy migration failures to explain the compatibility cutoff date.'
+    }
+    finally {
+        $Script:LegacyVulnMigrationRemovalDate = $originalRemovalDate
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-InitializeAdvancedHuntingStoreRejectsExpiredLegacyMigration {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('advancedhunting-store-expired-legacy-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalRemovalDate = $Script:LegacyVulnMigrationRemovalDate
+
+    try {
+        Write-NdjsonRecordsFile -Path (Join-Path $tempRoot 'AdvancedHunting_123_2026-05-01.json') -Records @(
+            [PSCustomObject]@{
+                CveId = 'CVE-2026-0001'
+                PublishedDate = '2026-05-01'
+                VulnerabilityDescription = 'Expired legacy compatibility test'
+                EpssScore = 0.42
+                AffectedSoftware = @('Legacy App')
+                LastModifiedTime = '2026-05-01T00:00:00Z'
+            }
+        )
+        $Script:LegacyVulnMigrationRemovalDate = '2000-01-01'
+
+        $failure = $null
+        try {
+            $null = Initialize-AdvancedHuntingStore -Path $tempRoot
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected expired Advanced Hunting legacy migration support to fail fast.'
+        Assert-True ($failure.Exception.Message -like '*Legacy Advanced Hunting snapshot compatibility support expired on 2000-01-01*') 'Expected Advanced Hunting legacy migration failures to explain the compatibility cutoff date.'
+    }
+    finally {
+        $Script:LegacyVulnMigrationRemovalDate = $originalRemovalDate
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-PublishVulnerabilityHistoryStoreRejectsExpiredImplicitLegacyMigration {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-store-expired-implicit-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalRemovalDate = $Script:LegacyVulnMigrationRemovalDate
+
+    try {
+        Write-NdjsonRecordsFile -Path (Join-Path $tempRoot 'VulnExport_1_2026-05-01.json') -Records @(
+            (Get-TestVulnRow -Id 'vuln-001' -CveId 'CVE-2026-0001' -SnapshotDate '2026-05-01' -Version '1.0.0')
+        )
+        $Script:LegacyVulnMigrationRemovalDate = '2000-01-01'
+
+        $failure = $null
+        try {
+            $null = Publish-VulnerabilityHistoryStore -OutputPath $tempRoot
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected implicit vulnerability legacy migration to be blocked after the cutoff date.'
+        Assert-True (($failure.Exception.Message -like '*legacy*') -and ($failure.Exception.Message -like '*2000-01-01*')) ("Expected vulnerability legacy migration failures to explain the compatibility cutoff date. Actual: {0}`nStack: {1}" -f $failure.Exception.Message, $failure.ScriptStackTrace)
+    }
+    finally {
+        $Script:LegacyVulnMigrationRemovalDate = $originalRemovalDate
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-PublishVulnerabilityHistoryStoreAllowsExplicitDownloadedLegacyFilesAfterCutoff {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-store-explicit-download-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalRemovalDate = $Script:LegacyVulnMigrationRemovalDate
+
+    try {
+        $downloadedFile = Join-Path $tempRoot 'VulnExport_1_2026-05-01.json'
+        Write-NdjsonRecordsFile -Path $downloadedFile -Records @(
+            (Get-TestVulnRow -Id 'vuln-001' -CveId 'CVE-2026-0001' -SnapshotDate '2026-05-01' -Version '1.0.0')
+        )
+        $Script:LegacyVulnMigrationRemovalDate = '2000-01-01'
+
+        $result = Publish-VulnerabilityHistoryStore -OutputPath $tempRoot -DownloadedFiles @($downloadedFile)
+
+        Assert-True ($result.CurrentRows -eq 1) 'Expected explicitly downloaded vulnerability snapshots to continue canonicalizing after the legacy cutoff.'
+        Assert-True ((Test-Path -LiteralPath (Get-VulnCurrentPath -BasePath $tempRoot) -PathType Leaf)) 'Expected the canonical vulnerability current store to be written for explicit downloaded snapshots.'
+    }
+    finally {
+        $Script:LegacyVulnMigrationRemovalDate = $originalRemovalDate
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-GetMdeAccessTokenReportsMissingConfigurationDiagnostic {
+    [CmdletBinding()]
+    param()
+
+    $failure = $null
+    try {
+        $null = Get-MdeAccessToken -AppId 'app-001' -AppSecret 'secret-value'
+    }
+    catch {
+        $failure = $_
+    }
+
+    Assert-True ($null -ne $failure) 'Expected incomplete MDE credential configuration to fail.'
+    Assert-True ($failure.Exception.Message -like '*TenantId is missing*') 'Expected missing-credential diagnostics to identify the specific missing MDE setting.'
+    Assert-True ($failure.Exception.Message -like '*Provide -AccessToken or -TenantId/-AppId/-AppSecret*') 'Expected missing-credential diagnostics to preserve the remediation guidance.'
+}
+
+function Test-GetMdeAccessTokenReportsAuthenticationContext {
+    [CmdletBinding()]
+    param()
+
+    Set-Item -Path Function:Invoke-RestMethod -Value {
+        throw [System.Exception]::new('invalid_client')
+    }
+
+    try {
+        $failure = $null
+        try {
+            $null = Get-MdeAccessToken -TenantId 'tenant-001' -AppId 'app-001' -AppSecret 'secret-value'
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected failed MDE authentication attempts to surface context-rich diagnostics.'
+        Assert-True ($failure.Exception.Message -like "*tenant 'tenant-001'*app 'app-001'*resource 'https://api.securitycenter.microsoft.com'*invalid_client*") 'Expected authentication failures to include the tenant, app, resource, and underlying error message.'
+    }
+    finally {
+        Remove-Item -Path Function:Invoke-RestMethod -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-BulkSnapshotImportSmoke {
     [CmdletBinding()]
     param()
@@ -5862,6 +6083,11 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-InitializeMachineHistoryStoreSupportsStateHashOnlyCurrentMap'; SuccessMessage = 'Machine store stateHash-only initialization checks passed.' }
     @{ Name = 'Test-MdeMachineRefreshPublishPlanSupportsStateHashOnlyCurrentMap'; SuccessMessage = 'Machine refresh plan stateHash-only checks passed.' }
     @{ Name = 'Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet'; SuccessMessage = 'Machine history cleanup empty-set checks passed.' }
+    @{ Name = 'Test-RestoreStoreTransactionRejectsInvalidJournalShape'; SuccessMessage = 'Store transaction journal validation checks passed.' }
+    @{ Name = 'Test-InitializeMachineHistoryStoreRejectsExpiredLegacyMigration'; SuccessMessage = 'Machine legacy migration cutoff checks passed.' }
+    @{ Name = 'Test-InitializeAdvancedHuntingStoreRejectsExpiredLegacyMigration'; SuccessMessage = 'Advanced Hunting legacy migration cutoff checks passed.' }
+    @{ Name = 'Test-PublishVulnerabilityHistoryStoreRejectsExpiredImplicitLegacyMigration'; SuccessMessage = 'Implicit vulnerability legacy migration cutoff checks passed.' }
+    @{ Name = 'Test-PublishVulnerabilityHistoryStoreAllowsExplicitDownloadedLegacyFilesAfterCutoff'; SuccessMessage = 'Explicit vulnerability snapshot import cutoff checks passed.' }
     @{ Name = 'Test-BulkSnapshotImportSmoke'; SuccessMessage = 'Bulk snapshot import smoke checks passed.' }
     @{ Name = 'Test-BulkSnapshotImportSingleSnapshot'; SuccessMessage = 'Single-snapshot vulnerability import checks passed.' }
     @{ Name = 'Test-BulkSnapshotImportMultipartSnapshot'; SuccessMessage = 'Multipart vulnerability import checks passed.' }
@@ -5874,6 +6100,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadEmptyBlobExhaustionBehavior'; SuccessMessage = 'Multipart vulnerability empty-blob retry exhaustion checks passed.' }
     @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadMoveFailureCleanupBehavior'; SuccessMessage = 'Multipart vulnerability move-failure cleanup checks passed.' }
     @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadCleanupBehavior'; SuccessMessage = 'Multipart vulnerability failed-download cleanup checks passed.' }
+    @{ Name = 'Test-GetMdeAccessTokenReportsMissingConfigurationDiagnostic'; SuccessMessage = 'MDE token-source diagnostics checks passed.' }
+    @{ Name = 'Test-GetMdeAccessTokenReportsAuthenticationContext'; SuccessMessage = 'MDE authentication context diagnostics checks passed.' }
     @{ Name = 'Test-VulnCurrentFileRejectsDuplicateId'; SuccessMessage = 'Current-file duplicate Id checks passed.' }
     @{ Name = 'Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore'; SuccessMessage = 'Canonical quarterly history repair skip checks passed.' }
     @{ Name = 'Test-VulnStoreRequiresCanonicalRepairDetectsMalformedQuarterlyHistory'; SuccessMessage = 'Canonical quarterly history gate checks passed.' }

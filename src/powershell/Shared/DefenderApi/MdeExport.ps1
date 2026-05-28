@@ -97,8 +97,19 @@ function Get-MdeAccessToken {
             return [string]$response.access_token
         }
         catch {
-            throw "Failed to authenticate to Microsoft Defender for Endpoint: $_"
+            throw ("Failed to authenticate to Microsoft Defender for Endpoint for tenant '{0}', app '{1}', resource '{2}': {3}" -f $resolvedTenantId, $resolvedAppId, $ResourceAppIdUri, $_.Exception.Message)
         }
+    }
+
+    $diagnostics = [System.Collections.Generic.List[string]]::new()
+    if ([string]::IsNullOrWhiteSpace($resolvedTenantId)) {
+        $diagnostics.Add('TenantId is missing')
+    }
+    if ([string]::IsNullOrWhiteSpace($resolvedAppId)) {
+        $diagnostics.Add('AppId is missing')
+    }
+    if ([string]::IsNullOrWhiteSpace($resolvedSecretText)) {
+        $diagnostics.Add('AppSecret is missing')
     }
 
     if ($UseAzureCliFallback) {
@@ -109,18 +120,46 @@ function Get-MdeAccessToken {
                 if (-not [string]::IsNullOrWhiteSpace($azAccessToken)) {
                     return $azAccessToken.Trim()
                 }
+
+                $diagnostics.Add("Azure CLI fallback returned no access token for resource '$ResourceAppIdUri'")
             }
             catch {
                 Write-Verbose "Azure CLI token acquisition failed: $_"
+                $diagnostics.Add(("Azure CLI fallback failed: {0}" -f $_.Exception.Message))
             }
+        }
+        else {
+            $diagnostics.Add("Azure CLI fallback is unavailable because 'az' is not installed")
         }
     }
 
-    if ($UseEnvironmentFallback -or $UseAzureCliFallback) {
-        throw "No Defender API token source available. Provide -AccessToken, set DEFENDER_ACCESS_TOKEN, set DEFENDER_TENANT_ID/DEFENDER_APP_ID/DEFENDER_APP_SECRET, or sign in with 'az login'."
+    if ($UseEnvironmentFallback) {
+        if ([string]::IsNullOrWhiteSpace([string]$env:DEFENDER_ACCESS_TOKEN)) {
+            $diagnostics.Add('DEFENDER_ACCESS_TOKEN is not set')
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$env:DEFENDER_TENANT_ID)) {
+            $diagnostics.Add('DEFENDER_TENANT_ID is not set')
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$env:DEFENDER_APP_ID)) {
+            $diagnostics.Add('DEFENDER_APP_ID is not set')
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$env:DEFENDER_APP_SECRET)) {
+            $diagnostics.Add('DEFENDER_APP_SECRET is not set')
+        }
     }
 
-    throw 'No Defender API token source available. Provide -AccessToken or -TenantId/-AppId/-AppSecret.'
+    $diagnosticSuffix = if ($diagnostics.Count -gt 0) {
+        ' Diagnostics: ' + (($diagnostics | Select-Object -Unique) -join '; ') + '.'
+    }
+    else {
+        ''
+    }
+
+    if ($UseEnvironmentFallback -or $UseAzureCliFallback) {
+        throw ("No Defender API token source available. Provide -AccessToken, set DEFENDER_ACCESS_TOKEN, set DEFENDER_TENANT_ID/DEFENDER_APP_ID/DEFENDER_APP_SECRET, or sign in with 'az login'.{0}" -f $diagnosticSuffix)
+    }
+
+    throw ("No Defender API token source available. Provide -AccessToken or -TenantId/-AppId/-AppSecret.{0}" -f $diagnosticSuffix)
 }
 
 function Get-MdeHeaderCollection {
