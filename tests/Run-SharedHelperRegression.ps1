@@ -6014,6 +6014,42 @@ function Test-LargeDatasetValidationSemanticModeForcesFullReplay {
     }
 }
 
+function Test-HotPhaseReviewArtifactsModeSmoke {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $reviewScriptPath = Join-Path $repoRoot 'tests\Invoke-HotPhaseReview.ps1'
+    Assert-True ((Test-Path -LiteralPath $reviewScriptPath -PathType Leaf)) "Expected hot-phase review script at '$reviewScriptPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('hot-phase-review-smoke-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $outputRoot = Join-Path $tempRoot 'review'
+
+        & $reviewScriptPath `
+            -DirectoryPath (Join-Path $repoRoot 'exports') `
+            -OutputRoot $outputRoot `
+            -ValidationMode artifacts `
+            -PollIntervalSeconds 1 | Out-Null
+
+        $reportPath = Join-Path $outputRoot 'hot-phase-review.json'
+        Assert-True ((Test-Path -LiteralPath $reportPath -PathType Leaf)) 'Expected hot-phase review smoke to emit a report.'
+
+        $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -Depth 20
+        Assert-True ($report.status -eq 'success') 'Expected hot-phase review smoke to complete successfully.'
+        Assert-True ($report.review.validationMode -eq 'artifacts') 'Expected hot-phase review smoke to record artifact validation mode.'
+        Assert-True ($report.artifactValidationSummary.passed -eq $true) 'Expected artifact-mode hot-phase review smoke to validate hosted and self-contained outputs.'
+        Assert-True (@($report.generatorPhases).Count -gt 0) 'Expected hot-phase review smoke to capture generator phase timings.'
+        Assert-True ((Test-Path -LiteralPath $report.artifacts.hostedDashboardPath -PathType Leaf)) 'Expected hot-phase review smoke to emit the hosted dashboard artifact.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-GetDashboardTemplateContentAcceptsExplicitTemplatesPathWithEmptyDefaultRoot {
     [CmdletBinding()]
     param()
@@ -6144,6 +6180,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload'; SuccessMessage = 'Embedded payload inspection checks passed.' }
     @{ Name = 'Test-MeasureStressRunWritesProgressAndFinalReport'; SuccessMessage = 'Measure-StressRun report persistence checks passed.' }
     @{ Name = 'Test-LargeDatasetValidationSemanticModeForcesFullReplay'; SuccessMessage = 'Large-dataset semantic sign-off checks passed.' }
+    @{ Name = 'Test-HotPhaseReviewArtifactsModeSmoke'; SuccessMessage = 'Hot-phase review wrapper smoke checks passed.' }
     @{ Name = 'Test-GetDashboardTemplateContentAcceptsExplicitTemplatesPathWithEmptyDefaultRoot'; SuccessMessage = 'Dashboard template explicit-path checks passed.' }
     @{ Name = 'Test-ValidationHelperPayloadCanonicalization'; SuccessMessage = 'Validation helper payload-format checks passed.' }
     @{ Name = 'Test-ValidationHelperSourceCanonicalization'; SuccessMessage = 'Validation helper source canonicalization checks passed.' }
