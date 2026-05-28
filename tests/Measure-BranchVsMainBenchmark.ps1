@@ -45,6 +45,10 @@ param(
     [string]$MainBaselineName = 'main-clean',
 
     [Parameter(Mandatory = $false)]
+    [ValidateSet('Alternate', 'CurrentThenMain', 'MainThenCurrent')]
+    [string]$BaselineExecutionOrder = 'Alternate',
+
+    [Parameter(Mandatory = $false)]
     [ValidateRange(5, 60)]
     [int]$PollIntervalSeconds = 15,
 
@@ -1835,6 +1839,7 @@ function Get-PhaseElapsedSecondsDeltaSummary {
         }
     }
 
+    $phaseNames = @($phaseNames | Sort-Object)
     $deltaByName = [ordered]@{}
     foreach ($phaseName in $phaseNames) {
         $currentPhaseSeconds = Get-PhaseElapsedSecondsValue -Result $CurrentResult -PhaseName $phaseName
@@ -1851,6 +1856,165 @@ function Get-PhaseElapsedSecondsDeltaSummary {
     }
 
     return [PSCustomObject]$deltaByName
+}
+
+function Get-RelativeDeltaPercent {
+    [CmdletBinding()]
+    [OutputType([double])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $CurrentValue,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $BaselineValue
+    )
+
+    if ($null -eq $CurrentValue -or $null -eq $BaselineValue) {
+        return $null
+    }
+
+    $baseline = [double]$BaselineValue
+    if ($baseline -eq 0) {
+        return $null
+    }
+
+    return [math]::Round(((([double]$CurrentValue) - $baseline) / $baseline) * 100, 2)
+}
+
+function Get-BenchmarkBaselineExecutionPlan {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RequestedOrder,
+
+        [Parameter(Mandatory = $true)]
+        [bool]$CurrentOnly,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CurrentBaselineName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CurrentRepoPath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$MainBaselineName,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$MainRepoPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ResultsOutputPath
+    )
+
+    if ($CurrentOnly) {
+        return [PSCustomObject]@{
+            requested_order = $RequestedOrder
+            effective_order = 'CurrentOnly'
+            reason = 'main baseline disabled'
+            sequence = @(
+                [PSCustomObject]@{
+                    key = 'current'
+                    role = 'branch'
+                    baseline_name = $CurrentBaselineName
+                    repo_path = $CurrentRepoPath
+                }
+            )
+        }
+    }
+
+    $effectiveOrder = $RequestedOrder
+    $orderReason = 'explicit parameter'
+    if ($RequestedOrder -eq 'Alternate') {
+        $resultLeaf = Split-Path -Path $ResultsOutputPath -Leaf
+        if ($resultLeaf -match '^run-(?<iteration>\d+)\.json$') {
+            $iteration = [int]$Matches.iteration
+            $effectiveOrder = if (($iteration % 2) -eq 0) { 'MainThenCurrent' } else { 'CurrentThenMain' }
+            $orderReason = ("derived from benchmark series iteration {0}" -f $iteration)
+        }
+        else {
+            $seedText = [System.IO.Path]::GetFileNameWithoutExtension($ResultsOutputPath)
+            if ([string]::IsNullOrWhiteSpace($seedText)) {
+                $seedText = $ResultsOutputPath
+            }
+
+            $characterSum = 0
+            foreach ($character in $seedText.ToCharArray()) {
+                $characterSum += [int][char]$character
+            }
+
+            $effectiveOrder = if (($characterSum % 2) -eq 0) { 'CurrentThenMain' } else { 'MainThenCurrent' }
+            $orderReason = ("derived from results output path '{0}'" -f $resultLeaf)
+        }
+    }
+
+    $sequence = if ($effectiveOrder -eq 'MainThenCurrent') {
+        @(
+            [PSCustomObject]@{
+                key = 'main'
+                role = 'main'
+                baseline_name = $MainBaselineName
+                repo_path = $MainRepoPath
+            }
+            [PSCustomObject]@{
+                key = 'current'
+                role = 'branch'
+                baseline_name = $CurrentBaselineName
+                repo_path = $CurrentRepoPath
+            }
+        )
+    }
+    else {
+        @(
+            [PSCustomObject]@{
+                key = 'current'
+                role = 'branch'
+                baseline_name = $CurrentBaselineName
+                repo_path = $CurrentRepoPath
+            }
+            [PSCustomObject]@{
+                key = 'main'
+                role = 'main'
+                baseline_name = $MainBaselineName
+                repo_path = $MainRepoPath
+            }
+        )
+    }
+
+    return [PSCustomObject]@{
+        requested_order = $RequestedOrder
+        effective_order = $effectiveOrder
+        reason = $orderReason
+        sequence = $sequence
+    }
+}
+
+function Format-BenchmarkSignedDeltaText {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value,
+
+        [Parameter(Mandatory = $false)]
+        [string]$Suffix = 's',
+
+        [Parameter(Mandatory = $false)]
+        [int]$Decimals = 2
+    )
+
+    if ($null -eq $Value) {
+        return 'n/a'
+    }
+
+    $roundedValue = [math]::Round([double]$Value, $Decimals)
+    $format = "{0:+0." + ('0' * $Decimals) + ";-0." + ('0' * $Decimals) + ";0." + ('0' * $Decimals) + "}{1}"
+    return ($format -f $roundedValue, $Suffix)
 }
 
 function Get-EnvironmentSnapshotDeltaSummary {
@@ -2486,13 +2650,30 @@ function Get-ComparisonBlock {
         [psobject]$Main
     )
 
+    $functionTimingBasisConsistent = if ($null -ne $Current.function_app -and $null -ne $Main.function_app) {
+        ([string]$Current.function_app.timing_basis -eq [string]$Main.function_app.timing_basis)
+    }
+    else {
+        $null
+    }
+
     return [PSCustomObject]@{
+        delta_basis = 'current-minus-main'
+        current_baseline_name = [string]$Current.baseline
+        main_baseline_name = [string]$Main.baseline
         local = if ($null -ne $Current.local -and $null -ne $Main.local) {
             [PSCustomObject]@{
                 elapsed_seconds_delta = [math]::Round(($Current.local.elapsed_seconds - $Main.local.elapsed_seconds), 2)
+                elapsed_seconds_delta_percent = Get-RelativeDeltaPercent -CurrentValue $Current.local.elapsed_seconds -BaselineValue $Main.local.elapsed_seconds
                 peak_rss_gb_delta = [math]::Round(($Current.local.peak_tree_rss_gb - $Main.local.peak_tree_rss_gb), 3)
                 peak_private_gb_delta = [math]::Round(($Current.local.peak_tree_private_gb - $Main.local.peak_tree_private_gb), 3)
                 phase_elapsed_seconds_delta = Get-PhaseElapsedSecondsDeltaSummary -CurrentResult $Current.local -MainResult $Main.local
+                wrapper_overhead_seconds_delta = if ($null -ne $Current.local.wrapper_overhead_seconds -and $null -ne $Main.local.wrapper_overhead_seconds) {
+                    [math]::Round(($Current.local.wrapper_overhead_seconds - $Main.local.wrapper_overhead_seconds), 2)
+                }
+                else {
+                    $null
+                }
                 environment_snapshot_delta = Get-EnvironmentSnapshotDeltaSummary -CurrentResult $Current.local -MainResult $Main.local
             }
         }
@@ -2520,6 +2701,7 @@ function Get-ComparisonBlock {
         runbook = if ($null -ne $Current.runbook -and $null -ne $Main.runbook) {
             [PSCustomObject]@{
                 elapsed_seconds_delta = [math]::Round(($Current.runbook.elapsed_seconds - $Main.runbook.elapsed_seconds), 2)
+                elapsed_seconds_delta_percent = Get-RelativeDeltaPercent -CurrentValue $Current.runbook.elapsed_seconds -BaselineValue $Main.runbook.elapsed_seconds
                 peak_working_set_mb_delta = [math]::Round(($Current.runbook.peak_working_set_mb - $Main.runbook.peak_working_set_mb), 1)
                 peak_gc_heap_mb_delta = [math]::Round(($Current.runbook.peak_gc_heap_mb - $Main.runbook.peak_gc_heap_mb), 1)
             }
@@ -2529,7 +2711,12 @@ function Get-ComparisonBlock {
         }
         function_app = if ($null -ne $Current.function_app -and $null -ne $Main.function_app) {
             [PSCustomObject]@{
+                timing_basis_current = [string]$Current.function_app.timing_basis
+                timing_basis_main = [string]$Main.function_app.timing_basis
+                timing_basis_consistent = $functionTimingBasisConsistent
+                elapsed_seconds_delta_is_comparable = $functionTimingBasisConsistent
                 elapsed_seconds_delta = [math]::Round(($Current.function_app.elapsed_seconds - $Main.function_app.elapsed_seconds), 2)
+                elapsed_seconds_delta_percent = Get-RelativeDeltaPercent -CurrentValue $Current.function_app.elapsed_seconds -BaselineValue $Main.function_app.elapsed_seconds
                 active_elapsed_seconds_delta = if ($null -ne $Current.function_app.active_elapsed_seconds -and $null -ne $Main.function_app.active_elapsed_seconds) {
                     [math]::Round(($Current.function_app.active_elapsed_seconds - $Main.function_app.active_elapsed_seconds), 2)
                 }
@@ -2612,8 +2799,10 @@ if ($null -ne $datasetDefinition -and -not $datasetDefinitionMatch) {
 $datasetDefinitionMetadata = Get-BenchmarkDatasetResultMetadata -DatasetPath $resolvedDatasetPath -Manifest $datasetManifest -BenchmarkDatasetId $BenchmarkDatasetId -RepoRoot $repoRoot
 $totalRows = [int]$datasetPreflight.totalRows
 $effectiveIncludeLocalBenchmark = ($LocalOnly -or $IncludeLocalBenchmark -or $IncludePersistentLocalWorkflow)
+$baselineExecutionPlan = Get-BenchmarkBaselineExecutionPlan -RequestedOrder $BaselineExecutionOrder -CurrentOnly ($CurrentOnly -eq $true) -CurrentBaselineName $CurrentBaselineName -CurrentRepoPath $resolvedCurrentRepoPath -MainBaselineName $MainBaselineName -MainRepoPath $resolvedMainRepoPath -ResultsOutputPath $resolvedResultsOutputPath
 
 Write-Host ("Dataset preflight passed: {0} rows, {1:N2} GB on disk, {2} GB free memory, {3} GB free disk." -f $totalRows, ($datasetPreflight.datasetBytes / 1GB), $datasetPreflight.availableMemoryGB, $datasetPreflight.freeDiskGB)
+Write-Host ("Benchmark execution order: {0} ({1}; {2})" -f ((@($baselineExecutionPlan.sequence) | ForEach-Object { "{0} [{1}]" -f $_.baseline_name, $_.role }) -join ' -> '), $baselineExecutionPlan.effective_order, $baselineExecutionPlan.reason)
 
 $subscription = if ($LocalOnly) { $null } else { Invoke-AzCli -Arguments @('account', 'show', '-o', 'json') -ExpectJson }
 $functionHostName = if ($LocalOnly) { $null } else { Get-FunctionHostName }
@@ -2629,17 +2818,20 @@ try {
         Wait-FunctionHostReady -HostName $functionHostName -MasterKey $functionMasterKey
     }
 
-    $currentResult = @(Invoke-BaselineBenchmark -BaselineName $CurrentBaselineName -RepoPath $resolvedCurrentRepoPath -DatasetRoot $resolvedDatasetPath -OutputRoot $outputDirectory -FunctionHostName $functionHostName -FunctionResourceId $functionResourceId -SubscriptionId $(if ($LocalOnly) { '' } else { [string]$subscription.id }) -TotalRows $totalRows -IncludeLocalBenchmark:$effectiveIncludeLocalBenchmark -LocalOnly:$LocalOnly -IncludePersistentLocalWorkflow:$IncludePersistentLocalWorkflow) | Select-Object -Last 1
-    $currentResult | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path -Path $outputDirectory -ChildPath ($CurrentBaselineName + '.result.json')) -Encoding utf8
-
-    if (-not $CurrentOnly) {
+    foreach ($baselineStep in @($baselineExecutionPlan.sequence)) {
         if (-not $LocalOnly) {
             $functionMasterKey = Get-FunctionMasterKey
             Wait-FunctionHostReady -HostName $functionHostName -MasterKey $functionMasterKey
         }
 
-        $mainResult = @(Invoke-BaselineBenchmark -BaselineName $MainBaselineName -RepoPath $resolvedMainRepoPath -DatasetRoot $resolvedDatasetPath -OutputRoot $outputDirectory -FunctionHostName $functionHostName -FunctionResourceId $functionResourceId -SubscriptionId $(if ($LocalOnly) { '' } else { [string]$subscription.id }) -TotalRows $totalRows -IncludeLocalBenchmark:$effectiveIncludeLocalBenchmark -LocalOnly:$LocalOnly -IncludePersistentLocalWorkflow:$IncludePersistentLocalWorkflow) | Select-Object -Last 1
-        $mainResult | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path -Path $outputDirectory -ChildPath ($MainBaselineName + '.result.json')) -Encoding utf8
+        $baselineResult = @(Invoke-BaselineBenchmark -BaselineName $baselineStep.baseline_name -RepoPath $baselineStep.repo_path -DatasetRoot $resolvedDatasetPath -OutputRoot $outputDirectory -FunctionHostName $functionHostName -FunctionResourceId $functionResourceId -SubscriptionId $(if ($LocalOnly) { '' } else { [string]$subscription.id }) -TotalRows $totalRows -IncludeLocalBenchmark:$effectiveIncludeLocalBenchmark -LocalOnly:$LocalOnly -IncludePersistentLocalWorkflow:$IncludePersistentLocalWorkflow) | Select-Object -Last 1
+        $baselineResult | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path -Path $outputDirectory -ChildPath ($baselineStep.baseline_name + '.result.json')) -Encoding utf8
+
+        switch ([string]$baselineStep.key) {
+            'current' { $currentResult = $baselineResult }
+            'main' { $mainResult = $baselineResult }
+            default { throw "Unsupported benchmark baseline step '$($baselineStep.key)'." }
+        }
     }
 }
 finally {
@@ -2656,7 +2848,7 @@ finally {
 }
 
 $result = [PSCustomObject]@{
-    benchmark_schema_version = 2
+    benchmark_schema_version = 3
     generated_utc = [datetime]::UtcNow.ToString('o')
     benchmark_mode = if ($LocalOnly) {
         if ($CurrentOnly) { 'local-current-only' } else { 'local-branch-vs-main' }
@@ -2670,6 +2862,18 @@ $result = [PSCustomObject]@{
     local_only = ($LocalOnly -eq $true)
     include_local_benchmark = ($effectiveIncludeLocalBenchmark -eq $true)
     persistent_local_workflow = ($IncludePersistentLocalWorkflow -eq $true)
+    baseline_execution_order_requested = $baselineExecutionPlan.requested_order
+    baseline_execution_order_effective = $baselineExecutionPlan.effective_order
+    baseline_execution_order_reason = $baselineExecutionPlan.reason
+    baseline_execution_sequence = @(
+        foreach ($baselineStep in @($baselineExecutionPlan.sequence)) {
+            [PSCustomObject]@{
+                key = [string]$baselineStep.key
+                role = [string]$baselineStep.role
+                baseline_name = [string]$baselineStep.baseline_name
+            }
+        }
+    )
     subscription = if ($null -ne $subscription) {
         [PSCustomObject]@{
             id = [string]$subscription.id
@@ -2706,41 +2910,63 @@ Write-Host ''
 Write-Host ('Benchmark report: {0}' -f $resolvedResultsOutputPath) -ForegroundColor Green
 if ($null -ne $currentResult) {
     if ($LocalOnly) {
-        Write-Host ('{0} local elapsed: {1}s' -f $CurrentBaselineName, $currentResult.local.elapsed_seconds)
+        Write-Host ('{0} [branch] local elapsed: {1}s' -f $CurrentBaselineName, $currentResult.local.elapsed_seconds)
     }
     elseif ($effectiveIncludeLocalBenchmark) {
-        Write-Host ('{0} local/runbook/function elapsed: {1}s / {2}s / {3}s ({4})' -f $CurrentBaselineName, $currentResult.local.elapsed_seconds, $currentResult.runbook.elapsed_seconds, $currentResult.function_app.elapsed_seconds, $currentResult.function_app.timing_basis)
+        Write-Host ('{0} [branch] local/runbook/function elapsed: {1}s / {2}s / {3}s ({4})' -f $CurrentBaselineName, $currentResult.local.elapsed_seconds, $currentResult.runbook.elapsed_seconds, $currentResult.function_app.elapsed_seconds, $currentResult.function_app.timing_basis)
         if ($null -ne $currentResult.function_app.end_to_end_elapsed_seconds) {
-            Write-Host ('{0} function end-to-end/pickup delay: {1}s / {2}s' -f $CurrentBaselineName, $currentResult.function_app.end_to_end_elapsed_seconds, $currentResult.function_app.pickup_delay_seconds)
+            Write-Host ('{0} [branch] function end-to-end/pickup delay: {1}s / {2}s' -f $CurrentBaselineName, $currentResult.function_app.end_to_end_elapsed_seconds, $currentResult.function_app.pickup_delay_seconds)
         }
     }
     else {
-        Write-Host ('{0} runbook/function elapsed: {1}s / {2}s ({3})' -f $CurrentBaselineName, $currentResult.runbook.elapsed_seconds, $currentResult.function_app.elapsed_seconds, $currentResult.function_app.timing_basis)
+        Write-Host ('{0} [branch] runbook/function elapsed: {1}s / {2}s ({3})' -f $CurrentBaselineName, $currentResult.runbook.elapsed_seconds, $currentResult.function_app.elapsed_seconds, $currentResult.function_app.timing_basis)
         if ($null -ne $currentResult.function_app.end_to_end_elapsed_seconds) {
-            Write-Host ('{0} function end-to-end/pickup delay: {1}s / {2}s' -f $CurrentBaselineName, $currentResult.function_app.end_to_end_elapsed_seconds, $currentResult.function_app.pickup_delay_seconds)
+            Write-Host ('{0} [branch] function end-to-end/pickup delay: {1}s / {2}s' -f $CurrentBaselineName, $currentResult.function_app.end_to_end_elapsed_seconds, $currentResult.function_app.pickup_delay_seconds)
         }
     }
     if ($null -ne $currentResult.local_persistent_cache) {
-        Write-Host ('{0} persistent local prime/reuse elapsed: {1}s / {2}s' -f $CurrentBaselineName, $currentResult.local_persistent_cache.prime.elapsed_seconds, $currentResult.local_persistent_cache.reuse_after_payload_eviction.elapsed_seconds)
+        Write-Host ('{0} [branch] persistent local prime/reuse elapsed: {1}s / {2}s' -f $CurrentBaselineName, $currentResult.local_persistent_cache.prime.elapsed_seconds, $currentResult.local_persistent_cache.reuse_after_payload_eviction.elapsed_seconds)
     }
 }
 if ($null -ne $mainResult) {
     if ($LocalOnly) {
-        Write-Host ('{0} local elapsed: {1}s' -f $MainBaselineName, $mainResult.local.elapsed_seconds)
+        Write-Host ('{0} [main] local elapsed: {1}s' -f $MainBaselineName, $mainResult.local.elapsed_seconds)
     }
     elseif ($effectiveIncludeLocalBenchmark) {
-        Write-Host ('{0} local/runbook/function elapsed: {1}s / {2}s / {3}s ({4})' -f $MainBaselineName, $mainResult.local.elapsed_seconds, $mainResult.runbook.elapsed_seconds, $mainResult.function_app.elapsed_seconds, $mainResult.function_app.timing_basis)
+        Write-Host ('{0} [main] local/runbook/function elapsed: {1}s / {2}s / {3}s ({4})' -f $MainBaselineName, $mainResult.local.elapsed_seconds, $mainResult.runbook.elapsed_seconds, $mainResult.function_app.elapsed_seconds, $mainResult.function_app.timing_basis)
         if ($null -ne $mainResult.function_app.end_to_end_elapsed_seconds) {
-            Write-Host ('{0} function end-to-end/pickup delay: {1}s / {2}s' -f $MainBaselineName, $mainResult.function_app.end_to_end_elapsed_seconds, $mainResult.function_app.pickup_delay_seconds)
+            Write-Host ('{0} [main] function end-to-end/pickup delay: {1}s / {2}s' -f $MainBaselineName, $mainResult.function_app.end_to_end_elapsed_seconds, $mainResult.function_app.pickup_delay_seconds)
         }
     }
     else {
-        Write-Host ('{0} runbook/function elapsed: {1}s / {2}s ({3})' -f $MainBaselineName, $mainResult.runbook.elapsed_seconds, $mainResult.function_app.elapsed_seconds, $mainResult.function_app.timing_basis)
+        Write-Host ('{0} [main] runbook/function elapsed: {1}s / {2}s ({3})' -f $MainBaselineName, $mainResult.runbook.elapsed_seconds, $mainResult.function_app.elapsed_seconds, $mainResult.function_app.timing_basis)
         if ($null -ne $mainResult.function_app.end_to_end_elapsed_seconds) {
-            Write-Host ('{0} function end-to-end/pickup delay: {1}s / {2}s' -f $MainBaselineName, $mainResult.function_app.end_to_end_elapsed_seconds, $mainResult.function_app.pickup_delay_seconds)
+            Write-Host ('{0} [main] function end-to-end/pickup delay: {1}s / {2}s' -f $MainBaselineName, $mainResult.function_app.end_to_end_elapsed_seconds, $mainResult.function_app.pickup_delay_seconds)
         }
     }
     if ($null -ne $mainResult.local_persistent_cache) {
-        Write-Host ('{0} persistent local prime/reuse elapsed: {1}s / {2}s' -f $MainBaselineName, $mainResult.local_persistent_cache.prime.elapsed_seconds, $mainResult.local_persistent_cache.reuse_after_payload_eviction.elapsed_seconds)
+        Write-Host ('{0} [main] persistent local prime/reuse elapsed: {1}s / {2}s' -f $MainBaselineName, $mainResult.local_persistent_cache.prime.elapsed_seconds, $mainResult.local_persistent_cache.reuse_after_payload_eviction.elapsed_seconds)
+    }
+}
+if ($null -ne $result.comparison) {
+    Write-Host ''
+    Write-Host 'Comparison summary (branch vs main; current minus main deltas)' -ForegroundColor Cyan
+    Write-Host ("Execution order: {0}" -f ((@($baselineExecutionPlan.sequence) | ForEach-Object { "{0} [{1}]" -f $_.baseline_name, $_.role }) -join ' -> '))
+    if ($null -ne $result.comparison.local) {
+        $localDirection = if ($result.comparison.local.elapsed_seconds_delta -lt 0) { 'faster' } elseif ($result.comparison.local.elapsed_seconds_delta -gt 0) { 'slower' } else { 'unchanged' }
+        Write-Host ("Local elapsed delta: {0} ({1}; {2})" -f (Format-BenchmarkSignedDeltaText -Value $result.comparison.local.elapsed_seconds_delta), $localDirection, (Format-BenchmarkSignedDeltaText -Value $result.comparison.local.elapsed_seconds_delta_percent -Suffix '%' ))
+    }
+    if ($null -ne $result.comparison.runbook) {
+        $runbookDirection = if ($result.comparison.runbook.elapsed_seconds_delta -lt 0) { 'faster' } elseif ($result.comparison.runbook.elapsed_seconds_delta -gt 0) { 'slower' } else { 'unchanged' }
+        Write-Host ("Runbook elapsed delta: {0} ({1}; {2})" -f (Format-BenchmarkSignedDeltaText -Value $result.comparison.runbook.elapsed_seconds_delta), $runbookDirection, (Format-BenchmarkSignedDeltaText -Value $result.comparison.runbook.elapsed_seconds_delta_percent -Suffix '%' ))
+    }
+    if ($null -ne $result.comparison.function_app) {
+        if ($result.comparison.function_app.elapsed_seconds_delta_is_comparable) {
+            $functionDirection = if ($result.comparison.function_app.elapsed_seconds_delta -lt 0) { 'faster' } elseif ($result.comparison.function_app.elapsed_seconds_delta -gt 0) { 'slower' } else { 'unchanged' }
+            Write-Host ("Function elapsed delta: {0} ({1}; {2}; basis: {3})" -f (Format-BenchmarkSignedDeltaText -Value $result.comparison.function_app.elapsed_seconds_delta), $functionDirection, (Format-BenchmarkSignedDeltaText -Value $result.comparison.function_app.elapsed_seconds_delta_percent -Suffix '%' ), $result.comparison.function_app.timing_basis_current)
+        }
+        else {
+            Write-Host ("Function elapsed delta is not directly comparable because timing bases differ: branch={0}; main={1}" -f $result.comparison.function_app.timing_basis_current, $result.comparison.function_app.timing_basis_main) -ForegroundColor Yellow
+        }
     }
 }
