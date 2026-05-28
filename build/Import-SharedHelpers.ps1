@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $__manifestToolsPath -PathType Leaf)) {
 
 . $__manifestToolsPath
 
-$__generatedHelperPath = Resolve-PowerShellArtifactOutputPath -ManifestPath (Join-Path $__buildRoot 'manifests\shared-helpers.json') -RepoRoot $__repoRoot -BuildScriptPath (Join-Path $__buildRoot 'Build-SharedHelpers.ps1') -BuildScriptNotFoundMessage "Shared helper build script not found at '{0}'." -MissingOutputMessage "Shared helpers were not generated at '{0}'."
+$__generatedHelperPath = Resolve-PowerShellArtifactOutputPath -ManifestPath (Join-Path $__buildRoot 'manifests\shared-helpers.json') -RepoRoot $__repoRoot -BuildScriptPath (Join-Path $__buildRoot 'Build-SharedHelpers.ps1') -BuildScriptNotFoundMessage "Shared helper build script not found at '{0}'. Run '.\\build\\Build-SharedHelpers.ps1' from the repo root to regenerate shared helpers." -MissingOutputMessage "Shared helpers were not generated at '{0}'. Run '.\\build\\Build-SharedHelpers.ps1' from the repo root to regenerate them."
 
 . $__generatedHelperPath
 Remove-Variable -Name __repoRoot -ErrorAction Ignore

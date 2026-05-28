@@ -222,6 +222,105 @@ function Test-ArtifactManifestRejectsCrossArtifactSourceConflict {
     }
 }
 
+function Test-ArtifactManifestUsesContentFingerprint {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $artifactManifestToolsPath = Join-Path $repoRoot 'build\private\ArtifactManifestTools.ps1'
+    Assert-True ((Test-Path -LiteralPath $artifactManifestToolsPath -PathType Leaf)) "Expected artifact manifest helper script at '$artifactManifestToolsPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('artifact-manifest-fingerprint-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path (Join-Path $tempRoot 'src\powershell\Shared') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\generated') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\manifests') -ItemType Directory -Force)
+
+        $sourcePath = Join-Path $tempRoot 'src\powershell\Shared\Helper.ps1'
+        $buildScriptPath = Join-Path $tempRoot 'build\Build-TestArtifact.ps1'
+        $manifestPath = Join-Path $tempRoot 'build\manifests\artifact-test.json'
+
+        Set-Content -LiteralPath $sourcePath -Value 'function Invoke-TestArtifactHelper { "alpha" }' -Encoding utf8
+        Set-Content -LiteralPath $buildScriptPath -Value '# synthetic build script for fingerprint coverage' -Encoding utf8
+        [ordered]@{
+            artifactName = 'artifact-test'
+            description = 'Synthetic manifest for fingerprint coverage.'
+            outputPath = 'build/generated/artifact-test.ps1'
+            sourceRoots = @('src/powershell/Shared')
+            sourceFiles = @('src/powershell/Shared/Helper.ps1')
+        } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+
+        . $artifactManifestToolsPath
+        $artifactManifest = Build-PowerShellArtifactFromManifest -ManifestPath $manifestPath -RepoRoot $tempRoot -BuildScriptPath $buildScriptPath
+        Assert-True ((Test-PowerShellArtifactRequiresBuild -ManifestPath $manifestPath -RepoRoot $tempRoot -BuildScriptPath $buildScriptPath) -eq $false) 'Expected freshly generated artifact to satisfy the current content fingerprint.'
+
+        $outputWriteTime = (Get-Item -LiteralPath $artifactManifest.OutputPath).LastWriteTimeUtc
+        Set-Content -LiteralPath $sourcePath -Value 'function Invoke-TestArtifactHelper { "beta" }' -Encoding utf8
+        (Get-Item -LiteralPath $sourcePath).LastWriteTimeUtc = $outputWriteTime.AddSeconds(-5)
+        (Get-Item -LiteralPath $buildScriptPath).LastWriteTimeUtc = $outputWriteTime.AddSeconds(-10)
+        (Get-Item -LiteralPath $manifestPath).LastWriteTimeUtc = $outputWriteTime.AddSeconds(-10)
+
+        Assert-True (Test-PowerShellArtifactRequiresBuild -ManifestPath $manifestPath -RepoRoot $tempRoot -BuildScriptPath $buildScriptPath) 'Expected content changes with older timestamps to invalidate the generated artifact fingerprint.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ArtifactManifestRejectsGeneratedOutputWithoutFingerprint {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $artifactManifestToolsPath = Join-Path $repoRoot 'build\private\ArtifactManifestTools.ps1'
+    Assert-True ((Test-Path -LiteralPath $artifactManifestToolsPath -PathType Leaf)) "Expected artifact manifest helper script at '$artifactManifestToolsPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('artifact-manifest-fingerprint-missing-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path (Join-Path $tempRoot 'src\powershell\Shared') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\generated') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\manifests') -ItemType Directory -Force)
+
+        $sourcePath = Join-Path $tempRoot 'src\powershell\Shared\Helper.ps1'
+        $buildScriptPath = Join-Path $tempRoot 'build\Build-TestArtifact.ps1'
+        $manifestPath = Join-Path $tempRoot 'build\manifests\artifact-test.json'
+        $outputPath = Join-Path $tempRoot 'build\generated\artifact-test.ps1'
+
+        Set-Content -LiteralPath $sourcePath -Value 'function Invoke-TestArtifactHelper { "alpha" }' -Encoding utf8
+        [ordered]@{
+            artifactName = 'artifact-test'
+            description = 'Synthetic manifest for fingerprint metadata coverage.'
+            outputPath = 'build/generated/artifact-test.ps1'
+            sourceRoots = @('src/powershell/Shared')
+            sourceFiles = @('src/powershell/Shared/Helper.ps1')
+        } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+
+        $buildScriptContent = @"
+[System.IO.File]::WriteAllText('$($outputPath.Replace('\', '\\'))', 'function Invoke-TestArtifactHelper { "from-build" }', [System.Text.UTF8Encoding]::new(`$true))
+"@
+        Set-Content -LiteralPath $buildScriptPath -Value $buildScriptContent -Encoding utf8
+
+        . $artifactManifestToolsPath
+        $failure = $null
+        try {
+            $null = Resolve-PowerShellArtifactOutputPath -ManifestPath $manifestPath -RepoRoot $tempRoot -BuildScriptPath $buildScriptPath
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected artifact resolution to reject generated outputs without embedded fingerprint metadata.'
+        Assert-True ($failure.Exception.Message -like '*missing fingerprint metadata*') 'Expected artifact resolution failure to mention missing fingerprint metadata.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-TestVulnRow {
     [CmdletBinding()]
     param(
@@ -5645,6 +5744,85 @@ function Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo {
     Assert-True ($summary -notlike '*rows=125.000*') 'Expected validation status summary text to avoid host-culture row count formatting.'
 }
 
+function Test-LargeDatasetValidationSemanticModeForcesFullReplay {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $validationScriptPath = Join-Path $repoRoot 'tests\Invoke-LargeDatasetValidation.ps1'
+    Assert-True ((Test-Path -LiteralPath $validationScriptPath -PathType Leaf)) "Expected large-dataset validation script at '$validationScriptPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('large-dataset-forcefull-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+        $syntheticOutputPath = Join-Path $tempRoot 'synthetic'
+        $dashboardOutputPath = Join-Path $tempRoot 'dashboard.html'
+        $validationOutputPath = Join-Path $tempRoot 'dashboard-audit.json'
+        $diagnosticPhaseLogPath = Join-Path $tempRoot 'phase-log.tsv'
+
+        & $validationScriptPath `
+            -SourcePath (Join-Path $repoRoot 'exports') `
+            -SyntheticOutputPath $syntheticOutputPath `
+            -TargetDeviceCount 50 `
+            -TargetTotalVulnRows 5000 `
+            -MinimumAvailableMemoryGB 4 `
+            -Validate `
+            -ValidationMode semantic `
+            -ForceFullValidation `
+            -DashboardOutputPath $dashboardOutputPath `
+            -ValidationOutputPath $validationOutputPath `
+            -DiagnosticPhaseLogPath $diagnosticPhaseLogPath | Out-Null
+
+        $reportPath = Join-Path $syntheticOutputPath 'stress-validation-report.json'
+        Assert-True ((Test-Path -LiteralPath $reportPath -PathType Leaf)) 'Expected large-dataset validation to emit a stress-validation report.'
+        Assert-True ((Test-Path -LiteralPath $validationOutputPath -PathType Leaf)) 'Expected large-dataset validation to emit a semantic audit.'
+
+        $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -Depth 20
+        $audit = Get-Content -LiteralPath $validationOutputPath -Raw | ConvertFrom-Json -Depth 100
+
+        Assert-True ($report.validation.validationMode -eq 'semantic') 'Expected the stress-validation report to record semantic validation mode.'
+        Assert-True ($report.validation.forceFullValidation -eq $true) 'Expected the stress-validation report to record forced full semantic replay.'
+        Assert-True ($report.validation.auditSummary.attestationUsed -eq $false) 'Expected semantic sign-off to avoid attestation reuse.'
+        Assert-True ([string]$audit.AuditMode -notlike '*attested*') 'Expected semantic sign-off audit mode to reflect a fresh replay rather than attested validation.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-GetDashboardTemplateContentAcceptsExplicitTemplatesPathWithEmptyDefaultRoot {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-template-path-' + [guid]::NewGuid().ToString('N'))
+
+    try {
+        $templatesPath = Join-Path $tempRoot 'templates'
+        $moduleDirectoryPath = Join-Path $templatesPath 'dashboard'
+        [void](New-Item -Path $templatesPath -ItemType Directory -Force)
+        [void](New-Item -Path $moduleDirectoryPath -ItemType Directory -Force)
+        [System.IO.File]::WriteAllText((Join-Path $templatesPath 'dashboard.html'), '<html></html>', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $templatesPath 'dashboard.css'), 'body { }', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $moduleDirectoryPath '00-core.js'), 'window.__templatePathRegression = true;', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $templatesPath 'dashboard.modules.json'), (@{ version = 1; modules = @('dashboard/00-core.js') } | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
+
+        $templates = Get-DashboardTemplateContent -TemplatesPath $templatesPath -DefaultRootPath ''
+
+        Assert-True ($templates.Html -eq '<html></html>') 'Expected template loading to honor the explicit templates path when DefaultRootPath is blank.'
+        Assert-True ($templates.Css -eq 'body { }') 'Expected CSS template loading to honor the explicit templates path when DefaultRootPath is blank.'
+        Assert-True ($templates.Js -like '*window.__templatePathRegression = true;*') 'Expected template loading to bundle JavaScript modules from the explicit templates path.'
+        Assert-True (($templates.JsModules.Keys -contains 'dashboard/00-core.js')) 'Expected template module map to preserve the declared dashboard module path.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Invoke-SharedHelperRegressionTest {
     [CmdletBinding()]
     param(
@@ -5671,6 +5849,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-ArtifactManifestRejectsSourceRootOverlap'; SuccessMessage = 'Artifact manifest overlap guard checks passed.' }
     @{ Name = 'Test-ArtifactManifestRejectsSourceFileOutsideSourceRoot'; SuccessMessage = 'Artifact manifest source-root boundary checks passed.' }
     @{ Name = 'Test-ArtifactManifestRejectsCrossArtifactSourceConflict'; SuccessMessage = 'Artifact manifest cross-artifact conflict checks passed.' }
+    @{ Name = 'Test-ArtifactManifestUsesContentFingerprint'; SuccessMessage = 'Artifact manifest fingerprint freshness checks passed.' }
+    @{ Name = 'Test-ArtifactManifestRejectsGeneratedOutputWithoutFingerprint'; SuccessMessage = 'Artifact manifest fingerprint metadata checks passed.' }
     @{ Name = 'Test-CanonicalLayoutHelper'; SuccessMessage = 'Canonical layout helper checks passed.' }
     @{ Name = 'Test-FileSetFingerprintIgnoresTimestampChange'; SuccessMessage = 'File-set fingerprint stability checks passed.' }
     @{ Name = 'Test-NormalizedPayloadCacheRejectsManifestHashMismatch'; SuccessMessage = 'Normalized payload cache integrity checks passed.' }
@@ -5735,6 +5915,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-WriteCombinedPayloadGzipCanConsumeColumnLookupData'; SuccessMessage = 'Payload lookup consumption checks passed.' }
     @{ Name = 'Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload'; SuccessMessage = 'Embedded payload inspection checks passed.' }
     @{ Name = 'Test-MeasureStressRunWritesProgressAndFinalReport'; SuccessMessage = 'Measure-StressRun report persistence checks passed.' }
+    @{ Name = 'Test-LargeDatasetValidationSemanticModeForcesFullReplay'; SuccessMessage = 'Large-dataset semantic sign-off checks passed.' }
+    @{ Name = 'Test-GetDashboardTemplateContentAcceptsExplicitTemplatesPathWithEmptyDefaultRoot'; SuccessMessage = 'Dashboard template explicit-path checks passed.' }
     @{ Name = 'Test-ValidationHelperPayloadCanonicalization'; SuccessMessage = 'Validation helper payload-format checks passed.' }
     @{ Name = 'Test-ValidationHelperSourceCanonicalization'; SuccessMessage = 'Validation helper source canonicalization checks passed.' }
     @{ Name = 'Test-ValidationHelperStandaloneImport'; SuccessMessage = 'Validation helper standalone import checks passed.' }

@@ -17,7 +17,7 @@ if (-not (Test-Path -LiteralPath $manifestToolsPath -PathType Leaf)) {
 
 . $manifestToolsPath
 
-$artifactManifest = Build-PowerShellArtifactFromManifest -ManifestPath $manifestPath -RepoRoot $repoRoot
+$artifactManifest = Build-PowerShellArtifactFromManifest -ManifestPath $manifestPath -RepoRoot $repoRoot -BuildScriptPath $PSCommandPath
 if (-not (Test-Path -LiteralPath $artifactManifest.OutputPath -PathType Leaf)) {
     throw "Expected generated shared helpers at '$($artifactManifest.OutputPath)'."
 }

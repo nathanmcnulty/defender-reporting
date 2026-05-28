@@ -57,6 +57,9 @@ param(
     [switch]$Validate,
 
     [Parameter(Mandatory = $false)]
+    [switch]$ForceFullValidation,
+
+    [Parameter(Mandatory = $false)]
     [ValidateSet('semantic', 'artifacts')]
     [string]$ValidationMode = 'semantic',
 
@@ -98,6 +101,10 @@ $resolvedValidationMode = if ($Validate) { $ValidationMode } else { 'none' }
 if ($resolvedValidationMode -eq 'artifacts' -and -not [string]::IsNullOrWhiteSpace($ValidationOutputPath)) {
     throw 'ValidationOutputPath is only supported with -ValidationMode semantic.'
 }
+if ($resolvedValidationMode -eq 'artifacts' -and $ForceFullValidation) {
+    throw '-ForceFullValidation is only supported with -ValidationMode semantic.'
+}
+$resolvedForceFullValidation = ($resolvedValidationMode -eq 'semantic')
 
 function Get-StreamingCount {
     [CmdletBinding()]
@@ -396,6 +403,9 @@ function Write-StressValidationReport {
         [Parameter(Mandatory = $true)]
         [string]$ResolvedValidationMode,
 
+        [Parameter(Mandatory = $true)]
+        [bool]$ResolvedForceFullValidation,
+
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         $ArtifactValidationSummary
@@ -441,6 +451,7 @@ function Write-StressValidationReport {
         validation = [PSCustomObject]@{
             validate = $Validate.IsPresent
             validationMode = $ResolvedValidationMode
+            forceFullValidation = $ResolvedForceFullValidation
             heartbeatSeconds = $ValidationHeartbeatSeconds
             partitionCompareParallelism = $ValidationPartitionCompareParallelism
             skipObservedWindowMerge = $SkipObservedWindowMerge
@@ -566,6 +577,9 @@ if ($resolvedValidationMode -eq 'semantic' -and $totalVulnRowCount -gt $Semantic
 if ($resolvedValidationMode -eq 'semantic' -and $totalVulnRowCount -gt $SemanticValidationRowLimit -and $AllowLargeSemanticValidation) {
     Write-Warning ("Large semantic validation override enabled for {0:N0} row(s)." -f $totalVulnRowCount)
 }
+if ($resolvedValidationMode -eq 'semantic' -and -not $ForceFullValidation) {
+    Write-Output 'Semantic large-dataset validation forces a fresh full replay for this entrypoint.'
+}
 
 $generateArgs = @{
     DirectoryPath = $resolvedSyntheticPath
@@ -579,6 +593,7 @@ if ($skipObservedWindowMerge) {
 }
 if ($resolvedValidationMode -eq 'semantic') {
     $generateArgs.Validate = $true
+    $generateArgs.ForceFullValidation = $true
     if (-not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
         $generateArgs.ValidationOutputPath = $resolvedValidationOutputPath
     }
@@ -644,6 +659,10 @@ try {
         }
 
         $audit = Get-Content -Path $resolvedValidationOutputPath -Raw | ConvertFrom-Json -Depth 100
+        $auditSummary = Get-ValidationAuditSummary -Audit $audit
+        if ($resolvedForceFullValidation -and $null -ne $auditSummary -and $auditSummary.attestationUsed) {
+            throw 'Semantic large-dataset sign-off unexpectedly reused an attestation instead of running a fresh full replay.'
+        }
     }
     elseif ($resolvedValidationMode -eq 'artifacts') {
         if (-not (Test-Path -LiteralPath $hostedDashboardOutput -PathType Leaf)) {
@@ -682,6 +701,7 @@ finally {
         -Audit $audit `
         -DiagnosticTimingSummary $diagnosticTimingSummary `
         -ResolvedValidationMode $resolvedValidationMode `
+        -ResolvedForceFullValidation $resolvedForceFullValidation `
         -ArtifactValidationSummary $artifactValidationSummary
 }
 
@@ -699,6 +719,7 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedDiagnosticPhaseLogPath)) {
 }
 Write-Output ("  Validation mode: {0}" -f $resolvedValidationMode)
 if ($resolvedValidationMode -eq 'semantic' -and -not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
+    Write-Output ("  Full semantic replay: {0}" -f $(if ($resolvedForceFullValidation) { 'forced' } else { 'disabled' }))
     Write-Output ("  Validation audit: {0}" -f $resolvedValidationOutputPath)
 }
 elseif ($resolvedValidationMode -eq 'artifacts') {

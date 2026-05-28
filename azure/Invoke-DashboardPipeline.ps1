@@ -10368,6 +10368,7 @@ function Get-DashboardTemplateContent {
         [string]$TemplatesPath,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$DefaultRootPath
     )
 
@@ -10375,6 +10376,10 @@ function Get-DashboardTemplateContent {
         $TemplatesPath
     }
     else {
+        if ([string]::IsNullOrWhiteSpace($DefaultRootPath)) {
+            throw 'DefaultRootPath must be provided when TemplatesPath is not supplied.'
+        }
+
         Join-Path -Path $DefaultRootPath -ChildPath 'templates'
     }
 
@@ -19327,6 +19332,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
+# ArtifactFingerprint: cd207812ef37d325c7813f2bab1ae7818696e62e851eca5ddbc04e75e8f226db
 
 
 

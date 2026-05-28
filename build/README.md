@@ -106,6 +106,8 @@ This makes dependency order explicit, lets the regression preflight catch orphan
 
 These checks now fail fast in the build helpers and in the deterministic preflight so manifest drift is easier to catch before CI.
 
+Generated helper artifacts now also carry an embedded content fingerprint derived from the manifest, build script, and ordered source files. Import wrappers rebuild when that fingerprint no longer matches, so helper freshness no longer depends on filesystem timestamps alone.
+
 ## Agent-safe maintenance patterns
 
 - Treat files under `src/powershell/`, `build/private/`, `build/manifests/`, and `build/azure/` as the source of truth.

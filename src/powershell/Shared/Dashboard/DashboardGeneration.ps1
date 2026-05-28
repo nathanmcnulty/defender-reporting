@@ -141,6 +141,7 @@ function Get-DashboardTemplateContent {
         [string]$TemplatesPath,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$DefaultRootPath
     )
 
@@ -148,6 +149,10 @@ function Get-DashboardTemplateContent {
         $TemplatesPath
     }
     else {
+        if ([string]::IsNullOrWhiteSpace($DefaultRootPath)) {
+            throw 'DefaultRootPath must be provided when TemplatesPath is not supplied.'
+        }
+
         Join-Path -Path $DefaultRootPath -ChildPath 'templates'
     }
 

@@ -109,7 +109,7 @@ Hosted dashboards now also use a summary-first load path: the browser fetches th
     -DualPackage
 ```
 
-`-PackageOnly` writes a sibling validation sidecar next to the HTML. After one successful full large-dataset semantic validation, later `-ValidateOnly` runs can reuse a versioned attestation when the dashboard still embeds the exact same normalized payload bytes. Use `-ForceFullValidation` when you explicitly want to bypass that fast-path and replay the full semantic audit.
+`-PackageOnly` writes a sibling validation sidecar next to the HTML. After one successful full large-dataset semantic validation, later `-ValidateOnly` runs can reuse a versioned attestation when the dashboard still embeds the exact same normalized payload bytes. Use `-ForceFullValidation` when you explicitly want to bypass that fast-path and replay the full semantic audit. The large sign-off wrapper at `tests\Invoke-LargeDatasetValidation.ps1` should be run with `-ValidationMode semantic -ForceFullValidation` so semantic sign-off always means a fresh replay.
 
 For managed identity auth, Azure provisioning, and GitHub workflow setup, use the linked docs below.
 
