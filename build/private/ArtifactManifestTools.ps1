@@ -38,6 +38,125 @@ function Test-ArtifactPathWithinRoot {
     return $resolvedPath.StartsWith($rootWithSeparator, $comparison)
 }
 
+$script:PowerShellArtifactFingerprintPrefix = '# ArtifactFingerprint: '
+
+function Get-TextSha256Hex {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    $hashBytes = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($Text))
+    return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+}
+
+function Get-FileContentSha256Hex {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Fingerprint input file not found: '$Path'."
+    }
+
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-RepoRelativeDisplayPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+    $resolvedRoot = [System.IO.Path]::GetFullPath($RepoRoot)
+    if ($resolvedPath.StartsWith($resolvedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $resolvedPath.Substring($resolvedRoot.Length + 1).Replace('\', '/')
+    }
+
+    return $resolvedPath.Replace('\', '/')
+}
+
+function Read-PowerShellArtifactEmbeddedFingerprint {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    $tail = @(Get-Content -LiteralPath $Path -Tail 5 -ErrorAction Stop)
+    for ($index = $tail.Count - 1; $index -ge 0; $index--) {
+        $line = [string]$tail[$index]
+        if (-not $line.StartsWith($script:PowerShellArtifactFingerprintPrefix, [System.StringComparison]::Ordinal)) {
+            continue
+        }
+
+        $fingerprint = $line.Substring($script:PowerShellArtifactFingerprintPrefix.Length).Trim()
+        if ($fingerprint -match '^[0-9a-f]{64}$') {
+            return $fingerprint.ToLowerInvariant()
+        }
+
+        return $null
+    }
+
+    return $null
+}
+
+function Get-PowerShellArtifactFingerprint {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ManifestPath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BuildScriptPath
+    )
+
+    $manifest = Read-PowerShellArtifactManifest -ManifestPath $ManifestPath -RepoRoot $RepoRoot
+    if (-not (Test-Path -LiteralPath $BuildScriptPath -PathType Leaf)) {
+        throw "Build script not found: '$BuildScriptPath'."
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.AppendLine("artifact:$($manifest.ArtifactName)")
+    # The output path is part of the trust contract so a renamed or moved generated
+    # artifact must be rebuilt instead of silently reusing a fingerprint from a
+    # different destination.
+    [void]$builder.AppendLine("output:$($manifest.OutputRelativePath)")
+    [void]$builder.AppendLine("build:$((Get-RepoRelativeDisplayPath -Path $BuildScriptPath -RepoRoot $RepoRoot))")
+    [void]$builder.AppendLine("build-hash:$(Get-FileContentSha256Hex -Path $BuildScriptPath)")
+    [void]$builder.AppendLine("manifest-hash:$(Get-FileContentSha256Hex -Path $manifest.ManifestPath)")
+
+    for ($index = 0; $index -lt $manifest.SourceFiles.Count; $index++) {
+        $sourcePath = $manifest.SourceFiles[$index]
+        $relativePath = $manifest.SourceRelativePaths[$index]
+        [void]$builder.AppendLine("source:$relativePath")
+        [void]$builder.AppendLine("source-hash:$(Get-FileContentSha256Hex -Path $sourcePath)")
+    }
+
+    return Get-TextSha256Hex -Text $builder.ToString()
+}
+
 function Read-PowerShellArtifactManifest {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -172,30 +291,13 @@ function Test-PowerShellArtifactRequiresBuild {
     )
 
     $manifest = Read-PowerShellArtifactManifest -ManifestPath $ManifestPath -RepoRoot $RepoRoot
-    if (-not (Test-Path -LiteralPath $BuildScriptPath -PathType Leaf)) {
-        throw "Build script not found: '$BuildScriptPath'."
-    }
-
+    $expectedFingerprint = Get-PowerShellArtifactFingerprint -ManifestPath $ManifestPath -RepoRoot $RepoRoot -BuildScriptPath $BuildScriptPath
     if (-not (Test-Path -LiteralPath $manifest.OutputPath -PathType Leaf)) {
         return $true
     }
 
-    $generatedWriteTimeUtc = (Get-Item -LiteralPath $manifest.OutputPath).LastWriteTimeUtc
-    if ((Get-Item -LiteralPath $BuildScriptPath).LastWriteTimeUtc -gt $generatedWriteTimeUtc) {
-        return $true
-    }
-
-    if ((Get-Item -LiteralPath $ManifestPath).LastWriteTimeUtc -gt $generatedWriteTimeUtc) {
-        return $true
-    }
-
-    foreach ($sourceFile in $manifest.SourceFiles) {
-        if ((Get-Item -LiteralPath $sourceFile).LastWriteTimeUtc -gt $generatedWriteTimeUtc) {
-            return $true
-        }
-    }
-
-    return $false
+    $embeddedFingerprint = Read-PowerShellArtifactEmbeddedFingerprint -Path $manifest.OutputPath
+    return ($embeddedFingerprint -ne $expectedFingerprint)
 }
 
 function Resolve-PowerShellArtifactOutputPath {
@@ -232,6 +334,22 @@ function Resolve-PowerShellArtifactOutputPath {
         throw ($MissingOutputMessage -f $artifactManifest.OutputPath)
     }
 
+    $generatedArtifact = Get-Item -LiteralPath $artifactManifest.OutputPath
+    if ($generatedArtifact.Length -le 0) {
+        throw "Artifact output is empty: '$($artifactManifest.OutputPath)'. Re-run '$((Get-RepoRelativeDisplayPath -Path $BuildScriptPath -RepoRoot $RepoRoot))'."
+    }
+
+    $expectedFingerprint = Get-PowerShellArtifactFingerprint -ManifestPath $ManifestPath -RepoRoot $RepoRoot -BuildScriptPath $BuildScriptPath
+    $embeddedFingerprint = Read-PowerShellArtifactEmbeddedFingerprint -Path $artifactManifest.OutputPath
+    $buildScriptDisplayPath = Get-RepoRelativeDisplayPath -Path $BuildScriptPath -RepoRoot $RepoRoot
+    if ([string]::IsNullOrWhiteSpace($embeddedFingerprint)) {
+        throw "Artifact output '$($artifactManifest.OutputPath)' is missing fingerprint metadata. Re-run '$buildScriptDisplayPath'."
+    }
+
+    if ($embeddedFingerprint -ne $expectedFingerprint) {
+        throw "Artifact output '$($artifactManifest.OutputPath)' does not match the current manifest/source fingerprint. Re-run '$buildScriptDisplayPath'."
+    }
+
     return $artifactManifest.OutputPath
 }
 
@@ -243,10 +361,14 @@ function Build-PowerShellArtifactFromManifest {
         [string]$ManifestPath,
 
         [Parameter(Mandatory = $true)]
-        [string]$RepoRoot
+        [string]$RepoRoot,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BuildScriptPath
     )
 
     $manifest = Read-PowerShellArtifactManifest -ManifestPath $ManifestPath -RepoRoot $RepoRoot
+    $fingerprint = Get-PowerShellArtifactFingerprint -ManifestPath $ManifestPath -RepoRoot $RepoRoot -BuildScriptPath $BuildScriptPath
     $outputDirectory = Split-Path -Path $manifest.OutputPath -Parent
     if (-not (Test-Path -LiteralPath $outputDirectory -PathType Container)) {
         New-Item -Path $outputDirectory -ItemType Directory -Force | Out-Null
@@ -265,6 +387,7 @@ function Build-PowerShellArtifactFromManifest {
         }
     }
 
+    [void]$combined.AppendLine("$($script:PowerShellArtifactFingerprintPrefix)$fingerprint")
     [System.IO.File]::WriteAllText($manifest.OutputPath, $combined.ToString(), [System.Text.UTF8Encoding]::new($true))
     return $manifest
 }

@@ -224,6 +224,14 @@ function Get-BenchmarkHistoryEntry {
         benchmark_result_path = $ResultPath
         benchmark_generated_utc = Format-DateTimeValue -Value (Get-ObjectPropertyValue -InputObject $Result -Name 'generated_utc')
         benchmark_mode = [string](Get-ObjectPropertyValue -InputObject $Result -Name 'benchmark_mode')
+        baseline_execution_order_requested = [string](Get-ObjectPropertyValue -InputObject $Result -Name 'baseline_execution_order_requested')
+        baseline_execution_order_effective = [string](Get-ObjectPropertyValue -InputObject $Result -Name 'baseline_execution_order_effective')
+        baseline_execution_order_reason = [string](Get-ObjectPropertyValue -InputObject $Result -Name 'baseline_execution_order_reason')
+        baseline_execution_order_requested_description = [string](Get-ObjectPropertyValue -InputObject $Result -Name 'baseline_execution_order_requested_description')
+        baseline_execution_sequence = @(
+            @(Get-ObjectPropertyValue -InputObject $Result -Name 'baseline_execution_sequence') |
+                ForEach-Object { [string](Get-ObjectPropertyValue -InputObject $_ -Name 'baseline_name') }
+        )
         local_only = [bool](Get-ObjectPropertyValue -InputObject $Result -Name 'local_only')
         include_local_benchmark = Test-BenchmarkIncludesLocalRun -BenchmarkObject $Result
         persistent_local_workflow = [bool](Get-ObjectPropertyValue -InputObject $Result -Name 'persistent_local_workflow')
@@ -521,6 +529,20 @@ function Write-BenchmarkHistorySummary {
     if ($null -ne $Entry.current.function_end_to_end_elapsed_seconds) {
         $lines.Add(('- Function end-to-end / pickup delay: {0} / {1}' -f (Format-SecondsValue -Value $Entry.current.function_end_to_end_elapsed_seconds), (Format-SecondsValue -Value $Entry.current.function_pickup_delay_seconds))) | Out-Null
     }
+    if (@($Entry.baseline_execution_sequence).Count -gt 0) {
+        $requestedOrderValue = Get-ObjectPropertyValue -InputObject $Entry -Name 'baseline_execution_order_requested'
+        $effectiveOrderValue = Get-ObjectPropertyValue -InputObject $Entry -Name 'baseline_execution_order_effective'
+        $orderReasonValue = Get-ObjectPropertyValue -InputObject $Entry -Name 'baseline_execution_order_reason'
+        $requestedDescriptionValue = Get-ObjectPropertyValue -InputObject $Entry -Name 'baseline_execution_order_requested_description'
+        $requestedOrder = if ([string]::IsNullOrWhiteSpace([string]$requestedOrderValue)) { 'unspecified' } else { [string]$requestedOrderValue }
+        $effectiveOrder = if ([string]::IsNullOrWhiteSpace([string]$effectiveOrderValue)) { 'unspecified' } else { [string]$effectiveOrderValue }
+        $orderReason = if ([string]::IsNullOrWhiteSpace([string]$orderReasonValue)) { 'reason unavailable' } else { [string]$orderReasonValue }
+        $requestedDescription = if ([string]::IsNullOrWhiteSpace([string]$requestedDescriptionValue)) { $null } else { [string]$requestedDescriptionValue }
+        $lines.Add(('- Baseline execution order: `{0}` (requested `{1}` -> effective `{2}`; {3})' -f (@($Entry.baseline_execution_sequence) -join ' -> '), $requestedOrder, $effectiveOrder, $orderReason)) | Out-Null
+        if ($null -ne $requestedDescription) {
+            $lines.Add(('- Requested-order meaning: {0}' -f $requestedDescription)) | Out-Null
+        }
+    }
     if ($Entry.persistent_local_workflow) {
         $lines.Add(('- Persistent local prime/reuse: {0} / {1}' -f (Format-SecondsValue -Value $Entry.current.persistent_prime_elapsed_seconds), (Format-SecondsValue -Value $Entry.current.persistent_reuse_elapsed_seconds))) | Out-Null
         $lines.Add(('- Persistent local elapsed delta: {0}' -f (Format-SecondsValue -Value $Entry.current.persistent_elapsed_delta_seconds))) | Out-Null
@@ -534,11 +556,15 @@ function Write-BenchmarkHistorySummary {
         $lines.Add('') | Out-Null
         $lines.Add('Current vs main baseline') | Out-Null
         $lines.Add('') | Out-Null
+        $lines.Add('- Delta semantics: current minus main; negative elapsed or memory deltas favor the current branch, positive deltas mean the branch was slower or higher.') | Out-Null
         $lines.Add(('- Local elapsed delta: {0}' -f (Format-SignedSecondsDeltaValue -Value $Entry.comparison.local.elapsed_seconds_delta))) | Out-Null
         $lines.Add(('- Local peak RSS / private delta: {0} / {1}' -f (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.peak_rss_gb_delta -Suffix 'GB' -Decimals 3), (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.peak_private_gb_delta -Suffix 'GB' -Decimals 3))) | Out-Null
         $lines.Add(('- Local phase deltas: {0}' -f (Format-PhaseDeltaSummaryValue -PhaseSummary $Entry.comparison.local.phase_elapsed_seconds_delta))) | Out-Null
         if ($null -ne $Entry.comparison.local.environment_snapshot_delta) {
             $lines.Add(('- Local pre-run environment delta: memory {0}, disk {1}, cpu {2}' -f (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.environment_snapshot_delta.available_memory_gb_delta -Suffix 'GB' -Decimals 2), (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.environment_snapshot_delta.free_disk_gb_delta -Suffix 'GB' -Decimals 2), (Format-SignedNumberDeltaValue -Value $Entry.comparison.local.environment_snapshot_delta.logical_cpu_count_delta -Decimals 0))) | Out-Null
+        }
+        if ($null -ne $Entry.comparison.function_app -and $Entry.comparison.function_app.PSObject.Properties['timing_basis_consistent'] -and -not [bool]$Entry.comparison.function_app.timing_basis_consistent) {
+            $lines.Add(('- Function elapsed delta is not directly comparable because timing bases differ: branch `{0}`, main `{1}`' -f [string]$Entry.comparison.function_app.timing_basis_current, [string]$Entry.comparison.function_app.timing_basis_main)) | Out-Null
         }
     }
 

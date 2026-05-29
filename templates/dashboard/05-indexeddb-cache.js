@@ -8,6 +8,7 @@ const VULNDB_STORE = 'denormalized';
 const DIGEST_TIMEOUT_MS = 2000;
 const IDB_OPERATION_TIMEOUT_MS = 2000;
 const WORKER_OPERATION_TIMEOUT_MS = 10000;
+const MAX_IDB_CACHE_ENTRIES = 4;
 
 function bytesToHex(bytes) {
     let output = '';
@@ -195,7 +196,8 @@ async function getCachedData(fingerprint) {
 
 /**
  * Store denormalized data in IndexedDB cache.
- * Clears old entries first to avoid unbounded growth.
+ * Keeps a small rolling window of cache entries so compressed and
+ * uncompressed fingerprints can coexist without racing each other out.
  * @param {string} fingerprint
  * @param {Array} data
  */
@@ -223,8 +225,23 @@ async function setCachedData(fingerprint, data) {
                 settle();
             }, IDB_OPERATION_TIMEOUT_MS);
 
-            store.clear(); // Keep only the latest dataset
             store.put({ fingerprint, data, lookups: lookups || null, ts: Date.now() });
+            const pruneRequest = store.getAll();
+            pruneRequest.onsuccess = () => {
+                const cachedEntries = Array.isArray(pruneRequest.result) ? pruneRequest.result : [];
+                if (cachedEntries.length <= MAX_IDB_CACHE_ENTRIES) {
+                    return;
+                }
+
+                cachedEntries
+                    .sort((left, right) => (Number(right.ts) || 0) - (Number(left.ts) || 0))
+                    .slice(MAX_IDB_CACHE_ENTRIES)
+                    .forEach(entry => {
+                        if (entry && entry.fingerprint) {
+                            store.delete(entry.fingerprint);
+                        }
+                    });
+            };
             tx.oncomplete = () => settle();
             tx.onerror = () => settle();
             tx.onabort = () => settle();

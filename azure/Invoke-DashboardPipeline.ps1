@@ -246,6 +246,68 @@ $Script:NvdCveCurrentFileName = 'NvdCve_Current.json.gz'
 $Script:LegacyVulnMigrationRemovalDate = '2026-07-01'
 $Script:VulnDiskPartitionCount = 128
 
+function Get-LegacyMigrationRemovalDateUtc {
+    [CmdletBinding()]
+    [OutputType([datetime])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$RemovalDate = $Script:LegacyVulnMigrationRemovalDate
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RemovalDate)) {
+        throw 'Legacy migration removal date is not configured.'
+    }
+
+    try {
+        return [datetime]::SpecifyKind([datetime]::ParseExact($RemovalDate, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture), [System.DateTimeKind]::Utc)
+    }
+    catch {
+        throw "Legacy migration removal date '$RemovalDate' is not in the expected yyyy-MM-dd format."
+    }
+}
+
+function Assert-LegacyMigrationAllowed {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FeatureName,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]]$LegacyPaths = @(),
+
+        [Parameter(Mandatory = $false)]
+        [datetime]$CurrentUtc = ([datetime]::UtcNow)
+    )
+
+    $resolvedLegacyPaths = [System.Collections.Generic.List[string]]::new()
+    foreach ($legacyPath in @($LegacyPaths)) {
+        if (-not [string]::IsNullOrWhiteSpace($legacyPath)) {
+            $resolvedLegacyPaths.Add($legacyPath)
+        }
+    }
+
+    if ($resolvedLegacyPaths.Count -eq 0) {
+        return
+    }
+
+    $removalDateUtc = Get-LegacyMigrationRemovalDateUtc
+    if ($CurrentUtc -lt $removalDateUtc) {
+        return
+    }
+
+    $samplePaths = @($resolvedLegacyPaths | Select-Object -First 3 | ForEach-Object { Split-Path -Leaf $_ })
+    $sampleSuffix = if ($samplePaths.Count -gt 0) {
+        " Example legacy artifact(s): $($samplePaths -join ', ')."
+    }
+    else {
+        ''
+    }
+
+    throw ("Legacy {0} support expired on {1}. Rebuild the canonical store and remove legacy compatibility artifacts before continuing.{2}" -f $FeatureName, $Script:LegacyVulnMigrationRemovalDate, $sampleSuffix)
+}
+
 function Get-StoreLockName {
     [CmdletBinding()]
     [OutputType([string])]
@@ -980,6 +1042,128 @@ function Get-StoreTransactionJournalPath {
     return Join-Path -Path $BasePath -ChildPath (".{0}.transaction.json" -f $StoreName)
 }
 
+function Get-NormalizedAbsolutePath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+
+    return [System.IO.Path]::GetFullPath($Path)
+}
+
+function Test-PathIsUnderRoot {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$RootPath
+    )
+
+    $normalizedPath = Get-NormalizedAbsolutePath -Path $Path
+    $normalizedRoot = Get-NormalizedAbsolutePath -Path $RootPath
+    if ([string]::IsNullOrWhiteSpace($normalizedPath) -or [string]::IsNullOrWhiteSpace($normalizedRoot)) {
+        return $false
+    }
+
+    $trimmedRoot = $normalizedRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    if ([string]::Equals($normalizedPath, $trimmedRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    $rootPrefix = $trimmedRoot + [System.IO.Path]::DirectorySeparatorChar
+    return $normalizedPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-StoreTransactionStateIsValid {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        $State,
+
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StoreName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$JournalPath
+    )
+
+    if ($null -eq $State) {
+        throw "Transaction journal '$JournalPath' is empty."
+    }
+
+    $journalLabel = "Transaction journal '$JournalPath'"
+    $phase = [string]$State.PSObject.Properties['Phase']?.Value
+    if ($phase -notin @('Prepared', 'Committed')) {
+        throw "$journalLabel has invalid phase '$phase'."
+    }
+
+    $stateStoreName = [string]$State.PSObject.Properties['StoreName']?.Value
+    if (-not [string]::IsNullOrWhiteSpace($stateStoreName) -and -not [string]::Equals($stateStoreName, $StoreName, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$journalLabel targets store '$stateStoreName' instead of '$StoreName'."
+    }
+
+    $transactionRoot = [string]$State.PSObject.Properties['TransactionRoot']?.Value
+    if (-not (Test-PathIsUnderRoot -Path $transactionRoot -RootPath $BasePath)) {
+        throw "$journalLabel references transaction root '$transactionRoot' outside '$BasePath'."
+    }
+
+    $targetPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $fileEntries = @($State.PSObject.Properties['Files']?.Value)
+    $removedEntries = @($State.PSObject.Properties['RemovedFiles']?.Value)
+    if (($fileEntries.Count + $removedEntries.Count) -eq 0) {
+        throw "$journalLabel does not contain any staged or removed file entries."
+    }
+
+    foreach ($entry in $fileEntries) {
+        $targetPath = [string]$entry.PSObject.Properties['TargetPath']?.Value
+        $stagePath = [string]$entry.PSObject.Properties['StagePath']?.Value
+        $backupPath = [string]$entry.PSObject.Properties['BackupPath']?.Value
+
+        if (-not (Test-PathIsUnderRoot -Path $targetPath -RootPath $BasePath)) {
+            throw "$journalLabel references staged target '$targetPath' outside '$BasePath'."
+        }
+        if (-not (Test-PathIsUnderRoot -Path $stagePath -RootPath $transactionRoot)) {
+            throw "$journalLabel references staged file '$stagePath' outside '$transactionRoot'."
+        }
+        if (-not (Test-PathIsUnderRoot -Path $backupPath -RootPath $transactionRoot)) {
+            throw "$journalLabel references backup file '$backupPath' outside '$transactionRoot'."
+        }
+        if (-not $targetPaths.Add((Get-NormalizedAbsolutePath -Path $targetPath))) {
+            throw "$journalLabel contains duplicate target path '$targetPath'."
+        }
+    }
+
+    foreach ($entry in $removedEntries) {
+        $targetPath = [string]$entry.PSObject.Properties['TargetPath']?.Value
+        $backupPath = [string]$entry.PSObject.Properties['BackupPath']?.Value
+
+        if (-not (Test-PathIsUnderRoot -Path $targetPath -RootPath $BasePath)) {
+            throw "$journalLabel references removed target '$targetPath' outside '$BasePath'."
+        }
+        if (-not (Test-PathIsUnderRoot -Path $backupPath -RootPath $transactionRoot)) {
+            throw "$journalLabel references removed-file backup '$backupPath' outside '$transactionRoot'."
+        }
+        if (-not $targetPaths.Add((Get-NormalizedAbsolutePath -Path $targetPath))) {
+            throw "$journalLabel contains duplicate target path '$targetPath'."
+        }
+    }
+}
+
 function Write-StoreTransactionState {
     [CmdletBinding()]
     param(
@@ -1044,6 +1228,8 @@ function Restore-StoreTransaction {
     if ($null -eq $state) {
         return
     }
+
+    Assert-StoreTransactionStateIsValid -State $state -BasePath $BasePath -StoreName $StoreName -JournalPath $journalPath
 
     $phase = [string]$state.Phase
     if ($phase -eq 'Committed') {
@@ -2028,9 +2214,11 @@ function Get-VulnLegacySnapshotFile {
         [string[]]$LegacyFilePaths
     )
 
-    if ($null -ne $LegacyFilePaths -and $LegacyFilePaths.Count -gt 0) {
+    $resolvedLegacyFilePaths = @($LegacyFilePaths | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+
+    if ($resolvedLegacyFilePaths.Count -gt 0) {
         return [System.IO.FileInfo[]]@(
-            $LegacyFilePaths |
+            $resolvedLegacyFilePaths |
                 ForEach-Object {
                     if (Test-Path -LiteralPath $_ -PathType Leaf) {
                         Get-Item -LiteralPath $_
@@ -5170,9 +5358,11 @@ function Publish-VulnerabilityHistoryStore {
         [string[]]$DownloadedFiles
     )
 
-    $legacyFiles = if ($null -ne $DownloadedFiles -and $DownloadedFiles.Count -gt 0) {
+    $downloadedFileList = @($DownloadedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+
+    $legacyFiles = if ($downloadedFileList.Count -gt 0) {
         @(
-            $DownloadedFiles |
+            $downloadedFileList |
                 ForEach-Object {
                     if (Test-Path -Path $_ -PathType Leaf) {
                         Get-Item -LiteralPath $_
@@ -5185,6 +5375,7 @@ function Publish-VulnerabilityHistoryStore {
     else {
         @(Get-ChildItem -Path $OutputPath -File | Where-Object { Test-IsLegacyVulnSnapshotFileName -Name $_.Name } | Sort-Object Name)
     }
+    $legacyFiles = @($legacyFiles)
 
     if ($legacyFiles.Count -eq 0) {
         if (Test-VulnStoreExistence -BasePath $OutputPath) {
@@ -5206,7 +5397,11 @@ function Publish-VulnerabilityHistoryStore {
         throw 'No vulnerability export files were downloaded and no canonical vulnerability store exists.'
     }
 
-    $publishResult = Publish-VulnStoreFromBulkSnapshot -BasePath $OutputPath -SnapshotFilePaths $legacyFiles.FullName -RemoveSnapshotFiles
+    if ($downloadedFileList.Count -eq 0) {
+        Assert-LegacyMigrationAllowed -FeatureName 'vulnerability snapshot compatibility' -LegacyPaths @($legacyFiles.FullName)
+    }
+
+    $publishResult = Publish-VulnStoreFromBulkSnapshot -BasePath $OutputPath -SnapshotFilePaths @($legacyFiles.FullName) -RemoveSnapshotFiles
     Write-Host "  Canonical vulnerability store updated: $($publishResult.CurrentRows) current row(s), $($publishResult.HistoryYears) history period file(s)" -ForegroundColor Green
     return $publishResult
 }
@@ -6979,11 +7174,25 @@ function Initialize-MachineHistoryStore {
     $historyRecordsByPeriod = @{}
     $historyRecordKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $defaultObservedOn = Get-Date -Format 'yyyy-MM-dd'
+    $legacyMigrationPaths = [System.Collections.Generic.List[string]]::new()
+
+    if (($currentReadPath -eq $legacyCurrentPath) -and -not [string]::IsNullOrWhiteSpace($legacyCurrentPath)) {
+        $legacyMigrationPaths.Add($legacyCurrentPath)
+    }
+    foreach ($legacyFile in $legacyFiles) {
+        if ($null -ne $legacyFile) {
+            $legacyMigrationPaths.Add($legacyFile.FullName)
+        }
+    }
 
     foreach ($sourcePath in $historySourcePaths) {
         foreach ($record in Read-MachineRecordsFromFile -Path $sourcePath) {
             Add-MachineHistoryRecordToPeriodMap -HistoryRecordsByPeriod $historyRecordsByPeriod -RecordKeys $historyRecordKeys -Record $record
         }
+    }
+
+    if ($legacyMigrationPaths.Count -gt 0) {
+        Assert-LegacyMigrationAllowed -FeatureName 'machine snapshot compatibility' -LegacyPaths $legacyMigrationPaths
     }
 
     if ($null -ne $currentReadPath) {
@@ -7339,6 +7548,20 @@ function Initialize-AdvancedHuntingStore {
     $currentRecords = @{}
     $migratedLegacy = $false
     $legacyFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File | Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } | Sort-Object Name)
+    $legacyMigrationPaths = [System.Collections.Generic.List[string]]::new()
+
+    if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
+        $legacyMigrationPaths.Add($legacyCurrentPath)
+    }
+    foreach ($legacyFile in $legacyFiles) {
+        if ($null -ne $legacyFile) {
+            $legacyMigrationPaths.Add($legacyFile.FullName)
+        }
+    }
+
+    if ($legacyMigrationPaths.Count -gt 0) {
+        Assert-LegacyMigrationAllowed -FeatureName 'Advanced Hunting snapshot compatibility' -LegacyPaths $legacyMigrationPaths
+    }
 
     if (Test-Path -Path $currentPath) {
         foreach ($record in Read-AdvancedHuntingRecordsFromFile -Path $currentPath) {
@@ -7516,8 +7739,19 @@ function Get-MdeAccessToken {
             return [string]$response.access_token
         }
         catch {
-            throw "Failed to authenticate to Microsoft Defender for Endpoint: $_"
+            throw ("Failed to authenticate to Microsoft Defender for Endpoint for tenant '{0}', app '{1}', resource '{2}': {3}" -f $resolvedTenantId, $resolvedAppId, $ResourceAppIdUri, $_.Exception.Message)
         }
+    }
+
+    $diagnostics = [System.Collections.Generic.List[string]]::new()
+    if ([string]::IsNullOrWhiteSpace($resolvedTenantId)) {
+        $diagnostics.Add('TenantId is missing')
+    }
+    if ([string]::IsNullOrWhiteSpace($resolvedAppId)) {
+        $diagnostics.Add('AppId is missing')
+    }
+    if ([string]::IsNullOrWhiteSpace($resolvedSecretText)) {
+        $diagnostics.Add('AppSecret is missing')
     }
 
     if ($UseAzureCliFallback) {
@@ -7528,18 +7762,46 @@ function Get-MdeAccessToken {
                 if (-not [string]::IsNullOrWhiteSpace($azAccessToken)) {
                     return $azAccessToken.Trim()
                 }
+
+                $diagnostics.Add("Azure CLI fallback returned no access token for resource '$ResourceAppIdUri'")
             }
             catch {
                 Write-Verbose "Azure CLI token acquisition failed: $_"
+                $diagnostics.Add(("Azure CLI fallback failed: {0}" -f $_.Exception.Message))
             }
+        }
+        else {
+            $diagnostics.Add("Azure CLI fallback is unavailable because 'az' is not installed")
         }
     }
 
-    if ($UseEnvironmentFallback -or $UseAzureCliFallback) {
-        throw "No Defender API token source available. Provide -AccessToken, set DEFENDER_ACCESS_TOKEN, set DEFENDER_TENANT_ID/DEFENDER_APP_ID/DEFENDER_APP_SECRET, or sign in with 'az login'."
+    if ($UseEnvironmentFallback) {
+        if ([string]::IsNullOrWhiteSpace([string]$env:DEFENDER_ACCESS_TOKEN)) {
+            $diagnostics.Add('DEFENDER_ACCESS_TOKEN is not set')
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$env:DEFENDER_TENANT_ID)) {
+            $diagnostics.Add('DEFENDER_TENANT_ID is not set')
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$env:DEFENDER_APP_ID)) {
+            $diagnostics.Add('DEFENDER_APP_ID is not set')
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$env:DEFENDER_APP_SECRET)) {
+            $diagnostics.Add('DEFENDER_APP_SECRET is not set')
+        }
     }
 
-    throw 'No Defender API token source available. Provide -AccessToken or -TenantId/-AppId/-AppSecret.'
+    $diagnosticSuffix = if ($diagnostics.Count -gt 0) {
+        ' Diagnostics: ' + (($diagnostics | Select-Object -Unique) -join '; ') + '.'
+    }
+    else {
+        ''
+    }
+
+    if ($UseEnvironmentFallback -or $UseAzureCliFallback) {
+        throw ("No Defender API token source available. Provide -AccessToken, set DEFENDER_ACCESS_TOKEN, set DEFENDER_TENANT_ID/DEFENDER_APP_ID/DEFENDER_APP_SECRET, or sign in with 'az login'.{0}" -f $diagnosticSuffix)
+    }
+
+    throw ("No Defender API token source available. Provide -AccessToken or -TenantId/-AppId/-AppSecret.{0}" -f $diagnosticSuffix)
 }
 
 function Get-MdeHeaderCollection {
@@ -8643,6 +8905,7 @@ function Resolve-AdvancedHuntingBundleSourceFileList {
     $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
 
     if ((-not (Test-Path -LiteralPath $currentPath -PathType Leaf)) -and (Test-Path -LiteralPath $legacyCurrentPath -PathType Leaf)) {
+        Assert-LegacyMigrationAllowed -FeatureName 'Advanced Hunting snapshot compatibility' -LegacyPaths @($legacyCurrentPath)
         $currentPath = $legacyCurrentPath
     }
 
@@ -8650,9 +8913,11 @@ function Resolve-AdvancedHuntingBundleSourceFileList {
         return @((Get-Item -LiteralPath $currentPath))
     }
 
-    return @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File -ErrorAction SilentlyContinue |
+    $legacyFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File -ErrorAction SilentlyContinue |
         Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
         Sort-Object Name -Descending)
+    Assert-LegacyMigrationAllowed -FeatureName 'Advanced Hunting snapshot compatibility' -LegacyPaths @($legacyFiles | ForEach-Object { $_.FullName })
+    return @($legacyFiles)
 }
 
 function ConvertTo-AdvancedHuntingBundleStringArray {
@@ -8898,7 +9163,7 @@ function ConvertTo-AdvancedHuntingBundleLoggedOnUserList {
     $values = [System.Collections.Generic.List[string]]::new()
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     Add-AdvancedHuntingBundleLoggedOnUserValue -Value $Value -Values $values -Seen $seen
-    return ,([string[]]$values.ToArray())
+    return [string[]]$values.ToArray()
 }
 
 function Read-AdvancedHuntingBundle {
@@ -9116,27 +9381,16 @@ function Read-AdvancedHuntingData {
 
         $ahData = @{}
         $parseErrors = 0
-        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
-        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
-
-        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
-            $currentPath = $legacyCurrentPath
+        $sourceFiles = @(Resolve-AdvancedHuntingBundleSourceFileList -Path $Path)
+        if ($sourceFiles.Count -eq 0) {
+            Write-Warning 'No Advanced Hunting data files found. CVE enrichment will be skipped.'
+            return @{}
         }
 
-        if (Test-Path -Path $currentPath) {
-            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
-            $sourceFiles = @(Get-Item -Path $currentPath)
+        if ($sourceFiles.Count -eq 1) {
+            Write-Information "  Using $($sourceFiles[0].Name)" -InformationAction Continue
         }
         else {
-            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
-                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
-                Sort-Object Name -Descending)
-
-            if ($sourceFiles.Count -eq 0) {
-                Write-Warning 'No Advanced Hunting data files found. CVE enrichment will be skipped.'
-                return @{}
-            }
-
             Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
         }
 
@@ -9192,27 +9446,16 @@ function Read-AdvancedHuntingInventoryData {
 
         $inventoryData = @{}
         $parseErrors = 0
-        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
-        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
-
-        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
-            $currentPath = $legacyCurrentPath
+        $sourceFiles = @(Resolve-AdvancedHuntingBundleSourceFileList -Path $Path)
+        if ($sourceFiles.Count -eq 0) {
+            Write-Information '  No Advanced Hunting software inventory data files found.' -InformationAction Continue
+            return @{}
         }
 
-        if (Test-Path -Path $currentPath) {
-            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
-            $sourceFiles = @(Get-Item -Path $currentPath)
+        if ($sourceFiles.Count -eq 1) {
+            Write-Information "  Using $($sourceFiles[0].Name)" -InformationAction Continue
         }
         else {
-            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
-                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
-                Sort-Object Name -Descending)
-
-            if ($sourceFiles.Count -eq 0) {
-                Write-Information '  No Advanced Hunting software inventory data files found.' -InformationAction Continue
-                return @{}
-            }
-
             Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
         }
 
@@ -9273,122 +9516,6 @@ function Read-AdvancedHuntingDeviceUserMap {
         [string]$Path
     )
 
-    function Add-AdvancedHuntingLoggedOnUserValue {
-        [CmdletBinding()]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            $Value,
-
-            [Parameter(Mandatory = $true)]
-            [AllowEmptyCollection()]
-            [System.Collections.Generic.List[string]]$Values,
-
-            [Parameter(Mandatory = $true)]
-            [AllowEmptyCollection()]
-            [System.Collections.Generic.HashSet[string]]$Seen
-        )
-
-        if ($null -eq $Value) {
-            return
-        }
-
-        if ($Value -is [string]) {
-            $text = $Value.Trim()
-            if ([string]::IsNullOrWhiteSpace($text)) {
-                return
-            }
-
-            if ((($text.StartsWith('[') -and $text.EndsWith(']')) -or ($text.StartsWith('{') -and $text.EndsWith('}')))) {
-                try {
-                    $parsedValue = $text | ConvertFrom-Json -Depth 20
-                    Add-AdvancedHuntingLoggedOnUserValue -Value $parsedValue -Values $Values -Seen $Seen
-                    return
-                }
-                catch {
-                    Write-Verbose ("Falling back to raw LoggedOnUsers text after JSON parse failed: {0}" -f $_.Exception.Message)
-                }
-            }
-
-            if ($Seen.Add($text)) {
-                $Values.Add($text)
-            }
-            return
-        }
-
-        if ($Value -is [pscustomobject] -or $Value -is [System.Collections.IDictionary]) {
-            $propertyBag = $Value.PSObject.Properties
-            $upn = [string]$propertyBag['UserPrincipalName']?.Value
-            $domainName = [string]$propertyBag['DomainName']?.Value
-            $accountName = [string]$propertyBag['AccountName']?.Value
-            $userName = [string]$propertyBag['UserName']?.Value
-            $displayName = [string]$propertyBag['Name']?.Value
-
-            $resolvedName = $null
-            if (-not [string]::IsNullOrWhiteSpace($upn)) {
-                $resolvedName = $upn.Trim()
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace($accountName)) {
-                $resolvedName = if (-not [string]::IsNullOrWhiteSpace($domainName)) {
-                    $domainName.Trim() + '\' + $accountName.Trim()
-                }
-                else {
-                    $accountName.Trim()
-                }
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace($userName)) {
-                $resolvedName = if (-not [string]::IsNullOrWhiteSpace($domainName)) {
-                    $domainName.Trim() + '\' + $userName.Trim()
-                }
-                else {
-                    $userName.Trim()
-                }
-            }
-            elseif (-not [string]::IsNullOrWhiteSpace($displayName)) {
-                $resolvedName = $displayName.Trim()
-            }
-
-            if (-not [string]::IsNullOrWhiteSpace($resolvedName)) {
-                if ($Seen.Add($resolvedName)) {
-                    $Values.Add($resolvedName)
-                }
-                return
-            }
-
-            foreach ($property in $propertyBag) {
-                Add-AdvancedHuntingLoggedOnUserValue -Value $property.Value -Values $Values -Seen $Seen
-            }
-            return
-        }
-
-        if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [string]) {
-            foreach ($item in $Value) {
-                Add-AdvancedHuntingLoggedOnUserValue -Value $item -Values $Values -Seen $Seen
-            }
-            return
-        }
-
-        $fallbackText = [string]$Value
-        if (-not [string]::IsNullOrWhiteSpace($fallbackText) -and $Seen.Add($fallbackText)) {
-            $Values.Add($fallbackText)
-        }
-    }
-
-    function ConvertTo-AdvancedHuntingLoggedOnUserList {
-        [CmdletBinding()]
-        [OutputType([string[]])]
-        param(
-            [Parameter(Mandatory = $false)]
-            [AllowNull()]
-            $Value
-        )
-
-        $values = [System.Collections.Generic.List[string]]::new()
-        $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        Add-AdvancedHuntingLoggedOnUserValue -Value $Value -Values $values -Seen $seen
-        return [string[]]$values.ToArray()
-    }
-
     return Invoke-WithStoreLock -BasePath $Path -StoreName 'advancedhunting' -ScriptBlock {
         Restore-StoreTransaction -BasePath $Path -StoreName 'advancedhunting'
 
@@ -9396,27 +9523,16 @@ function Read-AdvancedHuntingDeviceUserMap {
 
         $deviceUsers = @{}
         $parseErrors = 0
-        $currentPath = Get-AdvancedHuntingCurrentPath -BasePath $Path
-        $legacyCurrentPath = Get-LegacyCanonicalPath -Path $currentPath
-
-        if ((-not (Test-Path -Path $currentPath)) -and (Test-Path -Path $legacyCurrentPath)) {
-            $currentPath = $legacyCurrentPath
+        $sourceFiles = @(Resolve-AdvancedHuntingBundleSourceFileList -Path $Path)
+        if ($sourceFiles.Count -eq 0) {
+            Write-Information '  No Advanced Hunting device-user data files found.' -InformationAction Continue
+            return @{}
         }
 
-        if (Test-Path -Path $currentPath) {
-            Write-Information "  Using $(Split-Path -Leaf $currentPath)" -InformationAction Continue
-            $sourceFiles = @(Get-Item -Path $currentPath)
+        if ($sourceFiles.Count -eq 1) {
+            Write-Information "  Using $($sourceFiles[0].Name)" -InformationAction Continue
         }
         else {
-            $sourceFiles = @(Get-ChildItem -Path $Path -Filter 'AdvancedHunting_*.json' -File |
-                Where-Object { Test-IsLegacyAdvancedHuntingSnapshotFileName -Name $_.Name } |
-                Sort-Object Name -Descending)
-
-            if ($sourceFiles.Count -eq 0) {
-                Write-Information '  No Advanced Hunting device-user data files found.' -InformationAction Continue
-                return @{}
-            }
-
             Write-Information "  Found $($sourceFiles.Count) legacy Advanced Hunting file(s)" -InformationAction Continue
         }
 
@@ -9433,7 +9549,7 @@ function Read-AdvancedHuntingDeviceUserMap {
                         continue
                     }
 
-                    $loggedOnUsers = @(ConvertTo-AdvancedHuntingLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
+                    $loggedOnUsers = @(ConvertTo-AdvancedHuntingBundleLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
                     if ($loggedOnUsers.Count -gt 0) {
                         $deviceUsers[$deviceId] = @($loggedOnUsers)
                     }
@@ -10368,6 +10484,7 @@ function Get-DashboardTemplateContent {
         [string]$TemplatesPath,
 
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$DefaultRootPath
     )
 
@@ -10375,6 +10492,10 @@ function Get-DashboardTemplateContent {
         $TemplatesPath
     }
     else {
+        if ([string]::IsNullOrWhiteSpace($DefaultRootPath)) {
+            throw 'DefaultRootPath must be provided when TemplatesPath is not supplied.'
+        }
+
         Join-Path -Path $DefaultRootPath -ChildPath 'templates'
     }
 
@@ -19327,6 +19448,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
+# ArtifactFingerprint: 465d9066540bf2e499066e16e7a4636895290db448b1e4feba972f40f8d71710
 
 
 

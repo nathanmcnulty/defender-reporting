@@ -106,10 +106,10 @@ That command:
 Reserve the semantic replay for milestone or final local sign-off:
 
 ```powershell
-pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -Validate -ValidationMode semantic
+pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -Validate -ValidationMode semantic -ForceFullValidation
 ```
 
-That semantic mode additionally writes `dashboard-audit.json` under `exports-synthetic/`.
+That semantic mode additionally writes `dashboard-audit.json` under `exports-synthetic/` and forces a fresh full semantic replay instead of reusing an attested validation sidecar.
 
 Supported presets:
 - `DeviceCardinalityFirst`
@@ -183,7 +183,7 @@ pwsh -NoProfile -File .\tests\New-SyntheticLiveExport.ps1 -SourcePath .\.local\l
 pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -SkipSyntheticGeneration -SyntheticOutputPath .\.local\large-datasets\synthetic-raw-live -Validate -ValidationMode artifacts
 ```
 
-Switch that final command to `-ValidationMode semantic` only when you need the full streaming semantic replay before sign-off.
+Switch that final command to `-ValidationMode semantic -ForceFullValidation` only when you need the full streaming semantic replay before sign-off.
 
 Standalone legacy vulnerability snapshot materialization from that raw live dataset:
 
@@ -352,6 +352,13 @@ That command:
 - writes aggregate `series-summary.json` and `series-summary.md` artifacts
 
 `Measure-BranchVsMainBenchmark.ps1` and `Invoke-BenchmarkSeries.ps1` default to Azure-only capture. Add `-IncludeLocalBenchmark` when you also want local timings in the same run, or `-LocalOnly` when you want to skip Azure entirely.
+
+For branch-vs-main captures, `Measure-BranchVsMainBenchmark.ps1` now records both the requested and effective baseline execution order plus `comparison.delta_basis = current-minus-main`.
+
+- `-BaselineExecutionOrder Alternate` (default) flips who runs first across repeated captures so one branch is not always measured first.
+- `-BaselineExecutionOrder CurrentThenMain` always runs the current branch first.
+- `-BaselineExecutionOrder MainThenCurrent` always runs main first.
+- Negative elapsed or memory deltas favor the current branch; positive deltas mean the branch was slower or used more memory.
 
 Function App timing semantics:
 - `function_app.elapsed_seconds` now tracks active execution time when the runtime status blob is available

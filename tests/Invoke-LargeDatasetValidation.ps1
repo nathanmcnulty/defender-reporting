@@ -57,6 +57,9 @@ param(
     [switch]$Validate,
 
     [Parameter(Mandatory = $false)]
+    [switch]$ForceFullValidation,
+
+    [Parameter(Mandatory = $false)]
     [ValidateSet('semantic', 'artifacts')]
     [string]$ValidationMode = 'semantic',
 
@@ -89,6 +92,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'build\Import-SharedHelpers.ps1')
+. (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
+. (Join-Path $PSScriptRoot 'helpers\ValidationReviewSupport.ps1')
 
 if (-not $Validate -and -not [string]::IsNullOrWhiteSpace($ValidationOutputPath)) {
     throw 'ValidationOutputPath requires -Validate.'
@@ -98,6 +103,10 @@ $resolvedValidationMode = if ($Validate) { $ValidationMode } else { 'none' }
 if ($resolvedValidationMode -eq 'artifacts' -and -not [string]::IsNullOrWhiteSpace($ValidationOutputPath)) {
     throw 'ValidationOutputPath is only supported with -ValidationMode semantic.'
 }
+if ($resolvedValidationMode -eq 'artifacts' -and $ForceFullValidation) {
+    throw '-ForceFullValidation is only supported with -ValidationMode semantic.'
+}
+$resolvedForceFullValidation = ($resolvedValidationMode -eq 'semantic')
 
 function Get-StreamingCount {
     [CmdletBinding()]
@@ -115,213 +124,6 @@ function Get-StreamingCount {
     }
 
     return $count
-}
-
-function Get-ValidationAuditSummary {
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory = $false)]
-        [AllowNull()]
-        $Audit
-    )
-
-    if ($null -eq $Audit) {
-        return $null
-    }
-
-    $semanticParity = if ($Audit.PSObject.Properties['SemanticParity']) {
-        $Audit.SemanticParity
-    }
-    else {
-        $null
-    }
-
-    return [PSCustomObject]@{
-        auditMode = if ($Audit.PSObject.Properties['AuditMode']) { [string]$Audit.AuditMode } else { $null }
-        rowMatch = if ($Audit.PSObject.Properties['RowComparison']) { [bool]$Audit.RowComparison.Match } else { $null }
-        payloadByteParityMatch = if ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['PayloadByteParityMatch']) { [bool]$semanticParity.PayloadByteParityMatch } else { $null }
-        attestationUsed = if ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['AttestationUsed']) { [bool]$semanticParity.AttestationUsed } else { $false }
-        comparisonStorage = if ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['ComparisonStorage']) { [string]$semanticParity.ComparisonStorage } else { $null }
-        comparisonPayloadSource = if ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['ComparisonPayloadSource']) { [string]$semanticParity.ComparisonPayloadSource } else { $null }
-        phaseTimings = if ($Audit.PSObject.Properties['PhaseTimings']) { $Audit.PhaseTimings } elseif ($null -ne $semanticParity -and $semanticParity.PSObject.Properties['PhaseTimings']) { $semanticParity.PhaseTimings } else { $null }
-    }
-}
-
-function Add-PathSuffixBeforeExtensionLocal {
-    [CmdletBinding()]
-    [OutputType([string])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Suffix
-    )
-
-    $extension = [System.IO.Path]::GetExtension($Path)
-    if ([string]::IsNullOrEmpty($extension)) {
-        return ($Path + $Suffix)
-    }
-
-    return ($Path.Substring(0, $Path.Length - $extension.Length) + $Suffix + $extension)
-}
-
-function Invoke-GeneratedArtifactValidation {
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$SelfContainedPath,
-
-        [Parameter(Mandatory = $true)]
-        [string]$HostedPath
-    )
-
-    $validatorScriptPath = Join-Path $PSScriptRoot 'Validate-DashboardGeneratedArtifacts.js'
-    if (-not (Test-Path -LiteralPath $validatorScriptPath -PathType Leaf)) {
-        throw "Artifact validator '$validatorScriptPath' was not found."
-    }
-
-    $nodeCommand = Get-Command -Name 'node' -ErrorAction Stop
-    & $nodeCommand.Source $validatorScriptPath $SelfContainedPath $HostedPath
-
-    $validatorExitCode = [int]$global:LASTEXITCODE
-    if ($validatorExitCode -ne 0) {
-        throw "Generated artifact validation failed with exit code $validatorExitCode."
-    }
-
-    return [PSCustomObject]@{
-        mode = 'generated-artifact-parity'
-        validatorScriptPath = [System.IO.Path]::GetFullPath($validatorScriptPath)
-        selfContainedPath = [System.IO.Path]::GetFullPath($SelfContainedPath)
-        hostedPath = [System.IO.Path]::GetFullPath($HostedPath)
-        hostedAssetsPath = Join-Path (Split-Path -Path (Resolve-Path -LiteralPath $HostedPath).Path -Parent) (([System.IO.Path]::GetFileNameWithoutExtension($HostedPath)) + '.assets')
-        passed = $true
-    }
-}
-
-function ConvertTo-DiagnosticUtcDateTime {
-    [CmdletBinding()]
-    [OutputType([datetime])]
-    param(
-        [Parameter(Mandatory = $false)]
-        [AllowNull()]
-        $Value
-    )
-
-    if ($null -eq $Value) {
-        return $null
-    }
-
-    if ($Value -is [datetime]) {
-        return ([datetime]$Value).ToUniversalTime()
-    }
-
-    if ($Value -is [datetimeoffset]) {
-        return ([datetimeoffset]$Value).UtcDateTime
-    }
-
-    $text = [string]$Value
-    if ([string]::IsNullOrWhiteSpace($text)) {
-        return $null
-    }
-
-    $parsed = [datetimeoffset]::MinValue
-    if ([datetimeoffset]::TryParse($text, [ref]$parsed)) {
-        return $parsed.UtcDateTime
-    }
-
-    return $null
-}
-
-function Get-DiagnosticPhaseTimingSummary {
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory = $false)]
-        [AllowEmptyString()]
-        [string]$Path
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $null
-    }
-
-    $phaseByName = [ordered]@{}
-    $pipelineStartUtc = $null
-    $pipelineEndUtc = $null
-
-    foreach ($line in Get-Content -LiteralPath $Path) {
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            continue
-        }
-
-        $parts = @([string]$line -split "`t")
-        if ($parts.Count -lt 3) {
-            continue
-        }
-
-        $timestampUtc = ConvertTo-DiagnosticUtcDateTime -Value $parts[0]
-        if ($null -eq $timestampUtc) {
-            continue
-        }
-
-        $eventType = [string]$parts[1]
-        $name = [string]$parts[2]
-        switch ($eventType) {
-            'pipeline-start' {
-                if ($null -eq $pipelineStartUtc) {
-                    $pipelineStartUtc = $timestampUtc
-                }
-            }
-            'pipeline-end' {
-                $pipelineEndUtc = $timestampUtc
-            }
-            'phase-start' {
-                if (-not $phaseByName.Contains($name)) {
-                    $phaseByName[$name] = [ordered]@{ start_utc = $null; end_utc = $null }
-                }
-
-                if ($null -eq $phaseByName[$name].start_utc) {
-                    $phaseByName[$name].start_utc = $timestampUtc
-                }
-            }
-            'phase-end' {
-                if (-not $phaseByName.Contains($name)) {
-                    $phaseByName[$name] = [ordered]@{ start_utc = $null; end_utc = $null }
-                }
-
-                $phaseByName[$name].end_utc = $timestampUtc
-            }
-        }
-    }
-
-    $phaseTimings = [ordered]@{}
-    $phaseElapsedSeconds = 0.0
-    foreach ($phaseName in $phaseByName.Keys) {
-        $phaseEntry = $phaseByName[$phaseName]
-        if ($null -eq $phaseEntry.start_utc -or $null -eq $phaseEntry.end_utc) {
-            continue
-        }
-
-        $elapsedSeconds = [math]::Round((New-TimeSpan -Start $phaseEntry.start_utc -End $phaseEntry.end_utc).TotalSeconds, 2)
-        $phaseTimings[$phaseName] = $elapsedSeconds
-        $phaseElapsedSeconds += $elapsedSeconds
-    }
-
-    return [PSCustomObject]@{
-        source = 'diagnostic-phase-log'
-        generated_on_utc = [datetime]::UtcNow.ToString('o')
-        pipeline_elapsed_seconds = if ($null -ne $pipelineStartUtc -and $null -ne $pipelineEndUtc) {
-            [math]::Round((New-TimeSpan -Start $pipelineStartUtc -End $pipelineEndUtc).TotalSeconds, 2)
-        }
-        else {
-            $null
-        }
-        phase_elapsed_seconds = [math]::Round($phaseElapsedSeconds, 2)
-        phase_timings = [PSCustomObject]$phaseTimings
-    }
 }
 
 function Write-StressValidationReport {
@@ -396,6 +198,9 @@ function Write-StressValidationReport {
         [Parameter(Mandatory = $true)]
         [string]$ResolvedValidationMode,
 
+        [Parameter(Mandatory = $true)]
+        [bool]$ResolvedForceFullValidation,
+
         [Parameter(Mandatory = $false)]
         [AllowNull()]
         $ArtifactValidationSummary
@@ -417,14 +222,46 @@ function Write-StressValidationReport {
         diagnosticPhaseLogPath = if ([string]::IsNullOrWhiteSpace($ResolvedDiagnosticPhaseLogPath)) { $null } else { [System.IO.Path]::GetFullPath($ResolvedDiagnosticPhaseLogPath) }
         elapsedSeconds = [math]::Round($ElapsedSeconds, 2)
         generationTiming = if ($null -ne $DiagnosticTimingSummary) {
+            $pipelineElapsedSeconds = Get-ObjectPropertyValue -InputObject $DiagnosticTimingSummary -Name 'pipeline_elapsed_seconds'
+            if ($null -eq $pipelineElapsedSeconds) {
+                $pipelineElapsedSeconds = Get-ObjectPropertyValue -InputObject $DiagnosticTimingSummary -Name 'pipelineElapsedSeconds'
+            }
+
+            $phaseElapsedSeconds = Get-ObjectPropertyValue -InputObject $DiagnosticTimingSummary -Name 'phase_elapsed_seconds'
+            if ($null -eq $phaseElapsedSeconds) {
+                $phaseElapsedSeconds = Get-ObjectPropertyValue -InputObject $DiagnosticTimingSummary -Name 'phaseElapsedSeconds'
+            }
+
+            $phaseTimings = Get-ObjectPropertyValue -InputObject $DiagnosticTimingSummary -Name 'phase_timings'
+            if ($null -eq $phaseTimings) {
+                $phaseSummaries = @(Get-ObjectPropertyValue -InputObject $DiagnosticTimingSummary -Name 'phase_summaries')
+                $phaseTimingMap = [ordered]@{}
+                $phaseElapsedAccumulator = 0.0
+                foreach ($phaseSummary in $phaseSummaries) {
+                    $phaseName = [string](Get-ObjectPropertyValue -InputObject $phaseSummary -Name 'name')
+                    $phaseSeconds = Get-ObjectPropertyValue -InputObject $phaseSummary -Name 'elapsedSeconds'
+                    if ([string]::IsNullOrWhiteSpace($phaseName) -or $null -eq $phaseSeconds) {
+                        continue
+                    }
+
+                    $phaseTimingMap[$phaseName] = [double]$phaseSeconds
+                    $phaseElapsedAccumulator += [double]$phaseSeconds
+                }
+
+                if ($null -eq $phaseElapsedSeconds -and $phaseTimingMap.Count -gt 0) {
+                    $phaseElapsedSeconds = [math]::Round($phaseElapsedAccumulator, 2)
+                }
+                $phaseTimings = if ($phaseTimingMap.Count -gt 0) { [PSCustomObject]$phaseTimingMap } else { $null }
+            }
+
             [PSCustomObject]@{
-                source = [string]$DiagnosticTimingSummary.source
-                generatedOnUtc = [string]$DiagnosticTimingSummary.generated_on_utc
-                pipelineElapsedSeconds = $DiagnosticTimingSummary.pipeline_elapsed_seconds
-                phaseElapsedSeconds = $DiagnosticTimingSummary.phase_elapsed_seconds
+                source = if ($null -ne (Get-ObjectPropertyValue -InputObject $DiagnosticTimingSummary -Name 'source')) { [string](Get-ObjectPropertyValue -InputObject $DiagnosticTimingSummary -Name 'source') } else { 'diagnostic-phase-log' }
+                generatedOnUtc = if ($null -ne (Get-ObjectPropertyValue -InputObject $DiagnosticTimingSummary -Name 'generated_on_utc')) { [string](Get-ObjectPropertyValue -InputObject $DiagnosticTimingSummary -Name 'generated_on_utc') } else { [datetime]::UtcNow.ToString('o') }
+                pipelineElapsedSeconds = $pipelineElapsedSeconds
+                phaseElapsedSeconds = $phaseElapsedSeconds
                 wrapperElapsedSeconds = [math]::Round($ElapsedSeconds, 2)
-                wrapperOverheadSeconds = [math]::Round(([math]::Round($ElapsedSeconds, 2) - [double]$DiagnosticTimingSummary.phase_elapsed_seconds), 2)
-                phaseTimings = $DiagnosticTimingSummary.phase_timings
+                wrapperOverheadSeconds = if ($null -ne $phaseElapsedSeconds) { [math]::Round(([math]::Round($ElapsedSeconds, 2) - [double]$phaseElapsedSeconds), 2) } else { $null }
+                phaseTimings = $phaseTimings
             }
         }
         else {
@@ -441,6 +278,7 @@ function Write-StressValidationReport {
         validation = [PSCustomObject]@{
             validate = $Validate.IsPresent
             validationMode = $ResolvedValidationMode
+            forceFullValidation = $ResolvedForceFullValidation
             heartbeatSeconds = $ValidationHeartbeatSeconds
             partitionCompareParallelism = $ValidationPartitionCompareParallelism
             skipObservedWindowMerge = $SkipObservedWindowMerge
@@ -566,6 +404,9 @@ if ($resolvedValidationMode -eq 'semantic' -and $totalVulnRowCount -gt $Semantic
 if ($resolvedValidationMode -eq 'semantic' -and $totalVulnRowCount -gt $SemanticValidationRowLimit -and $AllowLargeSemanticValidation) {
     Write-Warning ("Large semantic validation override enabled for {0:N0} row(s)." -f $totalVulnRowCount)
 }
+if ($resolvedValidationMode -eq 'semantic' -and -not $ForceFullValidation) {
+    Write-Output 'Semantic large-dataset validation forces a fresh full replay for this entrypoint.'
+}
 
 $generateArgs = @{
     DirectoryPath = $resolvedSyntheticPath
@@ -579,6 +420,7 @@ if ($skipObservedWindowMerge) {
 }
 if ($resolvedValidationMode -eq 'semantic') {
     $generateArgs.Validate = $true
+    $generateArgs.ForceFullValidation = $true
     if (-not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
         $generateArgs.ValidationOutputPath = $resolvedValidationOutputPath
     }
@@ -644,6 +486,10 @@ try {
         }
 
         $audit = Get-Content -Path $resolvedValidationOutputPath -Raw | ConvertFrom-Json -Depth 100
+        $auditSummary = Get-ValidationAuditSummary -Audit $audit
+        if ($resolvedForceFullValidation -and $null -ne $auditSummary -and $auditSummary.attestationUsed) {
+            throw 'Semantic large-dataset sign-off unexpectedly reused an attestation instead of running a fresh full replay.'
+        }
     }
     elseif ($resolvedValidationMode -eq 'artifacts') {
         if (-not (Test-Path -LiteralPath $hostedDashboardOutput -PathType Leaf)) {
@@ -682,6 +528,7 @@ finally {
         -Audit $audit `
         -DiagnosticTimingSummary $diagnosticTimingSummary `
         -ResolvedValidationMode $resolvedValidationMode `
+        -ResolvedForceFullValidation $resolvedForceFullValidation `
         -ArtifactValidationSummary $artifactValidationSummary
 }
 
@@ -699,6 +546,7 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedDiagnosticPhaseLogPath)) {
 }
 Write-Output ("  Validation mode: {0}" -f $resolvedValidationMode)
 if ($resolvedValidationMode -eq 'semantic' -and -not [string]::IsNullOrWhiteSpace($resolvedValidationOutputPath)) {
+    Write-Output ("  Full semantic replay: {0}" -f $(if ($resolvedForceFullValidation) { 'forced' } else { 'disabled' }))
     Write-Output ("  Validation audit: {0}" -f $resolvedValidationOutputPath)
 }
 elseif ($resolvedValidationMode -eq 'artifacts') {

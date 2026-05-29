@@ -222,6 +222,105 @@ function Test-ArtifactManifestRejectsCrossArtifactSourceConflict {
     }
 }
 
+function Test-ArtifactManifestUsesContentFingerprint {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $artifactManifestToolsPath = Join-Path $repoRoot 'build\private\ArtifactManifestTools.ps1'
+    Assert-True ((Test-Path -LiteralPath $artifactManifestToolsPath -PathType Leaf)) "Expected artifact manifest helper script at '$artifactManifestToolsPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('artifact-manifest-fingerprint-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path (Join-Path $tempRoot 'src\powershell\Shared') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\generated') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\manifests') -ItemType Directory -Force)
+
+        $sourcePath = Join-Path $tempRoot 'src\powershell\Shared\Helper.ps1'
+        $buildScriptPath = Join-Path $tempRoot 'build\Build-TestArtifact.ps1'
+        $manifestPath = Join-Path $tempRoot 'build\manifests\artifact-test.json'
+
+        Set-Content -LiteralPath $sourcePath -Value 'function Invoke-TestArtifactHelper { "alpha" }' -Encoding utf8
+        Set-Content -LiteralPath $buildScriptPath -Value '# synthetic build script for fingerprint coverage' -Encoding utf8
+        [ordered]@{
+            artifactName = 'artifact-test'
+            description = 'Synthetic manifest for fingerprint coverage.'
+            outputPath = 'build/generated/artifact-test.ps1'
+            sourceRoots = @('src/powershell/Shared')
+            sourceFiles = @('src/powershell/Shared/Helper.ps1')
+        } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+
+        . $artifactManifestToolsPath
+        $artifactManifest = Build-PowerShellArtifactFromManifest -ManifestPath $manifestPath -RepoRoot $tempRoot -BuildScriptPath $buildScriptPath
+        Assert-True ((Test-PowerShellArtifactRequiresBuild -ManifestPath $manifestPath -RepoRoot $tempRoot -BuildScriptPath $buildScriptPath) -eq $false) 'Expected freshly generated artifact to satisfy the current content fingerprint.'
+
+        $outputWriteTime = (Get-Item -LiteralPath $artifactManifest.OutputPath).LastWriteTimeUtc
+        Set-Content -LiteralPath $sourcePath -Value 'function Invoke-TestArtifactHelper { "beta" }' -Encoding utf8
+        (Get-Item -LiteralPath $sourcePath).LastWriteTimeUtc = $outputWriteTime.AddSeconds(-5)
+        (Get-Item -LiteralPath $buildScriptPath).LastWriteTimeUtc = $outputWriteTime.AddSeconds(-10)
+        (Get-Item -LiteralPath $manifestPath).LastWriteTimeUtc = $outputWriteTime.AddSeconds(-10)
+
+        Assert-True (Test-PowerShellArtifactRequiresBuild -ManifestPath $manifestPath -RepoRoot $tempRoot -BuildScriptPath $buildScriptPath) 'Expected content changes with older timestamps to invalidate the generated artifact fingerprint.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-ArtifactManifestRejectsGeneratedOutputWithoutFingerprint {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $artifactManifestToolsPath = Join-Path $repoRoot 'build\private\ArtifactManifestTools.ps1'
+    Assert-True ((Test-Path -LiteralPath $artifactManifestToolsPath -PathType Leaf)) "Expected artifact manifest helper script at '$artifactManifestToolsPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('artifact-manifest-fingerprint-missing-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path (Join-Path $tempRoot 'src\powershell\Shared') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\generated') -ItemType Directory -Force)
+        [void](New-Item -Path (Join-Path $tempRoot 'build\manifests') -ItemType Directory -Force)
+
+        $sourcePath = Join-Path $tempRoot 'src\powershell\Shared\Helper.ps1'
+        $buildScriptPath = Join-Path $tempRoot 'build\Build-TestArtifact.ps1'
+        $manifestPath = Join-Path $tempRoot 'build\manifests\artifact-test.json'
+        $outputPath = Join-Path $tempRoot 'build\generated\artifact-test.ps1'
+
+        Set-Content -LiteralPath $sourcePath -Value 'function Invoke-TestArtifactHelper { "alpha" }' -Encoding utf8
+        [ordered]@{
+            artifactName = 'artifact-test'
+            description = 'Synthetic manifest for fingerprint metadata coverage.'
+            outputPath = 'build/generated/artifact-test.ps1'
+            sourceRoots = @('src/powershell/Shared')
+            sourceFiles = @('src/powershell/Shared/Helper.ps1')
+        } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+
+        $buildScriptContent = @"
+[System.IO.File]::WriteAllText('$($outputPath.Replace('\', '\\'))', 'function Invoke-TestArtifactHelper { "from-build" }', [System.Text.UTF8Encoding]::new(`$true))
+"@
+        Set-Content -LiteralPath $buildScriptPath -Value $buildScriptContent -Encoding utf8
+
+        . $artifactManifestToolsPath
+        $failure = $null
+        try {
+            $null = Resolve-PowerShellArtifactOutputPath -ManifestPath $manifestPath -RepoRoot $tempRoot -BuildScriptPath $buildScriptPath
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected artifact resolution to reject generated outputs without embedded fingerprint metadata.'
+        Assert-True ($failure.Exception.Message -like '*missing fingerprint metadata*') 'Expected artifact resolution failure to mention missing fingerprint metadata.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-TestVulnRow {
     [CmdletBinding()]
     param(
@@ -814,6 +913,227 @@ function Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet {
         if (Test-Path -LiteralPath $tempRoot) {
             Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+function Test-RestoreStoreTransactionRejectsInvalidJournalShape {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('store-transaction-invalid-' + [guid]::NewGuid().ToString('N'))
+    $externalTransactionRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('store-transaction-external-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    [void](New-Item -Path $externalTransactionRoot -ItemType Directory -Force)
+
+    try {
+        $journalPath = Get-StoreTransactionJournalPath -BasePath $tempRoot -StoreName 'machines'
+        Write-StoreTransactionState -Path $journalPath -State ([PSCustomObject]@{
+                StoreName = 'machines'
+                TransactionRoot = $externalTransactionRoot
+                Phase = 'Prepared'
+                Files = @([PSCustomObject]@{
+                        TargetPath = Get-MachineCurrentPath -BasePath $tempRoot
+                        StagePath = Join-Path $externalTransactionRoot 'Machines_Current.json.gz'
+                        BackupPath = Join-Path $externalTransactionRoot 'replace-0-Machines_Current.json.gz.bak'
+                        TargetExisted = $false
+                    })
+                RemovedFiles = @()
+            })
+
+        $failure = $null
+        try {
+            Restore-StoreTransaction -BasePath $tempRoot -StoreName 'machines'
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected invalid transaction journals to be rejected before rollback begins.'
+        Assert-True ($failure.Exception.Message -like "*references transaction root*$externalTransactionRoot*outside*") 'Expected invalid transaction journal failures to explain that the transaction root escaped the store base path.'
+        Assert-True ((Test-Path -LiteralPath $journalPath -PathType Leaf)) 'Expected invalid transaction journals to remain on disk for manual inspection.'
+    }
+    finally {
+        foreach ($path in @($tempRoot, $externalTransactionRoot)) {
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+function Test-InitializeMachineHistoryStoreRejectsExpiredLegacyMigration {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-store-expired-legacy-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalRemovalDate = $Script:LegacyVulnMigrationRemovalDate
+
+    try {
+        Write-NdjsonRecordsFile -Path (Join-Path $tempRoot 'Machines_2026-05-01.json') -Records @(
+            (Get-TestMachineRecord -Id 'machine-001')
+        )
+        $Script:LegacyVulnMigrationRemovalDate = '2000-01-01'
+
+        $failure = $null
+        try {
+            $null = Initialize-MachineHistoryStore -Path $tempRoot
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected expired machine legacy migration support to fail fast.'
+        Assert-True ($failure.Exception.Message -like '*Legacy machine snapshot compatibility support expired on 2000-01-01*') 'Expected machine legacy migration failures to explain the compatibility cutoff date.'
+    }
+    finally {
+        $Script:LegacyVulnMigrationRemovalDate = $originalRemovalDate
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-InitializeAdvancedHuntingStoreRejectsExpiredLegacyMigration {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('advancedhunting-store-expired-legacy-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalRemovalDate = $Script:LegacyVulnMigrationRemovalDate
+
+    try {
+        Write-NdjsonRecordsFile -Path (Join-Path $tempRoot 'AdvancedHunting_123_2026-05-01.json') -Records @(
+            [PSCustomObject]@{
+                CveId = 'CVE-2026-0001'
+                PublishedDate = '2026-05-01'
+                VulnerabilityDescription = 'Expired legacy compatibility test'
+                EpssScore = 0.42
+                AffectedSoftware = @('Legacy App')
+                LastModifiedTime = '2026-05-01T00:00:00Z'
+            }
+        )
+        $Script:LegacyVulnMigrationRemovalDate = '2000-01-01'
+
+        $failure = $null
+        try {
+            $null = Initialize-AdvancedHuntingStore -Path $tempRoot
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected expired Advanced Hunting legacy migration support to fail fast.'
+        Assert-True ($failure.Exception.Message -like '*Legacy Advanced Hunting snapshot compatibility support expired on 2000-01-01*') 'Expected Advanced Hunting legacy migration failures to explain the compatibility cutoff date.'
+    }
+    finally {
+        $Script:LegacyVulnMigrationRemovalDate = $originalRemovalDate
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-PublishVulnerabilityHistoryStoreRejectsExpiredImplicitLegacyMigration {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-store-expired-implicit-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalRemovalDate = $Script:LegacyVulnMigrationRemovalDate
+
+    try {
+        Write-NdjsonRecordsFile -Path (Join-Path $tempRoot 'VulnExport_1_2026-05-01.json') -Records @(
+            (Get-TestVulnRow -Id 'vuln-001' -CveId 'CVE-2026-0001' -SnapshotDate '2026-05-01' -Version '1.0.0')
+        )
+        $Script:LegacyVulnMigrationRemovalDate = '2000-01-01'
+
+        $failure = $null
+        try {
+            $null = Publish-VulnerabilityHistoryStore -OutputPath $tempRoot
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected implicit vulnerability legacy migration to be blocked after the cutoff date.'
+        Assert-True (($failure.Exception.Message -like '*legacy*') -and ($failure.Exception.Message -like '*2000-01-01*')) ("Expected vulnerability legacy migration failures to explain the compatibility cutoff date. Actual: {0}`nStack: {1}" -f $failure.Exception.Message, $failure.ScriptStackTrace)
+    }
+    finally {
+        $Script:LegacyVulnMigrationRemovalDate = $originalRemovalDate
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-PublishVulnerabilityHistoryStoreAllowsExplicitDownloadedLegacyFilesAfterCutoff {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vuln-store-explicit-download-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalRemovalDate = $Script:LegacyVulnMigrationRemovalDate
+
+    try {
+        $downloadedFile = Join-Path $tempRoot 'VulnExport_1_2026-05-01.json'
+        Write-NdjsonRecordsFile -Path $downloadedFile -Records @(
+            (Get-TestVulnRow -Id 'vuln-001' -CveId 'CVE-2026-0001' -SnapshotDate '2026-05-01' -Version '1.0.0')
+        )
+        $Script:LegacyVulnMigrationRemovalDate = '2000-01-01'
+
+        $result = Publish-VulnerabilityHistoryStore -OutputPath $tempRoot -DownloadedFiles @($downloadedFile)
+
+        Assert-True ($result.CurrentRows -eq 1) 'Expected explicitly downloaded vulnerability snapshots to continue canonicalizing after the legacy cutoff.'
+        Assert-True ((Test-Path -LiteralPath (Get-VulnCurrentPath -BasePath $tempRoot) -PathType Leaf)) 'Expected the canonical vulnerability current store to be written for explicit downloaded snapshots.'
+    }
+    finally {
+        $Script:LegacyVulnMigrationRemovalDate = $originalRemovalDate
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-GetMdeAccessTokenReportsMissingConfigurationDiagnostic {
+    [CmdletBinding()]
+    param()
+
+    $failure = $null
+    try {
+        $null = Get-MdeAccessToken -AppId 'app-001' -AppSecret 'secret-value'
+    }
+    catch {
+        $failure = $_
+    }
+
+    Assert-True ($null -ne $failure) 'Expected incomplete MDE credential configuration to fail.'
+    Assert-True ($failure.Exception.Message -like '*TenantId is missing*') 'Expected missing-credential diagnostics to identify the specific missing MDE setting.'
+    Assert-True ($failure.Exception.Message -like '*Provide -AccessToken or -TenantId/-AppId/-AppSecret*') 'Expected missing-credential diagnostics to preserve the remediation guidance.'
+}
+
+function Test-GetMdeAccessTokenReportsAuthenticationContext {
+    [CmdletBinding()]
+    param()
+
+    Set-Item -Path Function:Invoke-RestMethod -Value {
+        throw [System.Exception]::new('invalid_client')
+    }
+
+    try {
+        $failure = $null
+        try {
+            $null = Get-MdeAccessToken -TenantId 'tenant-001' -AppId 'app-001' -AppSecret 'secret-value'
+        }
+        catch {
+            $failure = $_
+        }
+
+        Assert-True ($null -ne $failure) 'Expected failed MDE authentication attempts to surface context-rich diagnostics.'
+        Assert-True ($failure.Exception.Message -like "*tenant 'tenant-001'*app 'app-001'*resource 'https://api.securitycenter.microsoft.com'*invalid_client*") 'Expected authentication failures to include the tenant, app, resource, and underlying error message.'
+    }
+    finally {
+        Remove-Item -Path Function:Invoke-RestMethod -ErrorAction SilentlyContinue
     }
 }
 
@@ -5645,6 +5965,152 @@ function Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo {
     Assert-True ($summary -notlike '*rows=125.000*') 'Expected validation status summary text to avoid host-culture row count formatting.'
 }
 
+function Test-LargeDatasetValidationSemanticModeForcesFullReplay {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $validationScriptPath = Join-Path $repoRoot 'tests\Invoke-LargeDatasetValidation.ps1'
+    Assert-True ((Test-Path -LiteralPath $validationScriptPath -PathType Leaf)) "Expected large-dataset validation script at '$validationScriptPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('large-dataset-forcefull-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+        $syntheticOutputPath = Join-Path $tempRoot 'synthetic'
+        $dashboardOutputPath = Join-Path $tempRoot 'dashboard.html'
+        $validationOutputPath = Join-Path $tempRoot 'dashboard-audit.json'
+        $diagnosticPhaseLogPath = Join-Path $tempRoot 'phase-log.tsv'
+
+        & $validationScriptPath `
+            -SourcePath (Join-Path $repoRoot 'exports') `
+            -SyntheticOutputPath $syntheticOutputPath `
+            -TargetDeviceCount 50 `
+            -TargetTotalVulnRows 5000 `
+            -MinimumAvailableMemoryGB 4 `
+            -Validate `
+            -ValidationMode semantic `
+            -ForceFullValidation `
+            -DashboardOutputPath $dashboardOutputPath `
+            -ValidationOutputPath $validationOutputPath `
+            -DiagnosticPhaseLogPath $diagnosticPhaseLogPath | Out-Null
+
+        $reportPath = Join-Path $syntheticOutputPath 'stress-validation-report.json'
+        Assert-True ((Test-Path -LiteralPath $reportPath -PathType Leaf)) 'Expected large-dataset validation to emit a stress-validation report.'
+        Assert-True ((Test-Path -LiteralPath $validationOutputPath -PathType Leaf)) 'Expected large-dataset validation to emit a semantic audit.'
+
+        $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -Depth 20
+        $audit = Get-Content -LiteralPath $validationOutputPath -Raw | ConvertFrom-Json -Depth 100
+
+        Assert-True ($report.validation.validationMode -eq 'semantic') 'Expected the stress-validation report to record semantic validation mode.'
+        Assert-True ($report.validation.forceFullValidation -eq $true) 'Expected the stress-validation report to record forced full semantic replay.'
+        Assert-True ($report.validation.auditSummary.attestationUsed -eq $false) 'Expected semantic sign-off to avoid attestation reuse.'
+        Assert-True ([string]$audit.AuditMode -notlike '*attested*') 'Expected semantic sign-off audit mode to reflect a fresh replay rather than attested validation.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-HotPhaseReviewArtifactsModeSmoke {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $reviewScriptPath = Join-Path $repoRoot 'tests\Invoke-HotPhaseReview.ps1'
+    Assert-True ((Test-Path -LiteralPath $reviewScriptPath -PathType Leaf)) "Expected hot-phase review script at '$reviewScriptPath'."
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('hot-phase-review-smoke-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $outputRoot = Join-Path $tempRoot 'review'
+        $stdoutPath = Join-Path $tempRoot 'stdout.log'
+        $stderrPath = Join-Path $tempRoot 'stderr.log'
+
+        if (-not $IsWindows) {
+            $pwshCommand = Get-Command -Name 'pwsh' -ErrorAction Stop
+            $argumentList = @(
+                '-NoProfile'
+                '-File'
+                $reviewScriptPath
+                '-DirectoryPath'
+                (Join-Path $repoRoot 'exports')
+                '-OutputRoot'
+                $outputRoot
+                '-ValidationMode'
+                'artifacts'
+                '-PollIntervalSeconds'
+                '1'
+            )
+
+            $process = Start-Process -FilePath $pwshCommand.Source -ArgumentList $argumentList -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+            $process.WaitForExit()
+
+            $stdoutContent = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            $stderrContent = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            $processOutput = @($stdoutContent, $stderrContent) -join [Environment]::NewLine
+
+            Assert-True ($process.ExitCode -ne 0) 'Expected Invoke-HotPhaseReview regression smoke to fail fast on non-Windows platforms.'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $outputRoot 'hot-phase-review.json') -PathType Leaf)) 'Expected non-Windows hot-phase review execution to avoid writing a review report.'
+            Assert-True ($processOutput.Contains('currently supports Windows only')) 'Expected non-Windows hot-phase review execution to explain the Windows-only platform guard.'
+            return
+        }
+
+        & $reviewScriptPath `
+            -DirectoryPath (Join-Path $repoRoot 'exports') `
+            -OutputRoot $outputRoot `
+            -ValidationMode artifacts `
+            -PollIntervalSeconds 1 | Out-Null
+
+        $reportPath = Join-Path $outputRoot 'hot-phase-review.json'
+        Assert-True ((Test-Path -LiteralPath $reportPath -PathType Leaf)) 'Expected hot-phase review smoke to emit a report.'
+
+        $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -Depth 20
+        Assert-True ($report.status -eq 'success') 'Expected hot-phase review smoke to complete successfully.'
+        Assert-True ($report.review.validationMode -eq 'artifacts') 'Expected hot-phase review smoke to record artifact validation mode.'
+        Assert-True ($report.artifactValidationSummary.passed -eq $true) 'Expected artifact-mode hot-phase review smoke to validate hosted and self-contained outputs.'
+        Assert-True (@($report.generatorPhases).Count -gt 0) 'Expected hot-phase review smoke to capture generator phase timings.'
+        Assert-True ((Test-Path -LiteralPath $report.artifacts.hostedDashboardPath -PathType Leaf)) 'Expected hot-phase review smoke to emit the hosted dashboard artifact.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-GetDashboardTemplateContentAcceptsExplicitTemplatesPathWithEmptyDefaultRoot {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-template-path-' + [guid]::NewGuid().ToString('N'))
+
+    try {
+        $templatesPath = Join-Path $tempRoot 'templates'
+        $moduleDirectoryPath = Join-Path $templatesPath 'dashboard'
+        [void](New-Item -Path $templatesPath -ItemType Directory -Force)
+        [void](New-Item -Path $moduleDirectoryPath -ItemType Directory -Force)
+        [System.IO.File]::WriteAllText((Join-Path $templatesPath 'dashboard.html'), '<html></html>', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $templatesPath 'dashboard.css'), 'body { }', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $moduleDirectoryPath '00-core.js'), 'window.__templatePathRegression = true;', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $templatesPath 'dashboard.modules.json'), (@{ version = 1; modules = @('dashboard/00-core.js') } | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
+
+        $templates = Get-DashboardTemplateContent -TemplatesPath $templatesPath -DefaultRootPath ''
+
+        Assert-True ($templates.Html -eq '<html></html>') 'Expected template loading to honor the explicit templates path when DefaultRootPath is blank.'
+        Assert-True ($templates.Css -eq 'body { }') 'Expected CSS template loading to honor the explicit templates path when DefaultRootPath is blank.'
+        Assert-True ($templates.Js -like '*window.__templatePathRegression = true;*') 'Expected template loading to bundle JavaScript modules from the explicit templates path.'
+        Assert-True (($templates.JsModules.Keys -contains 'dashboard/00-core.js')) 'Expected template module map to preserve the declared dashboard module path.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Invoke-SharedHelperRegressionTest {
     [CmdletBinding()]
     param(
@@ -5671,6 +6137,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-ArtifactManifestRejectsSourceRootOverlap'; SuccessMessage = 'Artifact manifest overlap guard checks passed.' }
     @{ Name = 'Test-ArtifactManifestRejectsSourceFileOutsideSourceRoot'; SuccessMessage = 'Artifact manifest source-root boundary checks passed.' }
     @{ Name = 'Test-ArtifactManifestRejectsCrossArtifactSourceConflict'; SuccessMessage = 'Artifact manifest cross-artifact conflict checks passed.' }
+    @{ Name = 'Test-ArtifactManifestUsesContentFingerprint'; SuccessMessage = 'Artifact manifest fingerprint freshness checks passed.' }
+    @{ Name = 'Test-ArtifactManifestRejectsGeneratedOutputWithoutFingerprint'; SuccessMessage = 'Artifact manifest fingerprint metadata checks passed.' }
     @{ Name = 'Test-CanonicalLayoutHelper'; SuccessMessage = 'Canonical layout helper checks passed.' }
     @{ Name = 'Test-FileSetFingerprintIgnoresTimestampChange'; SuccessMessage = 'File-set fingerprint stability checks passed.' }
     @{ Name = 'Test-NormalizedPayloadCacheRejectsManifestHashMismatch'; SuccessMessage = 'Normalized payload cache integrity checks passed.' }
@@ -5682,6 +6150,11 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-InitializeMachineHistoryStoreSupportsStateHashOnlyCurrentMap'; SuccessMessage = 'Machine store stateHash-only initialization checks passed.' }
     @{ Name = 'Test-MdeMachineRefreshPublishPlanSupportsStateHashOnlyCurrentMap'; SuccessMessage = 'Machine refresh plan stateHash-only checks passed.' }
     @{ Name = 'Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet'; SuccessMessage = 'Machine history cleanup empty-set checks passed.' }
+    @{ Name = 'Test-RestoreStoreTransactionRejectsInvalidJournalShape'; SuccessMessage = 'Store transaction journal validation checks passed.' }
+    @{ Name = 'Test-InitializeMachineHistoryStoreRejectsExpiredLegacyMigration'; SuccessMessage = 'Machine legacy migration cutoff checks passed.' }
+    @{ Name = 'Test-InitializeAdvancedHuntingStoreRejectsExpiredLegacyMigration'; SuccessMessage = 'Advanced Hunting legacy migration cutoff checks passed.' }
+    @{ Name = 'Test-PublishVulnerabilityHistoryStoreRejectsExpiredImplicitLegacyMigration'; SuccessMessage = 'Implicit vulnerability legacy migration cutoff checks passed.' }
+    @{ Name = 'Test-PublishVulnerabilityHistoryStoreAllowsExplicitDownloadedLegacyFilesAfterCutoff'; SuccessMessage = 'Explicit vulnerability snapshot import cutoff checks passed.' }
     @{ Name = 'Test-BulkSnapshotImportSmoke'; SuccessMessage = 'Bulk snapshot import smoke checks passed.' }
     @{ Name = 'Test-BulkSnapshotImportSingleSnapshot'; SuccessMessage = 'Single-snapshot vulnerability import checks passed.' }
     @{ Name = 'Test-BulkSnapshotImportMultipartSnapshot'; SuccessMessage = 'Multipart vulnerability import checks passed.' }
@@ -5694,6 +6167,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadEmptyBlobExhaustionBehavior'; SuccessMessage = 'Multipart vulnerability empty-blob retry exhaustion checks passed.' }
     @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadMoveFailureCleanupBehavior'; SuccessMessage = 'Multipart vulnerability move-failure cleanup checks passed.' }
     @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadCleanupBehavior'; SuccessMessage = 'Multipart vulnerability failed-download cleanup checks passed.' }
+    @{ Name = 'Test-GetMdeAccessTokenReportsMissingConfigurationDiagnostic'; SuccessMessage = 'MDE token-source diagnostics checks passed.' }
+    @{ Name = 'Test-GetMdeAccessTokenReportsAuthenticationContext'; SuccessMessage = 'MDE authentication context diagnostics checks passed.' }
     @{ Name = 'Test-VulnCurrentFileRejectsDuplicateId'; SuccessMessage = 'Current-file duplicate Id checks passed.' }
     @{ Name = 'Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore'; SuccessMessage = 'Canonical quarterly history repair skip checks passed.' }
     @{ Name = 'Test-VulnStoreRequiresCanonicalRepairDetectsMalformedQuarterlyHistory'; SuccessMessage = 'Canonical quarterly history gate checks passed.' }
@@ -5735,6 +6210,9 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-WriteCombinedPayloadGzipCanConsumeColumnLookupData'; SuccessMessage = 'Payload lookup consumption checks passed.' }
     @{ Name = 'Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload'; SuccessMessage = 'Embedded payload inspection checks passed.' }
     @{ Name = 'Test-MeasureStressRunWritesProgressAndFinalReport'; SuccessMessage = 'Measure-StressRun report persistence checks passed.' }
+    @{ Name = 'Test-LargeDatasetValidationSemanticModeForcesFullReplay'; SuccessMessage = 'Large-dataset semantic sign-off checks passed.' }
+    @{ Name = 'Test-HotPhaseReviewArtifactsModeSmoke'; SuccessMessage = 'Hot-phase review wrapper smoke checks passed.' }
+    @{ Name = 'Test-GetDashboardTemplateContentAcceptsExplicitTemplatesPathWithEmptyDefaultRoot'; SuccessMessage = 'Dashboard template explicit-path checks passed.' }
     @{ Name = 'Test-ValidationHelperPayloadCanonicalization'; SuccessMessage = 'Validation helper payload-format checks passed.' }
     @{ Name = 'Test-ValidationHelperSourceCanonicalization'; SuccessMessage = 'Validation helper source canonicalization checks passed.' }
     @{ Name = 'Test-ValidationHelperStandaloneImport'; SuccessMessage = 'Validation helper standalone import checks passed.' }

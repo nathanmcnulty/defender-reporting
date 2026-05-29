@@ -9,9 +9,43 @@
 let pendingCompressedBytes = null;
 let pendingCompressedBytesPromise = null;
 let dashboardPayloadSummary = null;
+const EXTERNAL_FETCH_TIMEOUT_MS = 30000;
 
-async function loadExternalCompressedPayloadBytes(url) {
-    const response = await fetch(url, { cache: 'no-cache' });
+async function fetchDashboardResource(url, options = {}, label = 'dashboard resource') {
+    const requestOptions = Object.assign({}, options);
+    const canUseInternalAbortController = typeof AbortController === 'function' && !requestOptions.signal;
+    const controller = canUseInternalAbortController ? new AbortController() : null;
+    if (controller) {
+        requestOptions.signal = controller.signal;
+    }
+
+    let timeoutHandle = null;
+    try {
+        if (controller) {
+            timeoutHandle = setTimeout(() => controller.abort(), EXTERNAL_FETCH_TIMEOUT_MS);
+            return await fetch(url, requestOptions);
+        }
+
+        return await Promise.race([
+            fetch(url, requestOptions),
+            new Promise((resolve, reject) => {
+                timeoutHandle = setTimeout(() => reject(new Error(`Timed out loading ${label}.`)), EXTERNAL_FETCH_TIMEOUT_MS);
+            })
+        ]);
+    } catch (error) {
+        if (controller && controller.signal.aborted) {
+            throw new Error(`Timed out loading ${label}.`);
+        }
+        throw error;
+    } finally {
+        if (timeoutHandle != null) {
+            clearTimeout(timeoutHandle);
+        }
+    }
+}
+
+async function loadExternalCompressedPayloadBytes(url, signal) {
+    const response = await fetchDashboardResource(url, { cache: 'no-cache', signal }, 'dashboard payload');
     if (!response.ok) {
         throw new Error(`Failed to load dashboard payload (${response.status} ${response.statusText}).`);
     }
@@ -35,6 +69,7 @@ async function ensurePendingCompressedBytesLoaded() {
 async function loadData() {
     logDebug('Loading data, format:', dataFormat);
     dashboardPayloadSummary = null;
+    pendingCompressedBytes = null;
     pendingCompressedBytesPromise = null;
 
     if (dataFormat === 'external-compressed') {
@@ -43,21 +78,37 @@ async function loadData() {
         }
 
         if (dashboardConfig.payloadSummaryUrl) {
-            const compressedBytesPromise = loadExternalCompressedPayloadBytes(dashboardConfig.payloadUrl);
-            const summaryResponse = await fetch(dashboardConfig.payloadSummaryUrl, { cache: 'no-cache' });
-            if (!summaryResponse.ok) {
-                throw new Error(`Failed to load dashboard summary (${summaryResponse.status} ${summaryResponse.statusText}).`);
-            }
+            const fetchController = typeof AbortController === 'function' ? new AbortController() : null;
+            const compressedBytesPromise = loadExternalCompressedPayloadBytes(
+                dashboardConfig.payloadUrl,
+                fetchController ? fetchController.signal : undefined
+            );
+            try {
+                const summaryResponse = await fetchDashboardResource(
+                    dashboardConfig.payloadSummaryUrl,
+                    { cache: 'no-cache', signal: fetchController ? fetchController.signal : undefined },
+                    'dashboard summary'
+                );
+                if (!summaryResponse.ok) {
+                    throw new Error(`Failed to load dashboard summary (${summaryResponse.status} ${summaryResponse.statusText}).`);
+                }
 
-            dashboardPayloadSummary = await summaryResponse.json();
-            if (dashboardPayloadSummary && dashboardPayloadSummary.filterCatalog) {
-                lookups = {
-                    devices: Array.isArray(dashboardPayloadSummary.filterCatalog.devices) ? dashboardPayloadSummary.filterCatalog.devices : [],
-                    groups: Array.isArray(dashboardPayloadSummary.filterCatalog.groups) ? dashboardPayloadSummary.filterCatalog.groups : [],
-                    tags: Array.isArray(dashboardPayloadSummary.filterCatalog.tags) ? dashboardPayloadSummary.filterCatalog.tags : []
-                };
+                dashboardPayloadSummary = await summaryResponse.json();
+                if (dashboardPayloadSummary && dashboardPayloadSummary.filterCatalog) {
+                    lookups = {
+                        devices: Array.isArray(dashboardPayloadSummary.filterCatalog.devices) ? dashboardPayloadSummary.filterCatalog.devices : [],
+                        groups: Array.isArray(dashboardPayloadSummary.filterCatalog.groups) ? dashboardPayloadSummary.filterCatalog.groups : [],
+                        tags: Array.isArray(dashboardPayloadSummary.filterCatalog.tags) ? dashboardPayloadSummary.filterCatalog.tags : []
+                    };
+                }
+                pendingCompressedBytesPromise = compressedBytesPromise;
+            } catch (error) {
+                if (fetchController) {
+                    fetchController.abort();
+                }
+                await compressedBytesPromise.catch(() => { });
+                throw error;
             }
-            pendingCompressedBytesPromise = compressedBytesPromise;
         } else {
             pendingCompressedBytes = await loadExternalCompressedPayloadBytes(dashboardConfig.payloadUrl);
         }
