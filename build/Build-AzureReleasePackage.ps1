@@ -25,7 +25,7 @@ Write-Output 'Building Azure runbook artifact...'
 & (Join-Path $buildRoot 'azure\Build-Runbook.ps1')
 
 Write-Output 'Building Azure Function App artifact...'
-& (Join-Path $buildRoot 'azure\Build-FunctionApp.ps1')
+$functionAppArtifactState = Initialize-AzureFunctionAppArtifactState -BuildContext $azureBuildContext
 
 $requiredLeafPaths = @(
     Join-Path $repoRoot 'Setup-AzureResources.ps1'
@@ -53,9 +53,9 @@ if ([string]::IsNullOrWhiteSpace($sharedHelpersFingerprint)) {
     throw "Generated shared helpers '$($azureBuildContext.SharedHelpersPath)' are missing fingerprint metadata."
 }
 $runbookFingerprintState = Assert-AzureArtifactFingerprint -ArtifactPath $azureBuildContext.RunbookOutputPath -ExpectedFingerprint $sharedHelpersFingerprint -ArtifactDescription 'Azure Automation runbook artifact'
-$functionAppEntryPointPath = Join-Path $azureBuildContext.FunctionAppRoot 'ExportAndGenerate\run.ps1'
-$functionAppFingerprintState = Assert-AzureArtifactFingerprint -ArtifactPath $functionAppEntryPointPath -ExpectedFingerprint $sharedHelpersFingerprint -ArtifactDescription 'Azure Function App entry point artifact'
-$stagedModuleSummary = Get-AzAccountsModuleStagingSummary -ModuleRoot (Join-Path $azureBuildContext.FunctionAppRoot 'Modules\Az.Accounts') -RepoRoot $repoRoot
+$functionAppEntryPointPath = $functionAppArtifactState.EntryPointPath
+$functionAppFingerprintState = $functionAppArtifactState.EntryPointFingerprintState
+$stagedModuleSummary = $functionAppArtifactState.ModuleSummary
 
 Initialize-ParentDirectory -Path $OutputPath
 if (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
@@ -84,7 +84,7 @@ finally {
 }
 
 $outputItem = Get-Item -LiteralPath $OutputPath
-$manifestPath = Join-Path (Split-Path -Path $OutputPath -Parent) (([System.IO.Path]::GetFileNameWithoutExtension($OutputPath)) + '.manifest.json')
+$manifestPath = Get-AzurePackageManifestPath -PackagePath $OutputPath
 $packageManifest = [PSCustomObject]@{
     generatedOnUtc = [datetime]::UtcNow.ToString('o')
     packagePath = $outputItem.FullName
@@ -95,8 +95,10 @@ $packageManifest = [PSCustomObject]@{
     functionAppFingerprint = $functionAppFingerprintState.Fingerprint
     stagedAzAccountsModule = [PSCustomObject]@{
         version = $stagedModuleSummary.ModuleVersion
+        bundledVersions = @($stagedModuleSummary.BundledVersions)
         fileCount = $stagedModuleSummary.FileCount
         manifestPath = $stagedModuleSummary.ManifestDisplayPath
+        manifestPaths = @($stagedModuleSummary.BundledManifestPaths)
     }
     payloadFiles = @(
         [PSCustomObject]@{
