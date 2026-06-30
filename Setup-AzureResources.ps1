@@ -1523,13 +1523,24 @@ try {
             # Steps 9-12 (FunctionApp): Build deployment zip and deploy
             Write-Host "`nSteps 9-12: Building and deploying Function App..." -ForegroundColor Cyan
 
-            # Build the Function App from build/azure/runbook-source.ps1 when the build source is available.
+            $packageScript = Join-Path $PSScriptRoot 'build' 'Build-FunctionAppPackage.ps1'
             $buildScript = Join-Path $PSScriptRoot 'build' 'azure' 'Build-FunctionApp.ps1'
             $functionAppDir = Join-Path $PSScriptRoot 'azure' 'function-app'
             $functionAppEntryPoint = Join-Path $functionAppDir 'ExportAndGenerate' 'run.ps1'
             $functionAppModulesPath = Join-Path $functionAppDir 'Modules' 'Az.Accounts'
+            $zipMetadataPath = $null
+            $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) ('funcapp-deploy-' + [guid]::NewGuid().ToString('N') + '.zip')
+            if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 
-            if (Test-Path $buildScript) {
+            if (Test-Path $packageScript) {
+                $zipMetadataPath = Join-Path ([System.IO.Path]::GetTempPath()) ('funcapp-deploy-' + [guid]::NewGuid().ToString('N') + '.manifest.json')
+                Write-Host "  Building Function App deployment package..." -ForegroundColor Gray
+                & $packageScript -OutputPath $zipPath -MetadataPath $zipMetadataPath
+                Write-Host "  Function App package built successfully" -ForegroundColor Green
+            }
+            elseif (Test-Path $buildScript) {
+                # Release packages do not ship build/Build-FunctionAppPackage.ps1, so preserve
+                # the older source-build fallback when only the low-level build script is present.
                 Write-Host "  Building Function App from build/azure/runbook-source.ps1..." -ForegroundColor Gray
                 & $buildScript
                 # Build-FunctionApp.ps1 uses $ErrorActionPreference = 'Stop' and throws
@@ -1546,14 +1557,14 @@ try {
             # Deploy function app code via az CLI zip deployment (Flex Consumption
             # uses a Kudu-lite pipeline that packages and uploads to blob storage)
             Write-Host "  Deploying function app code via zip deployment..." -ForegroundColor Gray
-            $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) ('funcapp-deploy-' + [guid]::NewGuid().ToString('N') + '.zip')
-            if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-
-            Push-Location $functionAppDir
-            try {
-                Compress-Archive -Path '.\*' -DestinationPath $zipPath -Force
-            } finally {
-                Pop-Location
+            if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
+                Push-Location $functionAppDir
+                try {
+                    Compress-Archive -Path '.\*' -DestinationPath $zipPath -Force
+                }
+                finally {
+                    Pop-Location
+                }
             }
 
             try {
@@ -1623,6 +1634,9 @@ try {
             }
             finally {
                 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+                if (-not [string]::IsNullOrWhiteSpace($zipMetadataPath)) {
+                    Remove-Item $zipMetadataPath -Force -ErrorAction SilentlyContinue
+                }
             }
 
             Write-Host "  Function App deployed successfully" -ForegroundColor Green

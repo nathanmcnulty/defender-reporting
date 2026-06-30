@@ -25,6 +25,9 @@ This directory contains maintainer-facing build, validation, import, and packagi
 .\build\azure\Build-Runbook.ps1
 .\build\azure\Build-FunctionApp.ps1
 
+# Build the stable Function App deployment zip + manifest used by wrappers/CI
+.\build\Build-FunctionAppPackage.ps1
+
 # Run the deterministic local and CI-aligned preflight path
 .\build\Invoke-RegressionValidation.ps1
 
@@ -77,7 +80,7 @@ When you change `src/powershell/Shared/**/*.ps1` or `build/azure/runbook-source.
 .\build\azure\Build-FunctionApp.ps1 -SkipModuleStaging
 ```
 
-Use the default `Build-FunctionApp.ps1` invocation when you also need module staging for packaging. `-SkipModuleStaging` is sufficient for the routine script-only refresh loop.
+Use the default `Build-FunctionApp.ps1` invocation when you only need the generated entry point plus staged modules refreshed in place. Use `Build-FunctionAppPackage.ps1` when you need the stable deployable zip/manifest surface for CI, wrappers, or manual zip deployment. `-SkipModuleStaging` is sufficient for the routine script-only refresh loop.
 
 ## User-facing scripts
 
