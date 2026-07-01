@@ -12,7 +12,6 @@ on:
       - 'Setup-AzureResources.ps1'
       - 'templates/**'
       - 'azure/**'
-      - 'build/Build-FunctionAppPackage.ps1'
       - 'build/Build-AzureReleasePackage.ps1'
       - 'build/Build-SharedHelpers.ps1'
       - 'build/private/AzureArtifactBuildTools.ps1'
