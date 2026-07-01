@@ -232,9 +232,14 @@ To change the pipeline logic:
 
 # Rebuild the Function App entry point
 .\build\azure\Build-FunctionApp.ps1
+
+# Build the stable Function App deployment zip + sidecar manifest
+.\build\Build-FunctionAppPackage.ps1
 ```
 
 The Function App build transforms `runbook-source.ps1` into a timer-triggered function, replacing Automation Account variables with environment variable lookups and inlining the manifest-driven shared helper bundle generated from `src/powershell/Shared/`.
+
+`build/Build-FunctionAppPackage.ps1` is the supported packaging surface for CI and wrapper repositories. By default it rebuilds the generated Function App artifacts, stages `Az.Accounts`, writes a stable zip to `.local/local-reports/function-app-package/defender-reporting-function-app.zip`, and emits a sibling `.manifest.json` file that records the package path, SHA-256, and Function App artifact fingerprints.
 
 ## Related docs
 

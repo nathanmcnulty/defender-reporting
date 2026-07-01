@@ -54,6 +54,34 @@ function Initialize-ParentDirectory {
     }
 }
 
+function Get-AzurePackageManifestPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PackagePath
+    )
+
+    $packageDirectory = Split-Path -Path $PackagePath -Parent
+    $packageBaseName = [System.IO.Path]::GetFileNameWithoutExtension($PackagePath)
+    if ([string]::IsNullOrWhiteSpace($packageDirectory) -or [string]::IsNullOrWhiteSpace($packageBaseName)) {
+        throw "Could not derive a package manifest path from '$PackagePath'."
+    }
+
+    return Join-Path -Path $packageDirectory -ChildPath ($packageBaseName + '.manifest.json')
+}
+
+function Get-AzureFunctionAppPackageDefaultOutputPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot
+    )
+
+    return Join-Path -Path $RepoRoot -ChildPath '.local\local-reports\function-app-package\defender-reporting-function-app.zip'
+}
+
 function Get-AzureSharedAssemblyInput {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -184,7 +212,8 @@ function Get-AzAccountsModuleStagingSummary {
         }
     }
 
-    $selectedManifest = $validManifests | Sort-Object -Property ModuleVersion -Descending | Select-Object -First 1
+    $orderedValidManifests = @($validManifests | Sort-Object -Property ModuleVersion -Descending)
+    $selectedManifest = $orderedValidManifests | Select-Object -First 1
     if ($null -eq $selectedManifest) {
         $failurePreview = @(
             $manifestValidationFailures |
@@ -207,14 +236,66 @@ function Get-AzAccountsModuleStagingSummary {
     }
 
     $manifestDisplayPath = [string]$selectedManifest.DisplayPath
+    $bundledVersions = @(
+        $orderedValidManifests |
+            Sort-Object -Property ModuleVersion -Descending -Unique |
+            ForEach-Object { $_.ModuleVersion.ToString() }
+    )
+    $bundledManifestPaths = @(
+        $orderedValidManifests |
+            ForEach-Object { [string]$_.DisplayPath }
+    )
 
     return [PSCustomObject]@{
         ModuleRoot = $ModuleRoot
         ManifestPath = $selectedManifest.Path
         ManifestDisplayPath = $manifestDisplayPath
         ModuleVersion = $selectedManifest.ModuleVersion.ToString()
+        BundledVersions = $bundledVersions
+        BundledManifestPaths = $bundledManifestPaths
         FileCount = $fileCount
         InvalidManifestCandidateCount = $manifestValidationFailures.Count
+    }
+}
+
+function Initialize-AzureFunctionAppArtifactState {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$BuildContext
+    )
+
+    $buildScriptPath = Join-Path -Path $BuildContext.BuildRoot -ChildPath 'azure\Build-FunctionApp.ps1'
+    $entryPointPath = Join-Path -Path $BuildContext.FunctionAppRoot -ChildPath 'ExportAndGenerate\run.ps1'
+    $moduleRoot = Join-Path -Path $BuildContext.FunctionAppRoot -ChildPath 'Modules\Az.Accounts'
+
+    if (Test-Path -LiteralPath $buildScriptPath -PathType Leaf) {
+        & $buildScriptPath | ForEach-Object { Write-Host $_ }
+    }
+    elseif ((Test-Path -LiteralPath $entryPointPath -PathType Leaf) -and (Test-Path -LiteralPath $moduleRoot -PathType Container)) {
+        # Prebuilt release-package flow: the generated entry point and staged modules
+        # are already present even though the source build script is not shipped.
+    }
+    else {
+        throw "Function App build script not found at $buildScriptPath and prebuilt artifacts are incomplete. Expected '$entryPointPath' and '$moduleRoot'."
+    }
+
+    $sharedHelpersFingerprint = Read-PowerShellArtifactEmbeddedFingerprint -Path $BuildContext.SharedHelpersPath
+    if ([string]::IsNullOrWhiteSpace($sharedHelpersFingerprint)) {
+        throw "Generated shared helpers '$($BuildContext.SharedHelpersPath)' are missing fingerprint metadata."
+    }
+
+    $entryPointFingerprintState = Assert-AzureArtifactFingerprint -ArtifactPath $entryPointPath -ExpectedFingerprint $sharedHelpersFingerprint -ArtifactDescription 'Azure Function App entry point artifact'
+    $moduleSummary = Get-AzAccountsModuleStagingSummary -ModuleRoot $moduleRoot -RepoRoot $BuildContext.RepoRoot
+
+    return [PSCustomObject]@{
+        BuildScriptPath = $buildScriptPath
+        EntryPointPath = $entryPointPath
+        ModuleRoot = $moduleRoot
+        SharedHelpersFingerprint = $sharedHelpersFingerprint
+        EntryPointFingerprintState = $entryPointFingerprintState
+        ModuleSummary = $moduleSummary
     }
 }
 
