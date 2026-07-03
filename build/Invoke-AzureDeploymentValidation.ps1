@@ -701,13 +701,13 @@ function Refresh-FunctionExecutionTemplates {
         [string]$StorageAccountName
     )
 
-    $uploadScriptPath = Join-Path $repoRoot 'azure\Upload-Templates.ps1'
-    if (-not (Test-Path -LiteralPath $uploadScriptPath -PathType Leaf)) {
-        throw "Upload-Templates.ps1 not found: $uploadScriptPath"
+    $publishScriptPath = Join-Path $repoRoot 'build\Publish-DashboardTemplates.ps1'
+    if (-not (Test-Path -LiteralPath $publishScriptPath -PathType Leaf)) {
+        throw "Dashboard template publish script not found: $publishScriptPath"
     }
 
     Write-ValidationLogLine -Message ("Refreshing dashboard templates in storage account '{0}'..." -f $StorageAccountName)
-    Invoke-TimestampedCommand -ScriptBlock { & $uploadScriptPath -StorageAccountName $StorageAccountName }
+    Invoke-TimestampedCommand -ScriptBlock { & $publishScriptPath -StorageAccountName $StorageAccountName }
 }
 
 function Seed-ExportsContainer {
