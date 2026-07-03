@@ -1,2 +1,0 @@
-{"CveId":"CVE-2026-0001","PublishedDate":"2025-12-15","VulnerabilityDescription":"Legacy Agent privilege escalation vulnerability.","IsExploitAvailable":false,"EpssScore":0.12,"AffectedSoftware":["Contoso: Legacy Agent"],"LastModifiedTime":"2026-01-01T00:00:00Z"}
-{"CveId":"CVE-2026-0002","PublishedDate":"2025-12-20","VulnerabilityDescription":"Legacy Agent remote code execution vulnerability.","IsExploitAvailable":true,"EpssScore":0.44,"AffectedSoftware":["Contoso: Legacy Agent"],"LastModifiedTime":"2026-01-02T00:00:00Z"}

@@ -44,7 +44,7 @@
     - System-assigned Managed Identity with:
       - Storage Blob Data Contributor on the Storage Account
       - MDE app roles: Machine.Read.All, Vulnerability.Read.All, AdvancedQuery.Read.All
-    - Templates uploaded to the 'templates' blob container via Upload-Templates.ps1
+    - Templates uploaded to the 'templates' blob container via build/Publish-DashboardTemplates.ps1
 #>
 
 #Requires -Version 7.0
@@ -19448,7 +19448,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 9753af70f88bb1a9cb1df8b5c7f3f8ec0909d841b6a814efd0dbcaec7995f47e
+# ArtifactFingerprint: 465d9066540bf2e499066e16e7a4636895290db448b1e4feba972f40f8d71710
 
 
 
@@ -20539,7 +20539,7 @@ try {
     $templateBlobs = @(Get-BlobList -AccountName $StorageAccountName -Container $Script:BlobContainers.Templates -StorageToken $storageToken)
 
     if ($templateBlobs.Count -eq 0) {
-        throw "No templates found in '$($Script:BlobContainers.Templates)' container. Run Upload-Templates.ps1 first."
+        throw "No templates found in '$($Script:BlobContainers.Templates)' container. Run build/Publish-DashboardTemplates.ps1 first."
     }
 
     foreach ($blobName in $templateBlobs) {

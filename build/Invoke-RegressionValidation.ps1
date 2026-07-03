@@ -200,6 +200,13 @@ if (Test-LastExitCodeFailed) {
     throw 'build/azure/Build-FunctionApp.ps1 failed.'
 }
 
+Write-Output 'Smoke-testing dashboard template publish contract...'
+Reset-LastExitCode
+& (Join-Path $buildRoot 'Publish-DashboardTemplates.ps1') -StorageAccountName 'validationstorageaccount' -WhatIf
+if (Test-LastExitCodeFailed) {
+    throw 'build/Publish-DashboardTemplates.ps1 failed.'
+}
+
 Write-Output 'Running parser validation...'
 $parseValidationPaths = Get-ParseValidationPath
 Invoke-ParseValidation -Paths $parseValidationPaths

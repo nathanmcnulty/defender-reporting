@@ -28,6 +28,9 @@ This directory contains maintainer-facing build, validation, import, and packagi
 # Build the stable Function App deployment zip + manifest used by wrappers/CI
 .\build\Build-FunctionAppPackage.ps1
 
+# Publish dashboard templates through the supported build-layer contract
+.\build\Publish-DashboardTemplates.ps1 -StorageAccountName <storage-account>
+
 # Run the deterministic local and CI-aligned preflight path
 .\build\Invoke-RegressionValidation.ps1
 
@@ -43,7 +46,7 @@ This directory contains maintainer-facing build, validation, import, and packagi
 
 When `-SkipMdePermissions` is paired with Function App execution validation, pass `-FunctionExecutionDatasetPath <dataset>` so the script can reseed the Function App exports container before invocation. Use `-SkipFunctionExecution` only when you intentionally want deployment validation without the final Function App run.
 
-The Azure builders now assert that the generated runbook and Function App entry point still carry the current shared-helper fingerprint before packaging or deployment. `Build-AzureReleasePackage.ps1` also writes a sibling `.manifest.json` sidecar beside the zip so package provenance, staged `Az.Accounts` version, and artifact fingerprints are easier to audit locally.
+The Azure builders now assert that the generated runbook and Function App entry point still carry the current shared-helper fingerprint before packaging or deployment. `Build-AzureReleasePackage.ps1` also writes a sibling `.manifest.json` sidecar beside the zip so package provenance, staged `Az.Accounts` version, and artifact fingerprints are easier to audit locally. `Publish-DashboardTemplates.ps1` is the supported dashboard-template upload surface for wrappers, CI, and maintainer automation; `azure/Upload-Templates.ps1` remains only as a compatibility shim for older callers and release-package layouts.
 
 During seeded Function App validation, the script now writes a short-lived control blob at `dashboards/_diagnostics/ExportAndGenerate.control.json` and polls the runtime status blob at `dashboards/_diagnostics/ExportAndGenerate.status.json`. This makes Flex Consumption execution diagnosable even when admin VFS access and built-in log streaming are unavailable.
 
@@ -81,6 +84,8 @@ When you change `src/powershell/Shared/**/*.ps1` or `build/azure/runbook-source.
 ```
 
 Use the default `Build-FunctionApp.ps1` invocation when you only need the generated entry point plus staged modules refreshed in place. Use `Build-FunctionAppPackage.ps1` when you need the stable deployable zip/manifest surface for CI, wrappers, or manual zip deployment. `-SkipModuleStaging` is sufficient for the routine script-only refresh loop.
+
+When you need to refresh the `templates` blob container, prefer `build/Publish-DashboardTemplates.ps1` over calling `azure/Upload-Templates.ps1` directly. The build-layer entrypoint is the documented public contract and supports `-WhatIf` for deterministic smoke coverage in the maintainer preflight.
 
 ## User-facing scripts
 
