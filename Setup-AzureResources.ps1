@@ -1733,12 +1733,19 @@ try {
     if (-not $SkipValidation) {
         Write-Host "`nStep 14: Running end-to-end validation..." -ForegroundColor Cyan
 
-        # 14a: Upload template files via Upload-Templates.ps1
+        # 14a: Upload template files via the public build-layer publish contract
         Write-Host "  Uploading template files..." -ForegroundColor Gray
-        $uploadScript = Join-Path -Path $PSScriptRoot -ChildPath 'azure' | Join-Path -ChildPath 'Upload-Templates.ps1'
-        if (-not (Test-Path -Path $uploadScript)) {
-            Write-Warning "Upload-Templates.ps1 not found at: $uploadScript"
-            Write-Host "  Run azure/Upload-Templates.ps1 manually before the pipeline." -ForegroundColor Yellow
+        $publishTemplatesScript = Join-Path -Path $PSScriptRoot -ChildPath 'build' | Join-Path -ChildPath 'Publish-DashboardTemplates.ps1'
+        $uploadScript = if (Test-Path -LiteralPath $publishTemplatesScript -PathType Leaf) {
+            $publishTemplatesScript
+        }
+        else {
+            Join-Path -Path $PSScriptRoot -ChildPath 'azure' | Join-Path -ChildPath 'Upload-Templates.ps1'
+        }
+
+        if (-not (Test-Path -LiteralPath $uploadScript -PathType Leaf)) {
+            Write-Warning "Template publish script not found at: $uploadScript"
+            Write-Host "  Run .\build\Publish-DashboardTemplates.ps1 manually before the pipeline." -ForegroundColor Yellow
         }
         else {
             & $uploadScript -StorageAccountName $StorageAccountName
@@ -2539,7 +2546,7 @@ exec caddy file-server --root /data --listen :80
         }
     }
     else {
-        Write-Host "  1. Upload templates: .\azure\Upload-Templates.ps1 -StorageAccountName $StorageAccountName" -ForegroundColor Gray
+        Write-Host "  1. Upload templates: .\build\Publish-DashboardTemplates.ps1 -StorageAccountName $StorageAccountName" -ForegroundColor Gray
         if ($ComputeType -eq 'AutomationAccount') {
             Write-Host "  2. Run the pipeline: start the runbook manually from the Azure portal" -ForegroundColor Gray
         } else {

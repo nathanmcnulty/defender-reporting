@@ -218,7 +218,7 @@ finally {
 
 ## Pipeline source of truth
 
-Both the Automation runbook and Function App derive from the same source file. `azure/Invoke-DashboardPipeline.ps1` and `azure/function-app/ExportAndGenerate/run.ps1` are generated on demand and ignored by git.
+Both the Automation runbook and Function App derive from the same source file. `azure/Invoke-DashboardPipeline.ps1` is a tracked generated artifact that stays at its intentional repo path, while `azure/function-app/ExportAndGenerate/run.ps1` is generated on demand and ignored by git.
 
 To change the pipeline logic:
 
@@ -235,11 +235,16 @@ To change the pipeline logic:
 
 # Build the stable Function App deployment zip + sidecar manifest
 .\build\Build-FunctionAppPackage.ps1
+
+# Publish dashboard templates through the supported build-layer contract
+.\build\Publish-DashboardTemplates.ps1 -StorageAccountName <storage-account>
 ```
 
 The Function App build transforms `runbook-source.ps1` into a timer-triggered function, replacing Automation Account variables with environment variable lookups and inlining the manifest-driven shared helper bundle generated from `src/powershell/Shared/`.
 
 `build/Build-FunctionAppPackage.ps1` is the supported packaging surface for CI and wrapper repositories. By default it rebuilds the generated Function App artifacts, stages `Az.Accounts`, writes a stable zip to `.local/local-reports/function-app-package/defender-reporting-function-app.zip`, and emits a sibling `.manifest.json` file that records the package path, SHA-256, and Function App artifact fingerprints.
+
+`build/Publish-DashboardTemplates.ps1` is the supported template-publishing surface for CI, wrapper repositories, and repo-owned deployment automation. It uploads the canonical `templates/` tree to the `templates` blob container, emits a stable tree fingerprint, and can optionally write a JSON manifest with the published file inventory. `azure/Upload-Templates.ps1` remains as a thin compatibility wrapper for older callers.
 
 ## Related docs
 

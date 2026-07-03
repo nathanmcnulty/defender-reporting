@@ -211,7 +211,7 @@ function Publish-RunbookTemplateBundle {
         [string]$StorageAccountName
     )
 
-    Invoke-RepoScript -RepoPath $RepoPath -RelativeScriptPath 'azure/Upload-Templates.ps1' -Arguments @{ StorageAccountName = $StorageAccountName }
+    Invoke-RepoScript -RepoPath $RepoPath -RelativeScriptPath 'build/Publish-DashboardTemplates.ps1' -Arguments @{ StorageAccountName = $StorageAccountName }
 }
 
 function Start-RunbookBenchmark {

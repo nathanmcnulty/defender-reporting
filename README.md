@@ -206,6 +206,7 @@ flowchart TD
 - Run `./tests/Invoke-BenchmarkSeries.ps1 -BenchmarkDatasetId benchmark-medium-v1 -Iterations 3 -IncludePersistentLocalWorkflow` when you want the repeatable multi-run benchmark cadence used for durable baseline refreshes.
 - Run `./build/Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` when you want the local command that mirrors the live GitHub Actions export and dashboard generation path.
 - Run `./build/Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName <name> -FunctionAppName <name>` when you want the repo-owned manual validation path that rebuilds locally, redeploys Azure Automation and Function App, and executes both live Azure validation flows.
+- Run `./build/Publish-DashboardTemplates.ps1 -StorageAccountName <name>` when you want the supported public contract for refreshing the `templates` blob container used by Azure Automation, the Function App, and wrapper repositories.
 - CI builds a downloadable GitHub Actions artifact named `Azure-YYMMDD-<commit>.zip` whenever the Azure deployment inputs change.
 - Run `./build/Build-AzureReleasePackage.ps1` when you want the exact local packaging path used by that artifact workflow.
 - Run `./Invoke-NvdCveExport.ps1` to build or refresh the optional `NvdCve_Current.json.gz` enrichment cache consumed by dashboard generation; see `docs/nvd-enrichment.md` for usage details.

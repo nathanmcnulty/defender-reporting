@@ -4874,7 +4874,7 @@ function Test-MeasureStressRunWritesProgressAndFinalReport {
         )
 
         [System.IO.File]::WriteAllText((Join-Path $datasetRoot 'Machines_Current.json'), ($machines | ConvertTo-Json -Compress -Depth 20), [System.Text.UTF8Encoding]::new($false))
-        [System.IO.File]::WriteAllText((Join-Path $datasetRoot 'AdvancedHunting_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
+        Write-GzipTextFile -Path (Get-AdvancedHuntingCurrentPath -BasePath $datasetRoot) -Content '[]'
         [System.IO.File]::WriteAllText((Join-Path $datasetRoot 'synthetic-manifest.json'), (([ordered]@{
             actualDeviceCount = 1
             actualCurrentRows = 1
@@ -5251,7 +5251,7 @@ function Test-DashboardAuditBootstrapsSyntheticLargePayloadCacheWithNormalizatio
         )
 
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), ($machines | ConvertTo-Json -Compress -Depth 20), [System.Text.UTF8Encoding]::new($false))
-        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'AdvancedHunting_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
+        Write-GzipTextFile -Path (Get-AdvancedHuntingCurrentPath -BasePath $tempRoot) -Content '[]'
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'synthetic-manifest.json'), (([ordered]@{
             actualCurrentRows = 100000
             actualHistoryRows = 0
@@ -5311,7 +5311,7 @@ function Test-DashboardValidationUsesStableFallbackDeviceProfile {
 
         Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($first, $second)
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
-        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'AdvancedHunting_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
+        Write-GzipTextFile -Path (Get-AdvancedHuntingCurrentPath -BasePath $tempRoot) -Content '[]'
 
         & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
 
@@ -5414,7 +5414,7 @@ function Test-DashboardOpenStateAuditUsesPatchEvidenceAndInactivityCutoff {
         )
 
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), ($machines | ConvertTo-Json -Compress -Depth 20), [System.Text.UTF8Encoding]::new($false))
-        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'AdvancedHunting_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
+        Write-GzipTextFile -Path (Get-AdvancedHuntingCurrentPath -BasePath $tempRoot) -Content '[]'
 
         & $dashboardScriptPath -DirectoryPath $tempRoot -OutputPath $outputPath -ExportMachineData:$false -Validate -ValidationOutputPath $auditPath | Out-Null
 
