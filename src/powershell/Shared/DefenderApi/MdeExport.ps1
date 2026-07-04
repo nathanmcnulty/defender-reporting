@@ -1,9 +1,303 @@
 
 # Shared MDE export helpers used by local export, generator refresh, and the Azure runbook.
 
-function Get-MdeAccessToken {
+function Get-MdeTokenResponsePropertyValue {
+    [CmdletBinding()]
+    [OutputType([object])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name
+    )
+
+    if ($null -eq $InputObject) {
+        return $null
+    }
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        return $InputObject[$Name]
+    }
+
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return $property.Value
+}
+
+function ConvertTo-MdeUtcDateTime {
+    [CmdletBinding()]
+    [OutputType([Nullable[datetime]])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [datetimeoffset]) {
+        return $Value.UtcDateTime
+    }
+
+    if ($Value -is [datetime]) {
+        return $Value.ToUniversalTime()
+    }
+
+    $valueText = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($valueText)) {
+        return $null
+    }
+
+    $epochSeconds = 0L
+    if ([long]::TryParse($valueText, [ref]$epochSeconds)) {
+        return [System.DateTimeOffset]::FromUnixTimeSeconds($epochSeconds).UtcDateTime
+    }
+
+    $parsedOffset = [System.DateTimeOffset]::MinValue
+    if ([System.DateTimeOffset]::TryParse($valueText, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsedOffset)) {
+        return $parsedOffset.UtcDateTime
+    }
+
+    $parsedDateTime = [datetime]::MinValue
+    if ([datetime]::TryParse($valueText, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsedDateTime)) {
+        return $parsedDateTime.ToUniversalTime()
+    }
+
+    throw ("Unable to parse MDE token expiration value '{0}' as a UTC timestamp." -f $valueText)
+}
+
+function Resolve-MdeTokenExpirationUtc {
+    [CmdletBinding()]
+    [OutputType([Nullable[datetime]])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $TokenResponse,
+
+        [Parameter(Mandatory = $false)]
+        [datetime]$IssuedOnUtc = ([datetime]::UtcNow)
+    )
+
+    foreach ($propertyName in @('expires_on', 'ExpiresOn', 'expiresOn')) {
+        $propertyValue = Get-MdeTokenResponsePropertyValue -InputObject $TokenResponse -Name $propertyName
+        if ($null -ne $propertyValue -and -not [string]::IsNullOrWhiteSpace([string]$propertyValue)) {
+            return (ConvertTo-MdeUtcDateTime -Value $propertyValue)
+        }
+    }
+
+    foreach ($propertyName in @('expires_in', 'ext_expires_in')) {
+        $propertyValue = Get-MdeTokenResponsePropertyValue -InputObject $TokenResponse -Name $propertyName
+        if ($null -eq $propertyValue) {
+            continue
+        }
+
+        $lifetimeSeconds = 0
+        if ([int]::TryParse([string]$propertyValue, [ref]$lifetimeSeconds)) {
+            return $IssuedOnUtc.AddSeconds($lifetimeSeconds)
+        }
+    }
+
+    return $null
+}
+
+function New-MdeTokenContext {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal factory only returns an in-memory token context object.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$AccessToken,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [Nullable[datetime]]$ExpiresOnUtc,
+
+        [Parameter(Mandatory = $false)]
+        [bool]$CanRefresh = $false,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        [scriptblock]$RefreshScript,
+
+        [Parameter(Mandatory = $false)]
+        [timespan]$RefreshWindow = ([timespan]::FromMinutes(5)),
+
+        [Parameter(Mandatory = $false)]
+        [string]$SourceDescription = 'Microsoft Defender for Endpoint',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WriteStatus
+    )
+
+    if ($CanRefresh -and $null -eq $RefreshScript) {
+        throw 'Refreshable MDE token contexts require a refresh script.'
+    }
+
+    if ($CanRefresh -and $null -eq $ExpiresOnUtc) {
+        throw ("Refreshable MDE token contexts for '{0}' require expiration metadata." -f $SourceDescription)
+    }
+
+    return [PSCustomObject]@{
+        AccessToken       = $AccessToken.Trim()
+        ExpiresOnUtc      = $ExpiresOnUtc
+        CanRefresh        = $CanRefresh
+        RefreshScript     = $RefreshScript
+        RefreshWindow     = $RefreshWindow
+        SourceDescription = $SourceDescription
+        WriteStatus       = [bool]$WriteStatus
+    }
+}
+
+function Invoke-MdeClientCredentialTokenRequest {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TenantId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AppId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$AppSecretText,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ResourceAppIdUri = 'https://api.securitycenter.microsoft.com',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WriteStatus
+    )
+
+    if ($WriteStatus) {
+        Write-Host 'Authenticating to Microsoft Defender for Endpoint...' -ForegroundColor Cyan
+    }
+
+    $oAuthUri = "https://login.microsoftonline.com/$TenantId/oauth2/token"
+    $authBody = [ordered]@{
+        resource      = $ResourceAppIdUri
+        client_id     = $AppId
+        client_secret = $AppSecretText
+        grant_type    = 'client_credentials'
+    }
+
+    try {
+        $issuedOnUtc = [datetime]::UtcNow
+        $response = Invoke-RestMethod -Method Post -Uri $oAuthUri -Body $authBody -ErrorAction Stop
+        $accessToken = [string](Get-MdeTokenResponsePropertyValue -InputObject $response -Name 'access_token')
+        if ([string]::IsNullOrWhiteSpace($accessToken)) {
+            throw 'The authentication response did not contain an access_token value.'
+        }
+
+        if ($WriteStatus) {
+            Write-Host '  Authentication successful' -ForegroundColor Green
+        }
+
+        return [PSCustomObject]@{
+            AccessToken  = $accessToken
+            ExpiresOnUtc = Resolve-MdeTokenExpirationUtc -TokenResponse $response -IssuedOnUtc $issuedOnUtc
+        }
+    }
+    catch {
+        throw ("Failed to authenticate to Microsoft Defender for Endpoint for tenant '{0}', app '{1}', resource '{2}': {3}" -f $TenantId, $AppId, $ResourceAppIdUri, $_.Exception.Message)
+    }
+}
+
+function Invoke-MdeAzureCliTokenRequest {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AzureCliPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ResourceAppIdUri = 'https://api.securitycenter.microsoft.com'
+    )
+
+    $rawResponse = [string](& $AzureCliPath 'account' 'get-access-token' '--resource' $ResourceAppIdUri '-o' 'json')
+    if ([string]::IsNullOrWhiteSpace($rawResponse)) {
+        throw "Azure CLI fallback returned no access token for resource '$ResourceAppIdUri'."
+    }
+
+    try {
+        $response = $rawResponse | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw ("Azure CLI fallback returned an unreadable access token payload for resource '{0}': {1}" -f $ResourceAppIdUri, $_.Exception.Message)
+    }
+
+    $accessToken = [string](Get-MdeTokenResponsePropertyValue -InputObject $response -Name 'accessToken')
+    if ([string]::IsNullOrWhiteSpace($accessToken)) {
+        throw "Azure CLI fallback returned no access token for resource '$ResourceAppIdUri'."
+    }
+
+    return [PSCustomObject]@{
+        AccessToken  = $accessToken
+        ExpiresOnUtc = Resolve-MdeTokenExpirationUtc -TokenResponse $response
+    }
+}
+
+function Get-MdeUsableAccessToken {
     [CmdletBinding()]
     [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$TokenContext
+    )
+
+    if ([string]::IsNullOrWhiteSpace([string]$TokenContext.AccessToken)) {
+        throw 'The MDE token context does not contain an access token.'
+    }
+
+    $shouldRefresh = (
+        [bool]$TokenContext.CanRefresh -and
+        $null -ne $TokenContext.ExpiresOnUtc -and
+        ([datetime]::UtcNow -ge ([datetime]$TokenContext.ExpiresOnUtc).Subtract([timespan]$TokenContext.RefreshWindow))
+    )
+
+    if ($shouldRefresh) {
+        if ($null -eq $TokenContext.RefreshScript) {
+            throw ("The MDE token context for '{0}' is marked refreshable but has no refresh script." -f [string]$TokenContext.SourceDescription)
+        }
+
+        if ($TokenContext.WriteStatus) {
+            Write-Host ("Refreshing Microsoft Defender for Endpoint access token ({0})..." -f [string]$TokenContext.SourceDescription) -ForegroundColor Cyan
+        }
+
+        $refreshResult = & $TokenContext.RefreshScript
+        $refreshedAccessToken = [string](Get-MdeTokenResponsePropertyValue -InputObject $refreshResult -Name 'AccessToken')
+        if ([string]::IsNullOrWhiteSpace($refreshedAccessToken)) {
+            throw ("Refreshing the MDE token context for '{0}' returned no access token." -f [string]$TokenContext.SourceDescription)
+        }
+
+        $refreshedExpirationUtc = Get-MdeTokenResponsePropertyValue -InputObject $refreshResult -Name 'ExpiresOnUtc'
+        if ($null -eq $refreshedExpirationUtc) {
+            throw ("Refreshing the MDE token context for '{0}' returned no expiration metadata." -f [string]$TokenContext.SourceDescription)
+        }
+
+        $TokenContext.AccessToken = $refreshedAccessToken.Trim()
+        $TokenContext.ExpiresOnUtc = ConvertTo-MdeUtcDateTime -Value $refreshedExpirationUtc
+
+        if ($TokenContext.WriteStatus) {
+            Write-Host '  Token refresh successful' -ForegroundColor Green
+        }
+    }
+
+    return [string]$TokenContext.AccessToken
+}
+
+function New-MdeAccessTokenContext {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Token acquisition is an authentication read operation that returns an in-memory context object.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'ResourceAppIdUri', Justification = 'This parameter is captured in refresh closures used to reacquire the token for the same resource.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param(
         [Parameter(Mandatory = $false)]
         [AllowEmptyString()]
@@ -39,7 +333,7 @@ function Get-MdeAccessToken {
             Write-Host 'Using provided Microsoft Defender for Endpoint access token' -ForegroundColor Cyan
         }
 
-        return $AccessToken.Trim()
+        return (New-MdeTokenContext -AccessToken $AccessToken -SourceDescription 'provided access token' -WriteStatus:$WriteStatus)
     }
 
     $resolvedTenantId = $TenantId
@@ -49,7 +343,7 @@ function Get-MdeAccessToken {
     if ($UseEnvironmentFallback) {
         $environmentAccessToken = $env:DEFENDER_ACCESS_TOKEN
         if (-not [string]::IsNullOrWhiteSpace($environmentAccessToken)) {
-            return $environmentAccessToken.Trim()
+            return (New-MdeTokenContext -AccessToken $environmentAccessToken -SourceDescription 'DEFENDER_ACCESS_TOKEN environment variable' -WriteStatus:$WriteStatus)
         }
 
         if ([string]::IsNullOrWhiteSpace($resolvedTenantId)) {
@@ -76,29 +370,14 @@ function Get-MdeAccessToken {
         -not [string]::IsNullOrWhiteSpace($resolvedAppId) -and
         -not [string]::IsNullOrWhiteSpace($resolvedSecretText)
     ) {
-        if ($WriteStatus) {
-            Write-Host 'Authenticating to Microsoft Defender for Endpoint...' -ForegroundColor Cyan
-        }
+        $resolvedWriteStatus = [bool]$WriteStatus
+        $invokeClientCredentialTokenRequest = ${function:Invoke-MdeClientCredentialTokenRequest}
+        $refreshScript = {
+            & $invokeClientCredentialTokenRequest -TenantId $resolvedTenantId -AppId $resolvedAppId -AppSecretText $resolvedSecretText -ResourceAppIdUri $ResourceAppIdUri -WriteStatus:$resolvedWriteStatus
+        }.GetNewClosure()
 
-        $oAuthUri = "https://login.microsoftonline.com/$resolvedTenantId/oauth2/token"
-        $authBody = [ordered]@{
-            resource = $ResourceAppIdUri
-            client_id = $resolvedAppId
-            client_secret = $resolvedSecretText
-            grant_type = 'client_credentials'
-        }
-
-        try {
-            $response = Invoke-RestMethod -Method Post -Uri $oAuthUri -Body $authBody -ErrorAction Stop
-            if ($WriteStatus) {
-                Write-Host '  Authentication successful' -ForegroundColor Green
-            }
-
-            return [string]$response.access_token
-        }
-        catch {
-            throw ("Failed to authenticate to Microsoft Defender for Endpoint for tenant '{0}', app '{1}', resource '{2}': {3}" -f $resolvedTenantId, $resolvedAppId, $ResourceAppIdUri, $_.Exception.Message)
-        }
+        $initialToken = & $refreshScript
+        return (New-MdeTokenContext -AccessToken $initialToken.AccessToken -ExpiresOnUtc $initialToken.ExpiresOnUtc -CanRefresh $true -RefreshScript $refreshScript -SourceDescription ("client credentials for app '{0}'" -f $resolvedAppId) -WriteStatus:$WriteStatus)
     }
 
     $diagnostics = [System.Collections.Generic.List[string]]::new()
@@ -116,12 +395,12 @@ function Get-MdeAccessToken {
         $azCommand = Get-Command -Name 'az' -CommandType Application -ErrorAction SilentlyContinue
         if ($null -ne $azCommand) {
             try {
-                $azAccessToken = [string](& $azCommand.Source 'account' 'get-access-token' '--resource' $ResourceAppIdUri '--query' 'accessToken' '-o' 'tsv')
-                if (-not [string]::IsNullOrWhiteSpace($azAccessToken)) {
-                    return $azAccessToken.Trim()
-                }
-
-                $diagnostics.Add("Azure CLI fallback returned no access token for resource '$ResourceAppIdUri'")
+                $invokeAzureCliTokenRequest = ${function:Invoke-MdeAzureCliTokenRequest}
+                $refreshScript = {
+                    & $invokeAzureCliTokenRequest -AzureCliPath $azCommand.Source -ResourceAppIdUri $ResourceAppIdUri
+                }.GetNewClosure()
+                $initialToken = & $refreshScript
+                return (New-MdeTokenContext -AccessToken $initialToken.AccessToken -ExpiresOnUtc $initialToken.ExpiresOnUtc -CanRefresh $true -RefreshScript $refreshScript -SourceDescription 'Azure CLI access token' -WriteStatus:$WriteStatus)
             }
             catch {
                 Write-Verbose "Azure CLI token acquisition failed: $_"
@@ -162,19 +441,88 @@ function Get-MdeAccessToken {
     throw ("No Defender API token source available. Provide -AccessToken or -TenantId/-AppId/-AppSecret.{0}" -f $diagnosticSuffix)
 }
 
+function Get-MdeAccessToken {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$AccessToken,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$TenantId,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyString()]
+        [string]$AppId,
+
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $AppSecret,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ResourceAppIdUri = 'https://api.securitycenter.microsoft.com',
+
+        [Parameter(Mandatory = $false)]
+        [switch]$UseEnvironmentFallback,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$UseAzureCliFallback,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WriteStatus
+    )
+
+    $tokenContext = New-MdeAccessTokenContext @PSBoundParameters
+    return (Get-MdeUsableAccessToken -TokenContext $tokenContext)
+}
+
 function Get-MdeHeaderCollection {
     [CmdletBinding()]
     [OutputType([hashtable])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$AccessToken
+        [Parameter(Mandatory = $true, ParameterSetName = 'AccessToken')]
+        [string]$AccessToken,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'TokenContext')]
+        [pscustomobject]$TokenContext
     )
 
-    return @{
+    $authorizationToken = if ($PSCmdlet.ParameterSetName -eq 'TokenContext') {
+        Get-MdeUsableAccessToken -TokenContext $TokenContext
+    }
+    else {
+        $AccessToken.Trim()
+    }
+
+    $headers = @{
         'Content-Type'  = 'application/json'
         'Accept'        = 'application/json'
-        'Authorization' = "Bearer $AccessToken"
+        'Authorization' = "Bearer $authorizationToken"
     }
+
+    if ($PSCmdlet.ParameterSetName -eq 'TokenContext') {
+        Add-Member -InputObject $headers -NotePropertyName MdeTokenContext -NotePropertyValue $TokenContext -Force
+    }
+
+    return $headers
+}
+
+function Resolve-MdeHeaderCollection {
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Headers
+    )
+
+    $tokenContextProperty = $Headers.PSObject.Properties['MdeTokenContext']
+    if ($null -ne $tokenContextProperty -and $null -ne $tokenContextProperty.Value) {
+        $Headers['Authorization'] = "Bearer $(Get-MdeUsableAccessToken -TokenContext $tokenContextProperty.Value)"
+    }
+
+    return $Headers
 }
 
 function Resolve-UriQueryParameterValue {
@@ -256,7 +604,7 @@ function Invoke-MdeBulkVulnerabilitySnapshotDownload {
     $emptyDownloadBackoffMultiplier = 2.0
 
     $resolvedExportUrl = Get-MdeBulkVulnerabilityExportRequestUri -ExportUrl $ExportUrl
-    $response = Invoke-RestMethodWithRetry -Uri $resolvedExportUrl -Headers $Headers -Method Get -MaxRetries 4 -InitialDelayMs 5000 -TimeoutSec 600 -RetryTransientTransportFailures
+    $response = Invoke-RestMethodWithRetry -Uri $resolvedExportUrl -Headers (Resolve-MdeHeaderCollection -Headers $Headers) -Method Get -MaxRetries 4 -InitialDelayMs 5000 -TimeoutSec 600 -RetryTransientTransportFailures
     $exportFiles = @($response.exportFiles)
     if ($exportFiles.Count -eq 0) {
         throw 'Bulk vulnerability export returned no files.'
@@ -405,7 +753,7 @@ function Invoke-MdeAdvancedHuntingStoreRefresh {
 
         Write-Information ("  Running Advanced Hunting query: {0}" -f $Label) -InformationAction Continue
         $body = @{ Query = $Query } | ConvertTo-Json
-        $response = Invoke-RestMethodWithRetry -Uri $RequestUrl -Headers $RequestHeaders -Method Post -Body $body
+        $response = Invoke-RestMethodWithRetry -Uri $RequestUrl -Headers (Resolve-MdeHeaderCollection -Headers $RequestHeaders) -Method Post -Body $body
         if ($null -eq $response -or $null -eq $response.Results) {
             return @()
         }
@@ -648,7 +996,7 @@ function Get-MdeMachineRefreshPublishPlan {
 
         do {
             $pageCount++
-            $response = Invoke-RestMethodWithRetry -Uri $url -Headers $Headers -Method Get
+            $response = Invoke-RestMethodWithRetry -Uri $url -Headers (Resolve-MdeHeaderCollection -Headers $Headers) -Method Get
 
             if ($response.value) {
                 foreach ($machine in $response.value) {
@@ -929,6 +1277,9 @@ function Export-MdeMachineData {
         [Parameter(Mandatory = $true, ParameterSetName = 'AccessToken')]
         [string]$AccessToken,
 
+        [Parameter(Mandatory = $true, ParameterSetName = 'TokenContext')]
+        [pscustomobject]$TokenContext,
+
         [Parameter(Mandatory = $true)]
         [string]$OutputPath,
 
@@ -938,6 +1289,9 @@ function Export-MdeMachineData {
 
     $resolvedHeaders = if ($PSCmdlet.ParameterSetName -eq 'AccessToken') {
         Get-MdeHeaderCollection -AccessToken $AccessToken
+    }
+    elseif ($PSCmdlet.ParameterSetName -eq 'TokenContext') {
+        Get-MdeHeaderCollection -TokenContext $TokenContext
     }
     else {
         $Headers

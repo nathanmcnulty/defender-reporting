@@ -956,7 +956,8 @@ if ($sourcePlanningRowCount -gt $PlanningSourceRowLimit) {
 Write-Output "Reading source machine data from '$SourcePath'..."
 $sourceMachines = Read-MachineData -Path $SourcePath
 $machineTemplates = [System.Collections.Generic.List[object]]::new()
-foreach ($machine in $sourceMachines.Values) {
+foreach ($machineKey in @($sourceMachines.Keys | Sort-Object)) {
+    $machine = $sourceMachines[$machineKey]
     if ($null -eq $machine) { continue }
     $machineTemplates.Add($machine)
 }
@@ -1052,7 +1053,8 @@ foreach ($historyEntry in $sourceHistoryEntries) {
 }
 
 $rowProfiles = [System.Collections.Generic.List[object]]::new()
-foreach ($rowProfileEntry in $rowProfileMap.Values) {
+foreach ($profileKey in @($rowProfileMap.Keys | Sort-Object)) {
+    $rowProfileEntry = $rowProfileMap[$profileKey]
     if ($null -eq $rowProfileEntry.TemplateMachine) {
         $fallbackRow = if ($rowProfileEntry.CurrentRows.Count -gt 0) { $rowProfileEntry.CurrentRows[0] } elseif ($rowProfileEntry.HistoryEntries.Count -gt 0) { $rowProfileEntry.HistoryEntries[0].Row } else { $null }
         if ($null -ne $fallbackRow) {
