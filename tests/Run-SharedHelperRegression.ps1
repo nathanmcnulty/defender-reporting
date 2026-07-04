@@ -1123,18 +1123,90 @@ function Test-GetMdeAccessTokenReportsAuthenticationContext {
     try {
         $failure = $null
         try {
-            $null = Get-MdeAccessToken -TenantId 'tenant-001' -AppId 'app-001' -AppSecret 'secret-value'
+            $null = Invoke-MdeClientCredentialTokenRequest -TenantId 'tenant-001' -AppId 'app-001' -AppSecretText 'secret-value'
         }
         catch {
             $failure = $_
         }
 
         Assert-True ($null -ne $failure) 'Expected failed MDE authentication attempts to surface context-rich diagnostics.'
-        Assert-True ($failure.Exception.Message -like "*tenant 'tenant-001'*app 'app-001'*resource 'https://api.securitycenter.microsoft.com'*invalid_client*") 'Expected authentication failures to include the tenant, app, resource, and underlying error message.'
+        $message = [string]$failure.Exception.Message
+        Assert-True ($message.Contains("tenant 'tenant-001'")) 'Expected authentication failures to include the tenant identifier.'
+        Assert-True ($message.Contains("app 'app-001'")) 'Expected authentication failures to include the app identifier.'
+        Assert-True ($message.Contains("resource 'https://api.securitycenter.microsoft.com'")) 'Expected authentication failures to include the resource identifier.'
+        Assert-True ($message.Contains('invalid_client')) 'Expected authentication failures to preserve the underlying error message.'
     }
     finally {
         Remove-Item -Path Function:Invoke-RestMethod -ErrorAction SilentlyContinue
     }
+}
+
+function Test-NewMdeAccessTokenContextRejectsMissingExpirationMetadata {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Test function name mirrors the scenario under test.')]
+    [CmdletBinding()]
+    param()
+
+    $failure = $null
+    try {
+        $null = New-MdeTokenContext -AccessToken 'token-without-expiry' -CanRefresh $true -RefreshScript { return $null } -SourceDescription 'test context'
+    }
+    catch {
+        $failure = $_
+    }
+
+    Assert-True ($null -ne $failure) 'Expected refreshable MDE token contexts to reject missing expiration metadata.'
+    Assert-True ($failure.Exception.Message -like "*require expiration metadata*") 'Expected missing-expiration validation to explain why refreshable MDE token contexts cannot be created.'
+}
+
+function Test-MdeRequestHeaderRefreshesNearExpiryTokenContext {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Test function name mirrors the scenario under test.')]
+    [CmdletBinding()]
+    param()
+
+    $script:MockMdeTokenRequestCount = 0
+    Set-Item -Path Function:Invoke-RestMethod -Value {
+        $script:MockMdeTokenRequestCount++
+        if ($script:MockMdeTokenRequestCount -eq 1) {
+            return [PSCustomObject]@{
+                access_token = 'token-initial'
+                expires_in   = 3600
+            }
+        }
+
+        return [PSCustomObject]@{
+            access_token = 'token-refreshed'
+            expires_in   = 3600
+        }
+    }
+
+    try {
+        $tokenContext = New-MdeAccessTokenContext -TenantId 'tenant-001' -AppId 'app-001' -AppSecret 'secret-value'
+        $headers = Get-MdeHeaderCollection -TokenContext $tokenContext
+        Assert-True ($headers.Authorization -eq 'Bearer token-initial') 'Expected the initial MDE header collection to use the original token.'
+
+        $tokenContext.ExpiresOnUtc = [datetime]::UtcNow.AddMinutes(4)
+        $resolvedHeaders = Resolve-MdeHeaderCollection -Headers $headers
+
+        Assert-True ($resolvedHeaders.Authorization -eq 'Bearer token-refreshed') 'Expected near-expiry MDE headers to refresh the bearer token before the next request.'
+        Assert-True ($script:MockMdeTokenRequestCount -eq 2) 'Expected MDE token refresh to reacquire a token exactly once when the remaining lifetime drops below the refresh window.'
+    }
+    finally {
+        Remove-Item -Path Function:Invoke-RestMethod -ErrorAction SilentlyContinue
+        Remove-Variable -Name MockMdeTokenRequestCount -Scope Script -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-MdeRequestHeaderKeepsExplicitAccessTokenContextStable {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Test function name mirrors the scenario under test.')]
+    [CmdletBinding()]
+    param()
+
+    $tokenContext = New-MdeAccessTokenContext -AccessToken 'token-explicit'
+    $headers = Get-MdeHeaderCollection -TokenContext $tokenContext
+    $resolvedHeaders = Resolve-MdeHeaderCollection -Headers $headers
+
+    Assert-True ($tokenContext.CanRefresh -eq $false) 'Expected explicitly supplied access tokens to remain non-refreshable.'
+    Assert-True ($resolvedHeaders.Authorization -eq 'Bearer token-explicit') 'Expected explicit MDE access tokens to remain usable without refresh metadata.'
 }
 
 function Test-BulkSnapshotImportSmoke {
@@ -6014,6 +6086,124 @@ function Test-LargeDatasetValidationSemanticModeForcesFullReplay {
     }
 }
 
+function Test-GenerateSyntheticLargeExportsUsesStablePlannerOrdering {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $generatorScriptPath = Join-Path $repoRoot 'tests\Generate-SyntheticLargeExports.ps1'
+    Assert-True ((Test-Path -LiteralPath $generatorScriptPath -PathType Leaf)) "Expected synthetic large-export generator script at '$generatorScriptPath'."
+
+    $pwshCommand = Get-Command -Name 'pwsh' -ErrorAction Stop
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('synthetic-ordering-' + [guid]::NewGuid().ToString('N'))
+
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+        $runDirectories = @(
+            (Join-Path $tempRoot 'run-a')
+            (Join-Path $tempRoot 'run-b')
+        )
+
+        foreach ($runDirectory in $runDirectories) {
+            $stdoutPath = Join-Path $runDirectory 'stdout.log'
+            $stderrPath = Join-Path $runDirectory 'stderr.log'
+            [void](New-Item -Path $runDirectory -ItemType Directory -Force)
+
+            $argumentList = @(
+                '-NoProfile'
+                '-File'
+                $generatorScriptPath
+                '-SourcePath'
+                (Join-Path $repoRoot 'exports')
+                '-OutputPath'
+                $runDirectory
+                '-TargetDeviceCount'
+                '12'
+                '-TargetTotalVulnRows'
+                '300'
+                '-MinimumAvailableMemoryGB'
+                '1'
+                '-Seed'
+                '20260322'
+            )
+
+            $process = Start-Process -FilePath $pwshCommand.Source -ArgumentList $argumentList -WorkingDirectory $repoRoot -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+            $process.WaitForExit()
+
+            $stdoutContent = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            $stderrContent = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            $processOutput = @($stdoutContent, $stderrContent) -join [Environment]::NewLine
+
+            Assert-True ($process.ExitCode -eq 0) ("Expected deterministic generator smoke run to succeed. Output:`n{0}" -f $processOutput.Trim())
+        }
+
+        $manifestPropertyNames = @(
+            'preset'
+            'seed'
+            'targetDeviceCount'
+            'targetTotalVulnRows'
+            'targetCurrentRows'
+            'targetHistoryRows'
+            'actualDeviceCount'
+            'includeRawRows'
+            'actualCurrentRows'
+            'actualHistoryRows'
+            'actualTotalVulnRows'
+            'scaleFactor'
+            'sourceCurrentRows'
+            'sourceHistoryRows'
+            'sourceRowProfiles'
+            'historyPeriods'
+            'advancedHuntingRows'
+            'contentTemplateCount'
+            'uniqueCveIdCount'
+            'normalizedCveLookupCount'
+        )
+
+        $normalizedManifestJson = foreach ($runDirectory in $runDirectories) {
+            $manifest = Get-Content -LiteralPath (Join-Path $runDirectory 'synthetic-manifest.json') -Raw | ConvertFrom-Json -Depth 20
+            $normalizedManifest = [ordered]@{}
+            foreach ($propertyName in $manifestPropertyNames) {
+                $normalizedManifest[$propertyName] = $manifest.$propertyName
+            }
+
+            $normalizedManifest | ConvertTo-Json -Depth 20 -Compress
+        }
+
+        Assert-True ($normalizedManifestJson[0] -eq $normalizedManifestJson[1]) 'Expected synthetic manifests to match across fresh PowerShell processes when using the same seed.'
+
+        $gzipPaths = @(
+            @{ RelativePath = 'Machines_Current.json.gz'; PathResolver = { param($basePath) (Get-MachineCurrentPath -BasePath $basePath) } }
+            @{ RelativePath = 'VulnCurrentRefs.json.gz'; PathResolver = { param($basePath) (Get-VulnCurrentRefsPath -BasePath $basePath) } }
+            @{ RelativePath = 'AdvancedHunting_Current.json.gz'; PathResolver = { param($basePath) (Get-AdvancedHuntingCurrentPath -BasePath $basePath) } }
+            @{ RelativePath = 'VulnContentDictionary.json.gz'; PathResolver = { param($basePath) (Get-VulnContentDictionaryPath -BasePath $basePath) } }
+        )
+
+        foreach ($gzipPathInfo in $gzipPaths) {
+            $firstPath = & $gzipPathInfo.PathResolver $runDirectories[0]
+            $secondPath = & $gzipPathInfo.PathResolver $runDirectories[1]
+            Assert-True ((Read-GzipTextFile -Path $firstPath) -eq (Read-GzipTextFile -Path $secondPath)) ("Expected {0} to be stable across fresh PowerShell processes." -f $gzipPathInfo.RelativePath)
+        }
+
+        $historyRefNamesA = @((Get-ChildItem -LiteralPath $runDirectories[0] -Filter 'VulnHistoryRefs_*.json.gz' -File | Sort-Object Name).Name)
+        $historyRefNamesB = @((Get-ChildItem -LiteralPath $runDirectories[1] -Filter 'VulnHistoryRefs_*.json.gz' -File | Sort-Object Name).Name)
+
+        Assert-True (($historyRefNamesA.Count -eq $historyRefNamesB.Count) -and ((@($historyRefNamesA) -join '|') -eq (@($historyRefNamesB) -join '|'))) 'Expected synthetic history ref file sets to match across fresh PowerShell processes.'
+
+        foreach ($historyRefName in $historyRefNamesA) {
+            $firstPath = Join-Path $runDirectories[0] $historyRefName
+            $secondPath = Join-Path $runDirectories[1] $historyRefName
+            Assert-True ((Read-GzipTextFile -Path $firstPath) -eq (Read-GzipTextFile -Path $secondPath)) ("Expected history ref file '{0}' to be stable across fresh PowerShell processes." -f $historyRefName)
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-HotPhaseReviewArtifactsModeSmoke {
     [CmdletBinding()]
     param()
@@ -6169,6 +6359,9 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-BulkVulnerabilitySnapshotDownloadCleanupBehavior'; SuccessMessage = 'Multipart vulnerability failed-download cleanup checks passed.' }
     @{ Name = 'Test-GetMdeAccessTokenReportsMissingConfigurationDiagnostic'; SuccessMessage = 'MDE token-source diagnostics checks passed.' }
     @{ Name = 'Test-GetMdeAccessTokenReportsAuthenticationContext'; SuccessMessage = 'MDE authentication context diagnostics checks passed.' }
+    @{ Name = 'Test-NewMdeAccessTokenContextRejectsMissingExpirationMetadata'; SuccessMessage = 'MDE token expiration metadata checks passed.' }
+    @{ Name = 'Test-MdeRequestHeaderRefreshesNearExpiryTokenContext'; SuccessMessage = 'MDE proactive token refresh checks passed.' }
+    @{ Name = 'Test-MdeRequestHeaderKeepsExplicitAccessTokenContextStable'; SuccessMessage = 'Explicit MDE access token compatibility checks passed.' }
     @{ Name = 'Test-VulnCurrentFileRejectsDuplicateId'; SuccessMessage = 'Current-file duplicate Id checks passed.' }
     @{ Name = 'Test-RepairVulnHistoryLayoutSkipsCanonicalQuarterlyStore'; SuccessMessage = 'Canonical quarterly history repair skip checks passed.' }
     @{ Name = 'Test-VulnStoreRequiresCanonicalRepairDetectsMalformedQuarterlyHistory'; SuccessMessage = 'Canonical quarterly history gate checks passed.' }
@@ -6210,6 +6403,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-WriteCombinedPayloadGzipCanConsumeColumnLookupData'; SuccessMessage = 'Payload lookup consumption checks passed.' }
     @{ Name = 'Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload'; SuccessMessage = 'Embedded payload inspection checks passed.' }
     @{ Name = 'Test-MeasureStressRunWritesProgressAndFinalReport'; SuccessMessage = 'Measure-StressRun report persistence checks passed.' }
+    @{ Name = 'Test-GenerateSyntheticLargeExportsUsesStablePlannerOrdering'; SuccessMessage = 'Synthetic planner ordering checks passed.' }
     @{ Name = 'Test-LargeDatasetValidationSemanticModeForcesFullReplay'; SuccessMessage = 'Large-dataset semantic sign-off checks passed.' }
     @{ Name = 'Test-HotPhaseReviewArtifactsModeSmoke'; SuccessMessage = 'Hot-phase review wrapper smoke checks passed.' }
     @{ Name = 'Test-GetDashboardTemplateContentAcceptsExplicitTemplatesPathWithEmptyDefaultRoot'; SuccessMessage = 'Dashboard template explicit-path checks passed.' }

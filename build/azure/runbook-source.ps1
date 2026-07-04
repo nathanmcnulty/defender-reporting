@@ -453,6 +453,31 @@ function Write-PipelineExecutionStatus {
 # HELPER FUNCTIONS - TOKEN MANAGEMENT
 # =============================================================================
 
+function Get-PlainTokenResponse {
+    <#
+    .SYNOPSIS
+        Gets a plain-text bearer token plus expiration metadata using Get-AzAccessToken -AsSecureString.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ResourceUrl
+    )
+
+    $tokenResponse = Get-AzAccessToken -ResourceUrl $ResourceUrl -AsSecureString
+    $ssPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResponse.Token)
+
+    try {
+        return [PSCustomObject]@{
+            AccessToken  = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ssPtr)
+            ExpiresOnUtc = ConvertTo-MdeUtcDateTime -Value $tokenResponse.ExpiresOn
+        }
+    }
+    finally {
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ssPtr)
+    }
+}
+
 function Get-PlainToken {
     <#
     .SYNOPSIS
@@ -464,11 +489,28 @@ function Get-PlainToken {
         [string]$ResourceUrl
     )
 
-    $tokenResponse = Get-AzAccessToken -ResourceUrl $ResourceUrl -AsSecureString
-    $ssPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResponse.Token)
+    return [string](Get-PlainTokenResponse -ResourceUrl $ResourceUrl).AccessToken
+}
 
-    try { return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ssPtr) }
-    finally { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ssPtr) }
+function New-AzResourceTokenContext {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal factory only returns an in-memory token context object for the current Az session.')]
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ResourceUrl,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$WriteStatus
+    )
+
+    $getPlainTokenResponse = ${function:Get-PlainTokenResponse}
+    $refreshScript = {
+        & $getPlainTokenResponse -ResourceUrl $ResourceUrl
+    }.GetNewClosure()
+
+    $initialToken = & $refreshScript
+    return (New-MdeTokenContext -AccessToken $initialToken.AccessToken -ExpiresOnUtc $initialToken.ExpiresOnUtc -CanRefresh $true -RefreshScript $refreshScript -SourceDescription ("Az context for '{0}'" -f $ResourceUrl) -WriteStatus:$WriteStatus)
 }
 
 # =============================================================================
@@ -1157,8 +1199,8 @@ try {
         Write-Output "  Stress mode enabled: using existing exports from blob storage only"
     }
     else {
-        $mdeToken = Get-PlainToken -ResourceUrl 'https://api.securitycenter.microsoft.com'
-        $mdeHeaders = Get-MdeHeaderCollection -AccessToken $mdeToken
+        $mdeTokenContext = New-AzResourceTokenContext -ResourceUrl 'https://api.securitycenter.microsoft.com'
+        $mdeHeaders = Get-MdeHeaderCollection -TokenContext $mdeTokenContext
         Write-Output "  Tokens acquired"
     }
 
