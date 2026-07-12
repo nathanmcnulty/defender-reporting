@@ -223,12 +223,237 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Security.Cryptography;
+using System.Runtime;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
 namespace DefenderReporting.Store
 {
+    public sealed class CompiledNormalizationResult
+    {
+        public long ProcessedCount { get; set; }
+        public int DeviceCount { get; set; }
+        public int CveCount { get; set; }
+        public int SoftwareCount { get; set; }
+        public int VendorCount { get; set; }
+    }
+
+    public static class BoundedContentNormalizer
+    {
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr minimumWorkingSetSize, IntPtr maximumWorkingSetSize);
+        private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false);
+        private static readonly JsonWriterOptions WriterOptions = new JsonWriterOptions { SkipValidation = true };
+        private sealed class Device { public string Id, Name, OsVersion; public int Group, Platform; public int[] Tags; public bool Onboarded; }
+        private sealed class Software { public int Vendor; public string Name, Reference; }
+        private sealed class Update { public string Name, Id, Url; }
+        private sealed class Cve { public string Id, Url; public double? Score; public int Severity, Exploit, BatchTitle; }
+        private struct Template { public int Software, Cve, Version, Update, UpdateAvailable, DiskStart, DiskCount, RegistryStart, RegistryCount; }
+        private struct HashKey { public ulong First, Second; public HashKey(ulong first, ulong second) { First = first; Second = second; } }
+        private sealed class UlongIndexMap
+        {
+            private ulong[] firstKeys, secondKeys; private int[] values; private int count;
+            public UlongIndexMap(int expectedCount) { var capacity = 1024; var required = Math.Max(1, expectedCount) * 10 / 7 + 1; while (capacity < required) capacity *= 2; firstKeys = new ulong[capacity]; secondKeys = new ulong[capacity]; values = new int[capacity]; }
+            public bool TryGetValue(HashKey key, out int value) { var slot = Slot(key, values.Length); while (values[slot] != 0) { if (firstKeys[slot] == key.First && secondKeys[slot] == key.Second) { value = values[slot] - 1; return true; } slot = (slot + 1) & (values.Length - 1); } value = 0; return false; }
+            public void Add(HashKey key, int value) { if ((count + 1) * 10 >= values.Length * 7) Resize(); var slot = Slot(key, values.Length); while (values[slot] != 0) { if (firstKeys[slot] == key.First && secondKeys[slot] == key.Second) throw new ArgumentException("Duplicate hash key."); slot = (slot + 1) & (values.Length - 1); } firstKeys[slot] = key.First; secondKeys[slot] = key.Second; values[slot] = value + 1; count++; }
+            public void Clear() { firstKeys = Array.Empty<ulong>(); secondKeys = Array.Empty<ulong>(); values = Array.Empty<int>(); count = 0; }
+            private void Resize() { var oldFirst = firstKeys; var oldSecond = secondKeys; var oldValues = values; firstKeys = new ulong[oldFirst.Length * 2]; secondKeys = new ulong[firstKeys.Length]; values = new int[firstKeys.Length]; for (var index = 0; index < oldValues.Length; index++) if (oldValues[index] != 0) { var key = new HashKey(oldFirst[index], oldSecond[index]); var slot = Slot(key, values.Length); while (values[slot] != 0) slot = (slot + 1) & (values.Length - 1); firstKeys[slot] = key.First; secondKeys[slot] = key.Second; values[slot] = oldValues[index]; } }
+            private static int Slot(HashKey key, int length) { var hash = key.First ^ key.Second; hash ^= hash >> 33; hash *= 0xff51afd7ed558ccdUL; hash ^= hash >> 33; return (int)(hash & (ulong)(length - 1)); }
+        }
+
+        public static CompiledNormalizationResult Project(string dictionaryPath, string[] refPaths, string outputPath)
+        {
+            var expectedTemplates = Directory.Exists(dictionaryPath) ? File.ReadLines(Path.Combine(dictionaryPath, "contentTemplates.ndjson"), Utf8).Count() : 1024;
+            var vendors = new List<string>(); var vendorMap = Map();
+            var exploits = new List<string>(); var exploitMap = Map();
+            var groups = new List<string>(); var groupMap = Map();
+            var platforms = new List<string>(); var platformMap = Map();
+            var tags = new List<string>(); var tagMap = Map();
+            var versions = new List<string>(); var versionMap = Map();
+            var dates = new List<string>(); var dateMap = Map();
+            var diskPaths = new List<string>(); var diskMap = Map();
+            var registryPaths = new List<string>(); var registryMap = Map();
+            var batchTitles = new List<string>(); var batchMap = Map();
+            var softwareMap = HashMap(expectedTemplates); var softwareCount = 0;
+            var updateMap = HashMap(expectedTemplates); var updateCount = 0;
+            var cveMap = HashMap(expectedTemplates); var cveCount = 0;
+            var deviceOnboarded = new List<bool>();
+            var templateList = new List<Template>();
+            var templateDiskIndexes = new List<int>(); var templateRegistryIndexes = new List<int>();
+            var stageRoot = Path.Combine(Path.GetTempPath(), "bounded-normalizer-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(stageRoot);
+            var deviceFragment = Path.Combine(stageRoot, "devices.ndjson"); var softwareFragment = Path.Combine(stageRoot, "software.ndjson"); var updateFragment = Path.Combine(stageRoot, "updates.ndjson"); var cveFragment = Path.Combine(stageRoot, "cves.ndjson"); var vulnFragment = Path.Combine(stageRoot, "vulns.ndjson");
+            using (var deviceOutput = new StreamWriter(deviceFragment, false, Utf8, 65536))
+            using (var softwareOutput = new StreamWriter(softwareFragment, false, Utf8, 65536))
+            using (var updateOutput = new StreamWriter(updateFragment, false, Utf8, 65536))
+            using (var cveOutput = new StreamWriter(cveFragment, false, Utf8, 65536))
+            {
+
+            ReadDictionaryArray(dictionaryPath, "deviceProfiles", item =>
+                {
+                    var tagIndexes = new List<int>();
+                    JsonElement tagValues;
+                    if (item.TryGetProperty("t", out tagValues) && tagValues.ValueKind == JsonValueKind.Array)
+                        foreach (var tag in tagValues.EnumerateArray()) { var value = ScalarString(tag); var index = Intern(value, tags, tagMap); if (index >= 0) tagIndexes.Add(index); }
+                    var group = Value(item, "g"); if (String.IsNullOrWhiteSpace(group)) group = "(none)";
+                    var device = new Device {
+                        Id = Value(item, "id"), Name = EmptyFallback(Value(item, "n"), "(no machine data)"), OsVersion = NullIfEmpty(Value(item, "ov")),
+                        Group = Intern(group, groups, groupMap), Platform = Intern(Value(item, "o"), platforms, platformMap), Tags = tagIndexes.ToArray(), Onboarded = Boolean(item, "ob")
+                    };
+                    deviceOnboarded.Add(device.Onboarded); WriteDeviceFragment(deviceOutput, device);
+                });
+
+            ReadDictionaryArray(dictionaryPath, "contentTemplates", item =>
+                {
+                    var vendor = Value(item, "sv"); var name = Value(item, "sn"); var reference = Value(item, "rr");
+                    var vendorIndex = Intern(vendor, vendors, vendorMap);
+                    var softwareKey = GetHashKey(vendor, name, reference);
+                    int softwareIndex;
+                    if (!softwareMap.TryGetValue(softwareKey, out softwareIndex)) { softwareIndex = softwareCount++; softwareMap.Add(softwareKey, softwareIndex); WriteSoftwareFragment(softwareOutput, new Software { Vendor = vendorIndex, Name = name, Reference = reference }); }
+
+                    var cveId = Value(item, "c"); var scoreText = Value(item, "sc"); var severity = Value(item, "sev"); var exploit = Value(item, "ex"); var url = ConvertCveUrl(Value(item, "bu")); var batch = Value(item, "bt");
+                    var cveKey = GetHashKey(cveId, scoreText, severity, exploit, url, batch);
+                    int cveIndex;
+                    if (!cveMap.TryGetValue(cveKey, out cveIndex)) {
+                        cveIndex = cveCount++; cveMap.Add(cveKey, cveIndex);
+                        double parsedScore; double? score = Double.TryParse(scoreText, NumberStyles.Float, CultureInfo.InvariantCulture, out parsedScore) ? parsedScore : (double?)null;
+                        WriteCveFragment(cveOutput, new Cve { Id = cveId, Score = score, Severity = SeverityIndex(severity), Exploit = Intern(exploit, exploits, exploitMap), Url = url, BatchTitle = Intern(batch, batchTitles, batchMap) });
+                    }
+
+                    var updateName = Value(item, "ru"); var updateIndex = -1;
+                    if (!String.IsNullOrWhiteSpace(updateName) && updateName != "--") {
+                        var updateId = Value(item, "rid"); var updateUrl = Value(item, "url"); var updateKey = GetHashKey(updateName, updateId, updateUrl);
+                        if (!updateMap.TryGetValue(updateKey, out updateIndex)) { updateIndex = updateCount++; updateMap.Add(updateKey, updateIndex); WriteUpdateFragment(updateOutput, new Update { Name = updateName, Id = updateId, Url = updateUrl }); }
+                    }
+                    int diskStart, diskCount, registryStart, registryCount;
+                    InternFlatArray(item, "dp", diskPaths, diskMap, templateDiskIndexes, out diskStart, out diskCount);
+                    InternFlatArray(item, "rp", registryPaths, registryMap, templateRegistryIndexes, out registryStart, out registryCount);
+                    templateList.Add(new Template {
+                        Software = softwareIndex, Cve = cveIndex, Version = Intern(Value(item, "ver"), versions, versionMap), Update = updateIndex,
+                        UpdateAvailable = Boolean(item, "ua") ? 1 : 0, DiskStart = diskStart, DiskCount = diskCount, RegistryStart = registryStart, RegistryCount = registryCount
+                    });
+                });
+            }
+            foreach (var map in new[] { vendorMap, exploitMap, groupMap, platformMap, tagMap, versionMap, diskMap, registryMap, batchMap }) map.Clear();
+            softwareMap.Clear(); updateMap.Clear(); cveMap.Clear();
+            GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers();
+
+            long processed = 0;
+            using (var vulnOutput = new StreamWriter(vulnFragment, false, Utf8, 65536))
+            {
+                foreach (var refPath in refPaths)
+                {
+                    using (var input = OpenInput(refPath)) using (var reader = new StreamReader(input, Utf8, true, 65536))
+                    {
+                        string line;
+                        while ((line = reader.ReadLine()) != null)
+                        {
+                            if (String.IsNullOrWhiteSpace(line)) continue;
+                            using (var refDocument = JsonDocument.Parse(line))
+                            {
+                                var values = refDocument.RootElement; if (values.ValueKind != JsonValueKind.Array || values.GetArrayLength() < 5) continue;
+                                var deviceIndex = values[1].GetInt32(); var templateIndex = values[2].GetInt32();
+                                if (deviceIndex < 0 || deviceIndex >= deviceOnboarded.Count || templateIndex < 0 || templateIndex >= templateList.Count || !deviceOnboarded[deviceIndex]) continue;
+                                var first = NormalizeDate(ScalarString(values[3])); var last = NormalizeDate(ScalarString(values[4]));
+                                if (String.CompareOrdinal(first, last) > 0) { var swap = first; first = last; last = swap; }
+                                var template = templateList[templateIndex];
+                                var firstIndex = Intern(first, dates, dateMap); var lastIndex = Intern(last, dates, dateMap);
+                                WriteFragment(vulnOutput, writer => {
+                                    writer.WriteStartArray(); writer.WriteNumberValue(deviceIndex); writer.WriteNumberValue(template.Cve); writer.WriteNumberValue(template.Software); writer.WriteNumberValue(template.Version);
+                                    writer.WriteNumberValue(firstIndex); writer.WriteNumberValue(lastIndex); writer.WriteNumberValue(template.UpdateAvailable); writer.WriteNumberValue(template.Update);
+                                    WriteNullableIntRange(writer, templateDiskIndexes, template.DiskStart, template.DiskCount); WriteNullableIntRange(writer, templateRegistryIndexes, template.RegistryStart, template.RegistryCount); writer.WriteNumberValue(-1); writer.WriteEndArray();
+                                });
+                                processed++;
+                            }
+                        }
+                    }
+                }
+            }
+            using (var file = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.SequentialScan))
+            using (var gzip = new GZipStream(file, CompressionLevel.Fastest, false))
+            using (var writer = new Utf8JsonWriter(gzip, WriterOptions))
+            {
+                writer.WriteStartObject(); writer.WriteString("vulnsFormat", "rows-v1"); writer.WritePropertyName("lookups"); writer.WriteStartObject();
+                WriteStrings(writer, "vendors", vendors); WriteFixedStrings(writer, "severities", new[] { "Critical", "High", "Medium", "Low", "None" }); WriteStrings(writer, "exploitLevels", exploits);
+                WriteStrings(writer, "groups", groups); WriteStrings(writer, "platforms", platforms); WriteStrings(writer, "tags", tags);
+                writer.WritePropertyName("updates"); CopyJsonLines(writer, updateFragment);
+                WriteStrings(writer, "versions", versions); WriteStrings(writer, "dates", dates); WriteStrings(writer, "diskPaths", diskPaths); WriteStrings(writer, "regPaths", registryPaths);
+                WriteFixedStrings(writer, "affSoftware", Array.Empty<string>()); WriteStrings(writer, "batchTitles", batchTitles);
+                writer.WritePropertyName("devices"); CopyJsonLines(writer, deviceFragment);
+                writer.WritePropertyName("inventory"); writer.WriteStartArray(); writer.WriteEndArray();
+                writer.WritePropertyName("software"); CopyJsonLines(writer, softwareFragment);
+                writer.WritePropertyName("cves"); CopyJsonLines(writer, cveFragment);
+                writer.WriteNull("noTagsIdx"); writer.WriteEndObject();
+                writer.WritePropertyName("vulns"); CopyJsonLines(writer, vulnFragment); writer.WriteEndObject();
+            }
+            try { Directory.Delete(stageRoot, true); } catch { }
+            var result = new CompiledNormalizationResult { ProcessedCount = processed, DeviceCount = deviceOnboarded.Count, CveCount = cveCount, SoftwareCount = softwareCount, VendorCount = vendors.Count };
+            vendors = null; exploits = null; groups = null; platforms = null; tags = null; versions = null; dates = null; diskPaths = null; registryPaths = null; batchTitles = null;
+            deviceOnboarded = null; templateList = null; templateDiskIndexes = null; templateRegistryIndexes = null;
+            GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers();
+            TrimCurrentProcessWorkingSet();
+            return result;
+        }
+
+        public static void TrimCurrentProcessWorkingSet()
+        {
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+            try { SetProcessWorkingSetSize(System.Diagnostics.Process.GetCurrentProcess().Handle, new IntPtr(-1), new IntPtr(-1)); } catch { }
+        }
+
+        private static Dictionary<string, int> Map() { return new Dictionary<string, int>(StringComparer.Ordinal); }
+        private static UlongIndexMap HashMap(int expectedCount) { return new UlongIndexMap(expectedCount); }
+        private static HashKey GetHashKey(params string[] values)
+        {
+            const ulong offset1 = 14695981039346656037UL, offset2 = 7809847782465536322UL, prime1 = 1099511628211UL, prime2 = 14029467366897019727UL; var first = offset1; var second = offset2;
+            foreach (var value in values) { if (value != null) foreach (var character in value) { first ^= character; first *= prime1; second ^= (ulong)character + 0x9e37UL; second *= prime2; } first ^= 0xFF; first *= prime1; second ^= 0xA5; second *= prime2; }
+            return new HashKey(first, second);
+        }
+        private static void ReadDictionaryArray(string path, string propertyName, Action<JsonElement> action)
+        {
+            if (!Directory.Exists(path)) throw new InvalidDataException("Bounded normalization requires a staged dictionary fragment directory.");
+            var fragmentPath = Path.Combine(path, propertyName + ".ndjson");
+            using (var reader = new StreamReader(fragmentPath, Utf8, true, 65536))
+            {
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    if (String.IsNullOrWhiteSpace(line)) continue;
+                    using (var document = JsonDocument.Parse(line)) action(document.RootElement);
+                }
+            }
+        }
+        private static Stream OpenInput(string path) { var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan); return path.EndsWith(".gz", StringComparison.OrdinalIgnoreCase) ? (Stream)new GZipStream(file, CompressionMode.Decompress, false) : file; }
+        private static string Value(JsonElement item, string name) { JsonElement value; return item.TryGetProperty(name, out value) ? ScalarString(value) : String.Empty; }
+        private static string ScalarString(JsonElement value) { if (value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined) return String.Empty; return value.ValueKind == JsonValueKind.String ? value.GetString() ?? String.Empty : value.GetRawText().Trim('"'); }
+        private static bool Boolean(JsonElement item, string name) { JsonElement value; if (!item.TryGetProperty(name, out value)) return false; return value.ValueKind == JsonValueKind.True || (value.ValueKind == JsonValueKind.String && String.Equals(value.GetString(), "true", StringComparison.OrdinalIgnoreCase)); }
+        private static int Intern(string value, List<string> values, Dictionary<string, int> map) { if (String.IsNullOrEmpty(value)) return -1; int index; if (!map.TryGetValue(value, out index)) { index = values.Count; map.Add(value, index); values.Add(value); } return index; }
+        private static void InternFlatArray(JsonElement item, string name, List<string> values, Dictionary<string, int> map, List<int> flattened, out int start, out int count) { start = flattened.Count; JsonElement array; if (item.TryGetProperty(name, out array)) { if (array.ValueKind == JsonValueKind.Array) foreach (var element in array.EnumerateArray()) { var index = Intern(ScalarString(element), values, map); if (index >= 0) flattened.Add(index); } else { var index = Intern(ScalarString(array), values, map); if (index >= 0) flattened.Add(index); } } count = flattened.Count - start; }
+        private static string NormalizeDate(string value) { if (String.IsNullOrWhiteSpace(value)) return String.Empty; if (value.Length >= 10 && value[4] == '-' && value[7] == '-') return value.Substring(0, 10); DateTime parsed; return DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out parsed) ? parsed.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : value; }
+        private static int SeverityIndex(string value) { switch (value) { case "Critical": return 0; case "High": return 1; case "Medium": return 2; case "Low": return 3; case "None": return 4; default: return -1; } }
+        private static string ConvertCveUrl(string value) { const string marker = "/security-guidance/advisory/"; var index = value.IndexOf(marker, StringComparison.OrdinalIgnoreCase); if (index >= 0) { var id = value.Substring(index + marker.Length); if (id.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) return "https://msrc.microsoft.com/update-guide/vulnerability/" + id; } return value; }
+        private static string EmptyFallback(string value, string fallback) { return String.IsNullOrWhiteSpace(value) ? fallback : value; }
+        private static string NullIfEmpty(string value) { return String.IsNullOrWhiteSpace(value) ? null : value; }
+        private static void WriteFragment(StreamWriter output, Action<Utf8JsonWriter> action)
+        {
+            using (var buffer = new MemoryStream()) { using (var json = new Utf8JsonWriter(buffer, WriterOptions)) action(json); output.WriteLine(Utf8.GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length))); }
+        }
+        private static void WriteDeviceFragment(StreamWriter output, Device value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); writer.WriteString("n", value.Name); writer.WriteNumber("g", value.Group); writer.WriteNumber("o", value.Platform); if (value.OsVersion == null) writer.WriteNull("ov"); else writer.WriteString("ov", value.OsVersion); writer.WritePropertyName("t"); WriteIntArray(writer, value.Tags); writer.WriteNull("m"); writer.WriteEndObject(); }); }
+        private static void WriteSoftwareFragment(StreamWriter output, Software value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteNumber("v", value.Vendor); writer.WriteString("n", value.Name); writer.WriteString("r", value.Reference); writer.WriteEndObject(); }); }
+        private static void WriteUpdateFragment(StreamWriter output, Update value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("n", value.Name); writer.WriteString("id", value.Id); writer.WriteString("url", value.Url); writer.WriteEndObject(); }); }
+        private static void WriteCveFragment(StreamWriter output, Cve value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); if (value.Score.HasValue) writer.WriteNumber("sc", value.Score.Value); else writer.WriteNull("sc"); writer.WriteNumber("sv", value.Severity); writer.WriteNumber("ex", value.Exploit); writer.WriteString("u", value.Url); writer.WriteNumber("bt", value.BatchTitle); foreach (var name in new[] { "pd", "desc", "ep", "as", "ea", "nlm", "nbs", "nsv", "nvec", "nkev", "ndu", "nact", "nw" }) writer.WriteNull(name); writer.WriteEndObject(); }); }
+        private static void CopyJsonLines(Utf8JsonWriter writer, string path) { writer.WriteStartArray(); foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) document.RootElement.WriteTo(writer); } writer.WriteEndArray(); }
+        private static void WriteIntArray(Utf8JsonWriter writer, int[] values) { writer.WriteStartArray(); if (values != null) foreach (var value in values) writer.WriteNumberValue(value); writer.WriteEndArray(); }
+        private static void WriteNullableIntArray(Utf8JsonWriter writer, int[] values) { if (values == null || values.Length == 0) { writer.WriteNullValue(); return; } WriteIntArray(writer, values); }
+        private static void WriteNullableIntRange(Utf8JsonWriter writer, List<int> values, int start, int count) { if (count <= 0) { writer.WriteNullValue(); return; } writer.WriteStartArray(); for (var index = 0; index < count; index++) writer.WriteNumberValue(values[start + index]); writer.WriteEndArray(); }
+        private static void WriteStrings(Utf8JsonWriter writer, string name, List<string> values) { writer.WritePropertyName(name); writer.WriteStartArray(); foreach (var value in values) writer.WriteStringValue(value); writer.WriteEndArray(); }
+        private static void WriteFixedStrings(Utf8JsonWriter writer, string name, string[] values) { writer.WritePropertyName(name); writer.WriteStartArray(); foreach (var value in values) writer.WriteStringValue(value); writer.WriteEndArray(); }
+    }
+
     public static class VulnContentProjector
     {
         private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false);
@@ -784,6 +1009,7 @@ function Invoke-FullGarbageCollection {
     [CmdletBinding()]
     param()
 
+    [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
     [System.GC]::Collect()
@@ -13603,11 +13829,11 @@ function Write-CombinedPayloadLookupsValue {
             Set-NormalizedLookupPropertyValue -Lookups $Lookups -Name $lookupPropertyName -Value $null
             if (($lookupPropertyName -eq 'batchTitles') -and (Get-Command -Name Invoke-FullGarbageCollection -ErrorAction SilentlyContinue)) {
                 if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
-                    $null = Write-MemoryUsage -Label 'PayloadClose PreDeviceGc'
+                    $null = Write-MemoryUsage -Label ("PayloadClose PreLookupGc {0}" -f $lookupPropertyName)
                 }
                 Invoke-FullGarbageCollection
                 if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
-                    $null = Write-MemoryUsage -Label 'PayloadClose PostPreDeviceGc'
+                    $null = Write-MemoryUsage -Label ("PayloadClose PostLookupGc {0}" -f $lookupPropertyName)
                 }
             }
             if ($lookupPropertyName -in @('devices', 'inventory', 'software', 'cves')) {
@@ -14283,6 +14509,8 @@ function Get-DashboardPayloadSummaryJson {
     $gzip = $null
     $reader = $null
     $jsonReader = $null
+    $stringWriter = $null
+    $jsonWriter = $null
 
     try {
         $fileStream = [System.IO.File]::OpenRead($PayloadPath)
@@ -14290,7 +14518,38 @@ function Get-DashboardPayloadSummaryJson {
         $reader = [System.IO.StreamReader]::new($gzip, [System.Text.Encoding]::UTF8)
         $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
 
-        $lookupsToken = $null
+        $stringWriter = [System.IO.StringWriter]::new([System.Globalization.CultureInfo]::InvariantCulture)
+        $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($stringWriter)
+        $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
+
+        $jsonWriter.WriteStartObject()
+        $jsonWriter.WritePropertyName('version')
+        $jsonWriter.WriteValue(1)
+        $jsonWriter.WritePropertyName('meta')
+        $jsonWriter.WriteStartObject()
+        if ($null -ne $PayloadManifest) {
+            foreach ($manifestProperty in @(
+                    @{ Name = 'GeneratedOnUtc'; JsonName = 'generatedOnUtc'; Type = 'string' }
+                    @{ Name = 'PayloadSha256'; JsonName = 'payloadSha256'; Type = 'string' }
+                    @{ Name = 'VulnCount'; JsonName = 'vulnCount'; Type = 'int' }
+                    @{ Name = 'DeviceCount'; JsonName = 'deviceCount'; Type = 'int' }
+                    @{ Name = 'CveCount'; JsonName = 'cveCount'; Type = 'int' }
+                )) {
+                if (-not $PayloadManifest.PSObject.Properties[$manifestProperty.Name]) { continue }
+                $jsonWriter.WritePropertyName($manifestProperty.JsonName)
+                if ($manifestProperty.Type -eq 'int') {
+                    $jsonWriter.WriteValue([int]$PayloadManifest.($manifestProperty.Name))
+                }
+                else {
+                    $jsonWriter.WriteValue([string]$PayloadManifest.($manifestProperty.Name))
+                }
+            }
+        }
+        $jsonWriter.WriteEndObject()
+        $jsonWriter.WritePropertyName('filterCatalog')
+        $jsonWriter.WriteStartObject()
+
+        $foundLookups = $false
         while ($jsonReader.Read()) {
             if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) {
                 continue
@@ -14300,71 +14559,80 @@ function Get-DashboardPayloadSummaryJson {
                 continue
             }
 
-            [void]$jsonReader.Read()
-            $lookupsToken = [Newtonsoft.Json.Linq.JToken]::ReadFrom($jsonReader)
+            if (-not $jsonReader.Read() -or $jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+                throw "Dashboard payload '$PayloadPath' contains an invalid lookups object."
+            }
+            $foundLookups = $true
             break
         }
 
-        if ($null -eq $lookupsToken) {
+        if (-not $foundLookups) {
             throw "Unable to extract lookups from dashboard payload '$PayloadPath'."
         }
 
-        $summaryObject = [Newtonsoft.Json.Linq.JObject]::new()
-        $summaryObject.Add([Newtonsoft.Json.Linq.JProperty]::new('version', [Newtonsoft.Json.Linq.JValue]::new(1)))
-
-        $metaObject = [Newtonsoft.Json.Linq.JObject]::new()
-        if ($null -ne $PayloadManifest) {
-            if ($PayloadManifest.PSObject.Properties['GeneratedOnUtc']) {
-                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('generatedOnUtc', [Newtonsoft.Json.Linq.JValue]::new([string]$PayloadManifest.GeneratedOnUtc)))
+        $catalogFields = @('groups', 'tags', 'devices')
+        $writtenFields = @{}
+        while ($jsonReader.Read() -and $jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::EndObject) {
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) { continue }
+            $propertyName = [string]$jsonReader.Value
+            if (-not $jsonReader.Read()) { break }
+            if ($propertyName -notin $catalogFields) {
+                $jsonReader.Skip()
+                continue
             }
-            if ($PayloadManifest.PSObject.Properties['PayloadSha256']) {
-                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('payloadSha256', [Newtonsoft.Json.Linq.JValue]::new([string]$PayloadManifest.PayloadSha256)))
-            }
-            if ($PayloadManifest.PSObject.Properties['VulnCount']) {
-                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('vulnCount', [Newtonsoft.Json.Linq.JValue]::new([int]$PayloadManifest.VulnCount)))
-            }
-            if ($PayloadManifest.PSObject.Properties['DeviceCount']) {
-                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('deviceCount', [Newtonsoft.Json.Linq.JValue]::new([int]$PayloadManifest.DeviceCount)))
-            }
-            if ($PayloadManifest.PSObject.Properties['CveCount']) {
-                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('cveCount', [Newtonsoft.Json.Linq.JValue]::new([int]$PayloadManifest.CveCount)))
-            }
-        }
 
-        $lookupsObject = [Newtonsoft.Json.Linq.JObject]$lookupsToken
-        $filterCatalogObject = [Newtonsoft.Json.Linq.JObject]::new()
-        $groupsToken = $lookupsObject.GetValue('groups')
-        $tagsToken = $lookupsObject.GetValue('tags')
-        $devicesToken = $lookupsObject.GetValue('devices')
+            $jsonWriter.WritePropertyName($propertyName)
+            $writtenFields[$propertyName] = $true
+            if ($propertyName -ne 'devices') {
+                $catalogToken = [Newtonsoft.Json.Linq.JToken]::ReadFrom($jsonReader)
+                $catalogToken.WriteTo($jsonWriter, [Newtonsoft.Json.JsonConverter[]]@())
+                continue
+            }
 
-        $filterCatalogObject.Add([Newtonsoft.Json.Linq.JProperty]::new('groups', $(if ($null -ne $groupsToken) { $groupsToken.DeepClone() } else { [Newtonsoft.Json.Linq.JArray]::new() })))
-        $filterCatalogObject.Add([Newtonsoft.Json.Linq.JProperty]::new('tags', $(if ($null -ne $tagsToken) { $tagsToken.DeepClone() } else { [Newtonsoft.Json.Linq.JArray]::new() })))
-
-        $summaryDevices = [Newtonsoft.Json.Linq.JArray]::new()
-        if ($devicesToken -is [Newtonsoft.Json.Linq.JArray]) {
-            foreach ($deviceToken in $devicesToken) {
-                if ($deviceToken -isnot [Newtonsoft.Json.Linq.JObject]) {
-                    continue
-                }
-
-                $summaryDevice = [Newtonsoft.Json.Linq.JObject]::new()
-                foreach ($propertyName in @('id', 'n', 'g', 't')) {
-                    $propertyToken = $deviceToken.GetValue($propertyName)
-                    if ($null -ne $propertyToken) {
-                        $summaryDevice.Add([Newtonsoft.Json.Linq.JProperty]::new($propertyName, $propertyToken.DeepClone()))
+            $jsonWriter.WriteStartArray()
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::StartArray) {
+                while ($jsonReader.Read() -and $jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::EndArray) {
+                    if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+                        $jsonReader.Skip()
+                        continue
                     }
+                    $jsonWriter.WriteStartObject()
+                    while ($jsonReader.Read() -and $jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::EndObject) {
+                        if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) { continue }
+                        $devicePropertyName = [string]$jsonReader.Value
+                        if (-not $jsonReader.Read()) { break }
+                        if ($devicePropertyName -in @('id', 'n', 'g', 't')) {
+                            $jsonWriter.WritePropertyName($devicePropertyName)
+                            $devicePropertyToken = [Newtonsoft.Json.Linq.JToken]::ReadFrom($jsonReader)
+                            $devicePropertyToken.WriteTo($jsonWriter, [Newtonsoft.Json.JsonConverter[]]@())
+                        }
+                        else {
+                            $jsonReader.Skip()
+                        }
+                    }
+                    $jsonWriter.WriteEndObject()
                 }
-
-                $summaryDevices.Add($summaryDevice)
             }
+            else {
+                $jsonReader.Skip()
+            }
+            $jsonWriter.WriteEndArray()
         }
 
-        $filterCatalogObject.Add([Newtonsoft.Json.Linq.JProperty]::new('devices', $summaryDevices))
-        $summaryObject.Add([Newtonsoft.Json.Linq.JProperty]::new('meta', $metaObject))
-        $summaryObject.Add([Newtonsoft.Json.Linq.JProperty]::new('filterCatalog', $filterCatalogObject))
-        return $summaryObject.ToString([Newtonsoft.Json.Formatting]::None)
+        foreach ($missingField in $catalogFields) {
+            if ($writtenFields.ContainsKey($missingField)) { continue }
+            $jsonWriter.WritePropertyName($missingField)
+            $jsonWriter.WriteStartArray()
+            $jsonWriter.WriteEndArray()
+        }
+        $jsonWriter.WriteEndObject()
+        $jsonWriter.WriteEndObject()
+        $jsonWriter.Flush()
+        return $stringWriter.ToString()
     }
     finally {
+        if ($jsonWriter) { $jsonWriter.Close() }
+        if ($stringWriter) { $stringWriter.Dispose() }
         if ($jsonReader) { $jsonReader.Close() }
         if ($reader) { $reader.Dispose() }
         if ($gzip) { $gzip.Dispose() }
@@ -15404,6 +15672,79 @@ function Read-NormalizationMachineLookup {
     }
 
     return (Read-MachineData -Path $Path -AsNormalizationTuple)
+}
+
+function Get-NormalizationExecutionPlan {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $false)][string]$DeliveryMode = 'SelfContained',
+        [Parameter(Mandatory = $false)][ValidateRange(1000, 1000000)][int]$MaximumInProcessContentTemplates = 10000
+    )
+
+    $manifestPath = Join-Path $Path 'synthetic-manifest.json'
+    $manifest = if (Test-Path -LiteralPath $manifestPath -PathType Leaf) { Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 30 } else { $null }
+    $deviceProfileCount = if ($null -ne $manifest -and $manifest.PSObject.Properties['actualDeviceCount']) { [int]$manifest.actualDeviceCount } else { -1 }
+    $contentTemplateCount = if ($null -ne $manifest -and $manifest.PSObject.Properties['contentTemplateCount']) { [int]$manifest.contentTemplateCount } else { -1 }
+    $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $Path
+
+    if (($deviceProfileCount -lt 0 -or $contentTemplateCount -lt 0) -and (Test-Path -LiteralPath $dictionaryPath -PathType Leaf)) {
+        if ($deviceProfileCount -lt 0) {
+            $deviceProfileCount = 0
+            Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles' | ForEach-Object { $deviceProfileCount++ }
+        }
+        if ($contentTemplateCount -lt 0) {
+            $contentTemplateCount = 0
+            Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'contentTemplates' | ForEach-Object { $contentTemplateCount++ }
+        }
+    }
+
+    $deviceProfileCount = [math]::Max(0, $deviceProfileCount)
+    $contentTemplateCount = [math]::Max(0, $contentTemplateCount)
+    $requiresPartitionedContent = ($contentTemplateCount -gt $MaximumInProcessContentTemplates)
+    $machineInputFile = @(Get-ChildItem -LiteralPath $Path -Filter 'Machines_Current.json*' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+    $hasMachineInput = if ($machineInputFile.Count -eq 0) { $false } else { $null -ne (Read-VulnNdjsonLinesFromPath -Path $machineInputFile[0].FullName | Select-Object -First 1) }
+    $hasEnrichmentInput = @(Get-ChildItem -LiteralPath $Path -Filter 'AdvancedHunting_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0 -or @(Get-ChildItem -LiteralPath $Path -Filter 'NvdCve_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0
+    $compiledContentEligible = ($requiresPartitionedContent -and -not $hasMachineInput -and -not $hasEnrichmentInput)
+    $estimatedPrivateMemoryMb = [math]::Round((145 + ($deviceProfileCount * 0.0015) + ($contentTemplateCount * 0.008)), 1)
+    $estimatedWorkingSetMb = [math]::Round(($estimatedPrivateMemoryMb + 170), 1)
+
+    return [PSCustomObject]@{
+        DeviceProfileCount = $deviceProfileCount
+        ContentTemplateCount = $contentTemplateCount
+        DeviceLookupMode = if ($deviceProfileCount -ge 5000) { 'compiled-file-backed' } else { 'compact-file-backed' }
+        ContentNormalizationMode = if ($compiledContentEligible) { 'compiled-bounded-standard-payload' } elseif ($requiresPartitionedContent) { 'partitioned-required' } else { 'in-process-streaming' }
+        DeliveryMode = $DeliveryMode
+        EstimatedPrivateMemoryMb = $estimatedPrivateMemoryMb
+        EstimatedWorkingSetMb = $estimatedWorkingSetMb
+        MaximumInProcessContentTemplates = $MaximumInProcessContentTemplates
+        SafeToExecute = (-not $requiresPartitionedContent -or $compiledContentEligible)
+        FailureReason = if ($requiresPartitionedContent -and -not $compiledContentEligible) { "Content template cardinality $contentTemplateCount exceeds the safe in-process limit $MaximumInProcessContentTemplates, and machine/enrichment inputs require the compatibility normalizer. Use a lower-cardinality workload or a compiled enrichment-capable projection." } else { $null }
+    }
+}
+
+function Invoke-BoundedContentStorePayloadProjection {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$DataPath, [Parameter(Mandatory = $true)][string]$PayloadOutputPath)
+    Initialize-CompiledVulnContentProjector
+    $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $DataPath
+    $refs = @((Get-VulnCurrentRefsPath -BasePath $DataPath)) + @(Get-ChildItem -LiteralPath $DataPath -Filter 'VulnHistoryRefs_*.json.gz' -File | Sort-Object Name | ForEach-Object FullName)
+    $stagePath = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-dictionary-' + [guid]::NewGuid().ToString('N'))
+    $projectionResult = $null
+    try {
+        [void](New-Item -Path $stagePath -ItemType Directory -Force)
+        foreach ($propertyName in @('deviceProfiles', 'contentTemplates')) {
+            $writer = [System.IO.StreamWriter]::new((Join-Path $stagePath ($propertyName + '.ndjson')), $false, [System.Text.UTF8Encoding]::new($false), 65536)
+            try { Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName $propertyName | ForEach-Object { $writer.WriteLine($_.ToString([Newtonsoft.Json.Formatting]::None)) } }
+            finally { $writer.Dispose() }
+        }
+        $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $refs, [System.IO.Path]::GetFullPath($PayloadOutputPath))
+    }
+    finally { if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force -ErrorAction SilentlyContinue } }
+    Invoke-FullGarbageCollection
+    [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
+    return $projectionResult
 }
 
 function Get-DashboardCacheDirectory {
@@ -19019,6 +19360,9 @@ function Invoke-ContentStoreNormalization {
         }
         $deviceLookupIndices = [System.Collections.Generic.List[int]]::new()
         $deviceOnboardedFlags = [System.Collections.Generic.List[bool]]::new()
+        $deviceProfileLoadCount = 0L
+        $deviceProfileLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $deviceProfileLastHeartbeatSecond = -1
         Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles' | ForEach-Object {
             $deviceProfile = $_
             $deviceId = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'id')
@@ -19034,6 +19378,17 @@ function Invoke-ContentStoreNormalization {
                     -MachineTags @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $deviceProfile -Name 't')) `
                     -Context $Context)) | Out-Null
             $deviceOnboardedFlags.Add(((Get-VulnPropertyValue -InputObject $deviceProfile -Name 'ob') -eq $true)) | Out-Null
+            $deviceProfileLoadCount++
+            if (($deviceProfileLoadCount % 1000) -eq 0) {
+                $elapsedWholeSeconds = [math]::Floor($deviceProfileLoadStopwatch.Elapsed.TotalSeconds)
+                if (($deviceProfileLoadCount % 10000) -eq 0 -or ($deviceProfileLastHeartbeatSecond + 30) -le $elapsedWholeSeconds) {
+                    Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
+                            Kind = 'work'; Count = $deviceProfileLoadCount; Unit = 'device profile(s)';
+                            ElapsedSeconds = [math]::Round($deviceProfileLoadStopwatch.Elapsed.TotalSeconds, 1)
+                        })
+                    $deviceProfileLastHeartbeatSecond = $elapsedWholeSeconds
+                }
+            }
         }
 
         if ($hasInventoryIdentity) {
@@ -19057,6 +19412,9 @@ function Invoke-ContentStoreNormalization {
             Message = 'Loading content-store vulnerability templates into normalization lookups.'
         })
 
+    $contentTemplateLoadCount = 0L
+    $contentTemplateLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $contentTemplateLastHeartbeatSecond = -1
     Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'contentTemplates' | ForEach-Object {
         $contentTemplate = $_
         $softwareVendor = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sv')
@@ -19096,6 +19454,17 @@ function Invoke-ContentStoreNormalization {
                 -RegistryPaths @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $contentTemplate -Name 'rp')) `
                 -SecurityUpdateAvailable ((Get-VulnPropertyValue -InputObject $contentTemplate -Name 'ua') -eq $true) `
                 -Context $Context))) | Out-Null
+        $contentTemplateLoadCount++
+        if (($contentTemplateLoadCount % 1000) -eq 0) {
+            $elapsedWholeSeconds = [math]::Floor($contentTemplateLoadStopwatch.Elapsed.TotalSeconds)
+            if (($contentTemplateLoadCount % 10000) -eq 0 -or ($contentTemplateLastHeartbeatSecond + 30) -le $elapsedWholeSeconds) {
+                Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
+                        Kind = 'work'; Count = $contentTemplateLoadCount; Unit = 'content template(s)';
+                        ElapsedSeconds = [math]::Round($contentTemplateLoadStopwatch.Elapsed.TotalSeconds, 1)
+                    })
+                $contentTemplateLastHeartbeatSecond = $elapsedWholeSeconds
+            }
+        }
     }
 
     $contentLookupCache = $contentLookupCache.ToArray()
@@ -20433,6 +20802,19 @@ function ConvertTo-NormalizedData {
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
     Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s), {3} inventory tuple(s), {4} NVD CVE(s)" -f (Get-NormalizationMachineLookupCount -Machines $Machines), $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count, $AdvancedHuntingInventoryData.Count, $NvdCveData.Count) -InformationAction Continue
+    $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath
+    if ($executionPlan.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') {
+        if ([string]::IsNullOrWhiteSpace($PayloadOutputPath) -or -not $ConsumeLookupsOnPayloadClose -or -not $SkipObservedWindowMerge) { throw 'Compiled bounded content normalization requires direct payload output, lookup consumption, and SkipObservedWindowMerge.' }
+        if ((Get-NormalizationMachineLookupCount -Machines $Machines) -gt 0 -or $AdvancedHuntingData.Count -gt 0 -or $AdvancedHuntingDeviceUsers.Count -gt 0 -or $AdvancedHuntingInventoryData.Count -gt 0 -or $NvdCveData.Count -gt 0) { throw 'Compiled bounded content normalization cannot discard loaded machine or enrichment data.' }
+        Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{ Kind = 'phase'; Phase = 'CompiledBoundedContentNormalization'; Message = 'Streaming high-cardinality content through the compiled bounded standard-payload projector.' })
+        $compiledResult = Invoke-BoundedContentStorePayloadProjection -DataPath $DataPath -PayloadOutputPath $PayloadOutputPath
+        Invoke-FullGarbageCollection
+        [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
+        return @{
+            Lookups = $null; LookupsConsumed = $true; DeviceCount = [int]$compiledResult.DeviceCount; CveCount = [int]$compiledResult.CveCount; SoftwareCount = [int]$compiledResult.SoftwareCount; VendorCount = [int]$compiledResult.VendorCount
+            Quality = [PSCustomObject]@{ FirstLastSwappedCount = 0 }; VulnCount = [long]$compiledResult.ProcessedCount; VulnsPath = $null; VulnColumnPaths = $null; PayloadPath = $PayloadOutputPath
+        }
+    }
     Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
     $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
     $context = Get-NormalizationContext
@@ -20636,7 +21018,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 673fe21ab546728e229ca61eebb46eda95a9b31e680b5982070f413e180b627d
+# ArtifactFingerprint: 2a40997b48281b77202feff71fde887f4efb20b01768f6c5dad0038afd2b85cb
 
 
 
@@ -21910,6 +22292,12 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         Set-PipelineExecutionStage -Stage 'ReadNormalizationInputs' -Message 'Loading machine and Advanced Hunting inputs for dashboard normalization.'
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
+        $normalizationExecutionPlan = Get-NormalizationExecutionPlan -Path $tempExports -DeliveryMode $DashboardDeliveryMode
+        Write-Output ("  Normalization plan: devices={0}; contentTemplates={1}; machineLookup={2}; contentMode={3}; estimatedPrivate={4}MB; estimatedWorkingSet={5}MB" -f $normalizationExecutionPlan.DeviceProfileCount, $normalizationExecutionPlan.ContentTemplateCount, $normalizationExecutionPlan.DeviceLookupMode, $normalizationExecutionPlan.ContentNormalizationMode, $normalizationExecutionPlan.EstimatedPrivateMemoryMb, $normalizationExecutionPlan.EstimatedWorkingSetMb)
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties @{ normalizationExecutionPlan = $normalizationExecutionPlan })
+        if (-not $normalizationExecutionPlan.SafeToExecute) {
+            throw [string]$normalizationExecutionPlan.FailureReason
+        }
         $useDirectMergeDeviceLookupForRun = (
             $UseDirectMergeDeviceLookup -and
             (Sync-VulnContentStoreSidecar -BasePath $tempExports) -and
@@ -22018,6 +22406,20 @@ try {
                         Update-PipelineNormalizedLookupSnapshot -Counts $NormalizationEvent.LookupCounts
                         $additionalProperties['normalizedLookupCounts'] = $NormalizationEvent.LookupCounts
                     }
+                }
+                'work' {
+                    $workCount = [long]$NormalizationEvent.Count
+                    $workElapsedSeconds = [math]::Max(0.001, [double]$NormalizationEvent.ElapsedSeconds)
+                    $workUnit = if ($NormalizationEvent.PSObject.Properties['Unit']) { [string]$NormalizationEvent.Unit } else { 'item(s)' }
+                    $workRate = [math]::Round(($workCount / $workElapsedSeconds), 0)
+                    $statusMessage = ('{0} Processed {1:N0} {2} over {3:N1}s ({4:N0}/s).' -f [string]$normalizationStatusState.PhaseMessage, $workCount, $workUnit, $workElapsedSeconds, $workRate)
+                    if (-not [string]::IsNullOrWhiteSpace([string]$normalizationStatusState.SubPhase)) {
+                        $additionalProperties['normalizedSubPhase'] = [string]$normalizationStatusState.SubPhase
+                    }
+                    $additionalProperties['normalizedPhaseItemCount'] = $workCount
+                    $additionalProperties['normalizedPhaseItemUnit'] = $workUnit
+                    $additionalProperties['normalizedPhaseItemRatePerSecond'] = $workRate
+                    $additionalProperties['normalizedProgressMarkerType'] = 'heartbeat'
                 }
             }
 

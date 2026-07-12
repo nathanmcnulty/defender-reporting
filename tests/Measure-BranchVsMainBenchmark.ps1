@@ -99,6 +99,7 @@ $script:PollIntervalSeconds = $PollIntervalSeconds
 . (Join-Path $PSScriptRoot 'Import-BenchmarkDatasetCatalog.ps1')
 . (Join-Path $PSScriptRoot 'helpers\BenchmarkSeriesTools.ps1')
 . (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
+. (Join-Path $PSScriptRoot 'helpers\BenchmarkEvidenceTools.ps1')
 
 function Write-AdHocBenchmarkSeriesSummary {
     [CmdletBinding()]
@@ -2877,7 +2878,7 @@ finally {
 }
 
 $result = [PSCustomObject]@{
-    benchmark_schema_version = 3
+    benchmark_schema_version = 4
     generated_utc = [datetime]::UtcNow.ToString('o')
     benchmark_mode = if ($LocalOnly) {
         if ($CurrentOnly) { 'local-current-only' } else { 'local-branch-vs-main' }
@@ -2933,7 +2934,14 @@ $result = [PSCustomObject]@{
     comparison = if ($null -ne $currentResult -and $null -ne $mainResult) { Get-ComparisonBlock -Current $currentResult -Main $mainResult } else { $null }
 }
 
-$result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $resolvedResultsOutputPath -Encoding utf8
+$result | Add-Member -NotePropertyName benchmark_evidence -NotePropertyValue (Get-BenchmarkEvidenceEnvelope `
+        -Kind 'branch-vs-main' `
+        -RepoPath $resolvedCurrentRepoPath `
+        -Dataset (Get-BenchmarkDatasetEvidence -DatasetPath $resolvedDatasetPath) `
+        -Environment ([PSCustomObject]@{ subscription = $result.subscription; local_only = $LocalOnly; function_app = $FunctionAppName; automation_account = $AutomationAccountName; runbook = $RunbookName }) `
+        -Execution ([PSCustomObject]@{ current = $currentResult; main = $mainResult; comparison = $result.comparison; execution_order = $baselineExecutionPlan }) `
+        -Validation ([PSCustomObject]@{ total_rows = $totalRows; current_completed = ($null -ne $currentResult); main_completed = ($CurrentOnly -or $null -ne $mainResult) }))
+Write-BenchmarkEvidenceEnvelope -Path $resolvedResultsOutputPath -Evidence $result
 Write-AdHocBenchmarkSeriesSummary -ResultPath $resolvedResultsOutputPath
 
 Write-Host ''

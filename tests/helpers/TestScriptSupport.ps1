@@ -9,8 +9,15 @@ function Get-AvailableMemoryGB {
         return [double]::NaN
     }
 
-    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
-    return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        return [math]::Round(($os.FreePhysicalMemory / 1MB), 2)
+    }
+    catch {
+        # Memory sampling is useful telemetry, not a reason to prevent the
+        # benchmark wrapper from starting in restricted Windows environments.
+        return [double]::NaN
+    }
 }
 
 function Get-HeartbeatTimestampText {
@@ -41,6 +48,22 @@ function Get-HeartbeatFileStatus {
         bytes = [int64]$item.Length
         ageSeconds = [math]::Round(((Get-Date).ToUniversalTime() - $item.LastWriteTimeUtc).TotalSeconds, 1)
     }
+}
+
+function Get-ProgressStallAssessment {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)][datetime]$LastProgressUtc,
+        [Parameter(Mandatory = $false)][datetime]$NowUtc = [datetime]::UtcNow,
+        [Parameter(Mandatory = $false)][ValidateRange(1, 86400)][int]$WarningSeconds = 300,
+        [Parameter(Mandatory = $false)][ValidateRange(2, 172800)][int]$FailureSeconds = 1800
+    )
+
+    if ($FailureSeconds -le $WarningSeconds) { throw 'FailureSeconds must be greater than WarningSeconds.' }
+    $ageSeconds = [math]::Max(0, ($NowUtc.ToUniversalTime() - $LastProgressUtc.ToUniversalTime()).TotalSeconds)
+    $state = if ($ageSeconds -ge $FailureSeconds) { 'Failed' } elseif ($ageSeconds -ge $WarningSeconds) { 'Warning' } else { 'Healthy' }
+    return [PSCustomObject]@{ State = $state; AgeSeconds = [math]::Round($ageSeconds, 1); WarningSeconds = $WarningSeconds; FailureSeconds = $FailureSeconds }
 }
 
 function Get-TextWithoutAnsiEscape {

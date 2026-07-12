@@ -59,6 +59,9 @@ function Get-BenchmarkDatasetMetadataRecord {
         preset = [string]$Definition.preset
         seed = [int]$Definition.seed
         modelVersion = if ($Definition.PSObject.Properties['modelVersion']) { [string]$Definition.modelVersion } else { 'procedural-v1' }
+        workloadProfile = if ($Definition.PSObject.Properties['workloadProfile']) { [string]$Definition.workloadProfile } else { 'Unclassified' }
+        workloadProfileVersion = if ($Definition.PSObject.Properties['workloadProfileVersion']) { [int]$Definition.workloadProfileVersion } else { 1 }
+        expectedEnvelope = if ($Definition.PSObject.Properties['expectedEnvelope']) { $Definition.expectedEnvelope } else { $null }
         generatorVersion = if ($null -ne $Manifest -and $Manifest.PSObject.Properties['generatorVersion']) { [string]$Manifest.generatorVersion } else { 'procedural-streaming-v1' }
         targetDeviceCount = [int]$Definition.targetDeviceCount
         targetTotalVulnRows = [int]$Definition.targetTotalVulnRows
@@ -180,18 +183,24 @@ if ((Test-Path -LiteralPath $resolvedOutputPath) -and $Force) {
     Remove-Item -LiteralPath $resolvedOutputPath -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-& $generatorScriptPath `
-    -Preset ([string]$definition.preset) `
-    -SourcePath $sourcePath `
-    -OutputPath $resolvedOutputPath `
-    -TargetDeviceCount ([int]$definition.targetDeviceCount) `
-    -TargetTotalVulnRows ([int]$definition.targetTotalVulnRows) `
-    -ContentTemplateCount ([int]$definition.contentTemplateCount) `
-    -Seed ([int]$definition.seed) `
-    -MinimumAvailableMemoryGB $MinimumAvailableMemoryGB `
-    -MinimumFreeDiskGB $MinimumFreeDiskGB `
-    -AllowLargeDataset:$AllowLargeDataset `
-    -CleanOutput
+$generatorParameters = @{
+    Preset = [string]$definition.preset
+    SourcePath = $sourcePath
+    OutputPath = $resolvedOutputPath
+    TargetDeviceCount = [int]$definition.targetDeviceCount
+    TargetTotalVulnRows = [int]$definition.targetTotalVulnRows
+    ContentTemplateCount = [int]$definition.contentTemplateCount
+    Seed = [int]$definition.seed
+    MinimumAvailableMemoryGB = $MinimumAvailableMemoryGB
+    MinimumFreeDiskGB = $MinimumFreeDiskGB
+    AllowLargeDataset = $AllowLargeDataset
+    CleanOutput = $true
+}
+foreach ($parameterName in @('SnapshotCount', 'ChurnRate', 'OptionalFieldSparsity')) {
+    $definitionProperty = $definition.PSObject.Properties[$parameterName.Substring(0, 1).ToLowerInvariant() + $parameterName.Substring(1)]
+    if ($null -ne $definitionProperty) { $generatorParameters[$parameterName] = $definitionProperty.Value }
+}
+& $generatorScriptPath @generatorParameters
 
 $generatedManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 20
 $metadata = Get-BenchmarkDatasetMetadataRecord -Definition $definition -DatasetPath $resolvedOutputPath -SourcePath $sourcePath -Manifest $generatedManifest

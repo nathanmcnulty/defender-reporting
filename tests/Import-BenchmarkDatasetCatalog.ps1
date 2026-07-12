@@ -131,7 +131,10 @@ function Test-BenchmarkDatasetDefinitionMatch {
         ([int]$Manifest.targetDeviceCount -eq [int]$Definition.targetDeviceCount) -and
         ([int]$Manifest.targetTotalVulnRows -eq [int]$Definition.targetTotalVulnRows) -and
         ((-not $Definition.PSObject.Properties['contentTemplateCount']) -or ([int]$Manifest.contentTemplateCount -eq [int]$Definition.contentTemplateCount)) -and
-        ((-not $Definition.PSObject.Properties['modelVersion']) -or ([string]$Manifest.modelVersion -eq [string]$Definition.modelVersion))
+        ((-not $Definition.PSObject.Properties['modelVersion']) -or ([string]$Manifest.modelVersion -eq [string]$Definition.modelVersion)) -and
+        ((-not $Definition.PSObject.Properties['snapshotCount']) -or ([int]$Manifest.snapshotCount -eq [int]$Definition.snapshotCount)) -and
+        ((-not $Definition.PSObject.Properties['churnRate']) -or ([double]$Manifest.model.churnRate -eq [double]$Definition.churnRate)) -and
+        ((-not $Definition.PSObject.Properties['optionalFieldSparsity']) -or ([double]$Manifest.model.optionalFieldSparsity -eq [double]$Definition.optionalFieldSparsity))
     )
 }
 

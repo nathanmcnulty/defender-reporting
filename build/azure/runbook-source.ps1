@@ -1491,6 +1491,12 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         Set-PipelineExecutionStage -Stage 'ReadNormalizationInputs' -Message 'Loading machine and Advanced Hunting inputs for dashboard normalization.'
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
+        $normalizationExecutionPlan = Get-NormalizationExecutionPlan -Path $tempExports -DeliveryMode $DashboardDeliveryMode
+        Write-Output ("  Normalization plan: devices={0}; contentTemplates={1}; machineLookup={2}; contentMode={3}; estimatedPrivate={4}MB; estimatedWorkingSet={5}MB" -f $normalizationExecutionPlan.DeviceProfileCount, $normalizationExecutionPlan.ContentTemplateCount, $normalizationExecutionPlan.DeviceLookupMode, $normalizationExecutionPlan.ContentNormalizationMode, $normalizationExecutionPlan.EstimatedPrivateMemoryMb, $normalizationExecutionPlan.EstimatedWorkingSetMb)
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties @{ normalizationExecutionPlan = $normalizationExecutionPlan })
+        if (-not $normalizationExecutionPlan.SafeToExecute) {
+            throw [string]$normalizationExecutionPlan.FailureReason
+        }
         $useDirectMergeDeviceLookupForRun = (
             $UseDirectMergeDeviceLookup -and
             (Sync-VulnContentStoreSidecar -BasePath $tempExports) -and
@@ -1599,6 +1605,20 @@ try {
                         Update-PipelineNormalizedLookupSnapshot -Counts $NormalizationEvent.LookupCounts
                         $additionalProperties['normalizedLookupCounts'] = $NormalizationEvent.LookupCounts
                     }
+                }
+                'work' {
+                    $workCount = [long]$NormalizationEvent.Count
+                    $workElapsedSeconds = [math]::Max(0.001, [double]$NormalizationEvent.ElapsedSeconds)
+                    $workUnit = if ($NormalizationEvent.PSObject.Properties['Unit']) { [string]$NormalizationEvent.Unit } else { 'item(s)' }
+                    $workRate = [math]::Round(($workCount / $workElapsedSeconds), 0)
+                    $statusMessage = ('{0} Processed {1:N0} {2} over {3:N1}s ({4:N0}/s).' -f [string]$normalizationStatusState.PhaseMessage, $workCount, $workUnit, $workElapsedSeconds, $workRate)
+                    if (-not [string]::IsNullOrWhiteSpace([string]$normalizationStatusState.SubPhase)) {
+                        $additionalProperties['normalizedSubPhase'] = [string]$normalizationStatusState.SubPhase
+                    }
+                    $additionalProperties['normalizedPhaseItemCount'] = $workCount
+                    $additionalProperties['normalizedPhaseItemUnit'] = $workUnit
+                    $additionalProperties['normalizedPhaseItemRatePerSecond'] = $workRate
+                    $additionalProperties['normalizedProgressMarkerType'] = 'heartbeat'
                 }
             }
 

@@ -27,7 +27,11 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(0.0, 1.0)]
-    [double]$OptionalFieldSparsity = 0.03
+    [double]$OptionalFieldSparsity = 0.03,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 64)]
+    [int]$MaximumOverlayChainDepth = 8
 )
 
 Set-StrictMode -Version Latest
@@ -553,6 +557,27 @@ if (Test-EquivalentPath -Left $resolvedSourcePath -Right $resolvedOutputPath) {
     throw 'OutputPath must differ from SourcePath.'
 }
 
+function Assert-SyntheticParentArtifactIntegrity {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory = $true)][string]$DatasetPath, [Parameter(Mandatory = $true)]$Manifest)
+
+    if (-not $Manifest.PSObject.Properties['artifacts']) { return '' }
+    $canonical = [System.Collections.Generic.List[string]]::new()
+    foreach ($artifact in @($Manifest.artifacts | Sort-Object name)) {
+        $name = [string]$artifact.name
+        if ([string]::IsNullOrWhiteSpace($name)) { throw 'Parent manifest contains an artifact without a name.' }
+        $path = Join-Path $DatasetPath $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Parent artifact '$name' is missing." }
+        $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        $expectedHash = [string]$artifact.sha256
+        if (-not [string]::IsNullOrWhiteSpace($expectedHash) -and $actualHash -ne $expectedHash.ToLowerInvariant()) { throw "Parent artifact '$name' failed SHA-256 validation." }
+        $canonical.Add(("{0}|{1}|{2}" -f $name, (Get-Item -LiteralPath $path).Length, $actualHash))
+    }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($canonical -join "`n"))
+    return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+
 $proceduralManifestPath = Join-Path $resolvedSourcePath 'synthetic-manifest.json'
 $proceduralManifest = if (Test-Path -LiteralPath $proceduralManifestPath -PathType Leaf) {
     Get-Content -LiteralPath $proceduralManifestPath -Raw | ConvertFrom-Json -Depth 30
@@ -566,6 +591,10 @@ if ($Mode -eq 'AdvanceSnapshot') {
     if ((Test-Path -LiteralPath $resolvedOutputPath) -and -not $Force) {
         throw "Output path already exists: $resolvedOutputPath"
     }
+
+    $parentArtifactManifestHash = Assert-SyntheticParentArtifactIntegrity -DatasetPath $resolvedSourcePath -Manifest $proceduralManifest
+    $parentChainDepth = if ($proceduralManifest.PSObject.Properties['overlayChainDepth']) { [int]$proceduralManifest.overlayChainDepth } else { 0 }
+    if ($parentChainDepth -ge $MaximumOverlayChainDepth) { throw "Overlay chain depth $parentChainDepth reached the configured maximum $MaximumOverlayChainDepth. Consolidate the dataset into a new seed before advancing again." }
 
     $sourceLatestDate = Get-VulnStoreLatestSnapshotDate -BasePath $resolvedSourcePath
     if ([string]::IsNullOrWhiteSpace($sourceLatestDate)) {
@@ -614,6 +643,9 @@ if ($Mode -eq 'AdvanceSnapshot') {
         $overlayManifest.manifestVersion = 2
         $overlayManifest.generatorVersion = 'procedural-streaming-v1'
         $overlayManifest.parentDatasetId = [string]$proceduralManifest.datasetId
+        $overlayManifest.parentArtifactManifestHash = $parentArtifactManifestHash
+        $overlayManifest.overlayChainDepth = $parentChainDepth + 1
+        $overlayManifest.maximumOverlayChainDepth = $MaximumOverlayChainDepth
         $overlayManifest.datasetId = ([string]$proceduralManifest.datasetId + '-snapshot-' + $snapshotOrdinal)
         $overlayManifest.incrementMode = 'AdvanceSnapshot'
         $overlayManifest.snapshotOrdinal = $snapshotOrdinal

@@ -3,6 +3,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
+    [string]$SubscriptionId,
+
+    [Parameter(Mandatory = $false)]
     [string]$RepoPath = (Split-Path -Path $PSScriptRoot -Parent),
 
     [Parameter(Mandatory = $false)]
@@ -35,6 +38,14 @@ param(
     [int]$PollIntervalSeconds = 15,
 
     [Parameter(Mandatory = $false)]
+    [ValidateRange(60, 86400)]
+    [int]$StallWarningSeconds = 300,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(120, 172800)]
+    [int]$StallFailureSeconds = 1800,
+
+    [Parameter(Mandatory = $false)]
     [switch]$SkipDeployRunbook,
 
     [Parameter(Mandatory = $false)]
@@ -58,6 +69,7 @@ $script:UseDirectMergeDeviceLookup = if ($PSBoundParameters.ContainsKey('UseDire
 $script:ExpectedTotalRows = $ExpectedTotalRows
 $script:PollIntervalSeconds = $PollIntervalSeconds
 . (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
+. (Join-Path $PSScriptRoot 'helpers\BenchmarkEvidenceTools.ps1')
 
 function Invoke-AzCli {
     [CmdletBinding()]
@@ -72,6 +84,9 @@ function Invoke-AzCli {
         [switch]$AllowEmpty
     )
 
+    if (-not [string]::IsNullOrWhiteSpace($SubscriptionId) -and $Arguments -notcontains '--subscription') {
+        $Arguments = @($Arguments) + @('--subscription', $SubscriptionId)
+    }
     $output = (& az @Arguments 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) {
         throw ("az {0}`n{1}" -f ($Arguments -join ' '), $output.Trim())
@@ -452,9 +467,34 @@ if ($null -eq $runbookState) {
 Write-Host ("Started runbook job {0}" -f $runbookState.name) -ForegroundColor Yellow
 
 $runbookJob = $null
+$runbookStatusTimeline = [System.Collections.Generic.List[object]]::new()
+$lastStatusUpdatedOnUtc = ''
+$lastProgressUtc = $runbookState.creationTimeUtc
+$stallWarningIssued = $false
 do {
     Start-Sleep -Seconds $script:PollIntervalSeconds
     $runbookJob = Get-RunbookJobStatus -JobName $runbookState.name
+    $statusSample = Get-RunbookExecutionStatus -StorageAccountName $script:StorageAccountName
+    if ($null -ne $statusSample) {
+        $statusStartedUtc = ConvertTo-UtcDateTime -Value $statusSample.startedOnUtc
+        $statusUpdatedText = [string]$statusSample.updatedOnUtc
+        if ($null -ne $statusStartedUtc -and $statusStartedUtc -ge $runbookState.creationTimeUtc.AddMinutes(-1) -and $statusUpdatedText -ne $lastStatusUpdatedOnUtc) {
+            $runbookStatusTimeline.Add($statusSample)
+            $lastStatusUpdatedOnUtc = $statusUpdatedText
+            $statusUpdatedUtc = ConvertTo-UtcDateTime -Value $statusSample.updatedOnUtc
+            if ($null -ne $statusUpdatedUtc) { $lastProgressUtc = $statusUpdatedUtc }
+            $stallWarningIssued = $false
+        }
+    }
+    $stall = Get-ProgressStallAssessment -LastProgressUtc $lastProgressUtc -WarningSeconds $StallWarningSeconds -FailureSeconds $StallFailureSeconds
+    if ($stall.State -eq 'Warning' -and -not $stallWarningIssued) {
+        Write-Warning ("Runbook has not published progress for {0:N1}s (stage={1}; message={2})." -f $stall.AgeSeconds, [string]$statusSample.stage, [string]$statusSample.message)
+        $stallWarningIssued = $true
+    }
+    elseif ($stall.State -eq 'Failed') {
+        Invoke-AzCli -Arguments @('automation', 'job', 'stop', '--automation-account-name', $script:AutomationAccountName, '--resource-group', $script:AutomationResourceGroup, '--name', $runbookState.name, '--subscription', [string]$subscription.id, '-o', 'none') -AllowEmpty | Out-Null
+        throw ("Runbook made no progress for {0:N1}s and was stopped (stage={1}; message={2}; memory={3})." -f $stall.AgeSeconds, [string]$statusSample.stage, [string]$statusSample.message, ($statusSample.memory | ConvertTo-Json -Compress -Depth 10))
+    }
     Write-Host ("Runbook status: {0}" -f [string]$runbookJob.status) -ForegroundColor DarkGray
 }
 while ($runbookJob.status -notin @('Completed', 'Failed', 'Stopped', 'Suspended'))
@@ -497,6 +537,7 @@ if ([string]::IsNullOrWhiteSpace($repoBranch)) {
 }
 
 $result = [ordered]@{
+    benchmark_schema_version = 4
     generated_utc = (Get-Date).ToUniversalTime().ToString('o')
     repo = [ordered]@{
         path = $repoFullPath
@@ -524,10 +565,19 @@ $result = [ordered]@{
     }
     runbook_events = @($runbookEvents)
     runbook_status = $runbookStatus
+    runbook_status_timeline = @($runbookStatusTimeline)
     runbook_status_summary = $runbookStatusSummary
 }
 
-[System.IO.File]::WriteAllText($resultsFullPath, ($result | ConvertTo-Json -Depth 20), [System.Text.UTF8Encoding]::new($false))
+$result['benchmark_evidence'] = Get-BenchmarkEvidenceEnvelope `
+    -Kind 'azure-runbook-only' `
+    -RepoPath $repoFullPath `
+    -Dataset ([PSCustomObject]@{ source = 'azure-blob-exports'; expected_total_rows = $script:ExpectedTotalRows }) `
+    -Environment ([PSCustomObject]@{ subscription = $result.subscription; automation_account = $script:AutomationAccountName; resource_group = $script:AutomationResourceGroup; runbook = $script:RunbookName; storage_account = $script:StorageAccountName }) `
+    -Execution ([PSCustomObject]@{ summary = $runbookSummary; job = $result.runbook_job; status = $runbookStatus; status_timeline = @($runbookStatusTimeline); events = @($runbookEvents) }) `
+    -Validation ([PSCustomObject]@{ terminal_status = [string]$runbookJob.status; expected_total_rows = $script:ExpectedTotalRows })
+
+Write-BenchmarkEvidenceEnvelope -Path $resultsFullPath -Evidence $result
 
 Write-Host ''
 if ($null -ne $runbookStatusSummary) {
@@ -541,3 +591,7 @@ else {
 }
 Write-Host ("Runbook elapsed: {0}s" -f $runbookSummary.elapsed_seconds) -ForegroundColor Green
 Write-Host ("Results written to {0}" -f $resultsFullPath) -ForegroundColor Green
+
+if ([string]$runbookJob.status -ne 'Completed') {
+    throw ("Azure Automation job '{0}' ended with terminal status '{1}'. Diagnostic evidence was written to '{2}'." -f [string]$runbookState.name, [string]$runbookJob.status, $resultsFullPath)
+}

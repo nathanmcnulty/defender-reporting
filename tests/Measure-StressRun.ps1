@@ -39,6 +39,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
+. (Join-Path $PSScriptRoot 'helpers\BenchmarkEvidenceTools.ps1')
 
 if (-not $IsWindows) {
     throw 'tests/Measure-StressRun.ps1 currently supports Windows only because it relies on Win32 CIM classes for process and memory sampling.'
@@ -399,6 +400,14 @@ Add-MeasurementSample -Samples $samples -Process $process -Stopwatch $stopwatch 
 $stopwatch.Stop()
 
 $report = Write-StressReportFile -ReportPath $reportPath -Report (Get-StressReportObject -Name $Name -Command $command -Validate ($Validate -eq $true) -ValidationMode $ValidationMode -AllowLargeSemanticValidation ($AllowLargeSemanticValidation -eq $true) -SemanticValidationRowLimit $SemanticValidationRowLimit -ResolvedDashboardPath $resolvedDashboardPath -StdoutPath $stdoutPath -StderrPath $stderrPath -Stopwatch $stopwatch -PeakRssBytes $peakRssBytes -PeakRssAt $peakRssAt -PeakPrivateBytes $peakPrivateBytes -PeakPrivateAt $peakPrivateAt -Samples $samples -ChildExited $true -ReturnCode $process.ExitCode)
+$report | Add-Member -NotePropertyName benchmark_evidence -NotePropertyValue (Get-BenchmarkEvidenceEnvelope `
+        -Kind 'local-stress-run' `
+        -RepoPath $repoRoot `
+        -Dataset (Get-BenchmarkDatasetEvidence -DatasetPath $resolvedSyntheticPath) `
+        -Environment ([PSCustomObject]@{ host = 'local'; platform = [System.Environment]::OSVersion.ToString() }) `
+        -Execution ([PSCustomObject]@{ command = $command; elapsed_seconds = $report.elapsed_seconds; return_code = $report.return_code; peak_tree_rss_bytes = $report.peak_tree_rss_bytes; peak_tree_private_bytes = $report.peak_tree_private_bytes; samples = @($samples) }) `
+        -Validation $report.validation)
+$report = Write-StressReportFile -ReportPath $reportPath -Report $report
 
 Write-Output ("  Elapsed seconds: {0}" -f $report.elapsed_seconds)
 Write-Output ("  Peak RSS GB: {0}" -f $report.peak_tree_rss_gb)

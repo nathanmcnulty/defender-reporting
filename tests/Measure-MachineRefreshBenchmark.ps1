@@ -22,6 +22,7 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 . (Join-Path $repoRoot 'build\Import-SharedHelpers.ps1')
+. (Join-Path $PSScriptRoot 'helpers\BenchmarkEvidenceTools.ps1')
 
 if (-not (Test-Path -LiteralPath $DatasetPath -PathType Container)) {
     throw "Dataset path '$DatasetPath' does not exist."
@@ -437,10 +438,14 @@ $result = [PSCustomObject]@{
     results = @($results.ToArray())
 }
 
-[System.IO.File]::WriteAllText(
-    [System.IO.Path]::GetFullPath($OutputPath),
-    ($result | ConvertTo-Json -Depth 20),
-    [System.Text.UTF8Encoding]::new($false))
+$result | Add-Member -NotePropertyName benchmark_evidence -NotePropertyValue (Get-BenchmarkEvidenceEnvelope `
+        -Kind 'machine-refresh' `
+        -RepoPath $repoRoot `
+        -Dataset (Get-BenchmarkDatasetEvidence -DatasetPath $DatasetPath) `
+        -Environment ([PSCustomObject]@{ host = 'local'; platform = [System.Environment]::OSVersion.ToString() }) `
+        -Execution ([PSCustomObject]@{ scenario = $Scenario; page_size = $PageSize; results = @($results.ToArray()) }) `
+        -Validation ([PSCustomObject]@{ compared_modes = @('legacy_full', 'statehash_only') }))
+Write-BenchmarkEvidenceEnvelope -Path $OutputPath -Evidence $result
 
 Write-Output ''
 Write-Output ("Results written to {0}" -f [System.IO.Path]::GetFullPath($OutputPath))
