@@ -146,6 +146,7 @@ function Invoke-FullGarbageCollection {
     [CmdletBinding()]
     param()
 
+    [System.Runtime.GCSettings]::LargeObjectHeapCompactionMode = [System.Runtime.GCLargeObjectHeapCompactionMode]::CompactOnce
     [System.GC]::Collect()
     [System.GC]::WaitForPendingFinalizers()
     [System.GC]::Collect()

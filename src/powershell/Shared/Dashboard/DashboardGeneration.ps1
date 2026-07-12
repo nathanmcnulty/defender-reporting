@@ -2108,11 +2108,11 @@ function Write-CombinedPayloadLookupsValue {
             Set-NormalizedLookupPropertyValue -Lookups $Lookups -Name $lookupPropertyName -Value $null
             if (($lookupPropertyName -eq 'batchTitles') -and (Get-Command -Name Invoke-FullGarbageCollection -ErrorAction SilentlyContinue)) {
                 if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
-                    $null = Write-MemoryUsage -Label 'PayloadClose PreDeviceGc'
+                    $null = Write-MemoryUsage -Label ("PayloadClose PreLookupGc {0}" -f $lookupPropertyName)
                 }
                 Invoke-FullGarbageCollection
                 if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
-                    $null = Write-MemoryUsage -Label 'PayloadClose PostPreDeviceGc'
+                    $null = Write-MemoryUsage -Label ("PayloadClose PostLookupGc {0}" -f $lookupPropertyName)
                 }
             }
             if ($lookupPropertyName -in @('devices', 'inventory', 'software', 'cves')) {
@@ -2788,6 +2788,8 @@ function Get-DashboardPayloadSummaryJson {
     $gzip = $null
     $reader = $null
     $jsonReader = $null
+    $stringWriter = $null
+    $jsonWriter = $null
 
     try {
         $fileStream = [System.IO.File]::OpenRead($PayloadPath)
@@ -2795,7 +2797,38 @@ function Get-DashboardPayloadSummaryJson {
         $reader = [System.IO.StreamReader]::new($gzip, [System.Text.Encoding]::UTF8)
         $jsonReader = [Newtonsoft.Json.JsonTextReader]::new($reader)
 
-        $lookupsToken = $null
+        $stringWriter = [System.IO.StringWriter]::new([System.Globalization.CultureInfo]::InvariantCulture)
+        $jsonWriter = [Newtonsoft.Json.JsonTextWriter]::new($stringWriter)
+        $jsonWriter.Formatting = [Newtonsoft.Json.Formatting]::None
+
+        $jsonWriter.WriteStartObject()
+        $jsonWriter.WritePropertyName('version')
+        $jsonWriter.WriteValue(1)
+        $jsonWriter.WritePropertyName('meta')
+        $jsonWriter.WriteStartObject()
+        if ($null -ne $PayloadManifest) {
+            foreach ($manifestProperty in @(
+                    @{ Name = 'GeneratedOnUtc'; JsonName = 'generatedOnUtc'; Type = 'string' }
+                    @{ Name = 'PayloadSha256'; JsonName = 'payloadSha256'; Type = 'string' }
+                    @{ Name = 'VulnCount'; JsonName = 'vulnCount'; Type = 'int' }
+                    @{ Name = 'DeviceCount'; JsonName = 'deviceCount'; Type = 'int' }
+                    @{ Name = 'CveCount'; JsonName = 'cveCount'; Type = 'int' }
+                )) {
+                if (-not $PayloadManifest.PSObject.Properties[$manifestProperty.Name]) { continue }
+                $jsonWriter.WritePropertyName($manifestProperty.JsonName)
+                if ($manifestProperty.Type -eq 'int') {
+                    $jsonWriter.WriteValue([int]$PayloadManifest.($manifestProperty.Name))
+                }
+                else {
+                    $jsonWriter.WriteValue([string]$PayloadManifest.($manifestProperty.Name))
+                }
+            }
+        }
+        $jsonWriter.WriteEndObject()
+        $jsonWriter.WritePropertyName('filterCatalog')
+        $jsonWriter.WriteStartObject()
+
+        $foundLookups = $false
         while ($jsonReader.Read()) {
             if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) {
                 continue
@@ -2805,71 +2838,80 @@ function Get-DashboardPayloadSummaryJson {
                 continue
             }
 
-            [void]$jsonReader.Read()
-            $lookupsToken = [Newtonsoft.Json.Linq.JToken]::ReadFrom($jsonReader)
+            if (-not $jsonReader.Read() -or $jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+                throw "Dashboard payload '$PayloadPath' contains an invalid lookups object."
+            }
+            $foundLookups = $true
             break
         }
 
-        if ($null -eq $lookupsToken) {
+        if (-not $foundLookups) {
             throw "Unable to extract lookups from dashboard payload '$PayloadPath'."
         }
 
-        $summaryObject = [Newtonsoft.Json.Linq.JObject]::new()
-        $summaryObject.Add([Newtonsoft.Json.Linq.JProperty]::new('version', [Newtonsoft.Json.Linq.JValue]::new(1)))
-
-        $metaObject = [Newtonsoft.Json.Linq.JObject]::new()
-        if ($null -ne $PayloadManifest) {
-            if ($PayloadManifest.PSObject.Properties['GeneratedOnUtc']) {
-                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('generatedOnUtc', [Newtonsoft.Json.Linq.JValue]::new([string]$PayloadManifest.GeneratedOnUtc)))
+        $catalogFields = @('groups', 'tags', 'devices')
+        $writtenFields = @{}
+        while ($jsonReader.Read() -and $jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::EndObject) {
+            if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) { continue }
+            $propertyName = [string]$jsonReader.Value
+            if (-not $jsonReader.Read()) { break }
+            if ($propertyName -notin $catalogFields) {
+                $jsonReader.Skip()
+                continue
             }
-            if ($PayloadManifest.PSObject.Properties['PayloadSha256']) {
-                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('payloadSha256', [Newtonsoft.Json.Linq.JValue]::new([string]$PayloadManifest.PayloadSha256)))
-            }
-            if ($PayloadManifest.PSObject.Properties['VulnCount']) {
-                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('vulnCount', [Newtonsoft.Json.Linq.JValue]::new([int]$PayloadManifest.VulnCount)))
-            }
-            if ($PayloadManifest.PSObject.Properties['DeviceCount']) {
-                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('deviceCount', [Newtonsoft.Json.Linq.JValue]::new([int]$PayloadManifest.DeviceCount)))
-            }
-            if ($PayloadManifest.PSObject.Properties['CveCount']) {
-                $metaObject.Add([Newtonsoft.Json.Linq.JProperty]::new('cveCount', [Newtonsoft.Json.Linq.JValue]::new([int]$PayloadManifest.CveCount)))
-            }
-        }
 
-        $lookupsObject = [Newtonsoft.Json.Linq.JObject]$lookupsToken
-        $filterCatalogObject = [Newtonsoft.Json.Linq.JObject]::new()
-        $groupsToken = $lookupsObject.GetValue('groups')
-        $tagsToken = $lookupsObject.GetValue('tags')
-        $devicesToken = $lookupsObject.GetValue('devices')
+            $jsonWriter.WritePropertyName($propertyName)
+            $writtenFields[$propertyName] = $true
+            if ($propertyName -ne 'devices') {
+                $catalogToken = [Newtonsoft.Json.Linq.JToken]::ReadFrom($jsonReader)
+                $catalogToken.WriteTo($jsonWriter, [Newtonsoft.Json.JsonConverter[]]@())
+                continue
+            }
 
-        $filterCatalogObject.Add([Newtonsoft.Json.Linq.JProperty]::new('groups', $(if ($null -ne $groupsToken) { $groupsToken.DeepClone() } else { [Newtonsoft.Json.Linq.JArray]::new() })))
-        $filterCatalogObject.Add([Newtonsoft.Json.Linq.JProperty]::new('tags', $(if ($null -ne $tagsToken) { $tagsToken.DeepClone() } else { [Newtonsoft.Json.Linq.JArray]::new() })))
-
-        $summaryDevices = [Newtonsoft.Json.Linq.JArray]::new()
-        if ($devicesToken -is [Newtonsoft.Json.Linq.JArray]) {
-            foreach ($deviceToken in $devicesToken) {
-                if ($deviceToken -isnot [Newtonsoft.Json.Linq.JObject]) {
-                    continue
-                }
-
-                $summaryDevice = [Newtonsoft.Json.Linq.JObject]::new()
-                foreach ($propertyName in @('id', 'n', 'g', 't')) {
-                    $propertyToken = $deviceToken.GetValue($propertyName)
-                    if ($null -ne $propertyToken) {
-                        $summaryDevice.Add([Newtonsoft.Json.Linq.JProperty]::new($propertyName, $propertyToken.DeepClone()))
+            $jsonWriter.WriteStartArray()
+            if ($jsonReader.TokenType -eq [Newtonsoft.Json.JsonToken]::StartArray) {
+                while ($jsonReader.Read() -and $jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::EndArray) {
+                    if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::StartObject) {
+                        $jsonReader.Skip()
+                        continue
                     }
+                    $jsonWriter.WriteStartObject()
+                    while ($jsonReader.Read() -and $jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::EndObject) {
+                        if ($jsonReader.TokenType -ne [Newtonsoft.Json.JsonToken]::PropertyName) { continue }
+                        $devicePropertyName = [string]$jsonReader.Value
+                        if (-not $jsonReader.Read()) { break }
+                        if ($devicePropertyName -in @('id', 'n', 'g', 't')) {
+                            $jsonWriter.WritePropertyName($devicePropertyName)
+                            $devicePropertyToken = [Newtonsoft.Json.Linq.JToken]::ReadFrom($jsonReader)
+                            $devicePropertyToken.WriteTo($jsonWriter, [Newtonsoft.Json.JsonConverter[]]@())
+                        }
+                        else {
+                            $jsonReader.Skip()
+                        }
+                    }
+                    $jsonWriter.WriteEndObject()
                 }
-
-                $summaryDevices.Add($summaryDevice)
             }
+            else {
+                $jsonReader.Skip()
+            }
+            $jsonWriter.WriteEndArray()
         }
 
-        $filterCatalogObject.Add([Newtonsoft.Json.Linq.JProperty]::new('devices', $summaryDevices))
-        $summaryObject.Add([Newtonsoft.Json.Linq.JProperty]::new('meta', $metaObject))
-        $summaryObject.Add([Newtonsoft.Json.Linq.JProperty]::new('filterCatalog', $filterCatalogObject))
-        return $summaryObject.ToString([Newtonsoft.Json.Formatting]::None)
+        foreach ($missingField in $catalogFields) {
+            if ($writtenFields.ContainsKey($missingField)) { continue }
+            $jsonWriter.WritePropertyName($missingField)
+            $jsonWriter.WriteStartArray()
+            $jsonWriter.WriteEndArray()
+        }
+        $jsonWriter.WriteEndObject()
+        $jsonWriter.WriteEndObject()
+        $jsonWriter.Flush()
+        return $stringWriter.ToString()
     }
     finally {
+        if ($jsonWriter) { $jsonWriter.Close() }
+        if ($stringWriter) { $stringWriter.Dispose() }
         if ($jsonReader) { $jsonReader.Close() }
         if ($reader) { $reader.Dispose() }
         if ($gzip) { $gzip.Dispose() }
@@ -3909,6 +3951,79 @@ function Read-NormalizationMachineLookup {
     }
 
     return (Read-MachineData -Path $Path -AsNormalizationTuple)
+}
+
+function Get-NormalizationExecutionPlan {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $false)][string]$DeliveryMode = 'SelfContained',
+        [Parameter(Mandatory = $false)][ValidateRange(1000, 1000000)][int]$MaximumInProcessContentTemplates = 10000
+    )
+
+    $manifestPath = Join-Path $Path 'synthetic-manifest.json'
+    $manifest = if (Test-Path -LiteralPath $manifestPath -PathType Leaf) { Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 30 } else { $null }
+    $deviceProfileCount = if ($null -ne $manifest -and $manifest.PSObject.Properties['actualDeviceCount']) { [int]$manifest.actualDeviceCount } else { -1 }
+    $contentTemplateCount = if ($null -ne $manifest -and $manifest.PSObject.Properties['contentTemplateCount']) { [int]$manifest.contentTemplateCount } else { -1 }
+    $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $Path
+
+    if (($deviceProfileCount -lt 0 -or $contentTemplateCount -lt 0) -and (Test-Path -LiteralPath $dictionaryPath -PathType Leaf)) {
+        if ($deviceProfileCount -lt 0) {
+            $deviceProfileCount = 0
+            Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles' | ForEach-Object { $deviceProfileCount++ }
+        }
+        if ($contentTemplateCount -lt 0) {
+            $contentTemplateCount = 0
+            Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'contentTemplates' | ForEach-Object { $contentTemplateCount++ }
+        }
+    }
+
+    $deviceProfileCount = [math]::Max(0, $deviceProfileCount)
+    $contentTemplateCount = [math]::Max(0, $contentTemplateCount)
+    $requiresPartitionedContent = ($contentTemplateCount -gt $MaximumInProcessContentTemplates)
+    $machineInputFile = @(Get-ChildItem -LiteralPath $Path -Filter 'Machines_Current.json*' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+    $hasMachineInput = if ($machineInputFile.Count -eq 0) { $false } else { $null -ne (Read-VulnNdjsonLinesFromPath -Path $machineInputFile[0].FullName | Select-Object -First 1) }
+    $hasEnrichmentInput = @(Get-ChildItem -LiteralPath $Path -Filter 'AdvancedHunting_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0 -or @(Get-ChildItem -LiteralPath $Path -Filter 'NvdCve_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0
+    $compiledContentEligible = ($requiresPartitionedContent -and -not $hasMachineInput -and -not $hasEnrichmentInput)
+    $estimatedPrivateMemoryMb = [math]::Round((145 + ($deviceProfileCount * 0.0015) + ($contentTemplateCount * 0.008)), 1)
+    $estimatedWorkingSetMb = [math]::Round(($estimatedPrivateMemoryMb + 170), 1)
+
+    return [PSCustomObject]@{
+        DeviceProfileCount = $deviceProfileCount
+        ContentTemplateCount = $contentTemplateCount
+        DeviceLookupMode = if ($deviceProfileCount -ge 5000) { 'compiled-file-backed' } else { 'compact-file-backed' }
+        ContentNormalizationMode = if ($compiledContentEligible) { 'compiled-bounded-standard-payload' } elseif ($requiresPartitionedContent) { 'partitioned-required' } else { 'in-process-streaming' }
+        DeliveryMode = $DeliveryMode
+        EstimatedPrivateMemoryMb = $estimatedPrivateMemoryMb
+        EstimatedWorkingSetMb = $estimatedWorkingSetMb
+        MaximumInProcessContentTemplates = $MaximumInProcessContentTemplates
+        SafeToExecute = (-not $requiresPartitionedContent -or $compiledContentEligible)
+        FailureReason = if ($requiresPartitionedContent -and -not $compiledContentEligible) { "Content template cardinality $contentTemplateCount exceeds the safe in-process limit $MaximumInProcessContentTemplates, and machine/enrichment inputs require the compatibility normalizer. Use a lower-cardinality workload or a compiled enrichment-capable projection." } else { $null }
+    }
+}
+
+function Invoke-BoundedContentStorePayloadProjection {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$DataPath, [Parameter(Mandatory = $true)][string]$PayloadOutputPath)
+    Initialize-CompiledVulnContentProjector
+    $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $DataPath
+    $refs = @((Get-VulnCurrentRefsPath -BasePath $DataPath)) + @(Get-ChildItem -LiteralPath $DataPath -Filter 'VulnHistoryRefs_*.json.gz' -File | Sort-Object Name | ForEach-Object FullName)
+    $stagePath = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-dictionary-' + [guid]::NewGuid().ToString('N'))
+    $projectionResult = $null
+    try {
+        [void](New-Item -Path $stagePath -ItemType Directory -Force)
+        foreach ($propertyName in @('deviceProfiles', 'contentTemplates')) {
+            $writer = [System.IO.StreamWriter]::new((Join-Path $stagePath ($propertyName + '.ndjson')), $false, [System.Text.UTF8Encoding]::new($false), 65536)
+            try { Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName $propertyName | ForEach-Object { $writer.WriteLine($_.ToString([Newtonsoft.Json.Formatting]::None)) } }
+            finally { $writer.Dispose() }
+        }
+        $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $refs, [System.IO.Path]::GetFullPath($PayloadOutputPath))
+    }
+    finally { if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force -ErrorAction SilentlyContinue } }
+    Invoke-FullGarbageCollection
+    [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
+    return $projectionResult
 }
 
 function Get-DashboardCacheDirectory {
@@ -7524,6 +7639,9 @@ function Invoke-ContentStoreNormalization {
         }
         $deviceLookupIndices = [System.Collections.Generic.List[int]]::new()
         $deviceOnboardedFlags = [System.Collections.Generic.List[bool]]::new()
+        $deviceProfileLoadCount = 0L
+        $deviceProfileLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $deviceProfileLastHeartbeatSecond = -1
         Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'deviceProfiles' | ForEach-Object {
             $deviceProfile = $_
             $deviceId = [string](Get-VulnPropertyValue -InputObject $deviceProfile -Name 'id')
@@ -7539,6 +7657,17 @@ function Invoke-ContentStoreNormalization {
                     -MachineTags @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $deviceProfile -Name 't')) `
                     -Context $Context)) | Out-Null
             $deviceOnboardedFlags.Add(((Get-VulnPropertyValue -InputObject $deviceProfile -Name 'ob') -eq $true)) | Out-Null
+            $deviceProfileLoadCount++
+            if (($deviceProfileLoadCount % 1000) -eq 0) {
+                $elapsedWholeSeconds = [math]::Floor($deviceProfileLoadStopwatch.Elapsed.TotalSeconds)
+                if (($deviceProfileLoadCount % 10000) -eq 0 -or ($deviceProfileLastHeartbeatSecond + 30) -le $elapsedWholeSeconds) {
+                    Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
+                            Kind = 'work'; Count = $deviceProfileLoadCount; Unit = 'device profile(s)';
+                            ElapsedSeconds = [math]::Round($deviceProfileLoadStopwatch.Elapsed.TotalSeconds, 1)
+                        })
+                    $deviceProfileLastHeartbeatSecond = $elapsedWholeSeconds
+                }
+            }
         }
 
         if ($hasInventoryIdentity) {
@@ -7562,6 +7691,9 @@ function Invoke-ContentStoreNormalization {
             Message = 'Loading content-store vulnerability templates into normalization lookups.'
         })
 
+    $contentTemplateLoadCount = 0L
+    $contentTemplateLoadStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $contentTemplateLastHeartbeatSecond = -1
     Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName 'contentTemplates' | ForEach-Object {
         $contentTemplate = $_
         $softwareVendor = [string](Get-VulnPropertyValue -InputObject $contentTemplate -Name 'sv')
@@ -7601,6 +7733,17 @@ function Invoke-ContentStoreNormalization {
                 -RegistryPaths @(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $contentTemplate -Name 'rp')) `
                 -SecurityUpdateAvailable ((Get-VulnPropertyValue -InputObject $contentTemplate -Name 'ua') -eq $true) `
                 -Context $Context))) | Out-Null
+        $contentTemplateLoadCount++
+        if (($contentTemplateLoadCount % 1000) -eq 0) {
+            $elapsedWholeSeconds = [math]::Floor($contentTemplateLoadStopwatch.Elapsed.TotalSeconds)
+            if (($contentTemplateLoadCount % 10000) -eq 0 -or ($contentTemplateLastHeartbeatSecond + 30) -le $elapsedWholeSeconds) {
+                Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{
+                        Kind = 'work'; Count = $contentTemplateLoadCount; Unit = 'content template(s)';
+                        ElapsedSeconds = [math]::Round($contentTemplateLoadStopwatch.Elapsed.TotalSeconds, 1)
+                    })
+                $contentTemplateLastHeartbeatSecond = $elapsedWholeSeconds
+            }
+        }
     }
 
     $contentLookupCache = $contentLookupCache.ToArray()
@@ -8938,6 +9081,19 @@ function ConvertTo-NormalizedData {
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
     Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s), {3} inventory tuple(s), {4} NVD CVE(s)" -f (Get-NormalizationMachineLookupCount -Machines $Machines), $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count, $AdvancedHuntingInventoryData.Count, $NvdCveData.Count) -InformationAction Continue
+    $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath
+    if ($executionPlan.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') {
+        if ([string]::IsNullOrWhiteSpace($PayloadOutputPath) -or -not $ConsumeLookupsOnPayloadClose -or -not $SkipObservedWindowMerge) { throw 'Compiled bounded content normalization requires direct payload output, lookup consumption, and SkipObservedWindowMerge.' }
+        if ((Get-NormalizationMachineLookupCount -Machines $Machines) -gt 0 -or $AdvancedHuntingData.Count -gt 0 -or $AdvancedHuntingDeviceUsers.Count -gt 0 -or $AdvancedHuntingInventoryData.Count -gt 0 -or $NvdCveData.Count -gt 0) { throw 'Compiled bounded content normalization cannot discard loaded machine or enrichment data.' }
+        Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{ Kind = 'phase'; Phase = 'CompiledBoundedContentNormalization'; Message = 'Streaming high-cardinality content through the compiled bounded standard-payload projector.' })
+        $compiledResult = Invoke-BoundedContentStorePayloadProjection -DataPath $DataPath -PayloadOutputPath $PayloadOutputPath
+        Invoke-FullGarbageCollection
+        [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
+        return @{
+            Lookups = $null; LookupsConsumed = $true; DeviceCount = [int]$compiledResult.DeviceCount; CveCount = [int]$compiledResult.CveCount; SoftwareCount = [int]$compiledResult.SoftwareCount; VendorCount = [int]$compiledResult.VendorCount
+            Quality = [PSCustomObject]@{ FirstLastSwappedCount = 0 }; VulnCount = [long]$compiledResult.ProcessedCount; VulnsPath = $null; VulnColumnPaths = $null; PayloadPath = $PayloadOutputPath
+        }
+    }
     Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
     $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
     $context = Get-NormalizationContext

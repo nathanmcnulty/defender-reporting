@@ -1,7 +1,21 @@
 #Requires -Version 7.0
 
 [CmdletBinding()]
-param()
+param(
+    [Parameter(Mandatory = $false)]
+    [string[]]$TestName,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('Artifact', 'Store', 'Normalization', 'Benchmark', 'Generator', 'Validation', 'Other')]
+    [string[]]$Category,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0, 10000)]
+    [int]$StopAfter = 0,
+
+    [Parameter(Mandatory = $false)]
+    [string]$JUnitOutputPath
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -2763,6 +2777,8 @@ function Invoke-WithContentDictionaryStreamProbe {
     $originalResolveNormalizedContentLookup = ${function:Resolve-NormalizedContentLookup}
     $deviceProfileEntries = @($DeviceProfiles)
     $contentTemplateEntries = @($ContentTemplates)
+    $deviceProfileReadCount = 0
+    $contentTemplateReadCount = 0
     $probeState = [PSCustomObject]@{
         DeviceProfilesBuffered = $false
         ContentTemplatesBuffered = $false
@@ -2784,9 +2800,14 @@ function Invoke-WithContentDictionaryStreamProbe {
                 $null = $Path
 
                 $entries = switch ($PropertyName) {
-                    'deviceProfiles' { $deviceProfileEntries }
-                    'contentTemplates' { $contentTemplateEntries }
+                    'deviceProfiles' { $deviceProfileReadCount++; $deviceProfileEntries }
+                    'contentTemplates' { $contentTemplateReadCount++; $contentTemplateEntries }
                     default { @() }
+                }
+                $isNormalizationRead = switch ($PropertyName) {
+                    'deviceProfiles' { $deviceProfileReadCount -gt 1 }
+                    'contentTemplates' { $contentTemplateReadCount -gt 1 }
+                    default { $false }
                 }
 
                 if ($entries.Count -eq 0) {
@@ -2797,12 +2818,12 @@ function Invoke-WithContentDictionaryStreamProbe {
                 for ($entryIndex = 1; $entryIndex -lt $entries.Count; $entryIndex++) {
                     switch ($PropertyName) {
                         'deviceProfiles' {
-                            if (-not $probeState.FirstDeviceProfileProcessed) {
+                            if ($isNormalizationRead -and -not $probeState.FirstDeviceProfileProcessed) {
                                 $probeState.DeviceProfilesBuffered = $true
                             }
                         }
                         'contentTemplates' {
-                            if (-not $probeState.FirstContentTemplateProcessed) {
+                            if ($isNormalizationRead -and -not $probeState.FirstContentTemplateProcessed) {
                                 $probeState.ContentTemplatesBuffered = $true
                             }
                         }
@@ -4953,6 +4974,11 @@ function Test-MeasureStressRunWritesProgressAndFinalReport {
             actualHistoryRows = 0
         }) | ConvertTo-Json -Compress), [System.Text.UTF8Encoding]::new($false))
 
+        # Keep this regression hermetic. Dashboard generation normally reuses
+        # these pinned client libraries from its dataset cache, so provide
+        # minimal non-empty fixtures rather than depending on public CDNs.
+        Initialize-RegressionDashboardLibraryCache -BasePath $datasetRoot
+
         $pwshCommand = Get-Command -Name 'pwsh' -ErrorAction Stop
         $argumentList = @(
             '-NoProfile'
@@ -5006,13 +5032,27 @@ function Test-MeasureStressRunWritesProgressAndFinalReport {
             return
         }
 
+        if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+            $stdoutContent = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) { Get-Content -LiteralPath $stdoutPath -Raw } else { '' }
+            $stderrContent = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) { Get-Content -LiteralPath $stderrPath -Raw } else { '' }
+            throw ("Measure-StressRun did not create its report (exit code {0}).`nSTDOUT:`n{1}`nSTDERR:`n{2}" -f $process.ExitCode, $stdoutContent, $stderrContent)
+        }
+
         $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -Depth 20
 
         Assert-True $reportSeenWhileRunning 'Expected Measure-StressRun to persist a progress report before the wrapper process exits.'
         Assert-True ($report.report_state -eq 'completed') 'Expected Measure-StressRun to finalize the persisted report after the child process exits.'
-        Assert-True ($report.return_code -eq 0) 'Expected Measure-StressRun regression fixture to complete successfully.'
+        if ($report.return_code -ne 0) {
+            $childStdoutPath = [string]$report.stdout_path
+            $childStderrPath = [string]$report.stderr_path
+            $stdoutContent = if (Test-Path -LiteralPath $childStdoutPath -PathType Leaf) { Get-Content -LiteralPath $childStdoutPath -Raw } else { '' }
+            $stderrContent = if (Test-Path -LiteralPath $childStderrPath -PathType Leaf) { Get-Content -LiteralPath $childStderrPath -Raw } else { '' }
+            throw ("Expected Measure-StressRun regression fixture to complete successfully (exit code {0}).`nSTDOUT:`n{1}`nSTDERR:`n{2}" -f $report.return_code, $stdoutContent, $stderrContent)
+        }
         Assert-True ($report.sample_count -gt 0) 'Expected Measure-StressRun regression fixture to record at least one process-tree sample.'
         Assert-True ($report.dashboard_exists -eq $true) 'Expected Measure-StressRun regression fixture to generate the dashboard output.'
+        Assert-True ($report.benchmark_evidence.evidence_schema_version -eq 1) 'Expected Measure-StressRun to persist the versioned benchmark evidence envelope.'
+        Assert-True ($report.benchmark_evidence.dataset.files.Count -gt 0) 'Expected Measure-StressRun benchmark evidence to include dataset artifact hashes.'
     }
     finally {
         if ($null -ne $process -and -not $process.HasExited) {
@@ -5960,6 +6000,27 @@ function Test-ProceduralSyntheticDatasetGeneration {
     }
 }
 
+function Initialize-RegressionDashboardLibraryCache {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$BasePath)
+
+    $libraryCachePath = Join-Path $BasePath '.dashboard-cache\libraries'
+    [void](New-Item -Path $libraryCachePath -ItemType Directory -Force)
+    foreach ($library in @(
+            @{ Name = 'Chart.js'; Url = 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js' },
+            @{ Name = 'pdfmake'; Url = 'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/pdfmake.min.js' },
+            @{ Name = 'vfs_fonts'; Url = 'https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.2.7/vfs_fonts.min.js' },
+            @{ Name = 'html2canvas'; Url = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js' },
+            @{ Name = 'pako'; Url = 'https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js' }
+        )) {
+        $hashBytes = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes([string]$library.Url))
+        $urlHash = ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant().Substring(0, 16)
+        $safeName = ([string]$library.Name -replace '[^A-Za-z0-9._-]', '-')
+        $cachePath = Join-Path $libraryCachePath ("{0}-{1}.js" -f $safeName, $urlHash)
+        [System.IO.File]::WriteAllText($cachePath, ('/* offline regression fixture: ' + $safeName + ' */'), [System.Text.UTF8Encoding]::new($false))
+    }
+}
+
 function Test-VulnObservedWindowCacheRoundTrip {
     [CmdletBinding()]
     param()
@@ -6103,6 +6164,175 @@ function Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo {
     Assert-True ($summary -notlike '*rows=125.000*') 'Expected validation status summary text to avoid host-culture row count formatting.'
 }
 
+function Test-BenchmarkEvidenceEnvelopeWritesTransactionally {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    . (Join-Path $PSScriptRoot 'helpers\BenchmarkEvidenceTools.ps1')
+    $schemaPath = Join-Path $PSScriptRoot 'benchmark-evidence.schema.json'
+    Assert-True (Test-Path -LiteralPath $schemaPath -PathType Leaf) 'Expected the benchmark evidence JSON schema to exist.'
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('benchmark-evidence-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'synthetic-manifest.json'), '{"datasetId":"evidence-test","actualTotalVulnRows":1}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'VulnCurrentRefs.json'), '[0,0,0,"2026-01-01","2026-01-01"]', [System.Text.UTF8Encoding]::new($false))
+        $dataset = Get-BenchmarkDatasetEvidence -DatasetPath $tempRoot
+        $evidence = Get-BenchmarkEvidenceEnvelope -Kind 'regression' -RepoPath $repoRoot -Dataset $dataset -Execution ([PSCustomObject]@{ status = 'completed' })
+        $outputPath = Join-Path $tempRoot 'result\evidence.json'
+        Write-BenchmarkEvidenceEnvelope -Path $outputPath -Evidence $evidence
+
+        $written = Get-Content -LiteralPath $outputPath -Raw | ConvertFrom-Json -Depth 50
+        Assert-True ($written.evidence_schema_version -eq 1) 'Expected benchmark evidence schema version 1.'
+        Assert-True ($written.dataset.files.Count -eq 2) 'Expected benchmark evidence to hash every source dataset artifact before writing its result.'
+        Assert-True (-not [string]::IsNullOrWhiteSpace([string]$written.artifacts.runbook)) 'Expected benchmark evidence to capture the generated runbook fingerprint.'
+        Assert-True (@(Get-ChildItem -LiteralPath (Split-Path $outputPath -Parent) -Filter '*.tmp-*' -File).Count -eq 0) 'Expected transactional benchmark evidence publication to clean staging files.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Test-ProgressStallAssessmentDistinguishesSlowAndStalledWork {
+    [CmdletBinding()]
+    param()
+
+    . (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
+    $now = [datetime]'2026-07-11T12:00:00Z'
+    $healthy = Get-ProgressStallAssessment -LastProgressUtc $now.AddSeconds(-299) -NowUtc $now -WarningSeconds 300 -FailureSeconds 1800
+    $warning = Get-ProgressStallAssessment -LastProgressUtc $now.AddSeconds(-301) -NowUtc $now -WarningSeconds 300 -FailureSeconds 1800
+    $failed = Get-ProgressStallAssessment -LastProgressUtc $now.AddSeconds(-1801) -NowUtc $now -WarningSeconds 300 -FailureSeconds 1800
+    Assert-True ($healthy.State -eq 'Healthy') 'Expected recent slow progress to remain healthy.'
+    Assert-True ($warning.State -eq 'Warning') 'Expected a warning after the warning no-progress interval.'
+    Assert-True ($failed.State -eq 'Failed') 'Expected a failure after the failure no-progress interval.'
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $runbookSource = Get-Content -LiteralPath (Join-Path $repoRoot 'build\azure\runbook-source.ps1') -Raw
+    Assert-True ($runbookSource.Contains("'normalizedPhaseItemCount'")) 'Expected the Azure status callback to persist device/template work heartbeats.'
+}
+
+function Test-FullGarbageCollectionRequestsLargeObjectHeapCompaction {
+    [CmdletBinding()]
+    param()
+
+    $buffer = [byte[]]::new(100000)
+    [System.GC]::KeepAlive($buffer)
+    $buffer = $null
+    Invoke-FullGarbageCollection
+    Assert-True ([System.Runtime.GCSettings]::LargeObjectHeapCompactionMode -eq [System.Runtime.GCLargeObjectHeapCompactionMode]::Default) 'Expected the one-shot large-object heap compaction request to be consumed by full collection.'
+}
+
+function Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $path = Join-Path $PSScriptRoot 'Invoke-AzureRunbookValidation.ps1'
+    Assert-True (Test-Path -LiteralPath $path -PathType Leaf) 'Expected the guarded Azure validation harness.'
+    $text = Get-Content -LiteralPath $path -Raw
+    Assert-True ($text.Contains("if (-not `$Execute)")) 'Expected Azure validation to require the explicit Execute guard.'
+    Assert-True ($text.Contains("Restore-ValidationContainer 'exports'")) 'Expected Azure validation finally cleanup to restore exports.'
+    Assert-True ($text.Contains("Restore-ValidationContainer 'dashboards'")) 'Expected Azure validation finally cleanup to restore dashboards.'
+    Assert-True ($text.Contains("'automation','runbook','replace-content'")) 'Expected Azure validation to restore published runbook content.'
+    Assert-True ($text.Contains("'--if-none-match','*'")) 'Expected Azure validation to acquire its lock atomically.'
+
+    $caught = $null
+    try {
+        & $path -SubscriptionId 'test-subscription' -AutomationAccountName 'test-account' -AutomationResourceGroup 'test-group' -RunbookName 'test-runbook' -StorageAccountName 'test-storage' -DatasetPath (Join-Path $repoRoot 'exports')
+    }
+    catch { $caught = $_ }
+    Assert-True ($null -ne $caught -and $caught.Exception.Message -like '*Re-run with -Execute*') 'Expected the Azure harness to reject mutation without -Execute before contacting Azure.'
+}
+
+function Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('normalization-plan-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'synthetic-manifest.json'), '{"actualDeviceCount":50000,"contentTemplateCount":5000}', [System.Text.UTF8Encoding]::new($false))
+        $safe = Get-NormalizationExecutionPlan -Path $tempRoot -DeliveryMode Dual
+        Assert-True ($safe.SafeToExecute -eq $true -and $safe.DeviceLookupMode -eq 'compiled-file-backed') 'Expected the production-representative manifest to select safe compiled file-backed normalization.'
+        Assert-True ($safe.EstimatedPrivateMemoryMb -eq 260) 'Expected the estimate to remain calibrated to the measured 50k-device/5k-template Azure run.'
+
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'synthetic-manifest.json'), '{"actualDeviceCount":50000,"contentTemplateCount":187500}', [System.Text.UTF8Encoding]::new($false))
+        $bounded = Get-NormalizationExecutionPlan -Path $tempRoot
+        Assert-True ($bounded.SafeToExecute -eq $true -and $bounded.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') 'Expected unenriched high content cardinality to select compiled bounded normalization.'
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
+        $unsafe = Get-NormalizationExecutionPlan -Path $tempRoot
+        Assert-True ($unsafe.SafeToExecute -eq $false -and $unsafe.ContentNormalizationMode -eq 'partitioned-required') 'Expected enriched high content cardinality to fail before unsafe retained normalization state is allocated.'
+
+        $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+        $legacy = Get-NormalizationExecutionPlan -Path (Join-Path $repoRoot 'exports')
+        Assert-True ($legacy.SafeToExecute -eq $true -and $legacy.DeviceProfileCount -gt 0 -and $legacy.ContentTemplateCount -gt 0) 'Expected the checked-in exports dataset to remain supported without procedural metadata.'
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
+function Test-BenchmarkWorkloadProfilesArePinned {
+    [CmdletBinding()]
+    param()
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    . (Join-Path $PSScriptRoot 'Import-BenchmarkDatasetCatalog.ps1')
+    $catalog = @(Import-BenchmarkDatasetCatalog -RepoRoot $repoRoot)
+    $expectedProfiles = @('ProductionRepresentative', 'RowVolumeStress', 'ContentCardinalityStress', 'DeviceCardinalityStress', 'HistoryChurnStress', 'UnicodeAndSparsityEdgeCases')
+    foreach ($workloadName in $expectedProfiles) {
+        $definition = @($catalog | Where-Object workloadProfile -eq $workloadName)
+        Assert-True ($definition.Count -eq 1) "Expected exactly one pinned '$workloadName' workload definition."
+        foreach ($propertyName in @('workloadProfileVersion', 'modelVersion', 'seed', 'targetDeviceCount', 'targetTotalVulnRows', 'contentTemplateCount', 'expectedEnvelope')) {
+            Assert-True ($null -ne $definition[0].PSObject.Properties[$propertyName]) "Expected '$workloadName' to pin '$propertyName'."
+        }
+    }
+}
+
+function Test-CompiledBoundedContentNormalizationExpandedParity {
+    [CmdletBinding()]
+    param()
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-content-parity-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $first = Get-TestVulnRow -Id 'compiled-parity-1' -CveId 'CVE-2026-7001' -SnapshotDate '2026-07-10' -Version '1.0.0'
+        $second = Get-TestVulnRow -Id 'compiled-parity-2' -CveId 'CVE-2026-7002' -SnapshotDate '2026-07-11' -Version '2.0.0'
+        $unicodeRegistrySuffix = ([string][char]0x6D4B) + ([string][char]0x8BD5)
+        $second.DiskPaths = @(); $second.RegistryPaths = @('HKLM:\Software\Unicode-' + $unicodeRegistrySuffix)
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($first, $second)
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+        $baselinePath = Join-Path $tempRoot 'baseline.json.gz'
+        $null = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'baseline.json') -PayloadOutputPath $baselinePath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers @{} -AdvancedHuntingInventoryData @{} -NvdCveData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'synthetic-manifest.json'), '{"actualDeviceCount":1,"contentTemplateCount":10001}', [System.Text.UTF8Encoding]::new($false))
+        $compiledPath = Join-Path $tempRoot 'compiled.json.gz'
+        $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers @{} -AdvancedHuntingInventoryData @{} -NvdCveData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+        Assert-True ($compiled.VulnCount -eq 2 -and $compiled.LookupsConsumed) 'Expected the compiled bounded path to publish both rows directly to the standard payload.'
+        & node (Join-Path $repoRoot 'tests\helpers\Assert-ExpandedPayloadParity.js') $baselinePath $compiledPath
+        Assert-True ($LASTEXITCODE -eq 0) 'Expected compiled and compatibility payloads to have expanded semantic parity.'
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
+function Test-SyntheticUploadManifestSelectsRawReplayArtifact {
+    [CmdletBinding()]
+    param()
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('upload-manifest-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        foreach ($name in @('VulnExport_100_2026-07-12.json.gz', 'Machines_Current.json.gz', 'AdvancedHunting_Current.json.gz', 'VulnCurrentRefs.json.gz')) {
+            [System.IO.File]::WriteAllText((Join-Path $tempRoot $name), $name, [System.Text.UTF8Encoding]::new($false))
+        }
+        $manifestPath = Join-Path $tempRoot 'upload.json'
+        & (Join-Path $repoRoot 'tests\New-SyntheticUploadManifest.ps1') -DatasetPath $tempRoot -OutputPath $manifestPath -Mode RawReplay | Out-Null
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 20
+        $names = @($manifest.artifacts | ForEach-Object name)
+        Assert-True ('VulnExport_100_2026-07-12.json.gz' -in $names) 'Expected raw replay upload manifest to include dated vulnerability exports.'
+        Assert-True ('Machines_Current.json.gz' -in $names) 'Expected raw replay upload manifest to include the machine snapshot.'
+        Assert-True ('VulnCurrentRefs.json.gz' -notin $names) 'Expected raw replay upload manifest to exclude precomputed content refs.'
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
 function Test-LargeDatasetValidationSemanticModeForcesFullReplay {
     [CmdletBinding()]
     param()
@@ -6172,9 +6402,11 @@ function Test-GenerateSyntheticLargeExportsUsesStablePlannerOrdering {
         )
 
         foreach ($runDirectory in $runDirectories) {
-            $stdoutPath = Join-Path $runDirectory 'stdout.log'
-            $stderrPath = Join-Path $runDirectory 'stderr.log'
-            [void](New-Item -Path $runDirectory -ItemType Directory -Force)
+            # The generator atomically replaces OutputPath. Redirecting live
+            # process logs inside that directory prevents the Windows rename.
+            $runName = Split-Path -Path $runDirectory -Leaf
+            $stdoutPath = Join-Path $tempRoot ($runName + '.stdout.log')
+            $stderrPath = Join-Path $tempRoot ($runName + '.stderr.log')
 
             $argumentList = @(
                 '-NoProfile'
@@ -6231,7 +6463,8 @@ function Test-GenerateSyntheticLargeExportsUsesStablePlannerOrdering {
             $manifest = Get-Content -LiteralPath (Join-Path $runDirectory 'synthetic-manifest.json') -Raw | ConvertFrom-Json -Depth 20
             $normalizedManifest = [ordered]@{}
             foreach ($propertyName in $manifestPropertyNames) {
-                $normalizedManifest[$propertyName] = $manifest.$propertyName
+                $property = $manifest.PSObject.Properties[$propertyName]
+                $normalizedManifest[$propertyName] = if ($null -ne $property) { $property.Value } else { $null }
             }
 
             $normalizedManifest | ConvertTo-Json -Depth 20 -Compress
@@ -6501,10 +6734,99 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-VulnObservedWindowCacheRoundTrip'; SuccessMessage = 'Observed-window cache round-trip checks passed.' }
     @{ Name = 'Test-FunctionAppWriteOutputNoEnumeratePreservesJObject'; SuccessMessage = 'Function App Write-Output -NoEnumerate checks passed.' }
     @{ Name = 'Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo'; SuccessMessage = 'Function execution status summary metadata checks passed.' }
+    @{ Name = 'Test-BenchmarkEvidenceEnvelopeWritesTransactionally'; SuccessMessage = 'Benchmark evidence schema and transactional publication checks passed.' }
+    @{ Name = 'Test-ProgressStallAssessmentDistinguishesSlowAndStalledWork'; SuccessMessage = 'Progress stall warning/failure checks passed.' }
+    @{ Name = 'Test-FullGarbageCollectionRequestsLargeObjectHeapCompaction'; SuccessMessage = 'Large-object heap compaction checks passed.' }
+    @{ Name = 'Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration'; SuccessMessage = 'Azure validation guard and restoration checks passed.' }
+    @{ Name = 'Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback'; SuccessMessage = 'Cardinality-aware normalization plan and legacy fallback checks passed.' }
+    @{ Name = 'Test-BenchmarkWorkloadProfilesArePinned'; SuccessMessage = 'Versioned benchmark workload profile checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationExpandedParity'; SuccessMessage = 'Compiled bounded content normalization expanded-parity checks passed.' }
+    @{ Name = 'Test-SyntheticUploadManifestSelectsRawReplayArtifact'; SuccessMessage = 'Synthetic raw replay upload-manifest checks passed.' }
 )
 
-foreach ($sharedHelperRegressionTest in $sharedHelperRegressionTests) {
-    Invoke-SharedHelperRegressionTest -Name $sharedHelperRegressionTest.Name -SuccessMessage $sharedHelperRegressionTest.SuccessMessage
+function Get-SharedHelperRegressionCategory {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    if ($Name -match 'ArtifactManifest|CanonicalLayout|FileSetFingerprint') { return 'Artifact' }
+    if ($Name -match 'Synthetic|Benchmark|StressRun|ProgressMarker') { return 'Benchmark' }
+    if ($Name -match 'Validation|Audit|Dashboard|Template|PackageOnly|HotPhase') { return 'Validation' }
+    if ($Name -match 'Normalized|Normalization|Payload|Lookup|MachineTuple|CveEnrichment') { return 'Normalization' }
+    if ($Name -match 'Vuln|Machine|AdvancedHunting|Store|Snapshot|Mde') { return 'Store' }
+    if ($Name -match 'Generate') { return 'Generator' }
+    return 'Other'
 }
+
+function Write-SharedHelperRegressionJUnit {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][System.Collections.Generic.List[object]]$Results
+    )
+
+    $parent = Split-Path -Path $Path -Parent
+    if (-not [string]::IsNullOrWhiteSpace($parent)) { [void](New-Item -Path $parent -ItemType Directory -Force) }
+    $settings = [System.Xml.XmlWriterSettings]::new()
+    $settings.Indent = $true
+    $settings.Encoding = [System.Text.UTF8Encoding]::new($false)
+    $writer = [System.Xml.XmlWriter]::Create([System.IO.Path]::GetFullPath($Path), $settings)
+    try {
+        $writer.WriteStartDocument()
+        $writer.WriteStartElement('testsuite')
+        $writer.WriteAttributeString('name', 'SharedHelperRegression')
+        $writer.WriteAttributeString('tests', [string]$Results.Count)
+        $writer.WriteAttributeString('failures', [string]@($Results | Where-Object { -not $_.Passed }).Count)
+        $writer.WriteAttributeString('time', [string][math]::Round((($Results | Measure-Object -Property Seconds -Sum).Sum), 3))
+        foreach ($result in $Results) {
+            $errorMessage = [regex]::Replace(([regex]::Replace([string]$result.ErrorMessage, "`e\[[0-9;]*m", '')), '[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]', '')
+            $errorDetail = [regex]::Replace(([regex]::Replace([string]$result.ErrorDetail, "`e\[[0-9;]*m", '')), '[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]', '')
+            $writer.WriteStartElement('testcase')
+            $writer.WriteAttributeString('name', [string]$result.Name)
+            $writer.WriteAttributeString('classname', ('SharedHelperRegression.' + [string]$result.Category))
+            $writer.WriteAttributeString('time', [string][math]::Round([double]$result.Seconds, 3))
+            if (-not $result.Passed) {
+                $writer.WriteStartElement('failure')
+                $writer.WriteAttributeString('message', $errorMessage)
+                $writer.WriteString($errorDetail)
+                $writer.WriteEndElement()
+            }
+            $writer.WriteEndElement()
+        }
+        $writer.WriteEndElement()
+        $writer.WriteEndDocument()
+    }
+    finally { $writer.Dispose() }
+}
+
+$selectedTests = @($sharedHelperRegressionTests | Where-Object {
+        $entry = $_
+        $nameMatch = (-not $TestName -or @($TestName | Where-Object { $entry.Name -like $_ }).Count -gt 0)
+        $testCategory = Get-SharedHelperRegressionCategory -Name $entry.Name
+        $categoryMatch = (-not $Category -or $Category -contains $testCategory)
+        $nameMatch -and $categoryMatch
+    })
+if ($StopAfter -gt 0) { $selectedTests = @($selectedTests | Select-Object -First $StopAfter) }
+if ($selectedTests.Count -eq 0) { throw 'No shared-helper regression tests matched the requested selection.' }
+
+$repoRoot = Split-Path -Path $PSScriptRoot -Parent
+Initialize-RegressionDashboardLibraryCache -BasePath (Join-Path $repoRoot '.local\shared-regression-fixtures')
+
+$results = [System.Collections.Generic.List[object]]::new()
+$failure = $null
+foreach ($sharedHelperRegressionTest in $selectedTests) {
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        Invoke-SharedHelperRegressionTest -Name $sharedHelperRegressionTest.Name -SuccessMessage $sharedHelperRegressionTest.SuccessMessage
+        $stopwatch.Stop()
+        $results.Add([PSCustomObject]@{ Name = $sharedHelperRegressionTest.Name; Category = Get-SharedHelperRegressionCategory $sharedHelperRegressionTest.Name; Seconds = $stopwatch.Elapsed.TotalSeconds; Passed = $true; ErrorMessage = ''; ErrorDetail = '' })
+    }
+    catch {
+        $stopwatch.Stop()
+        $failure = $_
+        $results.Add([PSCustomObject]@{ Name = $sharedHelperRegressionTest.Name; Category = Get-SharedHelperRegressionCategory $sharedHelperRegressionTest.Name; Seconds = $stopwatch.Elapsed.TotalSeconds; Passed = $false; ErrorMessage = $_.Exception.Message; ErrorDetail = [string]$_ })
+        break
+    }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($JUnitOutputPath)) { Write-SharedHelperRegressionJUnit -Path $JUnitOutputPath -Results $results }
+if ($null -ne $failure) { throw $failure }
 
 Write-Output 'Shared-helper regression checks passed.'

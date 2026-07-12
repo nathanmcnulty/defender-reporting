@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defender-reporting.local/schemas/benchmark-evidence-v1.json",
+  "title": "Defender Reporting Benchmark Evidence",
+  "type": "object",
+  "required": ["evidence_schema_version", "kind", "generated_utc", "git", "artifacts", "execution"],
+  "properties": {
+    "evidence_schema_version": { "const": 1 },
+    "kind": { "type": "string", "minLength": 1 },
+    "generated_utc": { "type": "string", "format": "date-time" },
+    "git": {
+      "type": "object",
+      "required": ["repo_path", "commit", "dirty", "status"],
+      "properties": {
+        "repo_path": { "type": "string" },
+        "commit": { "type": "string" },
+        "branch": { "type": "string" },
+        "dirty": { "type": "boolean" },
+        "status": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "runbook": { "type": ["string", "null"] },
+        "function_app": { "type": ["string", "null"] }
+      }
+    },
+    "dataset": { "type": ["object", "null"] },
+    "environment": { "type": ["object", "null"] },
+    "execution": { "type": ["object", "null"] },
+    "validation": { "type": ["object", "null"] }
+  }
+}

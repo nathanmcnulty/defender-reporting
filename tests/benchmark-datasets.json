@@ -1,34 +1,103 @@
-﻿[
+[
   {
     "id": "benchmark-medium-v1",
-    "description": "Durable benchmark baseline dataset for Azure and local performance review.",
+    "workloadProfile": "ProductionRepresentative",
+    "workloadProfileVersion": 1,
+    "description": "Durable medium production-representative baseline.",
     "preset": "BalancedMediumHeavy",
     "seed": 20260322,
     "modelVersion": "procedural-v1",
     "targetDeviceCount": 1500,
     "targetTotalVulnRows": 120000,
     "contentTemplateCount": 2000,
+    "expectedEnvelope": { "maximumWorkingSetMb": 400, "maximumPrivateMemoryMb": 300, "maximumElapsedSeconds": 600 },
     "sourceRelativePath": "exports",
     "outputRelativePath": ".local/benchmark-datasets/benchmark-medium-v1",
-    "historyTags": [
-      "benchmark-medium-v1",
-      "durable-baseline"
-    ]
+    "historyTags": ["benchmark-medium-v1", "production-representative", "durable-baseline"]
   },
   {
     "id": "benchmark-large-50k-v1",
-    "description": "Durable large benchmark seed dataset for Azure replay and delta-snapshot validation.",
+    "workloadProfile": "RowVolumeStress",
+    "workloadProfileVersion": 1,
+    "description": "Production-representative 50k-device and 1.5m-observation row-volume benchmark.",
     "preset": "BalancedMediumHeavy",
     "seed": 20260322,
     "modelVersion": "procedural-v1",
     "targetDeviceCount": 50000,
     "targetTotalVulnRows": 1500000,
     "contentTemplateCount": 5000,
+    "expectedUniqueCveCount": 5000,
+    "expectedEnvelope": { "maximumWorkingSetMb": 400, "maximumPrivateMemoryMb": 300, "maximumElapsedSeconds": 1200 },
     "sourceRelativePath": "exports",
     "outputRelativePath": ".local/large-datasets/synthetic-50k-1_5m",
-    "historyTags": [
-      "benchmark-large-50k-v1",
-      "large-seed"
-    ]
+    "historyTags": ["benchmark-large-50k-v1", "row-volume-stress", "large-seed"]
+  },
+  {
+    "id": "benchmark-content-cardinality-187k-v1",
+    "workloadProfile": "ContentCardinalityStress",
+    "workloadProfileVersion": 1,
+    "description": "High-cardinality content-template benchmark isolated from production row-volume expectations.",
+    "preset": "BalancedMediumHeavy",
+    "seed": 20260322,
+    "modelVersion": "procedural-v1",
+    "targetDeviceCount": 50000,
+    "targetTotalVulnRows": 1500000,
+    "contentTemplateCount": 187500,
+    "expectedUniqueCveCount": 5000,
+    "expectedEnvelope": { "maximumWorkingSetMb": 400, "maximumPrivateMemoryMb": 300, "maximumElapsedSeconds": 1800 },
+    "sourceRelativePath": "exports",
+    "outputRelativePath": ".local/benchmark-datasets/content-cardinality-187k-v1",
+    "historyTags": ["content-cardinality-stress", "partitioning-gate"]
+  },
+  {
+    "id": "benchmark-device-cardinality-100k-v1",
+    "workloadProfile": "DeviceCardinalityStress",
+    "workloadProfileVersion": 1,
+    "description": "Device-index and machine-lookup cardinality benchmark.",
+    "preset": "DeviceCardinalityFirst",
+    "seed": 20260323,
+    "modelVersion": "procedural-v1",
+    "targetDeviceCount": 100000,
+    "targetTotalVulnRows": 1000000,
+    "contentTemplateCount": 5000,
+    "expectedEnvelope": { "maximumWorkingSetMb": 400, "maximumPrivateMemoryMb": 300, "maximumElapsedSeconds": 1200 },
+    "sourceRelativePath": "exports",
+    "outputRelativePath": ".local/benchmark-datasets/device-cardinality-100k-v1",
+    "historyTags": ["device-cardinality-stress", "machine-index"]
+  },
+  {
+    "id": "benchmark-history-churn-v1",
+    "workloadProfile": "HistoryChurnStress",
+    "workloadProfileVersion": 1,
+    "description": "Snapshot-history and deterministic churn benchmark.",
+    "preset": "BalancedMediumHeavy",
+    "seed": 20260324,
+    "modelVersion": "procedural-v1",
+    "targetDeviceCount": 10000,
+    "targetTotalVulnRows": 750000,
+    "contentTemplateCount": 5000,
+    "snapshotCount": 12,
+    "churnRate": 0.25,
+    "expectedEnvelope": { "maximumWorkingSetMb": 400, "maximumPrivateMemoryMb": 300, "maximumElapsedSeconds": 1200 },
+    "sourceRelativePath": "exports",
+    "outputRelativePath": ".local/benchmark-datasets/history-churn-v1",
+    "historyTags": ["history-churn-stress", "overlay-chain"]
+  },
+  {
+    "id": "benchmark-unicode-sparsity-v1",
+    "workloadProfile": "UnicodeAndSparsityEdgeCases",
+    "workloadProfileVersion": 1,
+    "description": "Deterministic Unicode, long-path, optional-property, empty-array, and scalar-variant coverage.",
+    "preset": "BalancedMediumHeavy",
+    "seed": 20260325,
+    "modelVersion": "procedural-v1",
+    "targetDeviceCount": 500,
+    "targetTotalVulnRows": 25000,
+    "contentTemplateCount": 2000,
+    "optionalFieldSparsity": 0.35,
+    "expectedEnvelope": { "maximumWorkingSetMb": 350, "maximumPrivateMemoryMb": 250, "maximumElapsedSeconds": 300 },
+    "sourceRelativePath": "exports",
+    "outputRelativePath": ".local/benchmark-datasets/unicode-sparsity-v1",
+    "historyTags": ["unicode", "sparsity", "edge-cases"]
   }
 ]
