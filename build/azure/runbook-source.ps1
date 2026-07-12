@@ -1491,13 +1491,17 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         Set-PipelineExecutionStage -Stage 'ReadNormalizationInputs' -Message 'Loading machine and Advanced Hunting inputs for dashboard normalization.'
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
-        $useDirectMergeDeviceLookupForRun = ($UseDirectMergeDeviceLookup -and (Sync-VulnContentStoreSidecar -BasePath $tempExports))
+        $useDirectMergeDeviceLookupForRun = (
+            $UseDirectMergeDeviceLookup -and
+            (Sync-VulnContentStoreSidecar -BasePath $tempExports) -and
+            (Test-VulnContentStoreSupportsDirectMerge -BasePath $tempExports)
+        )
         if ($useDirectMergeDeviceLookupForRun) {
             Write-Output "  Experimental direct-merge device lookup enabled for Azure runbook; skipping preloaded machine lookup."
             $machines = @{}
         }
         else {
-            $machines = Read-NormalizationMachineLookup -Path $tempExports -FileBacked
+            $machines = Read-NormalizationMachineLookup -Path $tempExports -FileBacked -Bucketed
         }
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-MachineRead"

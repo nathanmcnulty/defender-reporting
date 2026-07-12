@@ -4129,10 +4129,60 @@ function Publish-VulnContentStoreUnlocked {
     [void](New-Item -Path $stageRoot -ItemType Directory -Force)
 
     try {
-        $deviceProfiles = [System.Collections.Generic.List[object]]::new()
-        $deviceProfileIndex = @{}
-        $contentTemplates = [System.Collections.Generic.List[object]]::new()
-        $contentTemplateIndex = @{}
+        Initialize-CompiledVulnContentProjector
+        $inputPaths = [System.Collections.Generic.List[string]]::new()
+        $refStagePaths = [System.Collections.Generic.List[string]]::new()
+        $filesToPublish = [System.Collections.Generic.List[object]]::new()
+        $periodKeys = [System.Collections.Generic.List[string]]::new()
+        $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+        if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
+            $currentRefStagePath = Get-VulnCurrentRefsPath -BasePath $stageRoot
+            $inputPaths.Add($currentPath)
+            $refStagePaths.Add($currentRefStagePath)
+            $filesToPublish.Add([PSCustomObject]@{ StagePath = $currentRefStagePath; TargetPath = Get-VulnCurrentRefsPath -BasePath $BasePath })
+        }
+        foreach ($historyRowsFile in @(Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRows_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $match = [regex]::Match($historyRowsFile.Name, '^VulnHistoryRows_(?<period>\d{4}Q[1-4]|\d{4})\.json\.gz$')
+            if (-not $match.Success) { continue }
+            $periodKey = [string]$match.Groups['period'].Value
+            $historyRefStagePath = Get-VulnHistoryRefsPath -BasePath $stageRoot -PeriodKey $periodKey
+            $periodKeys.Add($periodKey)
+            $inputPaths.Add($historyRowsFile.FullName)
+            $refStagePaths.Add($historyRefStagePath)
+            $filesToPublish.Add([PSCustomObject]@{ StagePath = $historyRefStagePath; TargetPath = Get-VulnHistoryRefsPath -BasePath $BasePath -PeriodKey $periodKey })
+        }
+        $dictionaryStagePath = Get-VulnContentDictionaryPath -BasePath $stageRoot
+        if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) { Write-MemoryUsage -Label 'ContentStore Compiled Projection Start' | Out-Null }
+        [void][DefenderReporting.Store.VulnContentProjector]::Project($inputPaths.ToArray(), $refStagePaths.ToArray(), $dictionaryStagePath)
+        if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) { Write-MemoryUsage -Label 'ContentStore Compiled Projection End' | Out-Null }
+        $filesToPublish.Add([PSCustomObject]@{ StagePath = $dictionaryStagePath; TargetPath = Get-VulnContentDictionaryPath -BasePath $BasePath })
+
+        $publishedNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        [void]$publishedNames.Add($Script:VulnCurrentRefsFileName)
+        [void]$publishedNames.Add($Script:VulnContentDictionaryFileName)
+        foreach ($periodKey in $periodKeys) {
+            [void]$publishedNames.Add([string]::Format($Script:VulnHistoryFileNamePattern, $periodKey))
+            [void]$publishedNames.Add([string]::Format($Script:VulnHistoryRowsFileNamePattern, $periodKey))
+            [void]$publishedNames.Add([string]::Format($Script:VulnHistoryRefsFileNamePattern, $periodKey))
+        }
+        $removePaths = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedNames
+        Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths @($removePaths)
+    }
+    finally {
+        if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    return
+
+    $deviceTemplateWriter = $null
+    $contentTemplateWriter = $null
+    try {
+        $deviceProfileIndex = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal)
+        $contentTemplateIndex = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal)
+        $projectionState = [PSCustomObject]@{ DeviceCount = 0; ContentCount = 0 }
+        $deviceTemplatePath = Join-Path $stageRoot 'device-profiles.ndjson'
+        $contentTemplatePath = Join-Path $stageRoot 'content-templates.ndjson'
+        $deviceTemplateWriter = [System.IO.StreamWriter]::new([System.IO.File]::Create($deviceTemplatePath), [System.Text.UTF8Encoding]::new($false))
+        $contentTemplateWriter = [System.IO.StreamWriter]::new([System.IO.File]::Create($contentTemplatePath), [System.Text.UTF8Encoding]::new($false))
         $filesToPublish = [System.Collections.Generic.List[object]]::new()
 
         $writeObservationRefs = {
@@ -4457,9 +4507,11 @@ function Publish-VulnContentStoreUnlocked {
                             [string]$isOnboarded
                         ) -join $valueDelimiter
                     }
-                    if (-not $deviceProfileIndex.ContainsKey($deviceSignature)) {
-                        $deviceProfileIndex[$deviceSignature] = $deviceProfiles.Count
-                        [void]$deviceProfiles.Add([PSCustomObject]@{
+                    $deviceIndexValue = 0
+                    if (-not $deviceProfileIndex.TryGetValue($deviceSignature, [ref]$deviceIndexValue)) {
+                        $deviceIndexValue = [int]$projectionState.DeviceCount
+                        $deviceProfileIndex.Add($deviceSignature, $deviceIndexValue)
+                        $deviceTemplateWriter.WriteLine((ConvertTo-Json -InputObject ([PSCustomObject]@{
                             id = $deviceId
                             n = $deviceName
                             g = $groupName
@@ -4467,9 +4519,9 @@ function Publish-VulnContentStoreUnlocked {
                             ov = $osVersion
                             t = $machineTags
                             ob = $isOnboarded
-                        })
+                        }) -Compress -Depth 20))
+                        $projectionState.DeviceCount++
                     }
-                    $deviceIndexValue = [int]$deviceProfileIndex[$deviceSignature]
 
                     $contentSignature = @(
                         $cveId
@@ -4489,9 +4541,12 @@ function Publish-VulnContentStoreUnlocked {
                         $cveBatchTitle
                         $cveBatchUrl
                     ) -join $valueDelimiter
-                    if (-not $contentTemplateIndex.ContainsKey($contentSignature)) {
-                        $contentTemplateIndex[$contentSignature] = $contentTemplates.Count
-                        [void]$contentTemplates.Add([PSCustomObject]@{
+                    $contentKey = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($contentSignature)))
+                    $contentIndexValue = 0
+                    if (-not $contentTemplateIndex.TryGetValue($contentKey, [ref]$contentIndexValue)) {
+                        $contentIndexValue = [int]$projectionState.ContentCount
+                        $contentTemplateIndex.Add($contentKey, $contentIndexValue)
+                        $contentTemplateWriter.WriteLine((ConvertTo-Json -InputObject ([PSCustomObject]@{
                             c = $cveId
                             sv = $softwareVendor
                             sn = $softwareName
@@ -4508,9 +4563,9 @@ function Publish-VulnContentStoreUnlocked {
                             rp = $registryPaths
                             bt = $cveBatchTitle
                             bu = $cveBatchUrl
-                        })
+                        }) -Compress -Depth 20))
+                        $projectionState.ContentCount++
                     }
-                    $contentIndexValue = [int]$contentTemplateIndex[$contentSignature]
                     $writer.WriteLine((
                         '[' +
                         (Convert-ToJsonStringLiteral -Value $id) + ',' +
@@ -4554,6 +4609,11 @@ function Publish-VulnContentStoreUnlocked {
             })
         }
 
+        $deviceTemplateWriter.Dispose()
+        $deviceTemplateWriter = $null
+        $contentTemplateWriter.Dispose()
+        $contentTemplateWriter = $null
+
         $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $stageRoot
         $dictionaryFileStream = $null
         $dictionaryGzipStream = $null
@@ -4563,14 +4623,18 @@ function Publish-VulnContentStoreUnlocked {
             $dictionaryGzipStream = [System.IO.Compression.GZipStream]::new($dictionaryFileStream, [System.IO.Compression.CompressionMode]::Compress)
             $dictionaryWriter = [System.IO.StreamWriter]::new($dictionaryGzipStream, [System.Text.UTF8Encoding]::new($false))
             $dictionaryWriter.Write('{"version":"content-dictionary-v1","deviceProfiles":[')
-            for ($index = 0; $index -lt $deviceProfiles.Count; $index++) {
-                if ($index -gt 0) { $dictionaryWriter.Write(',') }
-                $dictionaryWriter.Write((ConvertTo-Json -InputObject $deviceProfiles[$index] -Compress -Depth 20))
+            $firstEntry = $true
+            foreach ($jsonLine in [System.IO.File]::ReadLines($deviceTemplatePath, [System.Text.UTF8Encoding]::new($false))) {
+                if (-not $firstEntry) { $dictionaryWriter.Write(',') }
+                $dictionaryWriter.Write($jsonLine)
+                $firstEntry = $false
             }
             $dictionaryWriter.Write('],"contentTemplates":[')
-            for ($index = 0; $index -lt $contentTemplates.Count; $index++) {
-                if ($index -gt 0) { $dictionaryWriter.Write(',') }
-                $dictionaryWriter.Write((ConvertTo-Json -InputObject $contentTemplates[$index] -Compress -Depth 20))
+            $firstEntry = $true
+            foreach ($jsonLine in [System.IO.File]::ReadLines($contentTemplatePath, [System.Text.UTF8Encoding]::new($false))) {
+                if (-not $firstEntry) { $dictionaryWriter.Write(',') }
+                $dictionaryWriter.Write($jsonLine)
+                $firstEntry = $false
             }
             $dictionaryWriter.Write(']}')
         }
@@ -4579,8 +4643,8 @@ function Publish-VulnContentStoreUnlocked {
             elseif ($dictionaryGzipStream) { $dictionaryGzipStream.Dispose() }
             elseif ($dictionaryFileStream) { $dictionaryFileStream.Dispose() }
         }
-        $deviceProfiles.Clear()
-        $contentTemplates.Clear()
+        $deviceProfileIndex.Clear()
+        $contentTemplateIndex.Clear()
         [void]$filesToPublish.Add([PSCustomObject]@{
             StagePath = $dictionaryPath
             TargetPath = Get-VulnContentDictionaryPath -BasePath $BasePath
@@ -4603,6 +4667,274 @@ function Publish-VulnContentStoreUnlocked {
         Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths @($removePaths)
     }
     finally {
+        if ($deviceTemplateWriter) { $deviceTemplateWriter.Dispose() }
+        if ($contentTemplateWriter) { $contentTemplateWriter.Dispose() }
+        if (Test-Path -LiteralPath $stageRoot) {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-VulnContentStoreSupportsDirectMerge {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    $path = Get-VulnContentDictionaryPath -BasePath $BasePath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        return $false
+    }
+
+    $fileStream = [System.IO.File]::OpenRead($path)
+    try {
+        $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Decompress)
+        try {
+            $reader = [System.IO.StreamReader]::new($gzipStream, [System.Text.UTF8Encoding]::new($false), $true, 1024, $true)
+            try {
+                $buffer = New-Object char[] 512
+                $count = $reader.Read($buffer, 0, $buffer.Length)
+                $prefix = if ($count -gt 0) { [string]::new($buffer, 0, $count) } else { '' }
+                return ($prefix -notmatch '"deviceProfileOrder"\s*:\s*"partitioned"')
+            }
+            finally { $reader.Dispose() }
+        }
+        finally { $gzipStream.Dispose() }
+    }
+    finally { $fileStream.Dispose() }
+}
+
+function Publish-VulnContentStorePartitioned {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$BasePath
+    )
+
+    if (-not (Test-VulnStoreExistence -BasePath $BasePath)) {
+        return
+    }
+
+    $stageRoot = Join-Path $BasePath ('.vuln-content-store-staging-' + [guid]::NewGuid().ToString('N'))
+    $partitionCount = if ($Script:VulnDiskPartitionCount -gt 0) { [int]$Script:VulnDiskPartitionCount } else { 128 }
+    $devicePartitionRoot = Join-Path $stageRoot 'device-partitions'
+    $contentPartitionRoot = Join-Path $stageRoot 'content-partitions'
+    [void](New-Item -Path $devicePartitionRoot -ItemType Directory -Force)
+    [void](New-Item -Path $contentPartitionRoot -ItemType Directory -Force)
+
+    $deviceWriters = [System.IO.StreamWriter[]]::new($partitionCount)
+    $contentWriters = [System.IO.StreamWriter[]]::new($partitionCount)
+    $refStreams = [System.Collections.Generic.List[object]]::new()
+    $filesToPublish = [System.Collections.Generic.List[object]]::new()
+    $sourceFiles = [System.Collections.Generic.List[object]]::new()
+    try {
+        $currentPath = Get-VulnCurrentPath -BasePath $BasePath
+        if (Test-Path -LiteralPath $currentPath -PathType Leaf) {
+            $sourceFiles.Add([PSCustomObject]@{
+                SourcePath = $currentPath
+                StagePath = Get-VulnCurrentRefsPath -BasePath $stageRoot
+                TargetPath = Get-VulnCurrentRefsPath -BasePath $BasePath
+                PeriodKey = $null
+            })
+        }
+
+        foreach ($historyRowsFile in @(Get-ChildItem -Path $BasePath -Filter 'VulnHistoryRows_*.json.gz' -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $match = [regex]::Match($historyRowsFile.Name, '^VulnHistoryRows_(?<period>\d{4}Q[1-4]|\d{4})\.json\.gz$')
+            if (-not $match.Success) { continue }
+            $periodKey = [string]$match.Groups['period'].Value
+            $sourceFiles.Add([PSCustomObject]@{
+                SourcePath = $historyRowsFile.FullName
+                StagePath = Get-VulnHistoryRefsPath -BasePath $stageRoot -PeriodKey $periodKey
+                TargetPath = Get-VulnHistoryRefsPath -BasePath $BasePath -PeriodKey $periodKey
+                PeriodKey = $periodKey
+            })
+        }
+
+        if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+            Write-MemoryUsage -Label 'ContentStore Scatter Start' | Out-Null
+        }
+        for ($sourceIndex = 0; $sourceIndex -lt $sourceFiles.Count; $sourceIndex++) {
+            $source = $sourceFiles[$sourceIndex]
+            Read-VulnNdjsonRecordsFromPath -Path ([string]$source.SourcePath) | ForEach-Object {
+                $row = $_
+                $deviceSignature = Get-VulnDeviceProfileSignature -Row $row
+                $contentSignature = Get-VulnContentTemplateSignature -Row $row
+                $deviceHash = [uint32]([int64]$deviceSignature.GetHashCode() -band 0xFFFFFFFFL)
+                $deviceBucket = [int]($deviceHash % [uint32]$partitionCount)
+                if ($null -eq $deviceWriters[$deviceBucket]) {
+                    $partitionPath = Join-Path $devicePartitionRoot ("p{0}.ndjson" -f $deviceBucket)
+                    $deviceWriters[$deviceBucket] = [System.IO.StreamWriter]::new([System.IO.File]::Create($partitionPath), [System.Text.UTF8Encoding]::new($false))
+                }
+                $envelope = [ordered]@{
+                    t = $sourceIndex
+                    id = [string](Get-VulnPropertyValue -InputObject $row -Name 'Id')
+                    fs = [string](Get-VulnPropertyValue -InputObject $row -Name 'FirstSeenTimestamp')
+                    ls = [string](Get-VulnPropertyValue -InputObject $row -Name 'LastSeenTimestamp')
+                    ds = $deviceSignature
+                    dj = (ConvertTo-VulnDeviceProfileTemplate -Row $row | ConvertTo-Json -Compress -Depth 20)
+                    cs = $contentSignature
+                    cj = (ConvertTo-VulnContentTemplate -Row $row | ConvertTo-Json -Compress -Depth 20)
+                }
+                $deviceWriters[$deviceBucket].WriteLine(($envelope | ConvertTo-Json -Compress -Depth 20))
+            }
+        }
+        for ($index = 0; $index -lt $partitionCount; $index++) {
+            if ($null -ne $deviceWriters[$index]) {
+                $deviceWriters[$index].Dispose()
+                $deviceWriters[$index] = $null
+            }
+        }
+        if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+            Write-MemoryUsage -Label 'ContentStore Scatter End' | Out-Null
+        }
+
+        $deviceDictionaryFragment = Join-Path $stageRoot 'device-profiles.ndjson'
+        $deviceDictionaryWriter = [System.IO.StreamWriter]::new([System.IO.File]::Create($deviceDictionaryFragment), [System.Text.UTF8Encoding]::new($false))
+        $deviceCount = 0
+        try {
+            for ($bucket = 0; $bucket -lt $partitionCount; $bucket++) {
+                $partitionPath = Join-Path $devicePartitionRoot ("p{0}.ndjson" -f $bucket)
+                if (-not (Test-Path -LiteralPath $partitionPath -PathType Leaf)) { continue }
+                $deviceIndex = @{}
+                foreach ($line in [System.IO.File]::ReadLines($partitionPath, [System.Text.UTF8Encoding]::new($false))) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    $envelope = $line | ConvertFrom-Json -Depth 20
+                    $signature = [string]$envelope.ds
+                    if (-not $deviceIndex.ContainsKey($signature)) {
+                        $deviceIndex[$signature] = $deviceCount
+                        $deviceDictionaryWriter.WriteLine([string]$envelope.dj)
+                        $deviceCount++
+                    }
+                    $contentSignature = [string]$envelope.cs
+                    $contentHash = [uint32]([int64]$contentSignature.GetHashCode() -band 0xFFFFFFFFL)
+                    $contentBucket = [int]($contentHash % [uint32]$partitionCount)
+                    if ($null -eq $contentWriters[$contentBucket]) {
+                        $contentPath = Join-Path $contentPartitionRoot ("p{0}.ndjson" -f $contentBucket)
+                        $contentWriters[$contentBucket] = [System.IO.StreamWriter]::new([System.IO.File]::Create($contentPath), [System.Text.UTF8Encoding]::new($false))
+                    }
+                    $resolved = [ordered]@{
+                        t = [int]$envelope.t
+                        id = [string]$envelope.id
+                        fs = [string]$envelope.fs
+                        ls = [string]$envelope.ls
+                        di = [int]$deviceIndex[$signature]
+                        cs = $contentSignature
+                        cj = [string]$envelope.cj
+                    }
+                    $contentWriters[$contentBucket].WriteLine(($resolved | ConvertTo-Json -Compress -Depth 20))
+                }
+                $deviceIndex.Clear()
+                Remove-Item -LiteralPath $partitionPath -Force -ErrorAction SilentlyContinue
+                if ((($bucket + 1) % 16) -eq 0 -and (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue)) {
+                    Write-MemoryUsage -Label ("ContentStore Device Partition {0}/{1}" -f ($bucket + 1), $partitionCount) | Out-Null
+                }
+            }
+        }
+        finally {
+            $deviceDictionaryWriter.Dispose()
+            for ($index = 0; $index -lt $partitionCount; $index++) {
+                if ($null -ne $contentWriters[$index]) {
+                    $contentWriters[$index].Dispose()
+                    $contentWriters[$index] = $null
+                }
+            }
+        }
+
+        foreach ($source in $sourceFiles) {
+            $fileStream = [System.IO.File]::Create([string]$source.StagePath)
+            $gzipStream = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionMode]::Compress)
+            $writer = [System.IO.StreamWriter]::new($gzipStream, [System.Text.UTF8Encoding]::new($false))
+            $refStreams.Add([PSCustomObject]@{ FileStream = $fileStream; GzipStream = $gzipStream; Writer = $writer })
+            $filesToPublish.Add([PSCustomObject]@{ StagePath = $source.StagePath; TargetPath = $source.TargetPath })
+        }
+
+        $contentDictionaryFragment = Join-Path $stageRoot 'content-templates.ndjson'
+        $contentDictionaryWriter = [System.IO.StreamWriter]::new([System.IO.File]::Create($contentDictionaryFragment), [System.Text.UTF8Encoding]::new($false))
+        $contentCount = 0
+        try {
+            for ($bucket = 0; $bucket -lt $partitionCount; $bucket++) {
+                $partitionPath = Join-Path $contentPartitionRoot ("p{0}.ndjson" -f $bucket)
+                if (-not (Test-Path -LiteralPath $partitionPath -PathType Leaf)) { continue }
+                $contentIndex = @{}
+                foreach ($line in [System.IO.File]::ReadLines($partitionPath, [System.Text.UTF8Encoding]::new($false))) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    $envelope = $line | ConvertFrom-Json -Depth 20
+                    $signature = [string]$envelope.cs
+                    if (-not $contentIndex.ContainsKey($signature)) {
+                        $contentIndex[$signature] = $contentCount
+                        $contentDictionaryWriter.WriteLine([string]$envelope.cj)
+                        $contentCount++
+                    }
+                    Write-VulnObservationRefLine -Writer $refStreams[[int]$envelope.t].Writer -Id ([string]$envelope.id) -DeviceProfileIndex ([int]$envelope.di) -ContentTemplateIndex ([int]$contentIndex[$signature]) -FirstSeenTimestamp ([string]$envelope.fs) -LastSeenTimestamp ([string]$envelope.ls)
+                }
+                $contentIndex.Clear()
+                Remove-Item -LiteralPath $partitionPath -Force -ErrorAction SilentlyContinue
+                if ((($bucket + 1) % 16) -eq 0 -and (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue)) {
+                    Write-MemoryUsage -Label ("ContentStore Content Partition {0}/{1}" -f ($bucket + 1), $partitionCount) | Out-Null
+                }
+            }
+        }
+        finally {
+            $contentDictionaryWriter.Dispose()
+            foreach ($streamState in $refStreams) {
+                if ($streamState.Writer) { $streamState.Writer.Dispose() }
+                elseif ($streamState.GzipStream) { $streamState.GzipStream.Dispose() }
+                elseif ($streamState.FileStream) { $streamState.FileStream.Dispose() }
+            }
+        }
+
+        $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $stageRoot
+        $dictionaryFileStream = [System.IO.File]::Create($dictionaryPath)
+        try {
+            $dictionaryGzipStream = [System.IO.Compression.GZipStream]::new($dictionaryFileStream, [System.IO.Compression.CompressionMode]::Compress)
+            try {
+                $dictionaryWriter = [System.IO.StreamWriter]::new($dictionaryGzipStream, [System.Text.UTF8Encoding]::new($false))
+                try {
+                    $dictionaryWriter.Write('{"version":"content-dictionary-v1","deviceProfileOrder":"partitioned","deviceProfiles":[')
+                    $first = $true
+                    foreach ($line in [System.IO.File]::ReadLines($deviceDictionaryFragment, [System.Text.UTF8Encoding]::new($false))) {
+                        if (-not $first) { $dictionaryWriter.Write(',') }
+                        $dictionaryWriter.Write($line)
+                        $first = $false
+                    }
+                    $dictionaryWriter.Write('],"contentTemplates":[')
+                    $first = $true
+                    foreach ($line in [System.IO.File]::ReadLines($contentDictionaryFragment, [System.Text.UTF8Encoding]::new($false))) {
+                        if (-not $first) { $dictionaryWriter.Write(',') }
+                        $dictionaryWriter.Write($line)
+                        $first = $false
+                    }
+                    $dictionaryWriter.Write(']}')
+                }
+                finally { $dictionaryWriter.Dispose() }
+            }
+            finally { $dictionaryGzipStream.Dispose() }
+        }
+        finally { $dictionaryFileStream.Dispose() }
+        $filesToPublish.Add([PSCustomObject]@{ StagePath = $dictionaryPath; TargetPath = Get-VulnContentDictionaryPath -BasePath $BasePath })
+
+        $publishedNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($source in $sourceFiles) {
+            [void]$publishedNames.Add((Split-Path -Leaf ([string]$source.TargetPath)))
+            if (-not [string]::IsNullOrWhiteSpace([string]$source.PeriodKey)) {
+                [void]$publishedNames.Add([string]::Format($Script:VulnHistoryFileNamePattern, [string]$source.PeriodKey))
+                [void]$publishedNames.Add([string]::Format($Script:VulnHistoryRowsFileNamePattern, [string]$source.PeriodKey))
+            }
+        }
+        [void]$publishedNames.Add($Script:VulnContentDictionaryFileName)
+        $removePaths = Get-VulnHistoryRemovePaths -BasePath $BasePath -PublishedHistoryNames $publishedNames
+        Publish-StoreFilesTransactional -BasePath $BasePath -StoreName 'vuln' -Files @($filesToPublish) -RemovePaths @($removePaths)
+        if (Get-Command -Name Write-MemoryUsage -ErrorAction SilentlyContinue) {
+            Write-MemoryUsage -Label 'ContentStore Publish End' | Out-Null
+        }
+    }
+    finally {
+        for ($index = 0; $index -lt $partitionCount; $index++) {
+            if ($null -ne $deviceWriters[$index]) { $deviceWriters[$index].Dispose() }
+            if ($null -ne $contentWriters[$index]) { $contentWriters[$index].Dispose() }
+        }
         if (Test-Path -LiteralPath $stageRoot) {
             Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
         }

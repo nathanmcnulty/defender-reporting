@@ -658,6 +658,7 @@ try {
     # Step 1: Verify Azure connection and set subscription
     # -------------------------------------------------------------------------
     Write-Host "Step 1: Verifying Azure connection..." -ForegroundColor Cyan
+    Write-Host ("  PowerShell runtime: {0} ({1})" -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition) -ForegroundColor Gray
 
     $context = Get-AzContext
     if (-not $context) {
@@ -824,7 +825,12 @@ try {
 
         if ($PSCmdlet.ShouldProcess($AutomationAccountName, "Create/update automation account")) {
             $null = Invoke-ArmApi -Path $aaPath -Method PUT -Payload $aaPayload -Description "Create/update automation account"
-            Write-Host "  Automation account ready with Managed Identity enabled" -ForegroundColor Green
+            if ($aaState.Exists) {
+                Write-Host "  Automation account already exists; configuration and Managed Identity confirmed" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  Automation account created with Managed Identity enabled" -ForegroundColor Green
+            }
         }
 
         # Step 4: Poll for Managed Identity principal ID (Automation Account)
@@ -867,7 +873,12 @@ try {
 
         if ($PSCmdlet.ShouldProcess($planName, "Create/update Flex Consumption plan")) {
             $null = Invoke-ArmApi -Path $planPath -Method PUT -Payload $planPayload -Description "Create/update Flex Consumption plan"
-            Write-Host "  Flex Consumption plan '$planName' ready" -ForegroundColor Green
+            if ($planState.Exists) {
+                Write-Host "  Flex Consumption plan '$planName' already exists; configuration confirmed" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  Flex Consumption plan '$planName' created" -ForegroundColor Green
+            }
         }
 
         # 3b: Create Function App with system-assigned Managed Identity
@@ -915,7 +926,12 @@ try {
 
         if ($PSCmdlet.ShouldProcess($FunctionAppName, "Create/update Function App")) {
             $null = Invoke-ArmApi -Path $functionAppPath -Method PUT -Payload $functionAppPayload -Description "Create/update Function App"
-            Write-Host "  Function App '$FunctionAppName' created with Managed Identity" -ForegroundColor Green
+            if ($functionAppState.Exists) {
+                Write-Host "  Function App '$FunctionAppName' already exists; configuration and Managed Identity confirmed" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  Function App '$FunctionAppName' created with Managed Identity" -ForegroundColor Green
+            }
         }
 
         # Step 4: Poll for Managed Identity principal ID (Function App)
@@ -1051,7 +1067,8 @@ try {
             return ($sa.properties.provisioningState -eq 'Succeeded')
         } | Out-Null
 
-        Write-Host "  Storage account created with security best practices:" -ForegroundColor Green
+        $storageStatus = if ($existingStorageFound) { 'Existing storage account security configuration confirmed:' } else { 'Storage account created with security best practices:' }
+        Write-Host "  $storageStatus" -ForegroundColor Green
         Write-Host "    - TLS 1.2 minimum" -ForegroundColor Gray
         Write-Host "    - HTTPS only" -ForegroundColor Gray
         Write-Host "    - No public blob access" -ForegroundColor Gray
@@ -1116,21 +1133,19 @@ try {
     # -------------------------------------------------------------------------
     # Step 7: Create blob containers
     # -------------------------------------------------------------------------
-    Write-Host "`nStep 7: Creating blob containers..." -ForegroundColor Cyan
+    Write-Host "`nStep 7: Blob containers..." -ForegroundColor Cyan
 
     foreach ($containerName in $Script:BlobContainers) {
         $containerPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName/blobServices/default/containers/${containerName}?api-version=$($Script:ArmApiVersions.StorageAccount)"
+        $containerState = Get-OptionalArmResource -Path $containerPath -Description "Check container '$containerName'"
 
         if ($PSCmdlet.ShouldProcess($containerName, "Create blob container")) {
-            try {
-                Invoke-ArmApi -Path $containerPath -Method PUT -Payload '{}' -Description "Create container '$containerName'" | Out-Null
-                Write-Host "  Container '$containerName' created" -ForegroundColor Green
+            Invoke-ArmApi -Path $containerPath -Method PUT -Payload '{}' -Description "Create/update container '$containerName'" | Out-Null
+            if ($containerState.Exists) {
+                Write-Host "  Container '$containerName' already exists" -ForegroundColor Green
             }
-            catch {
-                if ($_.Exception.Message -match '409|Conflict|already exists') {
-                    Write-Host "  Container '$containerName' already exists" -ForegroundColor Green
-                }
-                else { throw }
+            else {
+                Write-Host "  Container '$containerName' created" -ForegroundColor Green
             }
         }
     }
@@ -1138,16 +1153,14 @@ try {
     # Function App: also create deployment container for zip package
     if ($ComputeType -eq 'FunctionApp') {
         $deployContainerPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName/blobServices/default/containers/$($Script:FunctionAppDeploymentContainer)?api-version=$($Script:ArmApiVersions.StorageAccount)"
+        $deployContainerState = Get-OptionalArmResource -Path $deployContainerPath -Description "Check deployment container '$($Script:FunctionAppDeploymentContainer)'"
         if ($PSCmdlet.ShouldProcess($Script:FunctionAppDeploymentContainer, "Create deployment container")) {
-            try {
-                Invoke-ArmApi -Path $deployContainerPath -Method PUT -Payload '{}' -Description "Create deployment container" | Out-Null
-                Write-Host "  Container '$($Script:FunctionAppDeploymentContainer)' created (deployment)" -ForegroundColor Green
+            Invoke-ArmApi -Path $deployContainerPath -Method PUT -Payload '{}' -Description "Create/update deployment container" | Out-Null
+            if ($deployContainerState.Exists) {
+                Write-Host "  Container '$($Script:FunctionAppDeploymentContainer)' already exists (deployment)" -ForegroundColor Green
             }
-            catch {
-                if ($_.Exception.Message -match '409|Conflict|already exists') {
-                    Write-Host "  Container '$($Script:FunctionAppDeploymentContainer)' already exists" -ForegroundColor Green
-                }
-                else { throw }
+            else {
+                Write-Host "  Container '$($Script:FunctionAppDeploymentContainer)' created (deployment)" -ForegroundColor Green
             }
         }
     }
@@ -1523,11 +1536,12 @@ try {
             # Steps 9-12 (FunctionApp): Build deployment zip and deploy
             Write-Host "`nSteps 9-12: Building and deploying Function App..." -ForegroundColor Cyan
 
-            $packageScript = Join-Path $PSScriptRoot 'build' 'Build-FunctionAppPackage.ps1'
-            $buildScript = Join-Path $PSScriptRoot 'build' 'azure' 'Build-FunctionApp.ps1'
-            $functionAppDir = Join-Path $PSScriptRoot 'azure' 'function-app'
-            $functionAppEntryPoint = Join-Path $functionAppDir 'ExportAndGenerate' 'run.ps1'
-            $functionAppModulesPath = Join-Path $functionAppDir 'Modules' 'Az.Accounts'
+            # Static path construction avoids relying on session-specific Join-Path command resolution.
+            $packageScript = [System.IO.Path]::Combine($PSScriptRoot, 'build', 'Build-FunctionAppPackage.ps1')
+            $buildScript = [System.IO.Path]::Combine($PSScriptRoot, 'build', 'azure', 'Build-FunctionApp.ps1')
+            $functionAppDir = [System.IO.Path]::Combine($PSScriptRoot, 'azure', 'function-app')
+            $functionAppEntryPoint = [System.IO.Path]::Combine($functionAppDir, 'ExportAndGenerate', 'run.ps1')
+            $functionAppModulesPath = [System.IO.Path]::Combine($functionAppDir, 'Modules', 'Az.Accounts')
             $zipMetadataPath = $null
             $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) ('funcapp-deploy-' + [guid]::NewGuid().ToString('N') + '.zip')
             if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
@@ -1969,7 +1983,7 @@ try {
         # -----------------------------------------------------------------
         # Step 16: Create Container Apps Environment
         # -----------------------------------------------------------------
-        Write-Host "`nStep 16: Creating Container Apps Environment '$ContainerAppEnvName'..." -ForegroundColor Cyan
+        Write-Host "`nStep 16: Container Apps Environment '$ContainerAppEnvName'..." -ForegroundColor Cyan
 
         $caEnvPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.App/managedEnvironments/${ContainerAppEnvName}?api-version=$($Script:ArmApiVersions.ContainerAppEnvironment)"
         $caEnvState = Get-OptionalArmResource -Path $caEnvPath -Description 'Check Container Apps Environment'
@@ -1990,8 +2004,8 @@ try {
             }
         }) -IsNewResource (-not $caEnvState.Exists) | ConvertTo-Json -Depth 5
 
-        if ($PSCmdlet.ShouldProcess($ContainerAppEnvName, "Create Container Apps Environment")) {
-            Invoke-ArmApi -Path $caEnvPath -Method PUT -Payload $caEnvPayload -Description "Create Container Apps Environment" | Out-Null
+        if ($PSCmdlet.ShouldProcess($ContainerAppEnvName, "Create/update Container Apps Environment")) {
+            Invoke-ArmApi -Path $caEnvPath -Method PUT -Payload $caEnvPayload -Description "Create/update Container Apps Environment" | Out-Null
 
             # Environment creation can take 1-3 minutes
             $envDefaultDomain = $null
@@ -2006,7 +2020,12 @@ try {
                 return $false
             } | Out-Null
 
-            Write-Host "  Container Apps Environment created (no Log Analytics)" -ForegroundColor Green
+            if ($caEnvState.Exists) {
+                Write-Host "  Container Apps Environment already exists; configuration confirmed (no Log Analytics)" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  Container Apps Environment created (no Log Analytics)" -ForegroundColor Green
+            }
         }
 
         # If environment already existed, fetch the default domain
@@ -2023,7 +2042,7 @@ try {
         # -----------------------------------------------------------------
         # Step 17: Create Container App (Caddy with blob download)
         # -----------------------------------------------------------------
-        Write-Host "`nStep 17: Creating Container App '$ContainerAppName'..." -ForegroundColor Cyan
+        Write-Host "`nStep 17: Container App '$ContainerAppName'..." -ForegroundColor Cyan
 
         $caPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.App/containerApps/${ContainerAppName}?api-version=$($Script:ArmApiVersions.ContainerApp)"
         $caState = Get-OptionalArmResource -Path $caPath -Description 'Check Container App'
@@ -2180,8 +2199,8 @@ exec caddy file-server --root /data --listen :80
         $caPayloadBytes = [System.Text.Json.JsonSerializer]::SerializeToUtf8Bytes($caObj, [System.Text.Json.JsonSerializerOptions]@{ WriteIndented = $false })
         $caPayload = [System.Text.Encoding]::UTF8.GetString($caPayloadBytes)
 
-        if ($PSCmdlet.ShouldProcess($ContainerAppName, "Create Container App")) {
-            Invoke-ArmApi -Path $caPath -Method PUT -Payload $caPayload -Description "Create Container App" | Out-Null
+        if ($PSCmdlet.ShouldProcess($ContainerAppName, "Create/update Container App")) {
+            Invoke-ArmApi -Path $caPath -Method PUT -Payload $caPayload -Description "Create/update Container App" | Out-Null
 
             # Poll for provisioning
             $camiPrincipalId = $null
@@ -2197,10 +2216,15 @@ exec caddy file-server --root /data --listen :80
             } | Out-Null
 
             if (-not $camiPrincipalId) {
-                throw "Container App created but Managed Identity principal ID not available."
+                throw "Container App provisioning succeeded but Managed Identity principal ID is not available."
             }
 
-            Write-Host "  Container App created" -ForegroundColor Green
+            if ($caState.Exists) {
+                Write-Host "  Container App already exists; configuration and Managed Identity confirmed" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  Container App created" -ForegroundColor Green
+            }
             Write-Host "    FQDN: $caFqdn" -ForegroundColor Gray
             Write-Host "    Managed Identity: $camiPrincipalId" -ForegroundColor Gray
         }

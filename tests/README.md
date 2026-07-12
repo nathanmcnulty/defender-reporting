@@ -312,6 +312,8 @@ For the larger reusable Azure stress seed, materialize or register the existing 
 pwsh -NoProfile -File .\tests\New-BenchmarkDataset.ps1 -DatasetId benchmark-large-50k-v1 -AllowLargeDataset
 ```
 
+Benchmark seeds now use the deterministic `procedural-v1` model and compiled streaming writer by default. The seed, model version, cardinalities, generation date, churn, and sparsity settings are recorded in `synthetic-manifest.json`; repeat runs with the same settings produce byte-stable gzip data artifacts.
+
 That dataset definition maps to:
 - dataset id: `benchmark-large-50k-v1`
 - preset: `BalancedMediumHeavy`
@@ -338,6 +340,8 @@ That command:
 - writes a fresh `Machines_Current.json.gz` with shifted observation dates
 - writes a new `VulnExport_<group>_<date>.json.gz` snapshot representing the next full bulk export date
 - is intended for Azure replay paths that merge incoming snapshots into the existing canonical store
+- defaults to `AdvanceSnapshot`, which hard-links unchanged seed artifacts and procedurally writes only `Machines_Current.json.gz`, new grouped `VulnExport_*_<date>.json.gz` snapshots, and overlay metadata
+- supports `-Mode ShiftAllDates` for legacy datasets that do not contain `procedural-v1` model metadata
 
 Capture a repeatable multi-run benchmark series against the standard dataset with:
 

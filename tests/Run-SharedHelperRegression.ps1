@@ -5844,6 +5844,7 @@ function Test-VulnContentStoreRoundTrip {
         Assert-True ((Test-Path -LiteralPath (Get-VulnContentDictionaryPath -BasePath $tempRoot) -PathType Leaf)) 'Expected vulnerability content dictionary sidecar to be created.'
         Assert-True ((Test-Path -LiteralPath (Get-VulnCurrentRefsPath -BasePath $tempRoot) -PathType Leaf)) 'Expected vulnerability current refs sidecar to be created.'
         Assert-True ((Test-Path -LiteralPath (Get-VulnHistoryRefsPath -BasePath $tempRoot -PeriodKey '2026Q1') -PathType Leaf)) 'Expected vulnerability history refs sidecar to be created.'
+        Assert-True ((Test-VulnContentStoreSupportsDirectMerge -BasePath $tempRoot) -eq $true) 'Expected compact source-order content dictionaries to remain eligible for direct merge.'
         Assert-True ($roundTripped.Count -eq 2) 'Expected content sidecar round-trip to return both current and history rows.'
 
         $expectedRows = @($currentRow, $historyRow) | Sort-Object Id
@@ -5891,6 +5892,71 @@ function Test-VulnContentStoreRoundTrip {
         if (Test-Path -LiteralPath $tempRoot) {
             Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+}
+
+function Test-ProceduralSyntheticDatasetGeneration {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('procedural-synthetic-' + [guid]::NewGuid().ToString('N'))
+    $firstPath = Join-Path $tempRoot 'first'
+    $secondPath = Join-Path $tempRoot 'second'
+    $overlayPath = Join-Path $tempRoot 'overlay'
+    $initialImportPath = Join-Path $tempRoot 'initial-import'
+    try {
+        [void](New-Item -Path $firstPath -ItemType Directory -Force)
+        [void](New-Item -Path $secondPath -ItemType Directory -Force)
+        $writerSource = Join-Path $PSScriptRoot 'helpers\SyntheticDatasetWriter.cs'
+        if ($null -eq ('DefenderReporting.Synthetic.SyntheticDatasetWriter' -as [type])) { Add-Type -Path $writerSource }
+        foreach ($path in @($firstPath, $secondPath)) {
+            $result = [DefenderReporting.Synthetic.SyntheticDatasetWriter]::Generate($path, 16, 240, 4242, '2026-07-11', 4, 80, 0.10, 0.05, $true)
+            Assert-True ($result.CurrentRows + $result.HistoryRows -eq 240) 'Expected procedural writer to emit the requested total row count.'
+            ([ordered]@{
+                manifestVersion = 2; generatorVersion = 'procedural-streaming-v1'; modelVersion = 'procedural-v1'; datasetId = 'procedural-test';
+                preset = 'BalancedMediumHeavy'; seed = 4242; generationDate = '2026-07-11'; snapshotOrdinal = 0;
+                actualDeviceCount = 16; actualCurrentRows = $result.CurrentRows; actualHistoryRows = $result.HistoryRows;
+                actualTotalVulnRows = 240; targetDeviceCount = 16; targetTotalVulnRows = 240; contentTemplateCount = 80
+            }) | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $path 'synthetic-manifest.json') -Encoding utf8
+        }
+
+        foreach ($firstFile in @(Get-ChildItem -LiteralPath $firstPath -Filter '*.json.gz' -File | Sort-Object Name)) {
+            $secondFile = Join-Path $secondPath $firstFile.Name
+            Assert-True ((Test-Path -LiteralPath $secondFile -PathType Leaf)) "Expected deterministic rerun artifact '$($firstFile.Name)'."
+            Assert-True ((Get-FileHash $firstFile.FullName).Hash -eq (Get-FileHash $secondFile).Hash) "Expected byte-stable procedural artifact '$($firstFile.Name)'."
+        }
+
+        Assert-True (Test-VulnContentStoreExistence -BasePath $firstPath) 'Expected procedural seed to create a valid content store.'
+        Assert-True (@(Read-VulnContentStoreRow -BasePath $firstPath).Count -eq 240) 'Expected procedural content refs to expand to every requested row.'
+        foreach ($historyFile in @(Get-ChildItem -LiteralPath $firstPath -Filter 'VulnHistory_*.json.gz' -File)) {
+            Assert-True ((Test-VulnHistoryFileLightweight -Path $historyFile.FullName) -ge 0) "Expected valid procedural history metadata in '$($historyFile.Name)'."
+        }
+
+        & (Join-Path $PSScriptRoot 'New-SyntheticSnapshotDelta.ps1') -SourcePath $firstPath -OutputPath $overlayPath -TargetLatestDate '2026-07-12'
+        $overlayManifest = Get-Content -LiteralPath (Join-Path $overlayPath 'synthetic-manifest.json') -Raw | ConvertFrom-Json -Depth 30
+        Assert-True ([string]$overlayManifest.incrementMode -eq 'AdvanceSnapshot') 'Expected procedural delta to use AdvanceSnapshot mode.'
+        foreach ($category in @('added', 'changed', 'removed', 'reopened', 'persistent')) {
+            Assert-True ([int]$overlayManifest.churn.$category -gt 0) "Expected deterministic overlay churn category '$category' to contain rows."
+        }
+        Assert-True (@(Get-ChildItem -LiteralPath $overlayPath -Filter 'VulnExport_*_2026-07-12.json.gz' -File).Count -gt 0) 'Expected procedural delta to emit grouped bulk snapshot files.'
+        if ($IsWindows) { Assert-True ([int]$overlayManifest.hardLinkedSeedFiles -gt 0) 'Expected Windows procedural overlays to hard-link unchanged seed artifacts.' }
+        Assert-True ((Get-FileHash (Join-Path $firstPath 'VulnContentDictionary.json.gz')).Hash -eq (Get-FileHash (Join-Path $overlayPath 'VulnContentDictionary.json.gz')).Hash) 'Expected overlay creation to preserve the base dictionary.'
+
+        [void](New-Item -Path $initialImportPath -ItemType Directory -Force)
+        Copy-Item -LiteralPath (Join-Path $overlayPath 'synthetic-manifest.json') -Destination $initialImportPath
+        foreach ($snapshotFile in @(Get-ChildItem -LiteralPath $overlayPath -Filter 'VulnExport_*_2026-07-12.json.gz' -File)) {
+            Copy-Item -LiteralPath $snapshotFile.FullName -Destination $initialImportPath
+        }
+        $initialResult = Publish-VulnStoreFromBulkSnapshot -BasePath $initialImportPath -SnapshotFilePaths @(
+            Get-ChildItem -LiteralPath $initialImportPath -Filter 'VulnExport_*.json.gz' -File | ForEach-Object { $_.FullName }
+        )
+        Assert-True ($initialResult.CurrentRows -gt 0) 'Expected procedural initial import to publish current rows.'
+        Assert-True (Test-VulnStoreExistence -BasePath $initialImportPath) 'Expected procedural initial import to create the canonical store.'
+        Assert-True (Test-VulnContentStoreExistence -BasePath $initialImportPath) 'Expected procedural initial import to create content sidecars.'
+        Assert-True (@(Read-VulnContentStoreRow -BasePath $initialImportPath).Count -eq $initialResult.CurrentRows) 'Expected procedural initial import refs to expand to every canonical current row.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -6402,6 +6468,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-WriteProgressMarkerIncludesEtaWhenTotalCountKnown'; SuccessMessage = 'Progress marker ETA checks passed.' }
     @{ Name = 'Test-WriteCombinedPayloadGzipCanConsumeColumnLookupData'; SuccessMessage = 'Payload lookup consumption checks passed.' }
     @{ Name = 'Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload'; SuccessMessage = 'Embedded payload inspection checks passed.' }
+    @{ Name = 'Test-VulnContentStoreRoundTrip'; SuccessMessage = 'Vulnerability content store round-trip checks passed.' }
+    @{ Name = 'Test-ProceduralSyntheticDatasetGeneration'; SuccessMessage = 'Procedural synthetic generation and immutable overlay checks passed.' }
     @{ Name = 'Test-MeasureStressRunWritesProgressAndFinalReport'; SuccessMessage = 'Measure-StressRun report persistence checks passed.' }
     @{ Name = 'Test-GenerateSyntheticLargeExportsUsesStablePlannerOrdering'; SuccessMessage = 'Synthetic planner ordering checks passed.' }
     @{ Name = 'Test-LargeDatasetValidationSemanticModeForcesFullReplay'; SuccessMessage = 'Large-dataset semantic sign-off checks passed.' }
@@ -6430,7 +6498,6 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-LegacyMachineTupleFallbackPreservesProjectedRowMetadata'; SuccessMessage = 'Legacy tuple fallback checks passed.' }
     @{ Name = 'Test-SourceCveEnrichmentReadsExploitAvailabilityFromObjectRecord'; SuccessMessage = 'Source enrichment exploit-availability checks passed.' }
     @{ Name = 'Test-VulnPropertyHelpersSupportSupportedRowShapes'; SuccessMessage = 'Vulnerability property helper shape checks passed.' }
-    @{ Name = 'Test-VulnContentStoreRoundTrip'; SuccessMessage = 'Vulnerability content store round-trip checks passed.' }
     @{ Name = 'Test-VulnObservedWindowCacheRoundTrip'; SuccessMessage = 'Observed-window cache round-trip checks passed.' }
     @{ Name = 'Test-FunctionAppWriteOutputNoEnumeratePreservesJObject'; SuccessMessage = 'Function App Write-Output -NoEnumerate checks passed.' }
     @{ Name = 'Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo'; SuccessMessage = 'Function execution status summary metadata checks passed.' }

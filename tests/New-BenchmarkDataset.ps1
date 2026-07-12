@@ -10,7 +10,7 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(0.5, 256.0)]
-    [double]$MinimumAvailableMemoryGB = 3,
+    [double]$MinimumAvailableMemoryGB = 0.5,
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(1, 2048)]
@@ -58,6 +58,8 @@ function Get-BenchmarkDatasetMetadataRecord {
         description = [string]$Definition.description
         preset = [string]$Definition.preset
         seed = [int]$Definition.seed
+        modelVersion = if ($Definition.PSObject.Properties['modelVersion']) { [string]$Definition.modelVersion } else { 'procedural-v1' }
+        generatorVersion = if ($null -ne $Manifest -and $Manifest.PSObject.Properties['generatorVersion']) { [string]$Manifest.generatorVersion } else { 'procedural-streaming-v1' }
         targetDeviceCount = [int]$Definition.targetDeviceCount
         targetTotalVulnRows = [int]$Definition.targetTotalVulnRows
         sourcePath = $SourcePath
@@ -68,7 +70,7 @@ function Get-BenchmarkDatasetMetadataRecord {
     }
 
     if ($null -ne $Manifest) {
-        foreach ($propertyName in @('contentTemplateCount', 'uniqueCveIdCount', 'normalizedCveLookupCount')) {
+        foreach ($propertyName in @('datasetId', 'generationDate', 'snapshotCount', 'contentTemplateCount', 'uniqueCveIdCount', 'normalizedCveLookupCount', 'model')) {
             $property = $Manifest.PSObject.Properties[$propertyName]
             if ($null -ne $property) {
                 $metadata[$propertyName] = $property.Value
@@ -184,6 +186,7 @@ if ((Test-Path -LiteralPath $resolvedOutputPath) -and $Force) {
     -OutputPath $resolvedOutputPath `
     -TargetDeviceCount ([int]$definition.targetDeviceCount) `
     -TargetTotalVulnRows ([int]$definition.targetTotalVulnRows) `
+    -ContentTemplateCount ([int]$definition.contentTemplateCount) `
     -Seed ([int]$definition.seed) `
     -MinimumAvailableMemoryGB $MinimumAvailableMemoryGB `
     -MinimumFreeDiskGB $MinimumFreeDiskGB `
