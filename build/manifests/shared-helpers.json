@@ -6,6 +6,7 @@
     "src/powershell/Shared"
   ],
   "sourceFiles": [
+    "src/powershell/Shared/Core/CompiledVulnContentProjector.ps1",
     "src/powershell/Shared/Core/Core.ps1",
     "src/powershell/Shared/Stores/VulnerabilityStore.ps1",
     "src/powershell/Shared/Stores/VulnerabilitySnapshotImport.ps1",

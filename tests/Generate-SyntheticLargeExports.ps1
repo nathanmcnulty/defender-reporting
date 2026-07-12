@@ -54,6 +54,28 @@ param(
     [switch]$IncludeRawRows,
 
     [Parameter(Mandatory = $false)]
+    [string]$GenerationDate = (Get-Date).ToString('yyyy-MM-dd'),
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(1, 40)]
+    [int]$SnapshotCount = 4,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0, 50000000)]
+    [int]$ContentTemplateCount = 0,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0.0, 1.0)]
+    [double]$ChurnRate = 0.08,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0.0, 1.0)]
+    [double]$OptionalFieldSparsity = 0.03,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$UseLegacyGenerator,
+
+    [Parameter(Mandatory = $false)]
     [switch]$AllowLargeDataset
 )
 
@@ -836,6 +858,18 @@ if ($TargetDeviceCount -le 0) {
 if ($TargetTotalVulnRows -le 0) {
     $TargetTotalVulnRows = [int]$presetSettings.TargetTotalVulnRows
 }
+if ($ContentTemplateCount -le 0) {
+    # Keep content breadth realistic and bounded. Row volume validates streaming;
+    # making every eighth observation a distinct enrichment template instead
+    # measures retained lookup cardinality and can overwhelm constrained hosts.
+    $ContentTemplateCount = [math]::Min(
+        $TargetTotalVulnRows,
+        [math]::Min(25000, [math]::Max(2000, [int][math]::Ceiling($TargetTotalVulnRows / 300.0)))
+    )
+}
+if ((-not $UseLegacyGenerator) -and -not $PSBoundParameters.ContainsKey('MinimumAvailableMemoryGB')) {
+    $MinimumAvailableMemoryGB = 0.5
+}
 
 $SourcePath = [System.IO.Path]::GetFullPath($SourcePath)
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
@@ -900,8 +934,98 @@ elseif ($CleanOutput) {
     }
 }
 
+$generationDateValue = Convert-ToYmdDate -DateValue $GenerationDate
+if ([string]::IsNullOrWhiteSpace($generationDateValue)) {
+    throw "GenerationDate '$GenerationDate' could not be parsed as yyyy-MM-dd."
+}
+
+if (-not $UseLegacyGenerator) {
+    $writerSourcePath = Join-Path $PSScriptRoot 'helpers\SyntheticDatasetWriter.cs'
+    if (-not (Test-Path -LiteralPath $writerSourcePath -PathType Leaf)) {
+        throw "Procedural writer source was not found: $writerSourcePath"
+    }
+    if ($null -eq ('DefenderReporting.Synthetic.SyntheticDatasetWriter' -as [type])) {
+        Add-Type -Path $writerSourcePath
+    }
+
+    $stagePath = Join-Path (Split-Path -Path $OutputPath -Parent) ('.synthetic-generation-' + [guid]::NewGuid().ToString('N'))
+    $backupPath = $OutputPath + '.previous-' + [guid]::NewGuid().ToString('N')
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        [void](New-Item -Path $stagePath -ItemType Directory -Force)
+        $result = [DefenderReporting.Synthetic.SyntheticDatasetWriter]::Generate(
+            $stagePath,
+            $TargetDeviceCount,
+            $TargetTotalVulnRows,
+            $Seed,
+            $generationDateValue,
+            $SnapshotCount,
+            $ContentTemplateCount,
+            $ChurnRate,
+            $OptionalFieldSparsity,
+            ($IncludeRawRows -eq $true)
+        )
+        $artifactRecords = @(
+            Get-ChildItem -LiteralPath $stagePath -File | Sort-Object Name | ForEach-Object {
+                [ordered]@{ name = $_.Name; bytes = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+            }
+        )
+        $manifest = [ordered]@{
+            manifestVersion = 2
+            generatorVersion = 'procedural-streaming-v1'
+            modelVersion = 'procedural-v1'
+            datasetId = ('procedural-{0}-{1}-{2}' -f $Seed, $TargetDeviceCount, $TargetTotalVulnRows)
+            preset = $Preset
+            seed = $Seed
+            generatedOnUtc = [datetime]::UtcNow.ToString('o')
+            generationDate = $generationDateValue
+            snapshotCount = $SnapshotCount
+            targetDeviceCount = $TargetDeviceCount
+            targetTotalVulnRows = $TargetTotalVulnRows
+            actualDeviceCount = [int]$result.DeviceCount
+            actualCurrentRows = [int]$result.CurrentRows
+            actualHistoryRows = [int]$result.HistoryRows
+            actualTotalVulnRows = ([int]$result.CurrentRows + [int]$result.HistoryRows)
+            contentTemplateCount = [int]$result.ContentTemplateCount
+            uniqueCveIdCount = [int]$result.CveCount
+            normalizedCveLookupCount = [int]$result.CveCount
+            historyPeriods = @($result.HistoryPeriods | Sort-Object)
+            artifacts = $artifactRecords
+            includeRawRows = ($IncludeRawRows -eq $true)
+            model = [ordered]@{
+                churnRate = $ChurnRate
+                optionalFieldSparsity = $OptionalFieldSparsity
+                contentTemplateCount = $ContentTemplateCount
+                distribution = 'correlated-long-tail-v1'
+            }
+            elapsedSeconds = [math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
+        }
+        $manifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $stagePath 'synthetic-manifest.json') -Encoding utf8
+
+        if (Test-Path -LiteralPath $OutputPath) {
+            Move-Item -LiteralPath $OutputPath -Destination $backupPath
+        }
+        Move-Item -LiteralPath $stagePath -Destination $OutputPath
+        if (Test-Path -LiteralPath $backupPath) {
+            Remove-Item -LiteralPath $backupPath -Recurse -Force
+        }
+        Write-Output ("Procedural synthetic dataset generated: {0} devices, {1} rows, {2} content templates in {3:n2}s" -f $result.DeviceCount, ($result.CurrentRows + $result.HistoryRows), $result.ContentTemplateCount, $stopwatch.Elapsed.TotalSeconds)
+        return
+    }
+    catch {
+        if ((-not (Test-Path -LiteralPath $OutputPath)) -and (Test-Path -LiteralPath $backupPath)) {
+            Move-Item -LiteralPath $backupPath -Destination $OutputPath
+        }
+        throw
+    }
+    finally {
+        if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 $random = [System.Random]::new($Seed)
-$generationDate = (Get-Date).ToString('yyyy-MM-dd')
+$generationDate = $generationDateValue
 
 $sourceMachinePath = Get-MachineCurrentPath -BasePath $SourcePath
 if (-not (Test-Path -LiteralPath $sourceMachinePath -PathType Leaf)) {

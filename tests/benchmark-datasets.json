@@ -4,8 +4,10 @@
     "description": "Durable benchmark baseline dataset for Azure and local performance review.",
     "preset": "BalancedMediumHeavy",
     "seed": 20260322,
+    "modelVersion": "procedural-v1",
     "targetDeviceCount": 1500,
     "targetTotalVulnRows": 120000,
+    "contentTemplateCount": 2000,
     "sourceRelativePath": "exports",
     "outputRelativePath": ".local/benchmark-datasets/benchmark-medium-v1",
     "historyTags": [
@@ -18,8 +20,10 @@
     "description": "Durable large benchmark seed dataset for Azure replay and delta-snapshot validation.",
     "preset": "BalancedMediumHeavy",
     "seed": 20260322,
+    "modelVersion": "procedural-v1",
     "targetDeviceCount": 50000,
     "targetTotalVulnRows": 1500000,
+    "contentTemplateCount": 5000,
     "sourceRelativePath": "exports",
     "outputRelativePath": ".local/large-datasets/synthetic-50k-1_5m",
     "historyTags": [

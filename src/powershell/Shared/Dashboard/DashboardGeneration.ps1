@@ -637,7 +637,7 @@ function Write-JsonValueToWriter {
             return
         }
 
-        $baseValue = $Value.BaseObject
+        $baseValue = $Value.PSObject.BaseObject
         if ($null -ne $baseValue -and $baseValue -ne $Value) {
             Write-JsonValueToWriter -Writer $Writer -Value $baseValue
             return
@@ -3280,7 +3280,8 @@ function Test-FileBackedNormalizationMachineLookup {
     return (
         $Machines -is [hashtable] -and (
             $null -ne $Machines.PSObject.Properties['FileBackedPath'] -or
-            $null -ne $Machines.PSObject.Properties['FileBackedBucketDirectory']
+            $null -ne $Machines.PSObject.Properties['FileBackedBucketDirectory'] -or
+            $null -ne $Machines.PSObject.Properties['FileBackedCompiledLookup']
         )
     )
 }
@@ -3455,6 +3456,24 @@ function Open-BucketedFileBackedNormalizationMachineLookup {
     try {
         [void](New-Item -Path $bucketDirectory -ItemType Directory -Force)
 
+        $canonicalMachinePath = @(
+            (Join-Path $Path 'Machines_Current.json.gz'),
+            (Join-Path $Path 'Machines_Current.json')
+        ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        if (-not [string]::IsNullOrWhiteSpace([string]$canonicalMachinePath)) {
+            Initialize-CompiledVulnContentProjector
+            $compiledLookupPath = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-tuples-indexed-' + [System.Guid]::NewGuid().ToString('N') + '.json')
+            $compiledLookup = [DefenderReporting.Store.MachineTupleIndexedLookup]::Create(
+                [string]$canonicalMachinePath,
+                $compiledLookupPath
+            )
+            Remove-Item -LiteralPath $bucketDirectory -Recurse -Force -ErrorAction SilentlyContinue
+            Add-Member -InputObject $machines -NotePropertyName FileBackedCompiledLookup -NotePropertyValue $compiledLookup
+            Add-Member -InputObject $machines -NotePropertyName RecordCount -NotePropertyValue ([int]$compiledLookup.Count)
+            Write-Information "  Loaded $($compiledLookup.Count) unique machines (compiled file-backed offset index)" -InformationAction Continue
+            return $machines
+        }
+
         for ($bucketIndex = 0; $bucketIndex -lt $BucketCount; $bucketIndex++) {
             $rawBucketPath = Join-Path $bucketDirectory ('raw-{0:D3}.ndjson' -f $bucketIndex)
             $rawWriter = [System.IO.StreamWriter]::new(
@@ -3607,6 +3626,18 @@ function Remove-FileBackedNormalizationMachineLookup {
         return
     }
 
+    $compiledLookupProperty = $Machines.PSObject.Properties['FileBackedCompiledLookup']
+    if ($null -ne $compiledLookupProperty -and $null -ne $compiledLookupProperty.Value) {
+        $compiledPath = [string]$compiledLookupProperty.Value.Path
+        $compiledLookupProperty.Value.Dispose()
+        $compiledLookupProperty.Value = $null
+        if (-not [string]::IsNullOrWhiteSpace($compiledPath)) {
+            Remove-Item -LiteralPath $compiledPath -Force -ErrorAction SilentlyContinue
+        }
+        $Machines.Clear()
+        return
+    }
+
     $bucketDirectoryProperty = $Machines.PSObject.Properties['FileBackedBucketDirectory']
     if ($null -ne $bucketDirectoryProperty -and -not [string]::IsNullOrWhiteSpace([string]$bucketDirectoryProperty.Value)) {
         $bucketCacheProperty = $Machines.PSObject.Properties['FileBackedBucketCache']
@@ -3669,6 +3700,11 @@ function Read-FileBackedNormalizationMachineTuple {
         [Parameter(Mandatory = $true)]
         [string]$DeviceId
     )
+
+    $compiledLookupProperty = $Machines.PSObject.Properties['FileBackedCompiledLookup']
+    if ($null -ne $compiledLookupProperty -and $null -ne $compiledLookupProperty.Value) {
+        return [object[]]@($compiledLookupProperty.Value.ReadTuple($DeviceId))
+    }
 
     if (-not (Test-FileBackedNormalizationMachineLookup -Machines $Machines) -or [string]::IsNullOrWhiteSpace($DeviceId) -or -not $Machines.ContainsKey($DeviceId)) {
         $bucketDirectoryProperty = $Machines.PSObject.Properties['FileBackedBucketDirectory']

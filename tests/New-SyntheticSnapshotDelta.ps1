@@ -3,6 +3,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
+    [ValidateSet('AdvanceSnapshot', 'ShiftAllDates')]
+    [string]$Mode = 'AdvanceSnapshot',
+
+    [Parameter(Mandatory = $false)]
     [string]$SourcePath = (Join-Path (Split-Path -Path $PSScriptRoot -Parent) '.local\large-datasets\synthetic-50k-1_5m'),
 
     [Parameter(Mandatory = $false)]
@@ -15,7 +19,15 @@ param(
     [switch]$Force,
 
     [Parameter(Mandatory = $false)]
-    [switch]$CopyOnly
+    [switch]$CopyOnly,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0.0, 1.0)]
+    [double]$ChurnRate = 0.08,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0.0, 1.0)]
+    [double]$OptionalFieldSparsity = 0.03
 )
 
 Set-StrictMode -Version Latest
@@ -539,6 +551,114 @@ if ([string]::IsNullOrWhiteSpace($resolvedTargetLatestDate)) {
 
 if (Test-EquivalentPath -Left $resolvedSourcePath -Right $resolvedOutputPath) {
     throw 'OutputPath must differ from SourcePath.'
+}
+
+$proceduralManifestPath = Join-Path $resolvedSourcePath 'synthetic-manifest.json'
+$proceduralManifest = if (Test-Path -LiteralPath $proceduralManifestPath -PathType Leaf) {
+    Get-Content -LiteralPath $proceduralManifestPath -Raw | ConvertFrom-Json -Depth 30
+}
+else { $null }
+
+if ($Mode -eq 'AdvanceSnapshot') {
+    if ($null -eq $proceduralManifest -or [string]$proceduralManifest.modelVersion -ne 'procedural-v1') {
+        throw 'AdvanceSnapshot requires a procedural-v1 seed dataset. Use ShiftAllDates for legacy datasets.'
+    }
+    if ((Test-Path -LiteralPath $resolvedOutputPath) -and -not $Force) {
+        throw "Output path already exists: $resolvedOutputPath"
+    }
+
+    $sourceLatestDate = Get-VulnStoreLatestSnapshotDate -BasePath $resolvedSourcePath
+    if ([string]::IsNullOrWhiteSpace($sourceLatestDate)) {
+        $sourceLatestDate = [string]$proceduralManifest.generationDate
+    }
+    if (([datetime]$resolvedTargetLatestDate) -le ([datetime]$sourceLatestDate)) {
+        throw "TargetLatestDate '$resolvedTargetLatestDate' must be later than '$sourceLatestDate'."
+    }
+
+    $writerSourcePath = Join-Path $PSScriptRoot 'helpers\SyntheticDatasetWriter.cs'
+    if ($null -eq ('DefenderReporting.Synthetic.SyntheticDatasetWriter' -as [type])) { Add-Type -Path $writerSourcePath }
+    $stagePath = Join-Path (Split-Path -Path $resolvedOutputPath -Parent) ('.synthetic-overlay-' + [guid]::NewGuid().ToString('N'))
+    $backupPath = $resolvedOutputPath + '.previous-' + [guid]::NewGuid().ToString('N')
+    $linkedFileCount = 0
+    $copiedFileCount = 0
+    try {
+        [void](New-Item -Path $stagePath -ItemType Directory -Force)
+        foreach ($file in @(Get-ChildItem -LiteralPath $resolvedSourcePath -File | Where-Object {
+                    $_.Name -notin @('synthetic-manifest.json', 'benchmark-dataset.json', 'Machines_Current.json.gz') -and
+                    (-not (Test-IsLegacyVulnSnapshotFileName -Name $_.Name)) -and
+                    $_.Name -notlike '.synthetic-progress*'
+                })) {
+            Copy-OrLinkFile -SourceFilePath $file.FullName -DestinationFilePath (Join-Path $stagePath $file.Name) -CopyOnly ($CopyOnly -eq $true) -LinkedFileCount ([ref]$linkedFileCount) -CopiedFileCount ([ref]$copiedFileCount)
+        }
+
+        $snapshotOrdinal = if ($proceduralManifest.PSObject.Properties['snapshotOrdinal']) { [int]$proceduralManifest.snapshotOrdinal + 1 } else { 1 }
+        $result = [DefenderReporting.Synthetic.SyntheticDatasetWriter]::AdvanceSnapshot(
+            $stagePath,
+            [int]$proceduralManifest.actualDeviceCount,
+            [int]$proceduralManifest.actualCurrentRows,
+            [int]$proceduralManifest.contentTemplateCount,
+            [int]$proceduralManifest.seed,
+            $resolvedTargetLatestDate,
+            $snapshotOrdinal,
+            $ChurnRate,
+            $OptionalFieldSparsity
+        )
+        $artifactRecords = @(
+            Get-ChildItem -LiteralPath $stagePath -File | Sort-Object Name | ForEach-Object {
+                [ordered]@{ name = $_.Name; bytes = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+            }
+        )
+
+        $overlayManifest = [ordered]@{}
+        foreach ($property in $proceduralManifest.PSObject.Properties) { $overlayManifest[$property.Name] = $property.Value }
+        $overlayManifest.manifestVersion = 2
+        $overlayManifest.generatorVersion = 'procedural-streaming-v1'
+        $overlayManifest.parentDatasetId = [string]$proceduralManifest.datasetId
+        $overlayManifest.datasetId = ([string]$proceduralManifest.datasetId + '-snapshot-' + $snapshotOrdinal)
+        $overlayManifest.incrementMode = 'AdvanceSnapshot'
+        $overlayManifest.snapshotOrdinal = $snapshotOrdinal
+        $overlayManifest.sourceLatestDate = $sourceLatestDate
+        $overlayManifest.targetLatestDate = $resolvedTargetLatestDate
+        $overlayManifest.generationDate = $resolvedTargetLatestDate
+        $overlayManifest.generatedOnUtc = [datetime]::UtcNow.ToString('o')
+        $overlayManifest.hardLinkedSeedFiles = $linkedFileCount
+        $overlayManifest.copiedSeedFiles = $copiedFileCount
+        $overlayManifest.churn = [ordered]@{
+            rate = $ChurnRate
+            model = 'deterministic-v1'
+            added = [int]$result.AddedRows
+            changed = [int]$result.ChangedRows
+            removed = [int]$result.RemovedRows
+            reopened = [int]$result.ReopenedRows
+            persistent = ([int]$result.CurrentRows - [int]$result.RemovedRows - [int]$result.ChangedRows - [int]$result.ReopenedRows)
+        }
+        $overlayManifest.artifacts = $artifactRecords
+        $overlayManifest | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $stagePath 'synthetic-manifest.json') -Encoding utf8
+
+        $sourceMetadataPath = Join-Path $resolvedSourcePath 'benchmark-dataset.json'
+        if (Test-Path -LiteralPath $sourceMetadataPath -PathType Leaf) {
+            $metadata = Get-Content -LiteralPath $sourceMetadataPath -Raw | ConvertFrom-Json -Depth 30
+            $metadata | Add-Member -NotePropertyName parentDatasetId -NotePropertyValue ([string]$proceduralManifest.datasetId) -Force
+            $metadata | Add-Member -NotePropertyName datasetId -NotePropertyValue ([string]$overlayManifest.datasetId) -Force
+            $metadata | Add-Member -NotePropertyName modelVersion -NotePropertyValue 'procedural-v1' -Force
+            $metadata | Add-Member -NotePropertyName snapshotOrdinal -NotePropertyValue $snapshotOrdinal -Force
+            $metadata | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath (Join-Path $stagePath 'benchmark-dataset.json') -Encoding utf8
+        }
+
+        if (Test-Path -LiteralPath $resolvedOutputPath) { Move-Item -LiteralPath $resolvedOutputPath -Destination $backupPath }
+        Move-Item -LiteralPath $stagePath -Destination $resolvedOutputPath
+        if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Recurse -Force }
+        Write-Output ("Procedural snapshot overlay created: {0} rows for {1}; {2} linked and {3} copied seed files." -f $result.CurrentRows, $resolvedTargetLatestDate, $linkedFileCount, $copiedFileCount)
+        return
+    }
+    catch {
+        if ((-not (Test-Path -LiteralPath $resolvedOutputPath)) -and (Test-Path -LiteralPath $backupPath)) { Move-Item -LiteralPath $backupPath -Destination $resolvedOutputPath }
+        throw
+    }
+    finally {
+        if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $backupPath) { Remove-Item -LiteralPath $backupPath -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 if (Test-Path -LiteralPath $resolvedOutputPath) {

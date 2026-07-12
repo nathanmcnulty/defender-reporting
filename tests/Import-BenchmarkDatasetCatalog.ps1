@@ -129,7 +129,9 @@ function Test-BenchmarkDatasetDefinitionMatch {
         ([string]$Manifest.preset -eq [string]$Definition.preset) -and
         ([int]$Manifest.seed -eq [int]$Definition.seed) -and
         ([int]$Manifest.targetDeviceCount -eq [int]$Definition.targetDeviceCount) -and
-        ([int]$Manifest.targetTotalVulnRows -eq [int]$Definition.targetTotalVulnRows)
+        ([int]$Manifest.targetTotalVulnRows -eq [int]$Definition.targetTotalVulnRows) -and
+        ((-not $Definition.PSObject.Properties['contentTemplateCount']) -or ([int]$Manifest.contentTemplateCount -eq [int]$Definition.contentTemplateCount)) -and
+        ((-not $Definition.PSObject.Properties['modelVersion']) -or ([string]$Manifest.modelVersion -eq [string]$Definition.modelVersion))
     )
 }
 

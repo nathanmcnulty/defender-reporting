@@ -60,7 +60,7 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(0.5, 256.0)]
-    [double]$MinimumAvailableMemoryGB = 8,
+    [double]$MinimumAvailableMemoryGB = 0.5,
 
     [Parameter(Mandatory = $false)]
     [ValidateRange(1, 2048)]

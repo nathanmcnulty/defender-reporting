@@ -356,7 +356,7 @@ function Read-AdvancedHuntingBundle {
                             continue
                         }
 
-                        $loggedOnUsers = ConvertTo-AdvancedHuntingBundleLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value
+                        $loggedOnUsers = @(ConvertTo-AdvancedHuntingBundleLoggedOnUserList -Value $record.PSObject.Properties['LoggedOnUsers']?.Value)
                         if ($loggedOnUsers.Count -gt 0) {
                             $deviceUsers[$deviceId] = $loggedOnUsers
                         }
@@ -368,7 +368,7 @@ function Read-AdvancedHuntingBundle {
                         $pdRaw = $record.PSObject.Properties['PublishedDate']?.Value
                         $rawDescription = $record.PSObject.Properties['VulnerabilityDescription']?.Value
                         $rawAffectedSoftware = $record.PSObject.Properties['AffectedSoftware']?.Value
-                        $affectedSoftware = ConvertTo-AdvancedHuntingBundleStringArray -Value $rawAffectedSoftware
+                        $affectedSoftware = @(ConvertTo-AdvancedHuntingBundleStringArray -Value $rawAffectedSoftware)
                         $ahData[$cveId] = @{
                             PublishedDate = Convert-ToYmdDate -DateValue $pdRaw
                             VulnerabilityDescription = ConvertTo-AdvancedHuntingBundleDescriptionValue -Value $rawDescription
