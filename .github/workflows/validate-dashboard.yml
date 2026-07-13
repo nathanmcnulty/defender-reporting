@@ -21,6 +21,7 @@ on:
       - '.github/workflows/update-vulnerability-dashboard.yml'
       - '.github/workflows/sync-azure-runbook.yml'
       - '.github/workflows/sync-azure-package.yml'
+      - '.github/workflows/release-azure-package.yml'
   push:
     branches:
       - main
@@ -39,6 +40,7 @@ on:
       - '.github/workflows/update-vulnerability-dashboard.yml'
       - '.github/workflows/sync-azure-runbook.yml'
       - '.github/workflows/sync-azure-package.yml'
+      - '.github/workflows/release-azure-package.yml'
   workflow_dispatch:
 
 permissions:

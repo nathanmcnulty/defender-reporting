@@ -1,6 +1,6 @@
 # Workflow Notes
 
-This repo currently ships five GitHub Actions workflows.
+This repo currently ships six GitHub Actions workflows.
 
 ## Workflow summary
 
@@ -10,6 +10,7 @@ This repo currently ships five GitHub Actions workflows.
 | Validate Dashboard | `.github/workflows/validate-dashboard.yml` | Run the deterministic repo preflight used for local and PR validation |
 | Sync Azure Runbook | `.github/workflows/sync-azure-runbook.yml` | Rebuild and commit `azure/Invoke-DashboardPipeline.ps1` when its build sources change |
 | Build Azure Package | `.github/workflows/sync-azure-package.yml` | Build the latest Azure deployment zip and upload it as a downloadable workflow artifact |
+| Release Azure Package | `.github/workflows/release-azure-package.yml` | Build `Azure-YYMMDD.zip` from the published release tag and attach it to the GitHub release |
 | Export Dashboard PDFs | `.github/workflows/export-pdf-reports.yml` | Render PDF report variants from the latest committed dashboard |
 
 ## Flow
@@ -94,12 +95,27 @@ Key behavior:
 - Packages `Setup-AzureResources.ps1`, `templates/`, and `azure/` into `Azure-YYMMDD-<commit>.zip`
 - Uploads that zip as a workflow artifact for download from the Actions run
 
+## Release Azure Package
+
+Trigger sources:
+
+- Published GitHub releases
+
+Key behavior:
+
+- Checks out the published release tag so the package matches the release contents
+- Installs `Az.Accounts`
+- Runs `build/Build-AzureReleasePackage.ps1`
+- Packages `Setup-AzureResources.ps1`, `templates/`, and `azure/` into `Azure-YYMMDD.zip`
+- Uploads the zip as a release asset, replacing any existing asset with the same name
+
 ## Suggested operating model
 
 - Use the update workflow for the regular daily refresh
 - Let the validation workflow protect changes to scripts and templates through the same deterministic preflight used locally
 - Let the runbook sync workflow keep the committed Azure Automation artifact aligned with the build sources
 - Use the Azure package workflow when you want a fresh downloadable deployment bundle without committing a binary into the repository
+- Publish a GitHub release when you want the release-specific `Azure-YYMMDD.zip` asset attached automatically
 - Use `tests/Invoke-AzureRunbookValidation.ps1` for guarded, temporary candidate validation against a real Automation account; it requires an explicit subscription and restores the runbook and storage state after the run
 - Run the PDF workflow only when the HTML dashboard changes enough to warrant fresh report exports
 - Use `build/Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` locally when you need exact-path validation for the live export flow before publishing

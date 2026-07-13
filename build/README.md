@@ -43,7 +43,7 @@ This directory contains maintainer-facing build, validation, import, and packagi
 # Exercise only the Function App with a complete seeded dataset
 .\build\Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName aa-defender-reporting -FunctionAppName func-defender-reporting -ResourceGroupName rg-defender-reporting -DashboardDeliveryMode Hosted -SkipMdePermissions -FunctionExecutionDatasetPath .\.local\large-datasets\synthetic-50k-1_5m -SkipAutomationValidation
 
-# Build the same Azure zip used by the artifact workflow
+# Build the same Azure zip used by the release and artifact workflows
 .\build\Build-AzureReleasePackage.ps1
 ```
 
