@@ -187,6 +187,7 @@ $Script:PipelinePeakPrivateMemoryStage = $null
 $Script:PipelinePeakGcHeapMb = 0.0
 $Script:PipelinePeakGcHeapStage = $null
 $Script:PipelineLastNormalizedLookupCounts = $null
+$Script:PipelineCompiledMemoryTelemetry = $null
 
 $Script:LibraryConfig = @{
     ChartJs = @{
@@ -434,6 +435,10 @@ function Write-PipelineExecutionStatus {
 
         if ($null -ne $Script:PipelineLastNormalizedLookupCounts) {
             $statusDocument.normalizedLookupCounts = $Script:PipelineLastNormalizedLookupCounts
+        }
+
+        if ($null -ne $Script:PipelineCompiledMemoryTelemetry) {
+            $statusDocument.compiledMemoryTelemetry = $Script:PipelineCompiledMemoryTelemetry
         }
 
         $statusDocument | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $statusFilePath -Encoding utf8
@@ -1474,6 +1479,9 @@ try {
     Write-MemoryUsage -Label "Post-PayloadCacheCheck"
     $machines = $null
     $advancedHuntingData = $null
+    $advancedHuntingDeviceUsers = $null
+    $advancedHuntingInventoryData = $null
+    $nvdCveData = $null
     $normalizedQuality = $null
     $useDirectMergeDeviceLookupForRun = $false
     if ($payloadCacheEntry) {
@@ -1514,16 +1522,18 @@ try {
 
         # The normalization-machine reader already returns compact tuple entries.
         Write-MemoryUsage -Label "Post-MachineLookupCompression"
-        $advancedHuntingBundle = Read-AdvancedHuntingBundle -Path $tempExports -IncludeDeviceUsers
+        $advancedHuntingBundle = Read-AdvancedHuntingBundle -Path $tempExports -IncludeDeviceUsers -IncludeInventoryData
         $advancedHuntingData = [hashtable]$advancedHuntingBundle.AdvancedHuntingData
         $advancedHuntingDeviceUsers = [hashtable]$advancedHuntingBundle.DeviceUsers
+        $advancedHuntingInventoryData = [hashtable]$advancedHuntingBundle.InventoryData
+        $nvdCveData = Read-NvdCveData -Path $tempExports
         $sourceMetadata = Get-DashboardSourceSummary `
             -BasePath $tempExports `
             -MachineCount (Get-NormalizationMachineLookupCount -Machines $machines) `
             -AdvancedHuntingCveCount $advancedHuntingData.Count `
             -AdvancedHuntingDeviceUserCount $advancedHuntingDeviceUsers.Count `
-            -AdvancedHuntingInventoryTupleCount 0 `
-            -NvdCveCount 0 `
+            -AdvancedHuntingInventoryTupleCount $advancedHuntingInventoryData.Count `
+            -NvdCveCount $nvdCveData.Count `
             -NormalizationMode 'azure-runbook-normalization' `
             -SkipObservedWindowMerge:$skipObservedWindowMerge
         $advancedHuntingBundle = $null
@@ -1534,12 +1544,16 @@ try {
                 machines = Get-NormalizationMachineLookupCount -Machines $machines
                 advancedHuntingCves = $advancedHuntingData.Count
                 advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
+                advancedHuntingInventoryTuples = $advancedHuntingInventoryData.Count
+                nvdCves = $nvdCveData.Count
             })
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -Stage 'ReadNormalizationInputs' -Message 'Loaded machine and Advanced Hunting inputs for dashboard normalization.' -AdditionalProperties @{
                 normalizationInputs = [ordered]@{
                     machines = Get-NormalizationMachineLookupCount -Machines $machines
                     advancedHuntingCves = $advancedHuntingData.Count
                     advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
+                    advancedHuntingInventoryTuples = $advancedHuntingInventoryData.Count
+                    nvdCves = $nvdCveData.Count
                     directMergeDeviceLookup = $useDirectMergeDeviceLookupForRun
                 }
             })
@@ -1563,7 +1577,7 @@ try {
                 [bool]$UseDirectMergeDeviceLookupForAttempt
             )
 
-            ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DirectMergeDeviceLookup:$UseDirectMergeDeviceLookupForAttempt -NormalizationProgressCallback {
+            ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -AdvancedHuntingInventoryData $advancedHuntingInventoryData -NvdCveData $nvdCveData -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DirectMergeDeviceLookup:$UseDirectMergeDeviceLookupForAttempt -NormalizationProgressCallback {
             param($NormalizationEvent)
 
             if ($null -eq $NormalizationEvent) {
@@ -1650,8 +1664,8 @@ try {
                 -MachineCount (Get-NormalizationMachineLookupCount -Machines $machines) `
                 -AdvancedHuntingCveCount $advancedHuntingData.Count `
                 -AdvancedHuntingDeviceUserCount $advancedHuntingDeviceUsers.Count `
-                -AdvancedHuntingInventoryTupleCount 0 `
-                -NvdCveCount 0 `
+                -AdvancedHuntingInventoryTupleCount $advancedHuntingInventoryData.Count `
+                -NvdCveCount $nvdCveData.Count `
                 -NormalizationMode 'azure-runbook-normalization' `
                 -SkipObservedWindowMerge:$skipObservedWindowMerge
             Invoke-FullGarbageCollection
@@ -1661,6 +1675,8 @@ try {
                         machines = Get-NormalizationMachineLookupCount -Machines $machines
                         advancedHuntingCves = $advancedHuntingData.Count
                         advancedHuntingDeviceUsers = $advancedHuntingDeviceUsers.Count
+                        advancedHuntingInventoryTuples = $advancedHuntingInventoryData.Count
+                        nvdCves = $nvdCveData.Count
                         directMergeDeviceLookup = $true
                         directMergeFallback = $directMergeFallbackReason
                     }
@@ -1682,6 +1698,8 @@ try {
         $machines = $null
         $advancedHuntingData = $null
         $advancedHuntingDeviceUsers = $null
+        $advancedHuntingInventoryData = $null
+        $nvdCveData = $null
         Invoke-FullGarbageCollection
         Write-MemoryUsage -Label "Post-NormalizationCleanup"
         $retainedLookupCountsAfterInputRelease = $null
@@ -1712,6 +1730,10 @@ try {
             }
         if ($null -ne $retainedLookupCountsAfterInputRelease) {
             $preparePayloadStatusProperties['normalizedRetainedLookups'] = $retainedLookupCountsAfterInputRelease
+        }
+        if ($normalizedResult.ContainsKey('CompiledMemoryTelemetry') -and $null -ne $normalizedResult.CompiledMemoryTelemetry) {
+            $Script:PipelineCompiledMemoryTelemetry = $normalizedResult.CompiledMemoryTelemetry
+            $preparePayloadStatusProperties['compiledMemoryTelemetry'] = $normalizedResult.CompiledMemoryTelemetry
         }
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties $preparePayloadStatusProperties)
         Write-Output "Preparing data for embedding..."

@@ -22,6 +22,7 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'build\Import-SharedHelpers.ps1')
 . (Join-Path $PSScriptRoot 'helpers\BenchmarkSeriesTools.ps1')
+. (Join-Path $PSScriptRoot 'helpers\BenchmarkEvidenceTools.ps1')
 
 function Assert-True {
     [CmdletBinding()]
@@ -3506,7 +3507,7 @@ function Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePaylo
                 rbacGroupName = 'Prod'
                 osPlatform = 'Windows 11'
                 osVersion = '10.0.26100'
-                machineTags = @('Prod')
+                machineTags = 'Prod'
                 lastIpAddress = '10.0.0.21'
                 lastExternalIpAddress = '52.0.0.21'
                 healthStatus = 'Active'
@@ -5227,8 +5228,9 @@ function Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity {
         try {
             $primeAudit = Get-StreamingDashboardAuditResult -ResolvedHtmlPath $htmlPath -ResolvedExportsPath $tempRoot -PayloadCacheEntry $payloadCacheEntry
 
-            $mutatedRow = Get-TestVulnRow -Id 'streaming-audit-002' -CveId 'CVE-2026-0322' -SnapshotDate '2026-03-21' -Version '4.1.0'
-            Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($currentRow, $mutatedRow)
+            $changedRow = Get-TestVulnRow -Id 'streaming-audit-001' -CveId 'CVE-2026-0321' -SnapshotDate '2026-03-20' -Version '9.9.9'
+            $addedRow = Get-TestVulnRow -Id 'streaming-audit-002' -CveId 'CVE-2026-0322' -SnapshotDate '2026-03-21' -Version '4.1.0'
+            Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($changedRow, $addedRow)
 
             $contentStoreFiles = @(
                 Get-VulnContentDictionaryPath -BasePath $tempRoot
@@ -5253,7 +5255,8 @@ function Test-StreamingDashboardAuditDetectsSourceMismatchDespitePayloadParity {
         Assert-True ($audit.PayloadParity.Match -eq $true) 'Expected dashboard payload bytes to remain equal to the cached normalized payload.'
         Assert-True ($audit.SemanticParity.PayloadByteParityMatch -eq $true) 'Expected streaming audit diagnostics to record dashboard payload byte parity.'
         Assert-True ($audit.RowComparison.Match -eq $false) 'Expected streaming semantic parity to fail when the source exports diverge from the dashboard payload.'
-        Assert-True ($audit.RowComparison.MissingCount -eq 1) 'Expected the extra source row to be reported as missing from the dashboard payload.'
+        Assert-True ($audit.RowComparison.MissingCount -eq 2) 'Expected the added row and changed row signature to be reported as missing from the dashboard payload.'
+        Assert-True ($audit.RowComparison.ExtraCount -eq 1) 'Expected the dashboard version of the changed row to be reported as extra.'
         Assert-True ([string]$audit.SemanticParity.ComparisonPayloadSource -eq 'cached-payload') 'Expected source streaming audit to reuse the cached payload when byte parity proves dashboard equivalence.'
         Assert-True ($audit.SemanticParity.SourceSignatureCacheUsed -eq $false) 'Expected the streaming audit to bypass the cached source signature set after the source exports fingerprint changes.'
         Assert-True ((Test-Path -LiteralPath $payloadPath -PathType Leaf)) 'Expected the streaming audit to preserve externally referenced payload files after full comparison completes.'
@@ -6210,6 +6213,9 @@ function Test-ProgressStallAssessmentDistinguishesSlowAndStalledWork {
     $repoRoot = Split-Path -Path $PSScriptRoot -Parent
     $runbookSource = Get-Content -LiteralPath (Join-Path $repoRoot 'build\azure\runbook-source.ps1') -Raw
     Assert-True ($runbookSource.Contains("'normalizedPhaseItemCount'")) 'Expected the Azure status callback to persist device/template work heartbeats.'
+    Assert-True ($runbookSource.Contains('Read-AdvancedHuntingBundle -Path $tempExports -IncludeDeviceUsers -IncludeInventoryData')) 'Expected Azure normalization to load Advanced Hunting inventory enrichment in the single bundle pass.'
+    Assert-True ($runbookSource.Contains('$nvdCveData = Read-NvdCveData -Path $tempExports')) 'Expected Azure normalization to load NVD enrichment.'
+    Assert-True ($runbookSource.Contains('-AdvancedHuntingInventoryData $advancedHuntingInventoryData -NvdCveData $nvdCveData')) 'Expected Azure normalization to preserve all source enrichment inputs.'
 }
 
 function Test-FullGarbageCollectionRequestsLargeObjectHeapCompaction {
@@ -6236,6 +6242,8 @@ function Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration {
     Assert-True ($text.Contains("Restore-ValidationContainer 'dashboards'")) 'Expected Azure validation finally cleanup to restore dashboards.'
     Assert-True ($text.Contains("'automation','runbook','replace-content'")) 'Expected Azure validation to restore published runbook content.'
     Assert-True ($text.Contains("'--if-none-match','*'")) 'Expected Azure validation to acquire its lock atomically.'
+    Assert-True ($text.Contains('ValidatePublishedSemanticParity')) 'Expected Azure validation to expose published source-to-dashboard semantic sign-off.'
+    Assert-True ($text.Contains('-ForceFullValidation')) 'Expected published semantic sign-off to bypass prior attestations and perform a fresh comparison.'
 
     $caught = $null
     try {
@@ -6243,6 +6251,58 @@ function Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration {
     }
     catch { $caught = $_ }
     Assert-True ($null -ne $caught -and $caught.Exception.Message -like '*Re-run with -Execute*') 'Expected the Azure harness to reject mutation without -Execute before contacting Azure.'
+}
+
+function Test-AzureDashboardCandidateEvidenceRejectsIncompletePublication {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('azure-dashboard-evidence-' + [guid]::NewGuid().ToString('N'))
+    $assetRoot = Join-Path $tempRoot 'VulnerabilityDashboard.assets'
+    try {
+        foreach ($relativePath in @('runtime\dashboard.css', 'runtime\dashboard.js', 'runtime\pako.js', 'vendor\chart.js', 'optional\pdf-export.bundle.js')) {
+            $path = Join-Path $assetRoot $relativePath
+            [void](New-Item -Path (Split-Path $path -Parent) -ItemType Directory -Force)
+            [System.IO.File]::WriteAllText($path, 'fixture', [System.Text.UTF8Encoding]::new($false))
+        }
+        $payloadPath = Join-Path $assetRoot 'data\payload.json.gz'
+        [void](New-Item -Path (Split-Path $payloadPath -Parent) -ItemType Directory -Force)
+        Write-GzipTextFile -Path $payloadPath -Content '{"vulnsFormat":"rows-v1","lookups":{},"vulns":[[0]]}'
+        $payloadSha = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $summary = [ordered]@{ version = 1; meta = [ordered]@{ payloadSha256 = $payloadSha; vulnCount = 1; deviceCount = 1; cveCount = 1 }; filterCatalog = [ordered]@{ groups = @(); tags = @(); devices = @() } }
+        [System.IO.File]::WriteAllText((Join-Path $assetRoot 'data\summary.json'), ($summary | ConvertTo-Json -Compress -Depth 10), [System.Text.UTF8Encoding]::new($false))
+        $html = 'VulnerabilityDashboard.assets/data/payload.json.gz VulnerabilityDashboard.assets/data/summary.json VulnerabilityDashboard.assets/runtime/dashboard.js'
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'VulnerabilityDashboard.html'), $html, [System.Text.UTF8Encoding]::new($false))
+        $status = [PSCustomObject]@{ status = 'succeeded'; stage = 'Completed'; vulnerabilities = 1; devices = 1; cves = 1; dashboardBlobName = 'VulnerabilityDashboard.html'; hostedDashboardBlobName = $null }
+
+        $valid = Assert-AzureDashboardCandidateEvidence -DashboardRootPath $tempRoot -RunbookStatus $status -DashboardDeliveryMode Hosted -ExpectedTotalRows 1 -PayloadRowCounter { param($Path) Get-CompressedPayloadVulnCount -Path $Path }
+        Assert-True ($valid.hosted_assets_validated -eq $true -and $valid.payload_row_count -eq 1) 'Expected complete hosted candidate evidence to pass.'
+
+        $comparisonPayloadPath = Join-Path $tempRoot 'comparison.json.gz'
+        Write-GzipTextFile -Path $comparisonPayloadPath -Content '{"vulnsFormat":"rows-v1","lookups":{},"vulns":[[0]]}'
+        $payloadContentEvidence = Get-GzipDecompressedContentEvidence -Path $payloadPath
+        $comparisonContentEvidence = Get-GzipDecompressedContentEvidence -Path $comparisonPayloadPath
+        Assert-True ($payloadContentEvidence.decompressed_sha256 -eq $comparisonContentEvidence.decompressed_sha256 -and $payloadContentEvidence.decompressed_bytes -eq $comparisonContentEvidence.decompressed_bytes) 'Expected streaming decompressed evidence to prove exact JSON equality independently of gzip bytes.'
+        Write-GzipTextFile -Path $comparisonPayloadPath -Content '{"vulnsFormat":"rows-v1","lookups":{},"vulns":[[1]]}'
+        $comparisonContentEvidence = Get-GzipDecompressedContentEvidence -Path $comparisonPayloadPath
+        Assert-True ($payloadContentEvidence.decompressed_sha256 -ne $comparisonContentEvidence.decompressed_sha256) 'Expected streaming decompressed evidence to detect one changed row.'
+
+        $summary.meta.payloadSha256 = ('0' * 64)
+        [System.IO.File]::WriteAllText((Join-Path $assetRoot 'data\summary.json'), ($summary | ConvertTo-Json -Compress -Depth 10), [System.Text.UTF8Encoding]::new($false))
+        $caught = $null
+        try { $null = Assert-AzureDashboardCandidateEvidence -DashboardRootPath $tempRoot -RunbookStatus $status -DashboardDeliveryMode Hosted -ExpectedTotalRows 1 }
+        catch { $caught = $_ }
+        Assert-True ($null -ne $caught -and $caught.Exception.Message -like '*SHA-256*') 'Expected a stale summary payload hash to fail candidate acceptance.'
+
+        Remove-Item -LiteralPath (Join-Path $assetRoot 'runtime\dashboard.js') -Force
+        $caught = $null
+        try { $null = Assert-AzureDashboardCandidateEvidence -DashboardRootPath $tempRoot -RunbookStatus $status -DashboardDeliveryMode Hosted -ExpectedTotalRows 1 }
+        catch { $caught = $_ }
+        Assert-True ($null -ne $caught -and $caught.Exception.Message -like '*asset*missing*') 'Expected a missing hosted asset to fail candidate acceptance.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 function Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback {
@@ -6306,8 +6366,31 @@ function Test-CompiledBoundedContentNormalizationExpandedParity {
         $compiledPath = Join-Path $tempRoot 'compiled.json.gz'
         $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers @{} -AdvancedHuntingInventoryData @{} -NvdCveData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
         Assert-True ($compiled.VulnCount -eq 2 -and $compiled.LookupsConsumed) 'Expected the compiled bounded path to publish both rows directly to the standard payload.'
+        Assert-True ($null -ne $compiled.CompiledMemoryTelemetry) 'Expected the compiled path to report bounded transient-memory telemetry.'
+        Assert-True ($compiled.CompiledMemoryTelemetry.peakWorkingSetMb -gt 0 -and $compiled.CompiledMemoryTelemetry.peakPrivateMemoryMb -gt 0 -and $compiled.CompiledMemoryTelemetry.peakGcHeapMb -gt 0) 'Expected compiled telemetry to capture positive pre-trim peaks.'
+        Assert-True ($compiled.CompiledMemoryTelemetry.postTrimWorkingSetMb -le $compiled.CompiledMemoryTelemetry.preTrimWorkingSetMb) 'Expected post-trim working set not to exceed the pre-trim reading.'
+        Assert-True ($compiled.CompiledMemoryTelemetry.sampleIntervalMilliseconds -eq 0) 'Expected compiled telemetry to record phase-checkpoint sampling without a contending background timer.'
         & node (Join-Path $repoRoot 'tests\helpers\Assert-ExpandedPayloadParity.js') $baselinePath $compiledPath
         Assert-True ($LASTEXITCODE -eq 0) 'Expected compiled and compatibility payloads to have expanded semantic parity.'
+
+        $baselineManifest = [PSCustomObject]@{ GeneratedOnUtc = '2026-07-12T00:00:00Z'; PayloadSha256 = (Get-FileSha256Hex -Path $baselinePath); VulnCount = 2; DeviceCount = 1; CveCount = 2 }
+        $compiledManifest = [PSCustomObject]@{ GeneratedOnUtc = '2026-07-12T00:00:00Z'; PayloadSha256 = (Get-FileSha256Hex -Path $compiledPath); VulnCount = 2; DeviceCount = 1; CveCount = 2 }
+        $baselineSummary = Get-DashboardPayloadSummaryJson -PayloadPath $baselinePath -PayloadManifest $baselineManifest | ConvertFrom-Json -Depth 30
+        $compiledSummary = Get-DashboardPayloadSummaryJson -PayloadPath $compiledPath -PayloadManifest $compiledManifest | ConvertFrom-Json -Depth 30
+        Assert-True ((@($baselineSummary.filterCatalog.groups) -join '|') -eq (@($compiledSummary.filterCatalog.groups) -join '|')) 'Expected legacy vuln-first and compiled lookup-first summaries to preserve group catalogs.'
+        Assert-True ((@($baselineSummary.filterCatalog.devices | ConvertTo-Json -Compress -Depth 10) -join '') -eq (@($compiledSummary.filterCatalog.devices | ConvertTo-Json -Compress -Depth 10) -join '')) 'Expected both payload property orders to preserve summary device catalogs.'
+
+        $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempRoot -PayloadPath $compiledPath -VulnCount 2 -DeviceCount 1 -CveCount 2 -SkipObservedWindowMerge
+        $cacheHit = Get-NormalizedPayloadCacheEntry -BasePath $tempRoot -SkipObservedWindowMerge
+        Assert-True ($null -ne $cacheEntry -and $null -ne $cacheHit) 'Expected a second compiled payload access to resolve through the normalized payload cache.'
+        Assert-True ((Get-FileSha256Hex -Path $cacheHit.PayloadPath) -eq (Get-FileSha256Hex -Path $compiledPath)) 'Expected the cache-hit payload to preserve the compiled payload hash.'
+        $cacheSummary = Get-DashboardPayloadSummaryJson -PayloadPath $cacheHit.PayloadPath -PayloadManifest $cacheHit.Manifest | ConvertFrom-Json -Depth 30
+        Assert-True ($cacheSummary.meta.vulnCount -eq 2 -and @($cacheSummary.filterCatalog.devices).Count -eq 1) 'Expected cache-hit summary generation to preserve row and device counts.'
+
+        $invalidTailPath = Join-Path $tempRoot 'lookup-first-invalid-tail.json.gz'
+        Write-GzipTextFile -Path $invalidTailPath -Content '{"lookups":{"groups":["group"],"tags":[],"devices":[{"id":"device","n":"name","g":0,"t":[]}]},"vulns":[INVALID]}'
+        $invalidTailSummary = Get-DashboardPayloadSummaryJson -PayloadPath $invalidTailPath | ConvertFrom-Json -Depth 20
+        Assert-True (@($invalidTailSummary.filterCatalog.devices).Count -eq 1) 'Expected lookup-first summary generation to stop before tokenizing vulnerability rows.'
     }
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 }
@@ -6738,6 +6821,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-ProgressStallAssessmentDistinguishesSlowAndStalledWork'; SuccessMessage = 'Progress stall warning/failure checks passed.' }
     @{ Name = 'Test-FullGarbageCollectionRequestsLargeObjectHeapCompaction'; SuccessMessage = 'Large-object heap compaction checks passed.' }
     @{ Name = 'Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration'; SuccessMessage = 'Azure validation guard and restoration checks passed.' }
+    @{ Name = 'Test-AzureDashboardCandidateEvidenceRejectsIncompletePublication'; SuccessMessage = 'Azure candidate artifact evidence checks passed.' }
     @{ Name = 'Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback'; SuccessMessage = 'Cardinality-aware normalization plan and legacy fallback checks passed.' }
     @{ Name = 'Test-BenchmarkWorkloadProfilesArePinned'; SuccessMessage = 'Versioned benchmark workload profile checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationExpandedParity'; SuccessMessage = 'Compiled bounded content normalization expanded-parity checks passed.' }

@@ -10,9 +10,95 @@ using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 
 namespace DefenderReporting.Store
 {
+    public sealed class CompiledMemoryTelemetry
+    {
+        public long PeakWorkingSetBytes { get; set; }
+        public string PeakWorkingSetStage { get; set; }
+        public long PeakPrivateMemoryBytes { get; set; }
+        public string PeakPrivateMemoryStage { get; set; }
+        public long PeakGcHeapBytes { get; set; }
+        public string PeakGcHeapStage { get; set; }
+        public long PreTrimWorkingSetBytes { get; set; }
+        public long PreTrimPrivateMemoryBytes { get; set; }
+        public long PreTrimGcHeapBytes { get; set; }
+        public long PostTrimWorkingSetBytes { get; set; }
+        public long PostTrimPrivateMemoryBytes { get; set; }
+        public long PostTrimGcHeapBytes { get; set; }
+        public long ElapsedMilliseconds { get; set; }
+    }
+
+    public sealed class MemoryTelemetrySession : IDisposable
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ProcessMemoryCounters
+        {
+            public uint Size, PageFaultCount;
+            public UIntPtr PeakWorkingSetSize, WorkingSetSize, QuotaPeakPagedPoolUsage, QuotaPagedPoolUsage, QuotaPeakNonPagedPoolUsage, QuotaNonPagedPoolUsage, PagefileUsage, PeakPagefileUsage, PrivateUsage;
+        }
+        [DllImport("psapi.dll", SetLastError = true)]
+        private static extern bool GetProcessMemoryInfo(IntPtr process, out ProcessMemoryCounters counters, uint size);
+        private readonly System.Diagnostics.Process process = System.Diagnostics.Process.GetCurrentProcess();
+        private readonly System.Diagnostics.Stopwatch stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        private readonly Timer timer;
+        private long peakWorkingSet, peakPrivateMemory, peakGcHeap;
+        private string stage = "initialization", peakWorkingSetStage = "initialization", peakPrivateMemoryStage = "initialization", peakGcHeapStage = "initialization";
+        private int completed;
+
+        public MemoryTelemetrySession(int intervalMilliseconds)
+        {
+            if (intervalMilliseconds > 0) timer = new Timer(_ => Sample(), null, 0, Math.Max(25, intervalMilliseconds));
+        }
+
+        public void SetStage(string value) { Volatile.Write(ref stage, String.IsNullOrWhiteSpace(value) ? "unknown" : value); Sample(); }
+        public void Sample()
+        {
+            try
+            {
+                long workingSet, privateMemory; ReadMemory(out workingSet, out privateMemory); var currentStage = Volatile.Read(ref stage);
+                UpdatePeak(ref peakWorkingSet, workingSet, ref peakWorkingSetStage, currentStage);
+                UpdatePeak(ref peakPrivateMemory, privateMemory, ref peakPrivateMemoryStage, currentStage);
+                UpdatePeak(ref peakGcHeap, GC.GetTotalMemory(false), ref peakGcHeapStage, currentStage);
+            }
+            catch { }
+        }
+
+        public CompiledMemoryTelemetry Complete(Action trimWorkingSet)
+        {
+            if (Interlocked.Exchange(ref completed, 1) != 0) throw new InvalidOperationException("Memory telemetry session is already complete.");
+            if (timer != null) timer.Change(Timeout.Infinite, Timeout.Infinite); Sample();
+            long preTrimWorkingSet, preTrimPrivateMemory; ReadMemory(out preTrimWorkingSet, out preTrimPrivateMemory);
+            var result = new CompiledMemoryTelemetry {
+                PeakWorkingSetBytes = peakWorkingSet, PeakWorkingSetStage = peakWorkingSetStage,
+                PeakPrivateMemoryBytes = peakPrivateMemory, PeakPrivateMemoryStage = peakPrivateMemoryStage,
+                PeakGcHeapBytes = peakGcHeap, PeakGcHeapStage = peakGcHeapStage,
+                PreTrimWorkingSetBytes = preTrimWorkingSet, PreTrimPrivateMemoryBytes = preTrimPrivateMemory, PreTrimGcHeapBytes = GC.GetTotalMemory(false)
+            };
+            trimWorkingSet();
+            long postTrimWorkingSet, postTrimPrivateMemory; ReadMemory(out postTrimWorkingSet, out postTrimPrivateMemory);
+            result.PostTrimWorkingSetBytes = postTrimWorkingSet; result.PostTrimPrivateMemoryBytes = postTrimPrivateMemory; result.PostTrimGcHeapBytes = GC.GetTotalMemory(false); result.ElapsedMilliseconds = stopwatch.ElapsedMilliseconds;
+            if (timer != null) timer.Dispose(); process.Dispose(); return result;
+        }
+
+        public void Dispose() { if (Interlocked.Exchange(ref completed, 1) == 0) { if (timer != null) timer.Dispose(); process.Dispose(); } }
+        private static void UpdatePeak(ref long peak, long value, ref string peakStage, string currentStage)
+        {
+            long observed;
+            while (value > (observed = Volatile.Read(ref peak))) if (Interlocked.CompareExchange(ref peak, value, observed) == observed) { Volatile.Write(ref peakStage, currentStage); break; }
+        }
+        private void ReadMemory(out long workingSet, out long privateMemory)
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
+                var counters = new ProcessMemoryCounters(); counters.Size = (uint)Marshal.SizeOf(typeof(ProcessMemoryCounters));
+                if (GetProcessMemoryInfo(process.Handle, out counters, counters.Size)) { workingSet = checked((long)counters.WorkingSetSize.ToUInt64()); privateMemory = checked((long)counters.PrivateUsage.ToUInt64()); return; }
+            }
+            workingSet = Environment.WorkingSet; privateMemory = 0;
+        }
+    }
+
     public sealed class CompiledNormalizationResult
     {
         public long ProcessedCount { get; set; }
@@ -20,6 +106,7 @@ namespace DefenderReporting.Store
         public int CveCount { get; set; }
         public int SoftwareCount { get; set; }
         public int VendorCount { get; set; }
+        public CompiledMemoryTelemetry MemoryTelemetry { get; set; }
     }
 
     public static class BoundedContentNormalizer
@@ -47,6 +134,12 @@ namespace DefenderReporting.Store
 
         public static CompiledNormalizationResult Project(string dictionaryPath, string[] refPaths, string outputPath)
         {
+            using (var telemetry = new MemoryTelemetrySession(0)) return Project(dictionaryPath, refPaths, outputPath, telemetry);
+        }
+
+        public static CompiledNormalizationResult Project(string dictionaryPath, string[] refPaths, string outputPath, MemoryTelemetrySession telemetry)
+        {
+            telemetry.SetStage("template-interning");
             var expectedTemplates = Directory.Exists(dictionaryPath) ? File.ReadLines(Path.Combine(dictionaryPath, "contentTemplates.ndjson"), Utf8).Count() : 1024;
             var vendors = new List<string>(); var vendorMap = Map();
             var exploits = new List<string>(); var exploitMap = Map();
@@ -122,6 +215,7 @@ namespace DefenderReporting.Store
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers();
 
+            telemetry.SetStage("ref-projection");
             long processed = 0;
             using (var vulnOutput = new StreamWriter(vulnFragment, false, Utf8, 65536))
             {
@@ -142,41 +236,50 @@ namespace DefenderReporting.Store
                                 if (String.CompareOrdinal(first, last) > 0) { var swap = first; first = last; last = swap; }
                                 var template = templateList[templateIndex];
                                 var firstIndex = Intern(first, dates, dateMap); var lastIndex = Intern(last, dates, dateMap);
-                                WriteFragment(vulnOutput, writer => {
-                                    writer.WriteStartArray(); writer.WriteNumberValue(deviceIndex); writer.WriteNumberValue(template.Cve); writer.WriteNumberValue(template.Software); writer.WriteNumberValue(template.Version);
-                                    writer.WriteNumberValue(firstIndex); writer.WriteNumberValue(lastIndex); writer.WriteNumberValue(template.UpdateAvailable); writer.WriteNumberValue(template.Update);
-                                    WriteNullableIntRange(writer, templateDiskIndexes, template.DiskStart, template.DiskCount); WriteNullableIntRange(writer, templateRegistryIndexes, template.RegistryStart, template.RegistryCount); writer.WriteNumberValue(-1); writer.WriteEndArray();
-                                });
+                                WriteVulnFragment(vulnOutput, deviceIndex, template, firstIndex, lastIndex, templateDiskIndexes, templateRegistryIndexes);
                                 processed++;
+                                if (processed % 250000 == 0) telemetry.Sample();
                             }
                         }
                     }
                 }
             }
+            telemetry.SetStage("pre-assembly-cleanup");
+            var resultDeviceCount = deviceOnboarded.Count;
+            var resultVendorCount = vendors.Count;
+            templateList = null; deviceOnboarded = null; templateDiskIndexes = null; templateRegistryIndexes = null; dateMap.Clear();
+            GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers(); TrimCurrentProcessWorkingSet();
+            telemetry.SetStage("lookup-and-payload-assembly");
             using (var file = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.SequentialScan))
             using (var gzip = new GZipStream(file, CompressionLevel.Fastest, false))
             using (var writer = new Utf8JsonWriter(gzip, WriterOptions))
             {
                 writer.WriteStartObject(); writer.WriteString("vulnsFormat", "rows-v1"); writer.WritePropertyName("lookups"); writer.WriteStartObject();
-                WriteStrings(writer, "vendors", vendors); WriteFixedStrings(writer, "severities", new[] { "Critical", "High", "Medium", "Low", "None" }); WriteStrings(writer, "exploitLevels", exploits);
-                WriteStrings(writer, "groups", groups); WriteStrings(writer, "platforms", platforms); WriteStrings(writer, "tags", tags);
+                WriteStrings(writer, "vendors", vendors); vendors = null; WriteFixedStrings(writer, "severities", new[] { "Critical", "High", "Medium", "Low", "None" }); WriteStrings(writer, "exploitLevels", exploits); exploits = null;
+                WriteStrings(writer, "groups", groups); groups = null; WriteStrings(writer, "platforms", platforms); platforms = null; WriteStrings(writer, "tags", tags); tags = null;
                 writer.WritePropertyName("updates"); CopyJsonLines(writer, updateFragment);
-                WriteStrings(writer, "versions", versions); WriteStrings(writer, "dates", dates); WriteStrings(writer, "diskPaths", diskPaths); WriteStrings(writer, "regPaths", registryPaths);
-                WriteFixedStrings(writer, "affSoftware", Array.Empty<string>()); WriteStrings(writer, "batchTitles", batchTitles);
+                WriteStrings(writer, "versions", versions); versions = null; WriteStrings(writer, "dates", dates); dates = null; WriteStrings(writer, "diskPaths", diskPaths); diskPaths = null; WriteStrings(writer, "regPaths", registryPaths); registryPaths = null;
+                WriteFixedStrings(writer, "affSoftware", Array.Empty<string>()); WriteStrings(writer, "batchTitles", batchTitles); batchTitles = null;
                 writer.WritePropertyName("devices"); CopyJsonLines(writer, deviceFragment);
                 writer.WritePropertyName("inventory"); writer.WriteStartArray(); writer.WriteEndArray();
                 writer.WritePropertyName("software"); CopyJsonLines(writer, softwareFragment);
                 writer.WritePropertyName("cves"); CopyJsonLines(writer, cveFragment);
                 writer.WriteNull("noTagsIdx"); writer.WriteEndObject();
+                telemetry.SetStage("pre-vulnerability-assembly-cleanup");
+                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers(); TrimCurrentProcessWorkingSet();
+                telemetry.SetStage("vulnerability-assembly");
                 writer.WritePropertyName("vulns"); CopyJsonLines(writer, vulnFragment); writer.WriteEndObject();
             }
             try { Directory.Delete(stageRoot, true); } catch { }
-            var result = new CompiledNormalizationResult { ProcessedCount = processed, DeviceCount = deviceOnboarded.Count, CveCount = cveCount, SoftwareCount = softwareCount, VendorCount = vendors.Count };
+            var result = new CompiledNormalizationResult { ProcessedCount = processed, DeviceCount = resultDeviceCount, CveCount = cveCount, SoftwareCount = softwareCount, VendorCount = resultVendorCount };
+            telemetry.SetStage("cleanup"); telemetry.Sample();
             vendors = null; exploits = null; groups = null; platforms = null; tags = null; versions = null; dates = null; diskPaths = null; registryPaths = null; batchTitles = null;
             deviceOnboarded = null; templateList = null; templateDiskIndexes = null; templateRegistryIndexes = null;
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers();
-            TrimCurrentProcessWorkingSet();
+            result.MemoryTelemetry = telemetry.Complete(TrimCurrentProcessWorkingSet);
             return result;
         }
 
@@ -227,7 +330,15 @@ namespace DefenderReporting.Store
         private static void WriteSoftwareFragment(StreamWriter output, Software value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteNumber("v", value.Vendor); writer.WriteString("n", value.Name); writer.WriteString("r", value.Reference); writer.WriteEndObject(); }); }
         private static void WriteUpdateFragment(StreamWriter output, Update value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("n", value.Name); writer.WriteString("id", value.Id); writer.WriteString("url", value.Url); writer.WriteEndObject(); }); }
         private static void WriteCveFragment(StreamWriter output, Cve value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); if (value.Score.HasValue) writer.WriteNumber("sc", value.Score.Value); else writer.WriteNull("sc"); writer.WriteNumber("sv", value.Severity); writer.WriteNumber("ex", value.Exploit); writer.WriteString("u", value.Url); writer.WriteNumber("bt", value.BatchTitle); foreach (var name in new[] { "pd", "desc", "ep", "as", "ea", "nlm", "nbs", "nsv", "nvec", "nkev", "ndu", "nact", "nw" }) writer.WriteNull(name); writer.WriteEndObject(); }); }
-        private static void CopyJsonLines(Utf8JsonWriter writer, string path) { writer.WriteStartArray(); foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) document.RootElement.WriteTo(writer); } writer.WriteEndArray(); }
+        private static void WriteVulnFragment(StreamWriter output, int deviceIndex, Template template, int firstIndex, int lastIndex, List<int> diskIndexes, List<int> registryIndexes)
+        {
+            output.Write('['); WriteInteger(output, deviceIndex); output.Write(','); WriteInteger(output, template.Cve); output.Write(','); WriteInteger(output, template.Software); output.Write(','); WriteInteger(output, template.Version);
+            output.Write(','); WriteInteger(output, firstIndex); output.Write(','); WriteInteger(output, lastIndex); output.Write(','); WriteInteger(output, template.UpdateAvailable); output.Write(','); WriteInteger(output, template.Update); output.Write(',');
+            WriteNullableIntegerRange(output, diskIndexes, template.DiskStart, template.DiskCount); output.Write(','); WriteNullableIntegerRange(output, registryIndexes, template.RegistryStart, template.RegistryCount); output.Write(",-1]"); output.WriteLine();
+        }
+        private static void WriteInteger(StreamWriter output, int value) { output.Write(value.ToString(CultureInfo.InvariantCulture)); }
+        private static void WriteNullableIntegerRange(StreamWriter output, List<int> values, int start, int count) { if (count <= 0) { output.Write("null"); return; } output.Write('['); for (var index = 0; index < count; index++) { if (index > 0) output.Write(','); WriteInteger(output, values[start + index]); } output.Write(']'); }
+        private static void CopyJsonLines(Utf8JsonWriter writer, string path) { writer.WriteStartArray(); foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; writer.WriteRawValue(line, true); } writer.WriteEndArray(); }
         private static void WriteIntArray(Utf8JsonWriter writer, int[] values) { writer.WriteStartArray(); if (values != null) foreach (var value in values) writer.WriteNumberValue(value); writer.WriteEndArray(); }
         private static void WriteNullableIntArray(Utf8JsonWriter writer, int[] values) { if (values == null || values.Length == 0) { writer.WriteNullValue(); return; } WriteIntArray(writer, values); }
         private static void WriteNullableIntRange(Utf8JsonWriter writer, List<int> values, int start, int count) { if (count <= 0) { writer.WriteNullValue(); return; } writer.WriteStartArray(); for (var index = 0; index < count; index++) writer.WriteNumberValue(values[start + index]); writer.WriteEndArray(); }
@@ -572,7 +683,16 @@ namespace DefenderReporting.Store
                                 foreach (var propertyName in TupleProperties) WritePropertyValue(json, root, propertyName);
                                 JsonElement tags;
                                 if (root.TryGetProperty("machineTags", out tags) && tags.ValueKind == JsonValueKind.Array) tags.WriteTo(json);
-                                else { json.WriteStartArray(); json.WriteEndArray(); }
+                                else
+                                {
+                                    json.WriteStartArray();
+                                    // The canonical machine format intentionally accepts both an array and a
+                                    // scalar tag. Preserve the scalar as a one-element tuple just as the
+                                    // PowerShell normalization reader does.
+                                    if (tags.ValueKind != JsonValueKind.Undefined && tags.ValueKind != JsonValueKind.Null)
+                                        tags.WriteTo(json);
+                                    json.WriteEndArray();
+                                }
                                 json.WriteEndArray();
                             }
                             tuple = buffer.ToArray();
