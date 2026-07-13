@@ -17,6 +17,7 @@ param(
     [Parameter(Mandatory = $false)][ValidateRange(60, 86400)][int]$StallWarningSeconds = 300,
     [Parameter(Mandatory = $false)][ValidateRange(120, 172800)][int]$StallFailureSeconds = 1800,
     [Parameter(Mandatory = $false)][switch]$UseExistingExportsOnly,
+    [Parameter(Mandatory = $false)][switch]$ValidatePublishedSemanticParity,
     [Parameter(Mandatory = $false)][ValidateSet('None', 'AfterBackup', 'AfterDeploy', 'AfterSeed')][string]$FailureInjectionPoint = 'None',
     [Parameter(Mandatory = $false)][switch]$Execute
 )
@@ -25,6 +26,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 . (Join-Path $PSScriptRoot 'helpers\BenchmarkEvidenceTools.ps1')
+. (Join-Path $repoRoot 'build\Import-SharedHelpers.ps1')
 
 if (-not $Execute) { throw 'Azure validation is mutation-capable. Re-run with -Execute after reviewing the target parameters.' }
 if (-not (Test-Path -LiteralPath $DatasetPath -PathType Container)) { throw "Dataset path '$DatasetPath' was not found." }
@@ -157,6 +159,106 @@ try {
         -ExpectedTotalRows $resolvedExpectedTotalRows `
         -PollIntervalSeconds $PollIntervalSeconds -StallWarningSeconds $StallWarningSeconds -StallFailureSeconds $StallFailureSeconds `
         -SkipDeployRunbook -SkipTemplateUpload -ResultsOutputPath $resultPath
+
+    if (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) { throw 'Azure benchmark completed without publishing its evidence record.' }
+    $candidateDashboardPath = Join-Path $runRoot 'candidate-dashboards'
+    $null = Backup-ValidationContainer 'dashboards' $candidateDashboardPath
+    $benchmarkResult = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json -Depth 100
+    $candidateValidation = Assert-AzureDashboardCandidateEvidence `
+        -DashboardRootPath $candidateDashboardPath `
+        -RunbookStatus $benchmarkResult.runbook_status `
+        -DashboardDeliveryMode $DashboardDeliveryMode `
+        -ExpectedTotalRows $resolvedExpectedTotalRows `
+        -PayloadRowCounter { param($Path) Get-CompressedPayloadVulnCount -Path $Path }
+    $benchmarkResult | Add-Member -NotePropertyName candidate_artifact_validation -NotePropertyValue $candidateValidation -Force
+    if ($null -ne $benchmarkResult.benchmark_evidence -and $null -ne $benchmarkResult.benchmark_evidence.validation) {
+        $benchmarkResult.benchmark_evidence.validation | Add-Member -NotePropertyName candidate_artifacts -NotePropertyValue $candidateValidation -Force
+    }
+    if ($ValidatePublishedSemanticParity) {
+        $normalizationPlan = Get-NormalizationExecutionPlan -Path ([System.IO.Path]::GetFullPath($DatasetPath)) -DeliveryMode $DashboardDeliveryMode
+        if ($DashboardDeliveryMode -in @('Hosted', 'Dual')) {
+            $semanticStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $referencePayloadPath = Join-Path $runRoot 'source-reference-payload.json.gz'
+            $referenceMachines = @{}
+            $referenceAdvancedHuntingData = @{}
+            $referenceDeviceUsers = @{}
+            $referenceInventoryData = @{}
+            $referenceNvdData = @{}
+            try {
+                if ($normalizationPlan.ContentNormalizationMode -ne 'compiled-bounded-standard-payload') {
+                    $referenceMachines = Read-NormalizationMachineLookup -Path ([System.IO.Path]::GetFullPath($DatasetPath)) -FileBacked -Bucketed
+                    $referenceAdvancedHuntingBundle = Read-AdvancedHuntingBundle -Path ([System.IO.Path]::GetFullPath($DatasetPath)) -IncludeDeviceUsers -IncludeInventoryData
+                    $referenceAdvancedHuntingData = [hashtable]$referenceAdvancedHuntingBundle.AdvancedHuntingData
+                    $referenceDeviceUsers = [hashtable]$referenceAdvancedHuntingBundle.DeviceUsers
+                    $referenceInventoryData = [hashtable]$referenceAdvancedHuntingBundle.InventoryData
+                    $referenceNvdData = Read-NvdCveData -Path ([System.IO.Path]::GetFullPath($DatasetPath))
+                    $referenceAdvancedHuntingBundle = $null
+                }
+                $referenceResult = ConvertTo-NormalizedData `
+                    -DataPath ([System.IO.Path]::GetFullPath($DatasetPath)) `
+                    -VulnOutputPath (Join-Path $runRoot 'source-reference-vulns.json') `
+                    -PayloadOutputPath $referencePayloadPath `
+                    -Machines $referenceMachines -AdvancedHuntingData $referenceAdvancedHuntingData -AdvancedHuntingDeviceUsers $referenceDeviceUsers -AdvancedHuntingInventoryData $referenceInventoryData -NvdCveData $referenceNvdData `
+                    -SkipObservedWindowMerge:([bool](Test-Path -LiteralPath (Join-Path $DatasetPath 'synthetic-manifest.json') -PathType Leaf)) -ConsumeLookupsOnPayloadClose
+            }
+            finally {
+                if (Test-FileBackedNormalizationMachineLookup -Machines $referenceMachines) { Remove-FileBackedNormalizationMachineLookup -Machines $referenceMachines }
+            }
+            if ([int64]$referenceResult.VulnCount -ne $resolvedExpectedTotalRows) { throw 'Fresh source-reference projection row count does not match the expected Azure workload.' }
+            $hostedAssetDirectory = [System.IO.Path]::GetFileNameWithoutExtension([string]$candidateValidation.hosted_blob_name) + '.assets'
+            $publishedPayloadPath = Join-Path $candidateDashboardPath (Join-Path $hostedAssetDirectory 'data\payload.json.gz')
+            $referenceContent = Get-GzipDecompressedContentEvidence -Path $referencePayloadPath
+            $publishedContent = Get-GzipDecompressedContentEvidence -Path $publishedPayloadPath
+            $expandedComparison = $null
+            if ($referenceContent.decompressed_bytes -ne $publishedContent.decompressed_bytes -or $referenceContent.decompressed_sha256 -ne $publishedContent.decompressed_sha256) {
+                if ($normalizationPlan.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') {
+                    throw ("Published compiled payload does not exactly match the fresh source-reference JSON. Reference={0}; published={1}." -f ($referenceContent | ConvertTo-Json -Compress), ($publishedContent | ConvertTo-Json -Compress))
+                }
+                # Lookup insertion order can legitimately differ when enrichment maps are materialized in
+                # separate processes. Expand the modest compatibility workload and compare canonical rows;
+                # high-cardinality compiled workloads retain the bounded byte-exact path above.
+                . (Join-Path $repoRoot 'build\generated\validation-helpers.ps1')
+                $referenceRows = Read-DashboardRow -Payload (Read-CompressedPayloadObject -Path $referencePayloadPath)
+                $publishedRows = Read-DashboardRow -Payload (Read-CompressedPayloadObject -Path $publishedPayloadPath)
+                $expandedComparison = Compare-RowSet -ExpectedRows $referenceRows -ActualRows $publishedRows
+                if ($expandedComparison.Match -ne $true) {
+                    throw ("Published payload does not semantically match the fresh normalized source reference: {0}" -f ($expandedComparison | ConvertTo-Json -Compress -Depth 20))
+                }
+            }
+            $semanticStopwatch.Stop()
+            $semanticEvidence = [PSCustomObject]@{
+                audit_mode = if ($normalizationPlan.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') { 'fresh-compiled-source-reference' } else { 'fresh-normalized-source-reference' }
+                source_rows = [int64]$referenceResult.VulnCount
+                dashboard_rows = [int64]$resolvedExpectedTotalRows
+                missing_rows = 0
+                extra_rows = 0
+                comparison_storage = if ($null -eq $expandedComparison) { 'streaming-decompressed-sha256' } else { 'bounded-compatibility-row-map' }
+                verification_mode = if ($null -eq $expandedComparison) { 'exact-standard-payload-json' } else { 'canonical-expanded-row-equivalence' }
+                decompressed_bytes = [int64]$referenceContent.decompressed_bytes
+                decompressed_sha256 = [string]$referenceContent.decompressed_sha256
+                elapsed_seconds = [math]::Round($semanticStopwatch.Elapsed.TotalSeconds, 2)
+            }
+        }
+        else {
+            $semanticDashboardPath = if ($DashboardDeliveryMode -eq 'SelfContained') { Join-Path $candidateDashboardPath ([string]$candidateValidation.dashboard_blob_name) } else { Join-Path $candidateDashboardPath ([string]$candidateValidation.hosted_blob_name) }
+            $semanticAuditPath = Join-Path $runRoot 'candidate-semantic-audit.json'
+            & (Join-Path $repoRoot 'Generate-VulnerabilityDashboard.ps1') -DirectoryPath ([System.IO.Path]::GetFullPath($DatasetPath)) -OutputPath $semanticDashboardPath -ValidateOnly -ForceFullValidation -ValidationOutputPath $semanticAuditPath
+            if (-not (Test-Path -LiteralPath $semanticAuditPath -PathType Leaf)) { throw 'Published dashboard semantic validation did not produce an audit record.' }
+            $semanticAudit = Get-Content -LiteralPath $semanticAuditPath -Raw | ConvertFrom-Json -Depth 100
+            if ($semanticAudit.RowComparison.Match -ne $true -or [int64]$semanticAudit.RowComparison.MissingCount -ne 0 -or [int64]$semanticAudit.RowComparison.ExtraCount -ne 0) { throw ("Published dashboard semantic comparison failed: {0}" -f ($semanticAudit.RowComparison | ConvertTo-Json -Compress -Depth 20)) }
+            $semanticEvidence = [PSCustomObject]@{
+                audit_mode = [string]$semanticAudit.AuditMode; source_rows = [int64]$semanticAudit.RowComparison.ExpectedRows; dashboard_rows = [int64]$semanticAudit.RowComparison.ActualRows
+                missing_rows = [int64]$semanticAudit.RowComparison.MissingCount; extra_rows = [int64]$semanticAudit.RowComparison.ExtraCount; comparison_storage = [string]$semanticAudit.RowComparison.ComparisonStorage
+                verification_mode = [string]$semanticAudit.RowComparison.VerificationMode; elapsed_seconds = [double]$semanticAudit.PhaseTimings.TotalElapsedSeconds
+                audit_sha256 = (Get-FileHash -LiteralPath $semanticAuditPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+        }
+        $benchmarkResult | Add-Member -NotePropertyName candidate_semantic_validation -NotePropertyValue $semanticEvidence -Force
+        if ($null -ne $benchmarkResult.benchmark_evidence -and $null -ne $benchmarkResult.benchmark_evidence.validation) {
+            $benchmarkResult.benchmark_evidence.validation | Add-Member -NotePropertyName semantic_parity -NotePropertyValue $semanticEvidence -Force
+        }
+    }
+    Write-BenchmarkEvidenceEnvelope -Path $resultPath -Evidence $benchmarkResult
 }
 finally {
     if ($lockAcquired) {

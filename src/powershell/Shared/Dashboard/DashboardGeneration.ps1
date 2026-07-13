@@ -4011,16 +4011,21 @@ function Invoke-BoundedContentStorePayloadProjection {
     $refs = @((Get-VulnCurrentRefsPath -BasePath $DataPath)) + @(Get-ChildItem -LiteralPath $DataPath -Filter 'VulnHistoryRefs_*.json.gz' -File | Sort-Object Name | ForEach-Object FullName)
     $stagePath = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-dictionary-' + [guid]::NewGuid().ToString('N'))
     $projectionResult = $null
+    $telemetry = [DefenderReporting.Store.MemoryTelemetrySession]::new(0)
     try {
+        $telemetry.SetStage('dictionary-staging')
         [void](New-Item -Path $stagePath -ItemType Directory -Force)
         foreach ($propertyName in @('deviceProfiles', 'contentTemplates')) {
             $writer = [System.IO.StreamWriter]::new((Join-Path $stagePath ($propertyName + '.ndjson')), $false, [System.Text.UTF8Encoding]::new($false), 65536)
             try { Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName $propertyName | ForEach-Object { $writer.WriteLine($_.ToString([Newtonsoft.Json.Formatting]::None)) } }
             finally { $writer.Dispose() }
         }
-        $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $refs, [System.IO.Path]::GetFullPath($PayloadOutputPath))
+        $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $refs, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry)
     }
-    finally { if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force -ErrorAction SilentlyContinue } }
+    finally {
+        $telemetry.Dispose()
+        if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force -ErrorAction SilentlyContinue }
+    }
     Invoke-FullGarbageCollection
     [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
     return $projectionResult
@@ -9089,9 +9094,27 @@ function ConvertTo-NormalizedData {
         $compiledResult = Invoke-BoundedContentStorePayloadProjection -DataPath $DataPath -PayloadOutputPath $PayloadOutputPath
         Invoke-FullGarbageCollection
         [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
+        $compiledTelemetry = if ($null -eq $compiledResult.MemoryTelemetry) { $null } else {
+            [ordered]@{
+                peakWorkingSetMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PeakWorkingSetBytes / 1MB, 1)
+                peakWorkingSetStage = [string]$compiledResult.MemoryTelemetry.PeakWorkingSetStage
+                peakPrivateMemoryMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PeakPrivateMemoryBytes / 1MB, 1)
+                peakPrivateMemoryStage = [string]$compiledResult.MemoryTelemetry.PeakPrivateMemoryStage
+                peakGcHeapMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PeakGcHeapBytes / 1MB, 1)
+                peakGcHeapStage = [string]$compiledResult.MemoryTelemetry.PeakGcHeapStage
+                preTrimWorkingSetMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PreTrimWorkingSetBytes / 1MB, 1)
+                preTrimPrivateMemoryMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PreTrimPrivateMemoryBytes / 1MB, 1)
+                preTrimGcHeapMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PreTrimGcHeapBytes / 1MB, 1)
+                postTrimWorkingSetMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PostTrimWorkingSetBytes / 1MB, 1)
+                postTrimPrivateMemoryMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PostTrimPrivateMemoryBytes / 1MB, 1)
+                postTrimGcHeapMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PostTrimGcHeapBytes / 1MB, 1)
+                elapsedSeconds = [math]::Round([double]$compiledResult.MemoryTelemetry.ElapsedMilliseconds / 1000, 2)
+                sampleIntervalMilliseconds = 0
+            }
+        }
         return @{
             Lookups = $null; LookupsConsumed = $true; DeviceCount = [int]$compiledResult.DeviceCount; CveCount = [int]$compiledResult.CveCount; SoftwareCount = [int]$compiledResult.SoftwareCount; VendorCount = [int]$compiledResult.VendorCount
-            Quality = [PSCustomObject]@{ FirstLastSwappedCount = 0 }; VulnCount = [long]$compiledResult.ProcessedCount; VulnsPath = $null; VulnColumnPaths = $null; PayloadPath = $PayloadOutputPath
+            Quality = [PSCustomObject]@{ FirstLastSwappedCount = 0 }; VulnCount = [long]$compiledResult.ProcessedCount; VulnsPath = $null; VulnColumnPaths = $null; PayloadPath = $PayloadOutputPath; CompiledMemoryTelemetry = $compiledTelemetry
         }
     }
     Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
