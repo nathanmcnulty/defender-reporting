@@ -95,7 +95,18 @@ namespace DefenderReporting.Store
                 var counters = new ProcessMemoryCounters(); counters.Size = (uint)Marshal.SizeOf(typeof(ProcessMemoryCounters));
                 if (GetProcessMemoryInfo(process.Handle, out counters, counters.Size)) { workingSet = checked((long)counters.WorkingSetSize.ToUInt64()); privateMemory = checked((long)counters.PrivateUsage.ToUInt64()); return; }
             }
-            workingSet = Environment.WorkingSet; privateMemory = 0;
+            // psapi.dll is Windows-only. Process exposes the corresponding procfs-backed
+            // counters on Unix, so keep private-memory telemetry useful in Linux CI and
+            // Azure-hosted PowerShell as well.
+            try {
+                workingSet = process.WorkingSet64;
+                privateMemory = process.PrivateMemorySize64;
+            }
+            catch {
+                workingSet = 0; privateMemory = 0;
+            }
+            if (workingSet <= 0) workingSet = Environment.WorkingSet;
+            if (privateMemory <= 0) privateMemory = workingSet;
         }
     }
 
