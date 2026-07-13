@@ -13,10 +13,13 @@ flowchart LR
     B --> D["VulnHistory_YYYY.json.gz"]
     B --> E["Machines_Current.json.gz<br/>Machines_History.json.gz"]
     B --> F["AdvancedHunting_Current.json.gz<br/>(optional)"]
+    B --> J["NvdCve_Current.json.gz<br/>(optional)"]
     C --> G["Generate-VulnerabilityDashboard.ps1"]
     D --> G
     E --> G
     F --> G
+    J --> G
+    G --> K["VulnContentDictionary.json.gz<br/>VulnCurrentRefs.json.gz<br/>(optional sidecars)"]
     G --> H["VulnerabilityDashboard.html"]
     H --> I["reports/*.pdf"]
 ```
@@ -79,6 +82,14 @@ This writes `VulnerabilityDashboard.html` plus `VulnerabilityDashboard.Hosted.ht
 Hosted dashboards now support URL-based shared view state. When you change the report, filters, or remediation mode, the hosted URL keeps that state in a `view=` query parameter, and the footer exposes **Copy View Link** so you can share the current dashboard view directly. If no `view=` parameter is present, the dashboard opens with the normal clean default state.
 
 Hosted dashboards now also use a summary-first load path: the browser fetches the small `data\summary.json` filter catalog first so the toolbar/filter shell can initialize sooner, while the full `data\payload.json.gz` continues loading in parallel for row materialization and report data.
+
+## Large-data memory behavior
+
+Content-store publication is disk-partitioned. The publisher scatters observations into device and content partitions, retains only the active partition's deduplication map and templates, and carries unresolved references through staged files. Publication remains transactional and produces the same dictionary/ref formats; only dictionary ordering is explicitly marked as partitioned. Consumers must treat ref ordering as non-contractual and expand rows by reference identity.
+
+For high-cardinality content-only workloads, normalization selects the compiled streaming projector (`compiled-bounded-standard-payload`). It writes dictionary fragments, refs, and vulnerability rows through UTF-8 and gzip streams, releases completed lookup collections before payload assembly, and reports working-set, private-memory, and GC-heap checkpoints. Workloads with machine or enrichment inputs continue through the compatibility normalizer until a compiled enrichment join is available; those inputs are not silently discarded.
+
+The bounded path is intended to preserve existing exports. Machine tags may be encoded as either a scalar or an array, and Advanced Hunting inventory, device-user, CVE, and NVD fields remain optional. Use the large-data lanes in [`tests/README.md`](tests/README.md) and the acceptance thresholds in [`docs/performance-gate-playbook.md`](docs/performance-gate-playbook.md) before changing partition sizing or normalization behavior.
 
 5. Re-run validation later without regenerating the HTML.
 
@@ -176,6 +187,7 @@ The root scripts above are the primary user-facing entrypoints. Maintainer and a
 | `exports/Machines_Current.json.gz` | Latest known state per device |
 | `exports/Machines_History_YYYYQn.json.gz` | Machine state changes by quarter |
 | `exports/AdvancedHunting_Current.json.gz` | Latest known CVE enrichment from Advanced Hunting |
+| `exports/NvdCve_Current.json.gz` | Optional NVD CVE enrichment used during normalization |
 
 ## Delivery paths
 

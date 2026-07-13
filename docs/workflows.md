@@ -100,6 +100,7 @@ Key behavior:
 - Let the validation workflow protect changes to scripts and templates through the same deterministic preflight used locally
 - Let the runbook sync workflow keep the committed Azure Automation artifact aligned with the build sources
 - Use the Azure package workflow when you want a fresh downloadable deployment bundle without committing a binary into the repository
+- Use `tests/Invoke-AzureRunbookValidation.ps1` for guarded, temporary candidate validation against a real Automation account; it requires an explicit subscription and restores the runbook and storage state after the run
 - Run the PDF workflow only when the HTML dashboard changes enough to warrant fresh report exports
 - Use `build/Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` locally when you need exact-path validation for the live export flow before publishing
 
