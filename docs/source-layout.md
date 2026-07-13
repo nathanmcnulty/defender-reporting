@@ -12,7 +12,7 @@ This repository now treats generated helper bundles as build artifacts, not as t
 
 ## Current domains
 
-- `src/powershell/Shared/Core`: shared primitives, store utilities, cache helpers, and serialization helpers.
+- `src/powershell/Shared/Core`: shared primitives, store utilities, cache helpers, serialization helpers, and the narrowly scoped embedded C# streaming projector used by high-cardinality content normalization.
 - `src/powershell/Shared/Stores`: canonical storage readers, migration helpers, and snapshot import/publish logic.
 - `src/powershell/Shared/DefenderApi`: Microsoft Defender API export and refresh workflows.
 - `src/powershell/Shared/Enrichment`: Advanced Hunting and NVD readers plus shared enrichment/source-row projection helpers.
@@ -20,6 +20,7 @@ This repository now treats generated helper bundles as build artifacts, not as t
 - `src/powershell/Provisioning/Azure`: Azure provisioning entrypoint support, including ARM/Graph request helpers and polling utilities.
 - `src/powershell/Validation/Audit`: regression and semantic validation helpers.
 - `src/powershell/Validation/Orchestration`: dashboard validation entrypoints and failure shaping.
+- `tests/helpers/BenchmarkEvidenceTools.ps1`: bounded Azure artifact, payload, memory, and semantic evidence assertions used by the guarded validation harness.
 
 ## Build graph
 
@@ -33,6 +34,8 @@ This repository now treats generated helper bundles as build artifacts, not as t
 2. If you add, remove, or reorder a source file, update the owning manifest under `build/manifests/`.
 3. Rebuild with `./build/Build-SharedHelpers.ps1` or `./build/Build-ValidationHelpers.ps1` as needed.
 4. Run `./build/Invoke-RegressionValidation.ps1` before merge.
+
+For changes to the compiled projector or content-store publisher, also run the bounded high-cardinality local lane and the checked-in `exports` compatibility lane. The compiled path is eligible only when the preflight confirms high content cardinality without machine or enrichment inputs; compatibility inputs must remain fully represented in normalization.
 
 ## Agent-safe change guardrails
 

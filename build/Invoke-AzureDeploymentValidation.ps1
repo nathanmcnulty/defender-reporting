@@ -30,7 +30,10 @@ param(
     [string]$FunctionExecutionDatasetPath,
 
     [Parameter(Mandatory = $false)]
-    [switch]$SkipFunctionExecution
+    [switch]$SkipFunctionExecution,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipAutomationValidation
 )
 
 Set-StrictMode -Version Latest
@@ -1761,8 +1764,13 @@ if ($ResourceGroupName) {
     $setupCommonParameters.ResourceGroupName = $ResourceGroupName
 }
 
-Write-ValidationLogLine -Message 'Validating Azure Automation deployment...' -ForegroundColor Cyan
-Invoke-TimestampedCommand -FailureDescription 'Azure Automation deployment validation' -ScriptBlock { & $setupScriptPath @setupCommonParameters -AutomationAccountName $AutomationAccountName }
+if (-not $SkipAutomationValidation) {
+    Write-ValidationLogLine -Message 'Validating Azure Automation deployment...' -ForegroundColor Cyan
+    Invoke-TimestampedCommand -FailureDescription 'Azure Automation deployment validation' -ScriptBlock { & $setupScriptPath @setupCommonParameters -AutomationAccountName $AutomationAccountName }
+}
+else {
+    Write-ValidationLogLine -Message 'Skipping Azure Automation deployment validation at the caller''s request.' -ForegroundColor Yellow
+}
 
 Write-ValidationLogLine -Message 'Validating Azure Function App deployment...' -ForegroundColor Cyan
 Invoke-TimestampedCommand -FailureDescription 'Azure Function App deployment validation' -ScriptBlock { & $setupScriptPath @setupCommonParameters -ComputeType FunctionApp -FunctionAppName $FunctionAppName }
@@ -1785,6 +1793,7 @@ $result = [PSCustomObject]@{
     functionAppName = $FunctionAppName
     functionResourceGroup = $functionResourceGroup
     dashboardDeliveryMode = $effectiveDashboardDeliveryMode
+    skipAutomationValidation = [bool]$SkipAutomationValidation
     functionExecution = $functionExecutionResult
 }
 

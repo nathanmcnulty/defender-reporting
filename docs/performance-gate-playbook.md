@@ -32,8 +32,12 @@ Standard benchmark dataset:
 Standard large Azure acceptance dataset:
 - Dataset path: `.local\large-datasets\synthetic-50k-1_5m`
 - Shape: `50,000` devices, `1,500,000` vulnerability rows, `3,097` CVEs
-- Accepted architecture anchor: `monolithic-v1`
-- Compare future hosted Azure acceptance runs against the latest accepted envelope in `docs/performance-baselines.md`
+- Accepted architecture anchor: `monolithic-v1` with `compiled-bounded-standard-payload` for content-only high-cardinality normalization
+- Current Automation gate: true compiled pre-trim working set below `400 MB`; the 2026-07-12 acceptance measured `365.1 MB`, `42.34s` compiled projection time, and `1,187,395` onboarded rows
+- Current Function App reference: the 2026-07-13 complete enriched replay published `1,484,239` rows in about `544s` active time, with `816.3 MB` Azure Monitor peak working set and approximately `1,238,425,600` execution units. Track this separately from the Automation ceiling.
+- Compare future hosted Azure acceptance runs against the current bounded-path envelope in `docs/performance-baselines.md`; retain the older Function App envelope as a separate historical comparison until it is refreshed
+
+For a guarded candidate run against the real Automation account, use `tests/Invoke-AzureRunbookValidation.ps1` with an explicit subscription, `-ValidatePublishedSemanticParity`, and `-Execute`. The harness backs up and restores the runbook and storage state. Run both the high-cardinality content-only seed and the checked-in `exports` compatibility lane before accepting normalization or memory changes. Large compiled payloads use exact decompressed-byte equality; enriched compatibility payloads use canonical expanded-row equivalence when lookup ordering changes serialized bytes.
 
 ## Hosted local runtime checkpoints
 
@@ -76,6 +80,7 @@ Semantic validation guardrails:
 - The default local semantic row limit is `1,000,000` rows; the routine medium dataset stays under that limit, while the standard `synthetic-50k-1_5m` sign-off lane does not.
 - Use `tests/Invoke-RoutineSemanticReview.ps1` for repeatable branch iteration and reserve `-AllowLargeSemanticValidation` for intentional final-signoff or high-risk investigations.
 - Run the large sign-off wrapper as `pwsh -NoProfile -File .\tests\Invoke-LargeDatasetValidation.ps1 -SkipSyntheticGeneration -SyntheticOutputPath .\.local\large-datasets\synthetic-50k-1_5m -Validate -ValidationMode semantic -ForceFullValidation` so semantic sign-off always means a fresh replay instead of attestation reuse.
+- For Azure acceptance, prefer the bounded source-reference comparison in `tests/Invoke-AzureRunbookValidation.ps1`; the older full dashboard audit remains useful for compatibility diagnostics but can retain substantially more local state than the production publisher.
 - If you need browser-level hosted coverage, pair the deterministic preflight with `tests/Invoke-HostedDashboardRuntimeSmoke.ps1` on Windows instead of escalating directly to the large semantic lane.
 
 Timing interpretation:

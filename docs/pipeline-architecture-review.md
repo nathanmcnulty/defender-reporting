@@ -1,12 +1,15 @@
 # Pipeline Architecture Review
 
-This review captures the post-merge architecture decision after PR #37. It is based on the tracked source and maintainer docs, with generated outputs and local history treated as non-authoritative.
+This review captures the post-merge architecture decision after PR #37 and the subsequent bounded-content-store acceptance work. It is based on the tracked source and maintainer docs, with generated outputs and local history treated as non-authoritative.
 
 ## Current Validated State
 
-The current monolithic pipeline is no longer failing its Azure acceptance gate.
+The current monolithic pipeline now has a bounded high-cardinality content path and is no longer failing its Azure acceptance gate.
 
-- Azure Automation passed on the 50k device / 1.5M row hosted dataset.
+- The disk-partitioned content-store publisher retains one device/content partition's maps and templates at a time and preserves the existing dictionary/ref wire formats.
+- The compiled standard-payload projector releases completed lookup collections before vulnerability assembly and reports true transient memory telemetry.
+- Azure Automation passed on the 50k device / 1.5M row hosted dataset with 1,187,395 onboarded rows, a 365.1 MB true working-set peak, and exact source/payload equality.
+- The checked-in `exports` compatibility replay passed with 7,640 rows, including Advanced Hunting/NVD enrichment and scalar/array machine tags.
 - The hosted Function App validation also completed successfully on the same dataset during the keeper merge acceptance run.
 - The latest hosted Function App acceptance invocation was accepted at `2026-05-06T06:26:05Z` and wrote the dashboard blob at `2026-05-06T06:33:39Z`.
 - Recent keeper changes already reduced transient normalization state, reused shared library caches, and hardened blob validation against Azure CLI data-plane failures on this machine.
@@ -15,11 +18,11 @@ That changes the architecture decision. A high-risk sharded rewrite is no longer
 
 ## Decision
 
-Keep the current runtime architecture as the accepted baseline and name it `monolithic-v1`.
+Keep the current runtime architecture as the accepted baseline and name it `monolithic-v1`. Its high-cardinality content-only normalization mode is `compiled-bounded-standard-payload`; enriched or machine-backed workloads continue through the compatibility normalizer until a compiled enrichment join is justified and measured.
 
 Treat a staged, shard-oriented rewrite as a contingency path, not the active implementation scope for this branch.
 
-The next work should lock in observability, planning metadata, and escalation criteria so we can prove when a larger rewrite is actually required.
+The next work should keep observability, planning metadata, and escalation criteria durable so we can prove when a larger rewrite is actually required.
 
 ## Pipeline Map
 
@@ -30,6 +33,7 @@ The next work should lock in observability, planning metadata, and escalation cr
 2. Normalization
    - [Generate-VulnerabilityDashboard.ps1](../Generate-VulnerabilityDashboard.ps1) reads canonical stores, loads machine and enrichment data, and calls `ConvertTo-NormalizedData` from [DashboardGeneration.ps1](../src/powershell/Shared/Dashboard/DashboardGeneration.ps1).
    - Normalization can run from content-store sidecars or raw current/history rows and can reuse normalized column and payload caches under `.dashboard-cache/`.
+   - Large content-store publication is disk-partitioned. Content-only high-cardinality payloads use the compiled streaming projector; machine and Advanced Hunting/NVD inputs use the compatibility path with full enrichment preservation.
 
 3. Payload preparation
    - The generator writes a compressed payload with lookup tables plus vulnerability rows or columns.
@@ -47,7 +51,7 @@ The next work should lock in observability, planning metadata, and escalation cr
 
 ### Stage 0: Observability and Architecture Scaffolding
 
-This is the active branch scope.
+Completed. The runtime status includes `pipelineArchitectureVersion = monolithic-v1`, `pipelineArchitectureTrack = stage0-observability`, finer Stage D transitions, input cardinalities, and memory checkpoints.
 
 1. Stamp the runtime path with explicit architecture metadata.
    - Emit `pipelineArchitectureVersion = monolithic-v1` in the Azure pipeline status blob.
@@ -65,12 +69,12 @@ This is the active branch scope.
 4. Record the decision in tracked docs.
    - This file is the decision record for keeping `monolithic-v1` as the accepted baseline until a concrete trigger forces a larger rewrite.
 
-### Stage 1: Baseline Capture and Triggering
+### Stage 1: Bounded-path acceptance and triggering
 
-Do this after Stage 0 is merged.
+The bounded content-store and compiled standard-payload path is now accepted. Continue to refresh durable baselines after behavior or dataset changes.
 
 1. Capture durable post-acceptance benchmark baselines.
-   - Use the repo performance workflow and Azure acceptance artifacts to record the accepted envelope for the current monolithic pipeline.
+   - Use the repo performance workflow and guarded Azure validation artifacts to record separate completed-replay, raw sidecar-free, and fresh-export envelopes.
 
 2. Add explicit rewrite triggers.
    - Escalate only if repeated Azure acceptance runs regress materially or fail.
@@ -100,16 +104,18 @@ Start the staged rewrite only when at least one of these conditions becomes true
 2. Hosted Function App Azure acceptance regresses materially beyond the accepted baseline and keeps doing so after localized fixes.
 3. Operational requirements demand resumability across invocations rather than a single successful monolithic run.
 
-## First Implementation on This Branch
+## Current implementation record
 
-This branch implements Stage 0 only:
+The accepted implementation includes the original Stage 0 observability work plus:
 
-1. add architecture-version metadata to the pipeline status blob
-2. add finer status transitions inside Stage D
-3. surface the architecture version in the validation status summary
+1. disk-partitioned transactional content-store publication with partition-order metadata
+2. compiled streaming standard-payload projection with pre-trim telemetry and early lookup release
+3. Azure source-artifact validation and bounded source-to-dashboard semantic comparison
+4. compatibility preservation for machine/enrichment inputs, optional fields, Unicode, legacy arrays/NDJSON, and scalar or array machine tags
 
 ## Review Notes
 
 - The export phase already uses staged partial vulnerability downloads and transactional machine store publishing, so this review does not replace those mechanisms.
+- The generated runbook remains derived from `build/azure/runbook-source.ps1`; deployment validation backs up and restores the published runbook and storage state.
 - The validation attestation fast path remains payload-oriented. Dashboard runtime behavior is still covered by the Node dashboard assertion suite, semantic validation, and Azure acceptance runs.
 - If `monolithic-v1` remains within the accepted Azure envelope, prefer smaller focused improvements over a speculative rewrite.

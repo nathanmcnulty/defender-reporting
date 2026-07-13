@@ -214,6 +214,34 @@ Recommended acceptance process for large import changes:
 - one live Azure Automation fresh-export run
 - record which lane each captured result belongs to so replay and fresh-import numbers are not compared as if they covered the same path
 
+## Bounded Azure acceptance
+
+For a final large-data acceptance run, use the guarded validation harness rather than invoking a runbook job manually. It backs up the published runbook and the `exports`/`dashboards` containers, deploys the generated candidate, seeds the selected dataset, downloads the published dashboard, verifies required artifacts and counts, performs source-to-dashboard parity, and restores the previous state in `finally` cleanup. Every Azure CLI operation must target the intended subscription explicitly.
+
+Example for the prepared generated 50K raw replay seed (the raw replay lane publishes 1,187,395 onboarded rows):
+
+```powershell
+pwsh -NoProfile -File .\tests\Invoke-AzureRunbookValidation.ps1 `
+  -SubscriptionId '43babb60-9e73-4dc8-b769-4401c01aad73' `
+  -AutomationAccountName 'aa-defender-reporting' `
+  -AutomationResourceGroup 'rg-defender-reporting' `
+  -RunbookName 'Invoke-DashboardPipeline' `
+  -StorageAccountName 'stdefenderrepaad73' `
+  -DatasetPath .\.local\fast-large-import `
+  -SeedMode ContentReplay `
+  -DashboardDeliveryMode Hosted `
+  -ExpectedTotalRows 1187395 `
+  -UseExistingExportsOnly `
+  -ValidatePublishedSemanticParity `
+  -Execute -Confirm:$false
+```
+
+The harness uses exact decompressed payload bytes for the high-cardinality compiled path. For modest compatibility workloads, enrichment lookup insertion order may legitimately change the serialized bytes, so parity falls back to canonical expanded-row equivalence. A successful acceptance must still have zero missing and zero extra rows, valid current/history/dictionary/ref artifacts, and a true pre-trim working-set peak below the 400 MB Automation ceiling. The status evidence records working set, private memory, GC heap, phase, row count, and compiled telemetry; keep the timestamped result under `.local\azure-validation\`.
+
+The checked-in `exports` dataset is a compatibility gate, not just a fixture. It exercises Advanced Hunting CVE/device-user/inventory data, NVD data, and both scalar and array machine-tag representations. Do not replace it with a content-only synthetic dataset when changing enrichment or machine lookup code.
+
+When the Function App is the isolated subject of a test, add `-SkipAutomationValidation` to the build validation command. The default still validates both compute paths; the switch only avoids running the paired Automation deployment/validation while preserving Function App deployment, seeding, execution, status polling, and temporary-setting cleanup.
+
 ## Hot phase review
 
 Review the local generator and validation hot phases with:
@@ -313,6 +341,8 @@ pwsh -NoProfile -File .\tests\New-BenchmarkDataset.ps1 -DatasetId benchmark-larg
 ```
 
 Benchmark seeds now use the deterministic `procedural-v1` model and compiled streaming writer by default. The seed, model version, cardinalities, generation date, churn, and sparsity settings are recorded in `synthetic-manifest.json`; repeat runs with the same settings produce byte-stable gzip data artifacts.
+
+The procedural writer is intentionally streaming: it derives devices, templates, observations, and edge cases from `seed + ordinal + snapshot`, writes JSON/gzip artifacts directly through the embedded writer, and avoids a global source-row or signature cache. Use `-GenerationDate`, `-SnapshotCount`, `-ChurnRate`, `-ContentTemplateCount`, and `-OptionalFieldSparsity` to vary a reproducible dataset without changing the public entrypoint. Keep `-UseLegacyGenerator` only for comparison runs; it is not the bounded-memory acceptance path.
 
 That dataset definition maps to:
 - dataset id: `benchmark-large-50k-v1`

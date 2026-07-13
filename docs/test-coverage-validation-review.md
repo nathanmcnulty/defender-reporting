@@ -64,6 +64,7 @@ Entrypoints:
 - `tests/Invoke-LargeImportCoverage.ps1`
 - `tests/New-BenchmarkDataset.ps1`
 - `tests/New-SyntheticSnapshotDelta.ps1`
+- `tests/Invoke-AzureRunbookValidation.ps1`
 
 Covered today:
 
@@ -73,6 +74,8 @@ Covered today:
 - Full semantic validation mode for final local sign-off.
 - Legacy vulnerability snapshot replay preparation.
 - Durable benchmark dataset registration.
+- Procedural-v1 deterministic generation and immutable date/churn overlays.
+- Guarded Azure candidate deployment, artifact evidence, restoration, and bounded source-to-dashboard parity.
 
 Recommended use:
 
@@ -85,6 +88,7 @@ Recommended use:
 Entrypoints:
 
 - `build/Invoke-AzureDeploymentValidation.ps1`
+- `tests/Invoke-AzureRunbookValidation.ps1`
 - `tests/Measure-RunbookOnlyAzureBenchmark.ps1`
 - `tests/Measure-BranchVsMainBenchmark.ps1`
 
@@ -95,11 +99,14 @@ Covered today:
 - Function App deployment and seeded execution.
 - Runtime status blob diagnostics for Function App execution.
 - Azure benchmark capture for elapsed time, memory, and Function execution-unit review.
+- True compiled pre-trim working-set, private-memory, and GC-heap telemetry for high-cardinality content-only normalization.
+- Compatibility coverage for Advanced Hunting CVE/device-user/inventory data, NVD data, and scalar/array machine tags.
 
 Recommended use:
 
 - Run before merging Azure packaging, Automation, Function App, release packaging, or perf-sensitive large-dataset changes.
 - Prefer seeded deterministic exports when validating runtime behavior without depending on fresh API data.
+- For temporary candidate validation, use `Invoke-AzureRunbookValidation.ps1` with an explicit subscription and `-Execute`; it restores the published runbook and storage manifests after the run.
 
 ## Gaps Worth Tackling
 

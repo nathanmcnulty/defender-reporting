@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2026-07-13
+
+### Function App large-dataset validation
+
+#### Added
+- `build/Invoke-AzureDeploymentValidation.ps1 -SkipAutomationValidation` for isolated Function App validation when the paired Automation lane is being measured separately.
+
+#### Validation
+- The specified `func-defender-reporting` Function App completed the materialized 50K-device / 1.5M-row dataset with 1,484,239 published rows, 50,000 devices, and 5,000 CVEs.
+- Hosted dashboard artifacts were published successfully. Azure Monitor measured an 816.3 MB peak working set and approximately 1,238,425,600 execution units for the Flex Consumption invocation.
+- Temporary Function App settings and pre-validation `exports`/`dashboards` storage were restored and verified by manifest comparison.
+
+## 2026-07-12
+
+### Bounded content-store publication and Azure acceptance hardening
+
+#### Changed
+- Content-store publication now scatters observations to disk partitions and processes one device/content partition at a time. Staged fragments carry unresolved references between passes, so retained dictionary state follows the largest partition rather than the total number of rows.
+- Partitioned dictionaries are marked with `deviceProfileOrder = "partitioned"`; ordering-dependent direct merge is skipped and the existing file-backed lookup is selected instead.
+- Dictionary, partition, ref-projection, lookup-assembly, and cleanup phases now emit progress and memory checkpoints. Compiled projection telemetry records true working-set, private-memory, GC-heap, and pre/post-trim values.
+- Compiled payload assembly releases completed lookup collections before copying the high-cardinality vulnerability stream, reducing transient overlap without changing the payload wire format.
+- Azure normalization now preserves Advanced Hunting CVE/device-user/inventory data and NVD data, including their source metadata and cache identity.
+
+#### Fixed
+- Compiled machine lookup now preserves scalar `machineTags` values as one-element tag arrays, matching the compatibility reader's support for both scalar and array forms.
+- Azure validation now compares large compiled payloads with bounded decompressed-byte equality and uses canonical expanded-row equivalence for modest compatibility workloads when lookup insertion order differs between processes.
+
+#### Validation
+- The final 50,000-device / 1,500,000-row generated workload completed in Azure Automation with 1,187,395 published rows, a 365.1 MB true working-set peak, and a 42.34-second compiled projection.
+- The final published payload matched a fresh source projection exactly across 133,633,728 decompressed bytes.
+- The checked-in `exports` dataset produced 7,640 source and dashboard rows with zero missing or extra canonical rows.
+- Full repository validation passed, and the Azure runbook, exports, and dashboard storage state were restored after validation.
+
 ## 2026-04-21
 
 ### Azure Automation memory hardening and Stage D normalization tuning

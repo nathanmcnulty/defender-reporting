@@ -40,11 +40,15 @@ This directory contains maintainer-facing build, validation, import, and packagi
 # Rebuild locally, redeploy Azure Automation + Function App, and execute both live validation paths
 .\build\Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName aa-defender-reporting -FunctionAppName func-defender-reporting -SkipMdePermissions -FunctionExecutionDatasetPath .\exports
 
+# Exercise only the Function App with a complete seeded dataset
+.\build\Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName aa-defender-reporting -FunctionAppName func-defender-reporting -ResourceGroupName rg-defender-reporting -DashboardDeliveryMode Hosted -SkipMdePermissions -FunctionExecutionDatasetPath .\.local\large-datasets\synthetic-50k-1_5m -SkipAutomationValidation
+
 # Build the same Azure zip used by the artifact workflow
 .\build\Build-AzureReleasePackage.ps1
 ```
 
 When `-SkipMdePermissions` is paired with Function App execution validation, pass `-FunctionExecutionDatasetPath <dataset>` so the script can reseed the Function App exports container before invocation. Use `-SkipFunctionExecution` only when you intentionally want deployment validation without the final Function App run.
+Use `-SkipAutomationValidation` when the Function App is the isolated subject of a test; the default still validates both compute paths. This is useful when a complete Function App dataset is available but the Automation lane is being measured separately.
 
 The Azure builders now assert that the generated runbook and Function App entry point still carry the current shared-helper fingerprint before packaging or deployment. `Build-AzureReleasePackage.ps1` also writes a sibling `.manifest.json` sidecar beside the zip so package provenance, staged `Az.Accounts` version, and artifact fingerprints are easier to audit locally. `Publish-DashboardTemplates.ps1` is the supported dashboard-template upload surface for wrappers, CI, and maintainer automation; `azure/Upload-Templates.ps1` remains only as a compatibility shim for older callers and release-package layouts.
 
@@ -86,6 +90,14 @@ When you change `src/powershell/Shared/**/*.ps1` or `build/azure/runbook-source.
 Use the default `Build-FunctionApp.ps1` invocation when you only need the generated entry point plus staged modules refreshed in place. Use `Build-FunctionAppPackage.ps1` when you need the stable deployable zip/manifest surface for CI, wrappers, or manual zip deployment. `-SkipModuleStaging` is sufficient for the routine script-only refresh loop.
 
 When you need to refresh the `templates` blob container, prefer `build/Publish-DashboardTemplates.ps1` over calling `azure/Upload-Templates.ps1` directly. The build-layer entrypoint is the documented public contract and supports `-WhatIf` for deterministic smoke coverage in the maintainer preflight.
+
+## Memory-sensitive pipeline changes
+
+The generated Automation runbook and Function App share the same source, but the high-cardinality paths have different runtime boundaries. Content-store publication in `src/powershell/Shared/Core/Core.ps1` uses disk partitions and transactional staged files. High-cardinality content-only normalization uses the compiled streaming projector in `src/powershell/Shared/Core/CompiledVulnContentProjector.ps1`; machine or Advanced Hunting/NVD enrichment inputs remain on the compatibility path until a compiled enrichment join is available.
+
+When changing either path, validate both a content-only large dataset and the checked-in `exports` dataset. The former proves bounded partition/ref projection and true transient telemetry; the latter protects machine tags, device users, inventory, NVD fields, Unicode, optional properties, and legacy wire-format compatibility. Use `tests/Invoke-AzureRunbookValidation.ps1 -ValidatePublishedSemanticParity` for the guarded Azure proof. Its exact-byte comparison is reserved for the compiled standard payload; enriched compatibility runs use canonical expanded-row comparison when lookup insertion order differs.
+
+The accepted Automation ceiling is a true pre-trim working-set peak below 400 MB, with working set, private memory, GC heap, and elapsed time reviewed separately. Status-blob phase samples are useful for diagnosis but must not replace compiled pre-trim telemetry. Do not hand-edit the generated runbook after these changes; rebuild it with `Build-Runbook.ps1` and review the generated fingerprint.
 
 ## User-facing scripts
 

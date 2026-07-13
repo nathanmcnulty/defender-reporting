@@ -13,6 +13,22 @@ Do not compare those lanes as if they were interchangeable. Replay benchmarks ar
 
 `tests/Invoke-LargeImportCoverage.ps1` is the preferred deterministic prep entrypoint for large import-path spot checks. It produces both a raw sidecar-free replay dataset and an Azure-ready existing-export dataset that combines `Machines_Current.json.gz`, `AdvancedHunting_Current.json.gz`, and synthetic legacy `VulnExport_*.json.gz` files.
 
+The current bounded-content-store acceptance is recorded below. The older tables and triage entries remain useful historical comparisons, but they predate the disk-partitioned publisher and compiled streaming standard-payload path.
+
+## Current bounded-path acceptance (2026-07-12)
+
+| Dataset / lane | Rows | Azure elapsed | True compiled peak WS | Private / GC peak | Semantic proof |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `.local\fast-large-import` ContentReplay, Hosted | `1,187,395` | `114.34s` | `365.1 MB` | `438.2 MB` / `244.9 MB` | Exact decompressed payload equality; SHA-256 `745180e85d22e1132574857636fd9fd5a56865b466b15001af82c11f33a5b385` |
+| checked-in `exports`, Hosted compatibility replay | `7,640` | `157.42s` | N/A (compatibility path) | `203.2 MB` / `129.1 MB` status peak | Canonical expanded-row equivalence; zero missing and zero extra |
+| `.local\large-datasets\synthetic-50k-1_5m` Function App, Hosted compatibility replay | `1,484,239` | `~544s` active | N/A (compatibility path) | `816.3 MB` Azure Monitor WS; `449.5 MB` / `106.5 MB` status sample | Published summary/status agree: 50,000 devices and 5,000 CVEs |
+
+The large seed contains 50,000 devices and 1,500,000 generated vulnerability rows; the raw replay lane's onboarded dashboard count is 1,187,395. The 365.1 MB value is the compiled projector's true pre-trim working-set high-water mark, not the lower status-boundary sample. The 400 MB Automation ceiling therefore had 34.9 MB of measured headroom. The compatibility replay intentionally includes Advanced Hunting CVE/device-user/inventory data, NVD data, and real scalar/array machine-tag forms.
+
+The acceptance harness backed up and restored the published runbook and `exports`/`dashboards` blob manifests after each run. Raw evidence remains under `.local\azure-validation\`; use the guarded harness and preserve the same lane labels when refreshing these numbers.
+
+Function App execution uses Flex Consumption metrics and is not subject to the Automation account's 400 MB working-set ceiling. Keep its Azure Monitor working-set and execution-unit values as a separate Function App baseline; do not compare them directly with the compiled Automation peak.
+
 The raw result JSON files from the April 5, 2026 capture remain local-only under `.local/`. The April 20, 2026 ad hoc hosted review captures remain local-only under `.local/perf-triage/`, and the April 20, 2026 durable benchmark series remains local-only under `.local/benchmark-series/benchmark-medium-v1-20260420-004103/`.
 
 ## Recorded baselines
@@ -43,11 +59,11 @@ The raw result JSON files from the April 5, 2026 capture remain local-only under
 | `review-synthetic-medium` | `333520896 to 341286912` bytes | `236150784 to 242094080` bytes | `407.6 to 412.5 MB` | `85.2 to 95.0 MB` | `580.6 to 587.6 MB` | `580.2 to 587.6 MB` | `0.0` |
 | `benchmark-large-50k-v1` | N/A | N/A | `525.9 to 537.1 MB` | `113.8 to 113.9 MB` | `820.1 MB` | `820.1 MB` | `1,158,758,400` |
 
-## Standard large Azure acceptance
+## Historical Stage 1 large Azure acceptance
 
 | Dataset | Shape | Architecture | Azure path | Acceptance markers | Review notes |
 | --- | --- | --- | --- | --- | --- |
-| `synthetic-50k-1_5m` | `50,000` devices, `1,500,000` rows, `3,097` normalized CVE lookup entries | `monolithic-v1` | Azure Automation plus hosted Function App (`Dual`) | Function App execution accepted `2026-05-06T06:26:05Z`; dashboard blob written `2026-05-06T06:33:39Z`; blob-write interval `454s` | Treat this as the accepted Stage 1 large Azure envelope anchor until a newer accepted run replaces it. Compare future standard-dataset Azure runs against this record plus the review thresholds in `docs/performance-gate-playbook.md`, and keep the raw Azure validation artifacts local under `.local/`. |
+| `synthetic-50k-1_5m` | `50,000` devices, `1,500,000` rows, `3,097` normalized CVE lookup entries | `monolithic-v1` | Azure Automation plus hosted Function App (`Dual`) | Function App execution accepted `2026-05-06T06:26:05Z`; dashboard blob written `2026-05-06T06:33:39Z`; blob-write interval `454s` | Historical Stage 1 anchor. Use the 2026-07-12 bounded-path acceptance above for the current Automation working-set gate, and retain this row for Function App comparison until a new Function App capture is accepted. |
 
 ## Recent memory triage notes
 
