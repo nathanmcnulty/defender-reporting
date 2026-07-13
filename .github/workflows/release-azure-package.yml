@@ -1,0 +1,61 @@
+name: Release Azure Package
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  package-azure-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Install Az.Accounts PowerShell module
+        shell: pwsh
+        run: |
+          Install-Module -Name Az.Accounts -Force -AllowClobber -Scope CurrentUser
+
+      - name: Create Azure release package
+        id: package
+        shell: pwsh
+        env:
+          RELEASE_PUBLISHED_AT: ${{ github.event.release.published_at }}
+          RELEASE_CREATED_AT: ${{ github.event.release.created_at }}
+        run: |
+          $releaseTimestamp = $env:RELEASE_PUBLISHED_AT
+          if ([string]::IsNullOrWhiteSpace($releaseTimestamp)) {
+            $releaseTimestamp = $env:RELEASE_CREATED_AT
+          }
+
+          if ([string]::IsNullOrWhiteSpace($releaseTimestamp)) {
+            throw 'The GitHub release did not provide a published or created timestamp.'
+          }
+
+          $dateStamp = ([datetimeoffset]::Parse($releaseTimestamp)).ToUniversalTime().ToString('yyMMdd')
+          $assetName = "Azure-$dateStamp.zip"
+          $assetPath = Join-Path $env:RUNNER_TEMP $assetName
+
+          .\build\Build-AzureReleasePackage.ps1 -OutputPath $assetPath
+
+          "asset_name=$assetName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "asset_path=$assetPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload Azure release package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$env:RELEASE_TAG" "${{ steps.package.outputs.asset_path }}#${{ steps.package.outputs.asset_name }}" --clobber
