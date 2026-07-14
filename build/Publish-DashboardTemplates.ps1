@@ -19,7 +19,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Path $PSScriptRoot -Parent
-$azurePublishScriptPath = Join-Path -Path $repoRoot -ChildPath 'azure\Upload-Templates.ps1'
+$azurePublishScriptPath = Join-Path -Path (Join-Path -Path $repoRoot -ChildPath 'azure') -ChildPath 'Upload-Templates.ps1'
 if (-not (Test-Path -LiteralPath $azurePublishScriptPath -PathType Leaf)) {
     throw "Azure dashboard template publish script not found: $azurePublishScriptPath"
 }

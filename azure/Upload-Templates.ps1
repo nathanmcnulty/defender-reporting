@@ -48,7 +48,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$publishToolsPath = Join-Path -Path $PSScriptRoot -ChildPath 'private\DashboardTemplatePublishTools.ps1'
+$publishToolsPath = Join-Path -Path (Join-Path -Path $PSScriptRoot -ChildPath 'private') -ChildPath 'DashboardTemplatePublishTools.ps1'
 if (-not (Test-Path -LiteralPath $publishToolsPath -PathType Leaf)) {
     throw "Required dashboard template publish helper not found: $publishToolsPath"
 }
