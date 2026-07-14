@@ -1,3 +1,5 @@
+# Canonical dashboard-template publishing helpers. The Azure package builder
+# inlines this file into the generated azure/Upload-Templates.ps1 artifact.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 

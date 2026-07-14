@@ -52,7 +52,7 @@ Key behavior:
 - Installs `PSScriptAnalyzer` and `Az.Accounts`
 - Calls the repo-owned `build/Invoke-RegressionValidation.ps1` entrypoint
 - Validates generated deployment artifacts, source scripts, regression helpers, the build-layer template publish contract, and committed-export dashboard generation through one deterministic path
-- Smoke-tests the Azure zip packaging path with `build/Build-AzureReleasePackage.ps1`
+- Builds and extracts the Azure zip, asserts that it contains no `build/` dependency, and smoke-tests the packaged `azure/Upload-Templates.ps1` entrypoint
 
 ## Export Dashboard PDFs
 

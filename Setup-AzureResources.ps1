@@ -1749,16 +1749,10 @@ try {
 
         # 14a: Upload template files via the package-safe Azure publish contract
         Write-Host "  Uploading template files..." -ForegroundColor Gray
-        $uploadScriptCandidates = @(
-            (Join-Path -Path $PSScriptRoot -ChildPath 'azure' | Join-Path -ChildPath 'Upload-Templates.ps1')
-            (Join-Path -Path $PSScriptRoot -ChildPath 'build' | Join-Path -ChildPath 'Publish-DashboardTemplates.ps1')
-        )
-        $uploadScript = $uploadScriptCandidates |
-            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
-            Select-Object -First 1
+        $uploadScript = Join-Path -Path $PSScriptRoot -ChildPath 'azure' | Join-Path -ChildPath 'Upload-Templates.ps1'
 
-        if ([string]::IsNullOrWhiteSpace($uploadScript) -or -not (Test-Path -LiteralPath $uploadScript -PathType Leaf)) {
-            Write-Warning "Template publish script not found. Expected one of: $($uploadScriptCandidates -join ', ')"
+        if (-not (Test-Path -LiteralPath $uploadScript -PathType Leaf)) {
+            Write-Warning "Package-safe template publish script not found at: $uploadScript"
             Write-Host "  Run .\azure\Upload-Templates.ps1 manually before the pipeline." -ForegroundColor Yellow
         }
         else {

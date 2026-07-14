@@ -44,7 +44,7 @@
     - System-assigned Managed Identity with:
       - Storage Blob Data Contributor on the Storage Account
       - MDE app roles: Machine.Read.All, Vulnerability.Read.All, AdvancedQuery.Read.All
-    - Templates uploaded to the 'templates' blob container via build/Publish-DashboardTemplates.ps1
+    - Templates uploaded to the 'templates' blob container via azure/Upload-Templates.ps1
 #>
 
 #Requires -Version 7.0
@@ -1355,7 +1355,7 @@ try {
     $templateBlobs = @(Get-BlobList -AccountName $StorageAccountName -Container $Script:BlobContainers.Templates -StorageToken $storageToken)
 
     if ($templateBlobs.Count -eq 0) {
-        throw "No templates found in '$($Script:BlobContainers.Templates)' container. Run build/Publish-DashboardTemplates.ps1 first."
+        throw "No templates found in '$($Script:BlobContainers.Templates)' container. Run azure/Upload-Templates.ps1 first."
     }
 
     foreach ($blobName in $templateBlobs) {

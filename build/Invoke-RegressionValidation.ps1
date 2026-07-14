@@ -200,11 +200,24 @@ if (Test-LastExitCodeFailed) {
     throw 'build/azure/Build-FunctionApp.ps1 failed.'
 }
 
+Write-Output 'Building self-contained Azure template publisher...'
+Reset-LastExitCode
+& (Join-Path $buildRoot 'azure\Build-TemplatePublisher.ps1')
+if (Test-LastExitCodeFailed) {
+    throw 'build/azure/Build-TemplatePublisher.ps1 failed.'
+}
+
 Write-Output 'Smoke-testing dashboard template publish contract...'
 Reset-LastExitCode
 & (Join-Path $buildRoot 'Publish-DashboardTemplates.ps1') -StorageAccountName 'validationstorageaccount' -WhatIf
 if (Test-LastExitCodeFailed) {
     throw 'build/Publish-DashboardTemplates.ps1 failed.'
+}
+
+Reset-LastExitCode
+& (Join-Path $repoRoot 'azure\Upload-Templates.ps1') -StorageAccountName 'validationstorageaccount' -WhatIf
+if (Test-LastExitCodeFailed) {
+    throw 'Generated azure/Upload-Templates.ps1 failed.'
 }
 
 Write-Output 'Running parser validation...'
