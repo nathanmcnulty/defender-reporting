@@ -248,7 +248,7 @@ The Azure runbook status evidence includes the selected normalization mode, inpu
 
 `build/Build-FunctionAppPackage.ps1` is the supported packaging surface for CI and wrapper repositories. By default it rebuilds the generated Function App artifacts, stages `Az.Accounts`, writes a stable zip to `.local/local-reports/function-app-package/defender-reporting-function-app.zip`, and emits a sibling `.manifest.json` file that records the package path, SHA-256, and Function App artifact fingerprints.
 
-`azure/Upload-Templates.ps1` now owns the package-safe template publishing implementation used by `Setup-AzureResources.ps1` and extracted Azure release bundles. `build/Publish-DashboardTemplates.ps1` remains the repo-owned wrapper surface for CI, wrapper repositories, and maintainer automation. Both entrypoints upload the canonical `templates/` tree to the `templates` blob container, emit the same stable tree fingerprint, and can optionally write a JSON manifest with the published file inventory.
+`build/Publish-DashboardTemplates.ps1` is the canonical template-publishing implementation for CI, wrapper repositories, and maintainer automation. During packaging, `build/azure/Build-TemplatePublisher.ps1` inlines its focused helper and generates a self-contained `azure/Upload-Templates.ps1` for `Setup-AzureResources.ps1` and extracted release bundles. Both entrypoints upload the canonical `templates/` tree, emit the same stable tree fingerprint, and can optionally write a JSON manifest with the published inventory.
 
 ## Related docs
 

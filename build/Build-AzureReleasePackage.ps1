@@ -15,6 +15,7 @@ $buildRoot = $PSScriptRoot
 $repoRoot = Split-Path -Path $buildRoot -Parent
 $azureBuildContext = Get-AzureArtifactBuildContext -BuildScriptRoot (Join-Path $buildRoot 'azure')
 $azureProvisioningSourcePath = Join-Path $repoRoot 'src\powershell\Provisioning\Azure\AzureProvisioning.ps1'
+$templatePublisherPath = Join-Path $repoRoot 'azure\Upload-Templates.ps1'
 
 if (-not $PSBoundParameters.ContainsKey('OutputPath')) {
     $defaultName = 'Azure-' + ([datetime]::UtcNow).ToString('yyMMdd') + '.zip'
@@ -27,9 +28,13 @@ Write-Output 'Building Azure runbook artifact...'
 Write-Output 'Building Azure Function App artifact...'
 $functionAppArtifactState = Initialize-AzureFunctionAppArtifactState -BuildContext $azureBuildContext
 
+Write-Output 'Building Azure template publisher artifact...'
+& (Join-Path $buildRoot 'azure\Build-TemplatePublisher.ps1')
+
 $requiredLeafPaths = @(
     Join-Path $repoRoot 'Setup-AzureResources.ps1'
     Join-Path $repoRoot 'azure\Invoke-DashboardPipeline.ps1'
+    $templatePublisherPath
     Join-Path $repoRoot 'azure\function-app\ExportAndGenerate\run.ps1'
     $azureProvisioningSourcePath
 )
@@ -56,6 +61,10 @@ $runbookFingerprintState = Assert-AzureArtifactFingerprint -ArtifactPath $azureB
 $functionAppEntryPointPath = $functionAppArtifactState.EntryPointPath
 $functionAppFingerprintState = $functionAppArtifactState.EntryPointFingerprintState
 $stagedModuleSummary = $functionAppArtifactState.ModuleSummary
+$templatePublisherFingerprint = Read-PowerShellArtifactEmbeddedFingerprint -Path $templatePublisherPath
+if ([string]::IsNullOrWhiteSpace($templatePublisherFingerprint)) {
+    throw "Generated Azure template publisher '$templatePublisherPath' is missing fingerprint metadata."
+}
 
 Initialize-ParentDirectory -Path $OutputPath
 if (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
@@ -75,6 +84,11 @@ try {
     Copy-Item -Path $azureProvisioningSourcePath -Destination $stagedProvisioningHelperPath -Force
     Assert-BuildPath -Path $stagedProvisioningHelperPath -PathType Leaf
 
+    $stagedTemplatePublisherPath = Join-Path $stagingRoot 'azure\Upload-Templates.ps1'
+    Assert-BuildPath -Path $stagedTemplatePublisherPath -PathType Leaf
+    Write-Output 'Smoke-testing the staged Azure template publisher...'
+    & $stagedTemplatePublisherPath -StorageAccountName 'validationstorageaccount' -WhatIf
+
     Compress-Archive -Path (Join-Path $stagingRoot '*') -DestinationPath $OutputPath -Force
 }
 finally {
@@ -93,6 +107,7 @@ $packageManifest = [PSCustomObject]@{
     sharedHelpersFingerprint = $sharedHelpersFingerprint
     runbookFingerprint = $runbookFingerprintState.Fingerprint
     functionAppFingerprint = $functionAppFingerprintState.Fingerprint
+    templatePublisherFingerprint = $templatePublisherFingerprint
     stagedAzAccountsModule = [PSCustomObject]@{
         version = $stagedModuleSummary.ModuleVersion
         bundledVersions = @($stagedModuleSummary.BundledVersions)
@@ -110,11 +125,15 @@ $packageManifest = [PSCustomObject]@{
             sha256 = Get-FileContentSha256Hex -Path $azureBuildContext.RunbookOutputPath
         }
         [PSCustomObject]@{
+            path = 'azure/Upload-Templates.ps1'
+            sha256 = Get-FileContentSha256Hex -Path $templatePublisherPath
+        }
+        [PSCustomObject]@{
             path = 'azure/function-app/ExportAndGenerate/run.ps1'
             sha256 = Get-FileContentSha256Hex -Path $functionAppEntryPointPath
         }
         [PSCustomObject]@{
-            path = 'src/powershell/Provisioning/Azure/AzureProvisioning.ps1'
+            path = 'azure/AzureProvisioning.ps1'
             sha256 = Get-FileContentSha256Hex -Path $azureProvisioningSourcePath
         }
     )
@@ -123,5 +142,6 @@ Write-Utf8BomFile -Path $manifestPath -Content (($packageManifest | ConvertTo-Js
 Write-Output ("Created Azure release package: {0}" -f $outputItem.FullName)
 Write-Output ("Package size: {0:N2} MB" -f ($outputItem.Length / 1MB))
 Write-Output ("Shared helper fingerprint: {0}" -f $sharedHelpersFingerprint)
+Write-Output ("Template publisher fingerprint: {0}" -f $templatePublisherFingerprint)
 Write-Output ("Staged Az.Accounts module: v{0} ({1} files)" -f $stagedModuleSummary.ModuleVersion, $stagedModuleSummary.FileCount)
 Write-Output ("Azure package manifest: {0}" -f $manifestPath)

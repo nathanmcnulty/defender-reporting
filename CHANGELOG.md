@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Azure release package self-containment
+
+#### Fixed
+- Azure release packages now receive a generated, self-contained template publisher instead of relying on repository-only `build/` files.
+- Package validation now exercises the staged and extracted template publisher with `-WhatIf`, and package manifests record its source fingerprint and payload hash.
+
 ## 2026-07-13
 
 ### Function App large-dataset validation

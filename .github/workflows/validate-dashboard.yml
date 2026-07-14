@@ -71,4 +71,13 @@ jobs:
       - name: Smoke test Azure package
         shell: pwsh
         run: |
-          .\build\Build-AzureReleasePackage.ps1 -OutputPath (Join-Path $PWD '.local\local-reports\validate-dashboard\Azure-validation.zip')
+          $packagePath = Join-Path $PWD '.local\local-reports\validate-dashboard\Azure-validation.zip'
+          $extractPath = Join-Path $PWD '.local\local-reports\validate-dashboard\Azure-validation'
+          .\build\Build-AzureReleasePackage.ps1 -OutputPath $packagePath
+          Expand-Archive -LiteralPath $packagePath -DestinationPath $extractPath -Force
+
+          if (Test-Path -LiteralPath (Join-Path $extractPath 'build')) {
+            throw 'Azure release package unexpectedly contains a build directory.'
+          }
+
+          & (Join-Path $extractPath 'azure\Upload-Templates.ps1') -StorageAccountName 'validationstorageaccount' -WhatIf

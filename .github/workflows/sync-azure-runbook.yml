@@ -1,7 +1,7 @@
-﻿name: Sync Azure Runbook
+﻿name: Sync Azure Artifacts
 
 concurrency:
-  group: sync-azure-runbook-${{ github.ref }}
+  group: sync-azure-artifacts-${{ github.ref }}
   cancel-in-progress: true
 
 on:
@@ -13,8 +13,11 @@ on:
       - 'build/manifests/shared-helpers.json'
       - 'build/private/ArtifactManifestTools.ps1'
       - 'build/private/AzureArtifactBuildTools.ps1'
+      - 'build/private/DashboardTemplatePublishTools.ps1'
+      - 'build/Publish-DashboardTemplates.ps1'
       - 'src/powershell/Shared/**'
       - 'build/azure/Build-Runbook.ps1'
+      - 'build/azure/Build-TemplatePublisher.ps1'
       - 'build/azure/runbook-source.ps1'
       - '.github/workflows/sync-azure-runbook.yml'
   workflow_dispatch:
@@ -36,12 +39,13 @@ jobs:
           ref: ${{ github.ref_name }}
           fetch-depth: 0
 
-      - name: Build Azure runbook artifact
+      - name: Build Azure deployment artifacts
         shell: pwsh
         run: |
           .\build\azure\Build-Runbook.ps1
+          .\build\azure\Build-TemplatePublisher.ps1
 
-      - name: Commit regenerated runbook
+      - name: Commit regenerated Azure artifacts
         shell: pwsh
         env:
           SYNC_BRANCH: ${{ github.ref_name }}
@@ -49,11 +53,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add azure/Invoke-DashboardPipeline.ps1
+          git add azure/Invoke-DashboardPipeline.ps1 azure/Upload-Templates.ps1
 
-          git diff --staged --quiet -- azure/Invoke-DashboardPipeline.ps1
+          git diff --staged --quiet -- azure/Invoke-DashboardPipeline.ps1 azure/Upload-Templates.ps1
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "Azure runbook artifact is already up to date"
+            Write-Host "Azure deployment artifacts are already up to date"
             exit 0
           }
 
@@ -65,7 +69,7 @@ jobs:
             throw "SYNC_BRANCH is not set."
           }
 
-          $message = "chore: regenerate Azure runbook artifact"
+          $message = "chore: regenerate Azure deployment artifacts"
           git commit -m $message
           git push origin HEAD:$env:SYNC_BRANCH
-          Write-Host "Committed and pushed regenerated Azure runbook artifact"
+          Write-Host "Committed and pushed regenerated Azure deployment artifacts"
