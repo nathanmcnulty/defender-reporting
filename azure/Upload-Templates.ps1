@@ -2,13 +2,12 @@
 
 <#
 .SYNOPSIS
-    Compatibility wrapper for uploading dashboard templates to Azure Blob Storage.
+    Uploads dashboard templates to Azure Blob Storage.
 
 .DESCRIPTION
-    Delegates to the supported build-layer publish contract at
-    build/Publish-DashboardTemplates.ps1 so existing callers can keep using the
-    historical azure/Upload-Templates.ps1 path while wrappers and CI migrate to
-    the documented build entrypoint.
+    Azure-side template publisher used by Setup-AzureResources.ps1 and release
+    packages. This script is self-contained under the azure/ tree so extracted
+    deployment packages do not depend on build/ artifacts being present.
 
 .PARAMETER StorageAccountName
     Name of the Azure Storage account.
@@ -29,7 +28,8 @@
     .\Upload-Templates.ps1 -StorageAccountName "stdefenderreporting" -TemplatesPath "C:\repo\templates"
 
 .NOTES
-    Prefer build/Publish-DashboardTemplates.ps1 for new automation and wrapper integrations.
+    Repo-owned wrappers can call build/Publish-DashboardTemplates.ps1, which now
+    delegates to this Azure-shipped implementation.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -48,11 +48,71 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repoRoot = Split-Path -Path $PSScriptRoot -Parent
-$publishScriptPath = Join-Path -Path $repoRoot -ChildPath 'build\Publish-DashboardTemplates.ps1'
-
-if (-not (Test-Path -LiteralPath $publishScriptPath -PathType Leaf)) {
-    throw "Supported dashboard template publish script not found: $publishScriptPath"
+$publishToolsPath = Join-Path -Path $PSScriptRoot -ChildPath 'private\DashboardTemplatePublishTools.ps1'
+if (-not (Test-Path -LiteralPath $publishToolsPath -PathType Leaf)) {
+    throw "Required dashboard template publish helper not found: $publishToolsPath"
 }
 
-& $publishScriptPath @PSBoundParameters
+. $publishToolsPath
+
+$repoRoot = Split-Path -Path $PSScriptRoot -Parent
+$resolvedTemplatesPath = Resolve-DashboardTemplatesPath -RepoRoot $repoRoot -TemplatesPath $TemplatesPath
+$publishState = Get-DashboardTemplatePublishState -TemplatesPath $resolvedTemplatesPath -RepoRoot $repoRoot
+
+Write-Output ("Preparing dashboard template publish contract from: {0}" -f $publishState.TemplatesDisplayPath)
+Write-Output ("Template file count: {0}" -f $publishState.FileCount)
+Write-Output ("Template fingerprint: {0}" -f $publishState.Fingerprint)
+
+if ($PSBoundParameters.ContainsKey('MetadataPath')) {
+    $publishManifest = [PSCustomObject]@{
+        generatedOnUtc = [datetime]::UtcNow.ToString('o')
+        publishScript = 'azure/Upload-Templates.ps1'
+        storageAccountName = $StorageAccountName
+        containerName = $ContainerName
+        templatesPath = $publishState.TemplatesDisplayPath
+        templateFingerprint = $publishState.Fingerprint
+        templateFileCount = $publishState.FileCount
+        totalSizeBytes = $publishState.TotalSizeBytes
+        files = @(
+            $publishState.Files |
+                ForEach-Object {
+                    [PSCustomObject]@{
+                        path = $_.Path
+                        sourcePath = $_.SourcePath
+                        sha256 = $_.Sha256
+                        contentType = $_.ContentType
+                        sizeBytes = $_.SizeBytes
+                    }
+                }
+        )
+    }
+
+    if ($PSCmdlet.ShouldProcess($MetadataPath, 'Write dashboard template publish manifest')) {
+        Write-DashboardTemplatePublishUtf8BomFile -Path $MetadataPath -Content (($publishManifest | ConvertTo-Json -Depth 10) + [Environment]::NewLine)
+        Write-Output ("Dashboard template publish manifest: {0}" -f $MetadataPath)
+    }
+}
+
+if (-not $PSCmdlet.ShouldProcess(("$StorageAccountName/$ContainerName"), ("Upload {0} dashboard template file(s)" -f $publishState.FileCount))) {
+    return
+}
+
+Write-Output 'Authenticating to Azure Storage...'
+$storageToken = Get-DashboardTemplatePublishStorageAccessToken
+
+Write-Output ("Uploading dashboard templates to '{0}' container..." -f $ContainerName)
+foreach ($templateFile in $publishState.Files) {
+    $fileSizeKb = [math]::Round($templateFile.SizeBytes / 1KB, 1)
+    Write-Output ("  Uploading {0} ({1} KB)..." -f $templateFile.Path, $fileSizeKb)
+    Publish-DashboardTemplateBlobFileWithRetry `
+        -StorageAccountName $StorageAccountName `
+        -ContainerName $ContainerName `
+        -BlobName $templateFile.Path `
+        -FilePath $templateFile.FullPath `
+        -ContentType $templateFile.ContentType `
+        -StorageToken $storageToken
+    Write-Output '    Uploaded'
+}
+
+Write-Output ("Published dashboard templates to: https://{0}.blob.core.windows.net/{1}/" -f $StorageAccountName, $ContainerName)
+Write-Output 'The dashboard pipeline runbook and Function App will download these templates at generation time.'
