@@ -5938,6 +5938,45 @@ function Test-VulnContentStoreRoundTrip {
     }
 }
 
+function Test-NormalizedPayloadCacheVersionPreservesSourceData {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('payload-cache-version-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+
+    try {
+        $currentPath = Get-VulnCurrentPath -BasePath $tempRoot
+        $currentRow = Get-TestVulnRow -Id 'cache-version-001' -CveId 'CVE-2026-0803' -SnapshotDate '2026-03-20' -Version '8.0.1'
+        Write-NdjsonRecordsFile -Path $currentPath -Records @($currentRow)
+        $sourceSha256Before = Get-FileSha256Hex -Path $currentPath
+
+        $cacheDirectory = Get-DashboardCacheDirectory -BasePath $tempRoot -ChildPath 'payloads' -Create
+        $legacyFingerprint = ('a' * 64)
+        $legacyPayloadPath = Join-Path $cacheDirectory ("payload-{0}.json.gz" -f $legacyFingerprint)
+        $legacyManifestPath = Join-Path $cacheDirectory ("payload-{0}.json" -f $legacyFingerprint)
+        Write-GzipTextFile -Path $legacyPayloadPath -Content '{}'
+        Set-Content -LiteralPath $legacyManifestPath -Value '{}' -NoNewline -Encoding utf8
+
+        $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+        Write-GzipTextFile -Path $payloadPath -Content '{"lookups":{"devices":[],"cves":[]},"vulnsFormat":"rows-v1","vulns":[]}'
+        $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempRoot -PayloadPath $payloadPath -VulnCount 0 -DeviceCount 0 -CveCount 0
+
+        $expectedVersion = Get-DashboardPayloadCacheVersion
+        $expectedFingerprint = Get-FileSetFingerprint -Version $expectedVersion -Files @(Get-VulnerabilityPayloadFingerprintSourceFileSet -BasePath $tempRoot) -MetadataLines @('SkipObservedWindowMerge=False')
+        Assert-True ($expectedVersion -eq 'dashboard-payload-cache-v7') 'Expected the normalization semantics change to advance the payload cache version.'
+        Assert-True ($cacheEntry.Manifest.Version -eq $expectedVersion) 'Expected the payload manifest and cache fingerprint to share one version source.'
+        Assert-True ($cacheEntry.Fingerprint -eq $expectedFingerprint) 'Expected the payload cache fingerprint to incorporate the current cache version.'
+        Assert-True ((Test-Path -LiteralPath $currentPath -PathType Leaf) -and ((Get-FileSha256Hex -Path $currentPath) -eq $sourceSha256Before)) 'Expected replacing a stale payload cache to preserve source export bytes.'
+        Assert-True ((-not (Test-Path -LiteralPath $legacyPayloadPath)) -and (-not (Test-Path -LiteralPath $legacyManifestPath))) 'Expected successful cache publication to remove stale derived payload artifacts.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-ProceduralSyntheticDatasetGeneration {
     [CmdletBinding()]
     param()
@@ -6320,9 +6359,10 @@ function Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback {
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'synthetic-manifest.json'), '{"actualDeviceCount":50000,"contentTemplateCount":187500}', [System.Text.UTF8Encoding]::new($false))
         $bounded = Get-NormalizationExecutionPlan -Path $tempRoot
         Assert-True ($bounded.SafeToExecute -eq $true -and $bounded.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') 'Expected unenriched high content cardinality to select compiled bounded normalization.'
+        Assert-True ($bounded.EstimatedPrivateMemoryMb -eq 435 -and $bounded.EstimatedWorkingSetMb -eq 345.6) 'Expected high-cardinality planning estimates to use the measured compiled envelope.'
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'Machines_Current.json'), '[]', [System.Text.UTF8Encoding]::new($false))
-        $unsafe = Get-NormalizationExecutionPlan -Path $tempRoot
-        Assert-True ($unsafe.SafeToExecute -eq $false -and $unsafe.ContentNormalizationMode -eq 'partitioned-required') 'Expected enriched high content cardinality to fail before unsafe retained normalization state is allocated.'
+        $enriched = Get-NormalizationExecutionPlan -Path $tempRoot
+        Assert-True ($enriched.SafeToExecute -eq $true -and $enriched.ContentNormalizationMode -eq 'compiled-bounded-standard-payload' -and $enriched.HasMachineInput) 'Expected enriched high content cardinality to select the enrichment-capable bounded normalizer.'
 
         $repoRoot = Split-Path -Path $PSScriptRoot -Parent
         $legacy = Get-NormalizationExecutionPlan -Path (Join-Path $repoRoot 'exports')
@@ -6360,11 +6400,24 @@ function Test-CompiledBoundedContentNormalizationExpandedParity {
         $second.DiskPaths = @(); $second.RegistryPaths = @('HKLM:\Software\Unicode-' + $unicodeRegistrySuffix)
         Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($first, $second)
         Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+        $newEnrichmentInputs = {
+            $deviceId = [string]$first.DeviceId
+            $inventoryKey = Get-AdvancedHuntingInventoryMatchKey -DeviceId $deviceId -SoftwareVendor ([string]$first.SoftwareVendor) -SoftwareName ([string]$first.SoftwareName) -SoftwareVersion ([string]$first.SoftwareVersion)
+            return [PSCustomObject]@{
+                Machines = @{ $deviceId = [PSCustomObject]@{ computerDnsName = 'compiled-enriched-device'; rbacGroupName = 'Compiled Group'; osPlatform = 'Windows11'; osVersion = '10.0.99999'; machineTags = @('compiled-tag'); lastIpAddress = '10.20.30.40'; lastExternalIpAddress = '203.0.113.40'; healthStatus = 'Active'; riskScore = 'High'; exposureLevel = 'Medium'; deviceValue = 'High'; managedBy = 'Intune'; isAadJoined = $true; lastSeen = '2026-07-12'; firstSeen = '2026-01-02' } }
+                AdvancedHuntingData = @{ 'CVE-2026-7001' = @{ PublishedDate = '2026-02-03'; VulnerabilityDescription = 'Compiled enrichment parity'; EpssScore = 0.42; AffectedSoftware = @('Vendor:Product'); IsExploitAvailable = $true } }
+                DeviceUsers = @{ $deviceId = @('user@example.test') }
+                InventoryData = @{ $inventoryKey = @{ ProductCodeCpe = 'cpe:/a:vendor:product'; EndOfSupportStatus = 'Active'; EndOfSupportDate = '2027-01-01' } }
+                NvdCveData = @{ 'CVE-2026-7001' = @{ PublishedDate = '2026-02-04'; VulnerabilityDescription = 'NVD fallback'; LastModifiedDate = '2026-07-01'; BaseScore = 8.8; BaseSeverity = 'HIGH'; Vector = 'CVSS:3.1/AV:N'; CisaExploitAdd = '2026-06-01'; CisaActionDue = '2026-06-20'; CisaRequiredAction = 'Apply updates'; Weaknesses = @('CWE-79') } }
+            }
+        }
+        $baselineInputs = & $newEnrichmentInputs
         $baselinePath = Join-Path $tempRoot 'baseline.json.gz'
-        $null = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'baseline.json') -PayloadOutputPath $baselinePath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers @{} -AdvancedHuntingInventoryData @{} -NvdCveData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+        $null = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'baseline.json') -PayloadOutputPath $baselinePath -Machines $baselineInputs.Machines -AdvancedHuntingData $baselineInputs.AdvancedHuntingData -AdvancedHuntingDeviceUsers $baselineInputs.DeviceUsers -AdvancedHuntingInventoryData $baselineInputs.InventoryData -NvdCveData $baselineInputs.NvdCveData -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'synthetic-manifest.json'), '{"actualDeviceCount":1,"contentTemplateCount":10001}', [System.Text.UTF8Encoding]::new($false))
+        $compiledInputs = & $newEnrichmentInputs
         $compiledPath = Join-Path $tempRoot 'compiled.json.gz'
-        $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers @{} -AdvancedHuntingInventoryData @{} -NvdCveData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+        $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines $compiledInputs.Machines -AdvancedHuntingData $compiledInputs.AdvancedHuntingData -AdvancedHuntingDeviceUsers $compiledInputs.DeviceUsers -AdvancedHuntingInventoryData $compiledInputs.InventoryData -NvdCveData $compiledInputs.NvdCveData -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
         Assert-True ($compiled.VulnCount -eq 2 -and $compiled.LookupsConsumed) 'Expected the compiled bounded path to publish both rows directly to the standard payload.'
         Assert-True ($null -ne $compiled.CompiledMemoryTelemetry) 'Expected the compiled path to report bounded transient-memory telemetry.'
         Assert-True ($compiled.CompiledMemoryTelemetry.peakWorkingSetMb -gt 0 -and $compiled.CompiledMemoryTelemetry.peakPrivateMemoryMb -gt 0 -and $compiled.CompiledMemoryTelemetry.peakGcHeapMb -gt 0) 'Expected compiled telemetry to capture positive pre-trim peaks.'
@@ -6372,6 +6425,10 @@ function Test-CompiledBoundedContentNormalizationExpandedParity {
         Assert-True ($compiled.CompiledMemoryTelemetry.sampleIntervalMilliseconds -eq 0) 'Expected compiled telemetry to record phase-checkpoint sampling without a contending background timer.'
         & node (Join-Path $repoRoot 'tests\helpers\Assert-ExpandedPayloadParity.js') $baselinePath $compiledPath
         Assert-True ($LASTEXITCODE -eq 0) 'Expected compiled and compatibility payloads to have expanded semantic parity.'
+        $compiledPayload = Read-GzipTextFile -Path $compiledPath | ConvertFrom-Json -Depth 30
+        Assert-True ($compiledPayload.lookups.devices[0].m.ip -eq '10.20.30.40' -and $compiledPayload.lookups.devices[0].m.u[0] -eq 'user@example.test') 'Expected compiled normalization to preserve machine and device-user enrichment.'
+        Assert-True ($compiledPayload.lookups.cves[0].pd -eq '2026-02-03' -and $compiledPayload.lookups.cves[0].nlm -eq '2026-07-01' -and $compiledPayload.lookups.cves[0].nw[0] -eq 'CWE-79') 'Expected compiled normalization to preserve Advanced Hunting and NVD enrichment.'
+        Assert-True (@($compiledPayload.lookups.inventory).Count -eq 1 -and $compiledPayload.vulns[0][10] -eq 0) 'Expected compiled normalization to preserve inventory enrichment and row references.'
 
         $baselineManifest = [PSCustomObject]@{ GeneratedOnUtc = '2026-07-12T00:00:00Z'; PayloadSha256 = (Get-FileSha256Hex -Path $baselinePath); VulnCount = 2; DeviceCount = 1; CveCount = 2 }
         $compiledManifest = [PSCustomObject]@{ GeneratedOnUtc = '2026-07-12T00:00:00Z'; PayloadSha256 = (Get-FileSha256Hex -Path $compiledPath); VulnCount = 2; DeviceCount = 1; CveCount = 2 }
@@ -6714,6 +6771,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-CanonicalLayoutHelper'; SuccessMessage = 'Canonical layout helper checks passed.' }
     @{ Name = 'Test-FileSetFingerprintIgnoresTimestampChange'; SuccessMessage = 'File-set fingerprint stability checks passed.' }
     @{ Name = 'Test-NormalizedPayloadCacheRejectsManifestHashMismatch'; SuccessMessage = 'Normalized payload cache integrity checks passed.' }
+    @{ Name = 'Test-NormalizedPayloadCacheVersionPreservesSourceData'; SuccessMessage = 'Normalized payload cache version and source-preservation checks passed.' }
     @{ Name = 'Test-NormalizedPayloadManifestSourceSummary'; SuccessMessage = 'Normalized payload source metadata checks passed.' }
     @{ Name = 'Test-SaveJSLibraryFileRefreshesEmptyCache'; SuccessMessage = 'JavaScript library cache refresh checks passed.' }
     @{ Name = 'Test-VulnContentStoreExistenceNeedsRef'; SuccessMessage = 'Content-store existence checks passed.' }

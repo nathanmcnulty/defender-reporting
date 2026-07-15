@@ -126,10 +126,13 @@ namespace DefenderReporting.Store
         private static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr minimumWorkingSetSize, IntPtr maximumWorkingSetSize);
         private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false);
         private static readonly JsonWriterOptions WriterOptions = new JsonWriterOptions { SkipValidation = true };
-        private sealed class Device { public string Id, Name, OsVersion; public int Group, Platform; public int[] Tags; public bool Onboarded; }
-        private sealed class Software { public int Vendor; public string Name, Reference; }
+        private sealed class Device { public string Id, Name, OsVersion, MachineInfoJson; public int Group, Platform; public int[] Tags; public bool Onboarded; }
+        private sealed class MachineOverlay { public string Name, Group, Platform, OsVersion, MachineInfoJson; public string[] Tags; }
+        private sealed class Software { public int Vendor; public string Name, Reference, InventoryIdentity; }
         private sealed class Update { public string Name, Id, Url; }
-        private sealed class Cve { public string Id, Url; public double? Score; public int Severity, Exploit, BatchTitle; }
+        private sealed class CveEnrichment { public string PublishedDate, Description, EpssJson, ExploitAvailableJson, NvdLastModified, NvdBaseScoreJson, NvdBaseSeverity, NvdVector, NvdKevDate, NvdActionDue, NvdRequiredAction; public string[] AffectedSoftware, Weaknesses; }
+        private sealed class Cve { public string Id, Url; public double? Score; public int Severity, Exploit, BatchTitle; public CveEnrichment Enrichment; public int[] AffectedSoftware; }
+        private sealed class InventoryRecord { public string Cpe, EndOfSupportStatus, EndOfSupportDate; }
         private struct Template { public int Software, Cve, Version, Update, UpdateAvailable, DiskStart, DiskCount, RegistryStart, RegistryCount; }
         private struct HashKey { public ulong First, Second; public HashKey(ulong first, ulong second) { First = first; Second = second; } }
         private sealed class UlongIndexMap
@@ -150,8 +153,13 @@ namespace DefenderReporting.Store
 
         public static CompiledNormalizationResult Project(string dictionaryPath, string[] refPaths, string outputPath, MemoryTelemetrySession telemetry)
         {
+            if (refPaths == null) throw new ArgumentNullException("refPaths");
+            if (telemetry == null) throw new ArgumentNullException("telemetry");
             telemetry.SetStage("template-interning");
             var expectedTemplates = Directory.Exists(dictionaryPath) ? File.ReadLines(Path.Combine(dictionaryPath, "contentTemplates.ndjson"), Utf8).Count() : 1024;
+            var machineOverlays = ReadMachineOverlays(Path.Combine(dictionaryPath, "machines.ndjson"));
+            var cveEnrichment = ReadCveEnrichment(Path.Combine(dictionaryPath, "cveEnrichment.ndjson"));
+            var inventorySource = ReadInventory(Path.Combine(dictionaryPath, "inventory.ndjson"));
             var vendors = new List<string>(); var vendorMap = Map();
             var exploits = new List<string>(); var exploitMap = Map();
             var groups = new List<string>(); var groupMap = Map();
@@ -162,10 +170,14 @@ namespace DefenderReporting.Store
             var diskPaths = new List<string>(); var diskMap = Map();
             var registryPaths = new List<string>(); var registryMap = Map();
             var batchTitles = new List<string>(); var batchMap = Map();
+            var affectedSoftware = new List<string>(); var affectedSoftwareMap = Map();
             var softwareMap = HashMap(expectedTemplates); var softwareCount = 0;
             var updateMap = HashMap(expectedTemplates); var updateCount = 0;
             var cveMap = HashMap(expectedTemplates); var cveCount = 0;
             var deviceOnboarded = new List<bool>();
+            var deviceIds = new List<string>();
+            var softwareIdentities = new List<string>();
+            var inventoryValues = new List<InventoryRecord>(); var inventoryValueMap = Map();
             var templateList = new List<Template>();
             var templateDiskIndexes = new List<int>(); var templateRegistryIndexes = new List<int>();
             var stageRoot = Path.Combine(Path.GetTempPath(), "bounded-normalizer-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(stageRoot);
@@ -179,15 +191,22 @@ namespace DefenderReporting.Store
             ReadDictionaryArray(dictionaryPath, "deviceProfiles", item =>
                 {
                     var tagIndexes = new List<int>();
+                    var deviceId = Value(item, "id"); MachineOverlay overlay = null;
+                    var hasOverlay = !String.IsNullOrWhiteSpace(deviceId) && machineOverlays.TryGetValue(deviceId, out overlay);
                     JsonElement tagValues;
-                    if (item.TryGetProperty("t", out tagValues) && tagValues.ValueKind == JsonValueKind.Array)
+                    if (hasOverlay && overlay.Tags != null && overlay.Tags.Length > 0)
+                        foreach (var value in overlay.Tags) { var index = Intern(value, tags, tagMap); if (index >= 0) tagIndexes.Add(index); }
+                    else if (item.TryGetProperty("t", out tagValues) && tagValues.ValueKind == JsonValueKind.Array)
                         foreach (var tag in tagValues.EnumerateArray()) { var value = ScalarString(tag); var index = Intern(value, tags, tagMap); if (index >= 0) tagIndexes.Add(index); }
-                    var group = Value(item, "g"); if (String.IsNullOrWhiteSpace(group)) group = "(none)";
+                    var group = hasOverlay && !String.IsNullOrWhiteSpace(overlay.Group) ? overlay.Group : Value(item, "g"); if (String.IsNullOrWhiteSpace(group)) group = "(none)";
+                    var platform = hasOverlay && !String.IsNullOrWhiteSpace(overlay.Platform) ? overlay.Platform : Value(item, "o");
+                    var name = hasOverlay && !String.IsNullOrWhiteSpace(overlay.Name) ? overlay.Name : Value(item, "n");
+                    var osVersion = hasOverlay && !String.IsNullOrWhiteSpace(overlay.OsVersion) ? overlay.OsVersion : Value(item, "ov");
                     var device = new Device {
-                        Id = Value(item, "id"), Name = EmptyFallback(Value(item, "n"), "(no machine data)"), OsVersion = NullIfEmpty(Value(item, "ov")),
-                        Group = Intern(group, groups, groupMap), Platform = Intern(Value(item, "o"), platforms, platformMap), Tags = tagIndexes.ToArray(), Onboarded = Boolean(item, "ob")
+                        Id = deviceId, Name = EmptyFallback(name, "(no machine data)"), OsVersion = NullIfEmpty(osVersion), MachineInfoJson = hasOverlay ? overlay.MachineInfoJson : null,
+                        Group = Intern(group, groups, groupMap), Platform = Intern(platform, platforms, platformMap), Tags = tagIndexes.ToArray(), Onboarded = Boolean(item, "ob")
                     };
-                    deviceOnboarded.Add(device.Onboarded); WriteDeviceFragment(deviceOutput, device);
+                    deviceIds.Add(device.Id); deviceOnboarded.Add(device.Onboarded); WriteDeviceFragment(deviceOutput, device);
                 });
 
             ReadDictionaryArray(dictionaryPath, "contentTemplates", item =>
@@ -196,7 +215,11 @@ namespace DefenderReporting.Store
                     var vendorIndex = Intern(vendor, vendors, vendorMap);
                     var softwareKey = GetHashKey(vendor, name, reference);
                     int softwareIndex;
-                    if (!softwareMap.TryGetValue(softwareKey, out softwareIndex)) { softwareIndex = softwareCount++; softwareMap.Add(softwareKey, softwareIndex); WriteSoftwareFragment(softwareOutput, new Software { Vendor = vendorIndex, Name = name, Reference = reference }); }
+                    if (!softwareMap.TryGetValue(softwareKey, out softwareIndex)) {
+                        softwareIndex = softwareCount++; softwareMap.Add(softwareKey, softwareIndex);
+                        var software = new Software { Vendor = vendorIndex, Name = name, Reference = reference, InventoryIdentity = vendor + "|" + name };
+                        softwareIdentities.Add(software.InventoryIdentity); WriteSoftwareFragment(softwareOutput, software);
+                    }
 
                     var cveId = Value(item, "c"); var scoreText = Value(item, "sc"); var severity = Value(item, "sev"); var exploit = Value(item, "ex"); var url = ConvertCveUrl(Value(item, "bu")); var batch = Value(item, "bt");
                     var cveKey = GetHashKey(cveId, scoreText, severity, exploit, url, batch);
@@ -204,7 +227,10 @@ namespace DefenderReporting.Store
                     if (!cveMap.TryGetValue(cveKey, out cveIndex)) {
                         cveIndex = cveCount++; cveMap.Add(cveKey, cveIndex);
                         double parsedScore; double? score = Double.TryParse(scoreText, NumberStyles.Float, CultureInfo.InvariantCulture, out parsedScore) ? parsedScore : (double?)null;
-                        WriteCveFragment(cveOutput, new Cve { Id = cveId, Score = score, Severity = SeverityIndex(severity), Exploit = Intern(exploit, exploits, exploitMap), Url = url, BatchTitle = Intern(batch, batchTitles, batchMap) });
+                        CveEnrichment enrichment; cveEnrichment.TryGetValue(cveId, out enrichment);
+                        var affectedIndexes = new List<int>();
+                        if (enrichment != null && enrichment.AffectedSoftware != null) foreach (var affected in enrichment.AffectedSoftware) { var affectedIndex = Intern(affected, affectedSoftware, affectedSoftwareMap); if (affectedIndex >= 0) affectedIndexes.Add(affectedIndex); }
+                        WriteCveFragment(cveOutput, new Cve { Id = cveId, Score = score, Severity = SeverityIndex(severity), Exploit = Intern(exploit, exploits, exploitMap), Url = url, BatchTitle = Intern(batch, batchTitles, batchMap), Enrichment = enrichment, AffectedSoftware = affectedIndexes.Count > 0 ? affectedIndexes.ToArray() : null });
                     }
 
                     var updateName = Value(item, "ru"); var updateIndex = -1;
@@ -221,7 +247,7 @@ namespace DefenderReporting.Store
                     });
                 });
             }
-            foreach (var map in new[] { vendorMap, exploitMap, groupMap, platformMap, tagMap, versionMap, diskMap, registryMap, batchMap }) map.Clear();
+            foreach (var map in new[] { vendorMap, exploitMap, groupMap, platformMap, tagMap, versionMap, diskMap, registryMap, batchMap, affectedSoftwareMap }) map.Clear();
             softwareMap.Clear(); updateMap.Clear(); cveMap.Clear();
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers();
@@ -240,6 +266,7 @@ namespace DefenderReporting.Store
                             if (String.IsNullOrWhiteSpace(line)) continue;
                             using (var refDocument = JsonDocument.Parse(line))
                             {
+                                try {
                                 var values = refDocument.RootElement; if (values.ValueKind != JsonValueKind.Array || values.GetArrayLength() < 5) continue;
                                 var deviceIndex = values[1].GetInt32(); var templateIndex = values[2].GetInt32();
                                 if (deviceIndex < 0 || deviceIndex >= deviceOnboarded.Count || templateIndex < 0 || templateIndex >= templateList.Count || !deviceOnboarded[deviceIndex]) continue;
@@ -247,9 +274,21 @@ namespace DefenderReporting.Store
                                 if (String.CompareOrdinal(first, last) > 0) { var swap = first; first = last; last = swap; }
                                 var template = templateList[templateIndex];
                                 var firstIndex = Intern(first, dates, dateMap); var lastIndex = Intern(last, dates, dateMap);
-                                WriteVulnFragment(vulnOutput, deviceIndex, template, firstIndex, lastIndex, templateDiskIndexes, templateRegistryIndexes);
+                                var inventoryIndex = -1;
+                                if (inventorySource != null && inventorySource.Count > 0 && deviceIds != null && softwareIdentities != null && deviceIndex < deviceIds.Count && template.Software >= 0 && template.Software < softwareIdentities.Count) {
+                                    var version = template.Version >= 0 && template.Version < versions.Count ? versions[template.Version] : String.Empty;
+                                    InventoryRecord inventoryRecord;
+                                    if (inventorySource.TryGetValue(deviceIds[deviceIndex] + "|" + softwareIdentities[template.Software] + "|" + version, out inventoryRecord)) {
+                                        var inventoryValueKey = (inventoryRecord.Cpe ?? String.Empty) + "|" + (inventoryRecord.EndOfSupportStatus ?? String.Empty) + "|" + (inventoryRecord.EndOfSupportDate ?? String.Empty);
+                                        if (!inventoryValueMap.TryGetValue(inventoryValueKey, out inventoryIndex)) { inventoryIndex = inventoryValues.Count; inventoryValueMap.Add(inventoryValueKey, inventoryIndex); inventoryValues.Add(inventoryRecord); }
+                                    }
+                                }
+                                try { WriteVulnFragment(vulnOutput, deviceIndex, template, firstIndex, lastIndex, inventoryIndex, templateDiskIndexes, templateRegistryIndexes); }
+                                catch (Exception error) { throw new InvalidDataException("Bounded vulnerability projection failed at ref " + processed.ToString(CultureInfo.InvariantCulture) + ", device " + deviceIndex.ToString(CultureInfo.InvariantCulture) + ", template " + templateIndex.ToString(CultureInfo.InvariantCulture) + ".", error); }
                                 processed++;
                                 if (processed % 250000 == 0) telemetry.Sample();
+                                }
+                                catch (Exception error) { throw new InvalidDataException("Bounded ref processing failed after " + processed.ToString(CultureInfo.InvariantCulture) + " projected rows.", error); }
                             }
                         }
                     }
@@ -258,7 +297,7 @@ namespace DefenderReporting.Store
             telemetry.SetStage("pre-assembly-cleanup");
             var resultDeviceCount = deviceOnboarded.Count;
             var resultVendorCount = vendors.Count;
-            templateList = null; deviceOnboarded = null; templateDiskIndexes = null; templateRegistryIndexes = null; dateMap.Clear();
+            templateList = null; deviceOnboarded = null; deviceIds = null; softwareIdentities = null; inventorySource.Clear(); inventoryValueMap.Clear(); templateDiskIndexes = null; templateRegistryIndexes = null; dateMap.Clear();
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers(); TrimCurrentProcessWorkingSet();
             telemetry.SetStage("lookup-and-payload-assembly");
@@ -271,9 +310,9 @@ namespace DefenderReporting.Store
                 WriteStrings(writer, "groups", groups); groups = null; WriteStrings(writer, "platforms", platforms); platforms = null; WriteStrings(writer, "tags", tags); tags = null;
                 writer.WritePropertyName("updates"); CopyJsonLines(writer, updateFragment);
                 WriteStrings(writer, "versions", versions); versions = null; WriteStrings(writer, "dates", dates); dates = null; WriteStrings(writer, "diskPaths", diskPaths); diskPaths = null; WriteStrings(writer, "regPaths", registryPaths); registryPaths = null;
-                WriteFixedStrings(writer, "affSoftware", Array.Empty<string>()); WriteStrings(writer, "batchTitles", batchTitles); batchTitles = null;
+                WriteStrings(writer, "affSoftware", affectedSoftware); affectedSoftware = null; WriteStrings(writer, "batchTitles", batchTitles); batchTitles = null;
                 writer.WritePropertyName("devices"); CopyJsonLines(writer, deviceFragment);
-                writer.WritePropertyName("inventory"); writer.WriteStartArray(); writer.WriteEndArray();
+                writer.WritePropertyName("inventory"); writer.WriteStartArray(); foreach (var inventory in inventoryValues) { writer.WriteStartObject(); WriteNullableString(writer, "cpe", inventory.Cpe); WriteNullableString(writer, "eos", inventory.EndOfSupportStatus); WriteNullableString(writer, "eod", inventory.EndOfSupportDate); writer.WriteEndObject(); } writer.WriteEndArray(); inventoryValues = null;
                 writer.WritePropertyName("software"); CopyJsonLines(writer, softwareFragment);
                 writer.WritePropertyName("cves"); CopyJsonLines(writer, cveFragment);
                 writer.WriteNull("noTagsIdx"); writer.WriteEndObject();
@@ -286,8 +325,8 @@ namespace DefenderReporting.Store
             try { Directory.Delete(stageRoot, true); } catch { }
             var result = new CompiledNormalizationResult { ProcessedCount = processed, DeviceCount = resultDeviceCount, CveCount = cveCount, SoftwareCount = softwareCount, VendorCount = resultVendorCount };
             telemetry.SetStage("cleanup"); telemetry.Sample();
-            vendors = null; exploits = null; groups = null; platforms = null; tags = null; versions = null; dates = null; diskPaths = null; registryPaths = null; batchTitles = null;
-            deviceOnboarded = null; templateList = null; templateDiskIndexes = null; templateRegistryIndexes = null;
+            vendors = null; exploits = null; groups = null; platforms = null; tags = null; versions = null; dates = null; diskPaths = null; registryPaths = null; batchTitles = null; affectedSoftware = null; inventoryValues = null;
+            deviceOnboarded = null; deviceIds = null; softwareIdentities = null; templateList = null; templateDiskIndexes = null; templateRegistryIndexes = null;
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers();
             result.MemoryTelemetry = telemetry.Complete(TrimCurrentProcessWorkingSet);
@@ -322,6 +361,26 @@ namespace DefenderReporting.Store
                 }
             }
         }
+        private static Dictionary<string, MachineOverlay> ReadMachineOverlays(string path)
+        {
+            var result = new Dictionary<string, MachineOverlay>(StringComparer.Ordinal); if (!File.Exists(path)) return result;
+            foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var id = Value(item, "id"); if (String.IsNullOrWhiteSpace(id)) continue; result[id] = new MachineOverlay { Name = Value(item, "n"), Group = Value(item, "g"), Platform = Value(item, "o"), OsVersion = Value(item, "ov"), Tags = StringArray(item, "t"), MachineInfoJson = RawValue(item, "m") }; } }
+            return result;
+        }
+        private static Dictionary<string, CveEnrichment> ReadCveEnrichment(string path)
+        {
+            var result = new Dictionary<string, CveEnrichment>(StringComparer.OrdinalIgnoreCase); if (!File.Exists(path)) return result;
+            foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var id = Value(item, "id"); if (String.IsNullOrWhiteSpace(id)) continue; result[id] = new CveEnrichment { PublishedDate = NullIfEmpty(Value(item, "pd")), Description = NullIfEmpty(Value(item, "desc")), EpssJson = RawValue(item, "ep"), AffectedSoftware = StringArray(item, "as"), ExploitAvailableJson = RawValue(item, "ea"), NvdLastModified = NullIfEmpty(Value(item, "nlm")), NvdBaseScoreJson = RawValue(item, "nbs"), NvdBaseSeverity = NullIfEmpty(Value(item, "nsv")), NvdVector = NullIfEmpty(Value(item, "nvec")), NvdKevDate = NullIfEmpty(Value(item, "nkev")), NvdActionDue = NullIfEmpty(Value(item, "ndu")), NvdRequiredAction = NullIfEmpty(Value(item, "nact")), Weaknesses = StringArray(item, "nw") }; } }
+            return result;
+        }
+        private static Dictionary<string, InventoryRecord> ReadInventory(string path)
+        {
+            var result = new Dictionary<string, InventoryRecord>(StringComparer.Ordinal); if (!File.Exists(path)) return result;
+            foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var key = Value(item, "k"); if (String.IsNullOrWhiteSpace(key)) continue; result[key] = new InventoryRecord { Cpe = NullIfEmpty(Value(item, "cpe")), EndOfSupportStatus = NullIfEmpty(Value(item, "eos")), EndOfSupportDate = NullIfEmpty(Value(item, "eod")) }; } }
+            return result;
+        }
+        private static string[] StringArray(JsonElement item, string name) { JsonElement value; if (!item.TryGetProperty(name, out value) || value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined) return null; var values = new List<string>(); if (value.ValueKind == JsonValueKind.Array) { foreach (var element in value.EnumerateArray()) { var text = ScalarString(element); if (!String.IsNullOrWhiteSpace(text)) values.Add(text); } } else { var text = ScalarString(value); if (!String.IsNullOrWhiteSpace(text)) values.Add(text); } return values.Count == 0 ? null : values.ToArray(); }
+        private static string RawValue(JsonElement item, string name) { JsonElement value; if (!item.TryGetProperty(name, out value) || value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined) return null; return value.GetRawText(); }
         private static Stream OpenInput(string path) { var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan); return path.EndsWith(".gz", StringComparison.OrdinalIgnoreCase) ? (Stream)new GZipStream(file, CompressionMode.Decompress, false) : file; }
         private static string Value(JsonElement item, string name) { JsonElement value; return item.TryGetProperty(name, out value) ? ScalarString(value) : String.Empty; }
         private static string ScalarString(JsonElement value) { if (value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined) return String.Empty; return value.ValueKind == JsonValueKind.String ? value.GetString() ?? String.Empty : value.GetRawText().Trim('"'); }
@@ -337,21 +396,24 @@ namespace DefenderReporting.Store
         {
             using (var buffer = new MemoryStream()) { using (var json = new Utf8JsonWriter(buffer, WriterOptions)) action(json); output.WriteLine(Utf8.GetString(buffer.GetBuffer(), 0, checked((int)buffer.Length))); }
         }
-        private static void WriteDeviceFragment(StreamWriter output, Device value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); writer.WriteString("n", value.Name); writer.WriteNumber("g", value.Group); writer.WriteNumber("o", value.Platform); if (value.OsVersion == null) writer.WriteNull("ov"); else writer.WriteString("ov", value.OsVersion); writer.WritePropertyName("t"); WriteIntArray(writer, value.Tags); writer.WriteNull("m"); writer.WriteEndObject(); }); }
+        private static void WriteDeviceFragment(StreamWriter output, Device value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); writer.WriteString("n", value.Name); writer.WriteNumber("g", value.Group); writer.WriteNumber("o", value.Platform); if (value.OsVersion == null) writer.WriteNull("ov"); else writer.WriteString("ov", value.OsVersion); writer.WritePropertyName("t"); WriteIntArray(writer, value.Tags); writer.WritePropertyName("m"); WriteRawNullable(writer, value.MachineInfoJson); writer.WriteEndObject(); }); }
         private static void WriteSoftwareFragment(StreamWriter output, Software value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteNumber("v", value.Vendor); writer.WriteString("n", value.Name); writer.WriteString("r", value.Reference); writer.WriteEndObject(); }); }
         private static void WriteUpdateFragment(StreamWriter output, Update value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("n", value.Name); writer.WriteString("id", value.Id); writer.WriteString("url", value.Url); writer.WriteEndObject(); }); }
-        private static void WriteCveFragment(StreamWriter output, Cve value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); if (value.Score.HasValue) writer.WriteNumber("sc", value.Score.Value); else writer.WriteNull("sc"); writer.WriteNumber("sv", value.Severity); writer.WriteNumber("ex", value.Exploit); writer.WriteString("u", value.Url); writer.WriteNumber("bt", value.BatchTitle); foreach (var name in new[] { "pd", "desc", "ep", "as", "ea", "nlm", "nbs", "nsv", "nvec", "nkev", "ndu", "nact", "nw" }) writer.WriteNull(name); writer.WriteEndObject(); }); }
-        private static void WriteVulnFragment(StreamWriter output, int deviceIndex, Template template, int firstIndex, int lastIndex, List<int> diskIndexes, List<int> registryIndexes)
+        private static void WriteCveFragment(StreamWriter output, Cve value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); if (value.Score.HasValue) writer.WriteNumber("sc", value.Score.Value); else writer.WriteNull("sc"); writer.WriteNumber("sv", value.Severity); writer.WriteNumber("ex", value.Exploit); writer.WriteString("u", value.Url); writer.WriteNumber("bt", value.BatchTitle); var e = value.Enrichment; WriteNullableString(writer, "pd", e == null ? null : e.PublishedDate); WriteNullableString(writer, "desc", e == null ? null : e.Description); writer.WritePropertyName("ep"); WriteRawNullable(writer, e == null ? null : e.EpssJson); writer.WritePropertyName("as"); WriteNullableIntArray(writer, value.AffectedSoftware); writer.WritePropertyName("ea"); WriteRawNullable(writer, e == null ? null : e.ExploitAvailableJson); WriteNullableString(writer, "nlm", e == null ? null : e.NvdLastModified); writer.WritePropertyName("nbs"); WriteRawNullable(writer, e == null ? null : e.NvdBaseScoreJson); WriteNullableString(writer, "nsv", e == null ? null : e.NvdBaseSeverity); WriteNullableString(writer, "nvec", e == null ? null : e.NvdVector); WriteNullableString(writer, "nkev", e == null ? null : e.NvdKevDate); WriteNullableString(writer, "ndu", e == null ? null : e.NvdActionDue); WriteNullableString(writer, "nact", e == null ? null : e.NvdRequiredAction); writer.WritePropertyName("nw"); WriteNullableStringArray(writer, e == null ? null : e.Weaknesses); writer.WriteEndObject(); }); }
+        private static void WriteVulnFragment(StreamWriter output, int deviceIndex, Template template, int firstIndex, int lastIndex, int inventoryIndex, List<int> diskIndexes, List<int> registryIndexes)
         {
             output.Write('['); WriteInteger(output, deviceIndex); output.Write(','); WriteInteger(output, template.Cve); output.Write(','); WriteInteger(output, template.Software); output.Write(','); WriteInteger(output, template.Version);
             output.Write(','); WriteInteger(output, firstIndex); output.Write(','); WriteInteger(output, lastIndex); output.Write(','); WriteInteger(output, template.UpdateAvailable); output.Write(','); WriteInteger(output, template.Update); output.Write(',');
-            WriteNullableIntegerRange(output, diskIndexes, template.DiskStart, template.DiskCount); output.Write(','); WriteNullableIntegerRange(output, registryIndexes, template.RegistryStart, template.RegistryCount); output.Write(",-1]"); output.WriteLine();
+            WriteNullableIntegerRange(output, diskIndexes, template.DiskStart, template.DiskCount); output.Write(','); WriteNullableIntegerRange(output, registryIndexes, template.RegistryStart, template.RegistryCount); output.Write(','); WriteInteger(output, inventoryIndex); output.Write(']'); output.WriteLine();
         }
         private static void WriteInteger(StreamWriter output, int value) { output.Write(value.ToString(CultureInfo.InvariantCulture)); }
         private static void WriteNullableIntegerRange(StreamWriter output, List<int> values, int start, int count) { if (count <= 0) { output.Write("null"); return; } output.Write('['); for (var index = 0; index < count; index++) { if (index > 0) output.Write(','); WriteInteger(output, values[start + index]); } output.Write(']'); }
         private static void CopyJsonLines(Utf8JsonWriter writer, string path) { writer.WriteStartArray(); foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; writer.WriteRawValue(line, true); } writer.WriteEndArray(); }
         private static void WriteIntArray(Utf8JsonWriter writer, int[] values) { writer.WriteStartArray(); if (values != null) foreach (var value in values) writer.WriteNumberValue(value); writer.WriteEndArray(); }
         private static void WriteNullableIntArray(Utf8JsonWriter writer, int[] values) { if (values == null || values.Length == 0) { writer.WriteNullValue(); return; } WriteIntArray(writer, values); }
+        private static void WriteNullableStringArray(Utf8JsonWriter writer, string[] values) { if (values == null || values.Length == 0) { writer.WriteNullValue(); return; } writer.WriteStartArray(); foreach (var value in values) writer.WriteStringValue(value); writer.WriteEndArray(); }
+        private static void WriteNullableString(Utf8JsonWriter writer, string name, string value) { if (String.IsNullOrWhiteSpace(value)) writer.WriteNull(name); else writer.WriteString(name, value); }
+        private static void WriteRawNullable(Utf8JsonWriter writer, string json) { if (String.IsNullOrWhiteSpace(json)) writer.WriteNullValue(); else writer.WriteRawValue(json, true); }
         private static void WriteNullableIntRange(Utf8JsonWriter writer, List<int> values, int start, int count) { if (count <= 0) { writer.WriteNullValue(); return; } writer.WriteStartArray(); for (var index = 0; index < count; index++) writer.WriteNumberValue(values[start + index]); writer.WriteEndArray(); }
         private static void WriteStrings(Utf8JsonWriter writer, string name, List<string> values) { writer.WritePropertyName(name); writer.WriteStartArray(); foreach (var value in values) writer.WriteStringValue(value); writer.WriteEndArray(); }
         private static void WriteFixedStrings(Utf8JsonWriter writer, string name, string[] values) { writer.WritePropertyName(name); writer.WriteStartArray(); foreach (var value in values) writer.WriteStringValue(value); writer.WriteEndArray(); }
