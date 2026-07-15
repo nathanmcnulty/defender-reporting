@@ -1786,7 +1786,7 @@ try {
         }
         else {
             $payloadManifest = [PSCustomObject]@{
-                Version = 'dashboard-payload-cache-v6'
+                Version = Get-DashboardPayloadCacheVersion
                 Fingerprint = $null
                 GeneratedOnUtc = (Get-Date).ToUniversalTime().ToString('o')
                 PayloadSha256 = (Get-FileSha256Hex -Path $tempPayloadPath)

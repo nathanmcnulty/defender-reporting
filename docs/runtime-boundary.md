@@ -28,7 +28,7 @@ The content-store publisher has two bounded passes after scatter:
 
 Only the active partition's signature map and templates are retained. The final dictionary is assembled from staged fragments with `deviceProfileOrder = "partitioned"`, preserving the existing `content-dictionary-v1` object and ref line formats while making ordering non-contractual. The publisher keeps transactional staging, cleanup, Unicode handling, optional properties, and gzip output behavior. Because partitioned ordering cannot satisfy the old exact-order optimization, the execution plan selects the file-backed machine lookup instead of attempting direct merge.
 
-The compiled standard-payload projector follows the same principle: dictionary arrays and ref fragments are written to disk, refs are projected through a streaming pass, and completed lookup collections are released before vulnerability fragments are copied into the final gzip payload. Its telemetry checkpoints cover scatter, dictionary/template assembly, ref projection, lookup/payload assembly, cleanup, and working-set trim.
+The compiled standard-payload projector follows the same principle: dictionary arrays and compact machine, CVE, device-user, NVD, and inventory enrichment fragments are written to disk, merged refs are projected through a streaming pass, and completed lookup collections are released before vulnerability fragments are copied into the final gzip payload. Its telemetry checkpoints cover scatter, dictionary/template assembly, enrichment and ref projection, lookup/payload assembly, cleanup, and working-set trim.
 
 ## Compatibility and fallback
 
