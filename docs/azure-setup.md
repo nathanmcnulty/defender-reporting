@@ -117,7 +117,7 @@ For local validation of the hosted split-assets build, use a local HTTP server i
 |---|---|---|
 | `-ComputeType` | No | `AutomationAccount` (default) or `FunctionApp` |
 | `-ResourceGroupName` | First run only | Resource group name (auto-detected on re-runs) |
-| `-AutomationAccountName` | When `AutomationAccount` | Automation account name |
+| `-AutomationAccountName` | When `AutomationAccount`; optional for migration | Automation account name, or the existing source account to auto-discover shared resources when creating a Function App |
 | `-FunctionAppName` | When `FunctionApp` | Function App name |
 | `-StorageAccountName` | First run only | Storage account name (auto-detected on re-runs) |
 | `-Location` | No | Azure region, default `westus2` |
@@ -127,6 +127,18 @@ For local validation of the hosted split-assets build, use a local HTTP server i
 | `-IncludeContainerApp` | No | Deploy the Entra-protected Container App |
 | `-SecurityGroup` | With `-IncludeContainerApp` | Group allowed to access the Container App |
 | `-ContainerAppName` | No | Override the derived Container App name |
+| `-EasyAuthAppClientId` | No | Explicitly select an existing Easy Auth app registration when a legacy deployment has ambiguous duplicates and no usable Container App auth configuration |
+
+When migrating an existing Automation Account deployment to a Function App,
+pass `-AutomationAccountName` with the existing account and the script can
+auto-discover the shared resource group, location, and storage account. You can
+also pass the resource group and storage account names explicitly. The setup creates the
+Function App and its managed-identity role assignments while retaining the
+Automation Account, storage data, Container App, and Entra configuration. On
+reruns, the Container App's configured Easy Auth client ID is treated as the
+authoritative app registration. If legacy runs left duplicate registrations,
+the script reuses that configured registration and creates its missing service
+principal if necessary; it does not delete the duplicates.
 
 ## Required Microsoft Defender app roles
 
