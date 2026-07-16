@@ -42,7 +42,9 @@
 
 .PARAMETER AutomationAccountName
     Name of the Azure Automation account. Created if it does not exist.
-    Required when ComputeType is AutomationAccount.
+    Required when ComputeType is AutomationAccount. When ComputeType is
+    FunctionApp, this can name an existing Automation Account whose resource
+    group, location, and storage account should be reused for migration.
     Must be 6-50 characters: alphanumeric and hyphens, starting with a letter.
 
 .PARAMETER FunctionAppName
@@ -89,6 +91,13 @@
     Name for the Container App. Default: derived from ResourceGroupName.
     Must be 2-32 characters: lowercase alphanumeric and hyphens.
 
+.PARAMETER EasyAuthAppClientId
+    Optional client ID of an existing Entra app registration to use for
+    Container App Easy Auth. Normally the script reuses the client ID already
+    configured on the Container App. Use this only to disambiguate legacy
+    deployments that contain duplicate app registrations and no existing auth
+    configuration.
+
 .EXAMPLE
     .\Setup-AzureResources.ps1 -ResourceGroupName "rg-defender-reporting" `
         -AutomationAccountName "aa-defender-reporting" `
@@ -98,6 +107,13 @@
     .\Setup-AzureResources.ps1 -ResourceGroupName "rg-defender-reporting" `
         -StorageAccountName "stdefenderreporting" `
         -ComputeType FunctionApp -FunctionAppName "func-defender-reporting"
+
+.EXAMPLE
+    # Migrate from an existing Automation Account to a Function App while
+    # auto-discovering and retaining its resource group and storage account:
+    .\Setup-AzureResources.ps1 -ComputeType FunctionApp `
+        -FunctionAppName "func-defender-reporting" `
+        -AutomationAccountName "aa-defender-reporting"
 
 .EXAMPLE
     # Re-run against an existing Function App (resource group and storage
@@ -151,7 +167,7 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Resource group name (auto-detected from existing compute resource if omitted)")]
     [string]$ResourceGroupName,
 
-    [Parameter(Mandatory = $false, HelpMessage = "Automation account name (required for AutomationAccount compute type)")]
+    [Parameter(Mandatory = $false, HelpMessage = "Automation account name (required for AutomationAccount compute type; optional migration source for FunctionApp)")]
     [string]$AutomationAccountName,
 
     [Parameter(Mandatory = $false, HelpMessage = "Function App name (required for FunctionApp compute type)")]
@@ -187,7 +203,11 @@ param(
     [string]$SecurityGroup,
 
     [Parameter(Mandatory = $false, HelpMessage = "Container App name (default: derived from resource group name)")]
-    [string]$ContainerAppName
+    [string]$ContainerAppName,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Existing Entra app registration client ID for Container App Easy Auth")]
+    [ValidateScript({ [string]::IsNullOrWhiteSpace($_) -or $_ -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' })]
+    [string]$EasyAuthAppClientId
 )
 
 Set-StrictMode -Version Latest
@@ -641,6 +661,34 @@ function Get-CreateOnlyProvisioningPayload {
     return $Payload
 }
 
+function Get-OptionalObjectPropertyValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [AllowNull()]
+        $InputObject,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$PropertyPath
+    )
+
+    $current = $InputObject
+    foreach ($propertyName in $PropertyPath) {
+        if ($null -eq $current) {
+            return $null
+        }
+
+        $property = $current.PSObject.Properties[$propertyName]
+        if ($null -eq $property) {
+            return $null
+        }
+
+        $current = $property.Value
+    }
+
+    return $current
+}
+
 # =============================================================================
 # MAIN SCRIPT
 # =============================================================================
@@ -692,30 +740,43 @@ try {
         try {
         $computeName = if ($ComputeType -eq 'FunctionApp') { $FunctionAppName } else { $AutomationAccountName }
         $providerType = if ($ComputeType -eq 'FunctionApp') { 'Microsoft.Web/sites' } else { 'Microsoft.Automation/automationAccounts' }
+        $discoveredComputeType = $ComputeType
         Write-Host "`nLooking up existing $ComputeType '$computeName'..." -ForegroundColor Gray
 
         $found = $null
         $resources = Invoke-ArmApi -Path "$subPath/resources?`$filter=name eq '$computeName' and resourceType eq '$providerType'&api-version=2021-04-01" -Method GET -Description "Find existing $ComputeType"
         $found = $resources.value | Select-Object -First 1
 
+        if (-not $found -and $ComputeType -eq 'FunctionApp' -and $AutomationAccountName) {
+            Write-Host "  Target Function App does not exist yet; looking up migration source Automation Account '$AutomationAccountName'..." -ForegroundColor Gray
+            $sourceProviderType = 'Microsoft.Automation/automationAccounts'
+            $sourceResources = Invoke-ArmApi -Path "$subPath/resources?`$filter=name eq '$AutomationAccountName' and resourceType eq '$sourceProviderType'&api-version=2021-04-01" -Method GET -Description 'Find migration source Automation Account'
+            $found = $sourceResources.value | Select-Object -First 1
+            if ($found) {
+                $computeName = $AutomationAccountName
+                $discoveredComputeType = 'AutomationAccount'
+                Write-Host "  Using Automation Account '$AutomationAccountName' as the migration source" -ForegroundColor Green
+            }
+        }
+
         if ($found) {
             # Extract resource group from the resource ID: /subscriptions/.../resourceGroups/<RG>/providers/...
             $discoveredRG = ($found.id -split '/resourceGroups/|/providers/')[1]
             if (-not $ResourceGroupName) {
                 $ResourceGroupName = $discoveredRG
-                $resourceGroupNameSource = "auto-discovered from existing $ComputeType '$computeName'"
+                $resourceGroupNameSource = "auto-discovered from existing $discoveredComputeType '$computeName'"
                 Write-Host "  Auto-detected resource group: $ResourceGroupName" -ForegroundColor Green
             }
 
             # Auto-detect location from existing resource if not explicitly provided
             if (-not $PSBoundParameters.ContainsKey('Location') -and $found.location) {
                 $Location = $found.location
-                $locationSource = "auto-discovered from existing $ComputeType '$computeName'"
+                $locationSource = "auto-discovered from existing $discoveredComputeType '$computeName'"
                 Write-Host "  Auto-detected location: $Location" -ForegroundColor Green
             }
 
             if (-not $StorageAccountName) {
-                if ($ComputeType -eq 'FunctionApp') {
+                if ($discoveredComputeType -eq 'FunctionApp') {
                     $apiVer = $Script:ArmApiVersions.WebApp
                     $appSettings = Invoke-ArmApi -Path "$subPath/resourceGroups/$discoveredRG/providers/Microsoft.Web/sites/$FunctionAppName/config/appsettings/list?api-version=$apiVer" -Method POST -Description 'Read app settings'
                     $StorageAccountName = $appSettings.properties.STORAGE_ACCOUNT_NAME
@@ -747,7 +808,7 @@ try {
                 if ($StorageAccountName) {
                     Write-Host "  Auto-detected storage account: $StorageAccountName" -ForegroundColor Green
                 } else {
-                    throw "Could not auto-detect -StorageAccountName from existing $ComputeType '$computeName'. Please provide it explicitly."
+                    throw "Could not auto-detect -StorageAccountName from existing $discoveredComputeType '$computeName'. Please provide it explicitly."
                 }
             }
         } else {
@@ -2292,6 +2353,7 @@ exec caddy file-server --root /data --listen :80
         Write-Host "`nStep 19: Creating Entra ID App Registration..." -ForegroundColor Cyan
 
         $redirectUri = "https://$caFqdn/.auth/login/aad/callback"
+        $authConfigPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.App/containerApps/$ContainerAppName/authConfigs/current?api-version=$($Script:ArmApiVersions.ContainerApp)"
 
         # Microsoft Graph well-known IDs for openid, email, profile delegated permissions
         $msGraphResourceAppId = '00000003-0000-0000-c000-000000000000'
@@ -2301,36 +2363,80 @@ exec caddy file-server --root /data --listen :80
             @{ id = '14dad69e-099b-42c9-810b-d002981feec1'; type = 'Scope' }  # profile
         )
 
-        # Reuse an existing app registration when possible so reruns stay idempotent.
+        # Reuse the registration already wired to this Container App whenever
+        # possible. This is the authoritative discriminator for legacy
+        # deployments that accidentally created same-name registrations.
         $appDisplayName = 'Defender Reporting Dashboard'
         Write-Host "  Resolving app registration '$appDisplayName'..." -ForegroundColor Gray
-        $existingApps = @(
-            (Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/applications?`$filter=displayName eq '$appDisplayName'" -Description 'List matching Entra app registrations').value
-        )
-        $redirectMatchedApps = @(
-            $existingApps | Where-Object { @($_.web.redirectUris) -contains $redirectUri }
-        )
-
         $appResult = $null
-        if ($redirectMatchedApps.Count -eq 1) {
-            $appResult = $redirectMatchedApps[0]
-            Write-Host "  Reusing existing app registration: $($appResult.appId)" -ForegroundColor Green
-        }
-        elseif ($redirectMatchedApps.Count -gt 1) {
-            $candidateAppIds = ($redirectMatchedApps | ForEach-Object { $_.appId }) -join ', '
-            throw "Multiple Entra app registrations named '$appDisplayName' already include redirect URI '$redirectUri': $candidateAppIds. Clean up duplicates or update the script to disambiguate before rerunning setup."
-        }
-        elseif ($existingApps.Count -eq 1) {
-            $appResult = $existingApps[0]
-            Write-Host "  Reusing existing app registration by display name: $($appResult.appId)" -ForegroundColor Green
-        }
-        elseif ($existingApps.Count -gt 1) {
-            $candidateAppIds = ($existingApps | ForEach-Object { $_.appId }) -join ', '
-            throw "Multiple Entra app registrations named '$appDisplayName' were found: $candidateAppIds. Clean up duplicates or update the script to disambiguate before rerunning setup."
+        $preferredAppClientId = $EasyAuthAppClientId
+        $preferredAppSource = if ($preferredAppClientId) { '-EasyAuthAppClientId' } else { $null }
+
+        if (-not $preferredAppClientId) {
+            $existingAuthConfigState = Get-OptionalArmResource -Path $authConfigPath -Description 'Read existing Container App Easy Auth configuration'
+            if ($existingAuthConfigState.Exists) {
+                $preferredAppClientId = Get-OptionalObjectPropertyValue -InputObject $existingAuthConfigState.Resource -PropertyPath @('properties', 'identityProviders', 'azureActiveDirectory', 'registration', 'clientId')
+                if ($preferredAppClientId) {
+                    $preferredAppSource = "existing Easy Auth configuration on '$ContainerAppName'"
+                }
+            }
         }
 
+        if ($preferredAppClientId) {
+            $preferredApps = @(
+                (Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/applications?`$filter=appId eq '$preferredAppClientId'" -Description 'Look up preferred Easy Auth app registration').value
+            )
+            if ($preferredApps.Count -eq 1) {
+                $appResult = $preferredApps[0]
+                Write-Host "  Reusing app registration $preferredAppClientId from $preferredAppSource" -ForegroundColor Green
+            }
+            elseif ($EasyAuthAppClientId) {
+                throw "The app registration supplied with -EasyAuthAppClientId ('$EasyAuthAppClientId') was not found in the current tenant."
+            }
+            else {
+                Write-Warning "Easy Auth references app client ID '$preferredAppClientId', but that app registration no longer exists. Resolving a replacement registration."
+            }
+        }
+
+        if ($null -eq $appResult) {
+            $existingApps = @(
+                (Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/applications?`$filter=displayName eq '$appDisplayName'" -Description 'List matching Entra app registrations').value
+            )
+            $redirectMatchedApps = @(
+                $existingApps | Where-Object { @($_.web.redirectUris) -contains $redirectUri }
+            )
+            $candidateApps = if ($redirectMatchedApps.Count -gt 0) { $redirectMatchedApps } else { $existingApps }
+
+            if ($candidateApps.Count -eq 1) {
+                $appResult = $candidateApps[0]
+                Write-Host "  Reusing existing app registration: $($appResult.appId)" -ForegroundColor Green
+            }
+            elseif ($candidateApps.Count -gt 1) {
+                # Prefer the registration whose enterprise application already
+                # exists. Older setup versions could omit this service principal.
+                $servicePrincipalBackedApps = @()
+                foreach ($candidateApp in $candidateApps) {
+                    $candidateServicePrincipals = @(
+                        (Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/servicePrincipals?`$filter=appId eq '$($candidateApp.appId)'&`$select=id" -Description 'Check candidate Easy Auth service principal').value
+                    )
+                    if ($candidateServicePrincipals.Count -gt 0) {
+                        $servicePrincipalBackedApps += $candidateApp
+                    }
+                }
+
+                $preferredCandidates = if ($servicePrincipalBackedApps.Count -gt 0) { $servicePrincipalBackedApps } else { $candidateApps }
+                $appResult = $preferredCandidates |
+                    Sort-Object -Property @{ Expression = { $created = Get-OptionalObjectPropertyValue -InputObject $_ -PropertyPath @('createdDateTime'); if ($created) { [datetime]$created } else { [datetime]::MaxValue } } }, id |
+                    Select-Object -First 1
+
+                $candidateAppIds = ($candidateApps | ForEach-Object { $_.appId }) -join ', '
+                Write-Warning "Multiple matching app registrations were found ($candidateAppIds). Reusing '$($appResult.appId)' deterministically; no registrations were deleted. Pass -EasyAuthAppClientId to select a different one."
+            }
+        }
+
+        $resolvedAppDisplayName = if ($null -ne $appResult -and $appResult.displayName) { $appResult.displayName } else { $appDisplayName }
         $appBody = @{
-            displayName    = $appDisplayName
+            displayName    = $resolvedAppDisplayName
             signInAudience = 'AzureADMyOrg'
             web            = @{
                 redirectUris = @(
@@ -2384,7 +2490,9 @@ exec caddy file-server --root /data --listen :80
 
         $spObjectId = $spResult.id
 
-        # Grant admin consent for the delegated permissions (prevents user consent prompt)
+        # Grant admin consent for the delegated permissions (prevents user consent prompt).
+        # Query first so reruns reuse the grant instead of relying on a
+        # duplicate-create error from Graph.
         Write-Host "  Granting admin consent for openid, email, profile..." -ForegroundColor Gray
         $msgraphSp = Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/servicePrincipals?`$filter=appId eq '$msGraphResourceAppId'&`$select=id" -Description 'Look up Microsoft Graph service principal'
         $msgraphSpId = $msgraphSp.value[0].id
@@ -2396,9 +2504,34 @@ exec caddy file-server --root /data --listen :80
             resourceId  = $msgraphSpId
             scope       = 'openid email profile'
         }
+        $existingGrants = @(
+            (Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$spObjectId' and resourceId eq '$msgraphSpId'" -Description 'Look up delegated admin consent').value
+        )
         try {
-            Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri '/v1.0/oauth2PermissionGrants' -Body $oauth2Body -Description 'Grant delegated admin consent' | Out-Null
-            Write-Host "  Admin consent granted" -ForegroundColor Green
+            if ($existingGrants.Count -gt 0) {
+                $existingGrant = $existingGrants[0]
+                $existingScopeNames = @(
+                    @($existingGrant.scope -split ' ') |
+                        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                        Select-Object -Unique
+                )
+                $missingScopeNames = @(
+                    @('openid', 'email', 'profile') |
+                        Where-Object { $_ -notin $existingScopeNames }
+                )
+                if ($missingScopeNames.Count -gt 0) {
+                    $mergedScopes = @($existingScopeNames + $missingScopeNames) -join ' '
+                    Invoke-GraphApi -Context $containerGraphContext -Method PATCH -Uri "/v1.0/oauth2PermissionGrants/$($existingGrant.id)" -Body @{ scope = $mergedScopes } -Description 'Update delegated admin consent' | Out-Null
+                    Write-Host "  Admin consent updated" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "  Admin consent already granted" -ForegroundColor Green
+                }
+            }
+            else {
+                Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri '/v1.0/oauth2PermissionGrants' -Body $oauth2Body -Description 'Grant delegated admin consent' | Out-Null
+                Write-Host "  Admin consent granted" -ForegroundColor Green
+            }
         }
         catch {
             if ($_.Exception.Message -match 'already exists') {
@@ -2418,9 +2551,9 @@ exec caddy file-server --root /data --listen :80
                     Write-Host "  Verifying consent..." -ForegroundColor Gray
                     
                     # Check if the permission grant now exists
-                    $existingGrants = Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$spObjectId' and resourceId eq '$msgraphSpId'" -Description 'Verify delegated admin consent'
+                    $verifiedGrants = Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/oauth2PermissionGrants?`$filter=clientId eq '$spObjectId' and resourceId eq '$msgraphSpId'" -Description 'Verify delegated admin consent'
                     
-                    if ($existingGrants.value -and $existingGrants.value.Count -gt 0) {
+                    if ($verifiedGrants.value -and $verifiedGrants.value.Count -gt 0) {
                         Write-Host "  Admin consent verified successfully" -ForegroundColor Green
                         $consentVerified = $true
                     }
@@ -2448,15 +2581,16 @@ exec caddy file-server --root /data --listen :80
             resourceId  = $spObjectId
             appRoleId   = '00000000-0000-0000-0000-000000000000'
         }
-        try {
-            Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri "/v1.0/servicePrincipals/$spObjectId/appRoleAssignments" -Body $assignmentBody -Description 'Assign security group to app' | Out-Null
-            Write-Host "  Security group assigned" -ForegroundColor Green
+        $existingGroupAssignments = @(
+            (Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/groups/$securityGroupId/appRoleAssignments" -Description 'Look up security group app assignment').value |
+                Where-Object { $_.resourceId -eq $spObjectId -and $_.appRoleId -eq $assignmentBody.appRoleId }
+        )
+        if ($existingGroupAssignments.Count -gt 0) {
+            Write-Host "  Security group already assigned" -ForegroundColor Green
         }
-        catch {
-            if ($_.Exception.Message -match 'Permission being assigned already exists|EntitlementGrant entry already exists|already exists') {
-                Write-Host "  Security group already assigned" -ForegroundColor Green
-            }
-            else { throw }
+        else {
+            Invoke-GraphApi -Context $containerGraphContext -Method POST -Uri "/v1.0/groups/$securityGroupId/appRoleAssignments" -Body $assignmentBody -Description 'Assign security group to app' | Out-Null
+            Write-Host "  Security group assigned" -ForegroundColor Green
         }
 
         # -----------------------------------------------------------------
@@ -2466,8 +2600,6 @@ exec caddy file-server --root /data --listen :80
 
         # Configure the auth config (implicit flow — no client secret needed for user authentication)
         Write-Host "  Enabling Entra ID authentication (implicit flow)..." -ForegroundColor Gray
-        $authConfigPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.App/containerApps/$ContainerAppName/authConfigs/current?api-version=$($Script:ArmApiVersions.ContainerApp)"
-
         $authConfigPayload = @{
             properties = @{
                 platform = @{
