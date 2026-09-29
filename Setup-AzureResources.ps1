@@ -98,6 +98,10 @@
     deployments that contain duplicate app registrations and no existing auth
     configuration.
 
+.PARAMETER EasyAuthAppDisplayName
+    Display name for a new Container App Easy Auth registration. Use a unique
+    name for isolated deployments. Existing Container App auth takes precedence.
+
 .EXAMPLE
     .\Setup-AzureResources.ps1 -ResourceGroupName "rg-defender-reporting" `
         -AutomationAccountName "aa-defender-reporting" `
@@ -207,7 +211,10 @@ param(
 
     [Parameter(Mandatory = $false, HelpMessage = "Existing Entra app registration client ID for Container App Easy Auth")]
     [ValidateScript({ [string]::IsNullOrWhiteSpace($_) -or $_ -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' })]
-    [string]$EasyAuthAppClientId
+    [string]$EasyAuthAppClientId,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Display name for the Container App Easy Auth registration")]
+    [string]$EasyAuthAppDisplayName = 'Defender Reporting Dashboard'
 )
 
 Set-StrictMode -Version Latest
@@ -1650,6 +1657,7 @@ try {
                         --src $zipPath `
                         --name $FunctionAppName `
                         --resource-group $ResourceGroupName `
+                        --subscription $SubscriptionId `
                         --output none 2>&1)
 
                     $deployText = (($deployOutput | ForEach-Object {
@@ -2062,9 +2070,9 @@ try {
         if ($PSCmdlet.ShouldProcess($ContainerAppEnvName, "Create/update Container Apps Environment")) {
             Invoke-ArmApi -Path $caEnvPath -Method PUT -Payload $caEnvPayload -Description "Create/update Container Apps Environment" | Out-Null
 
-            # Environment creation can take 1-3 minutes
+            # Environment creation can take several minutes.
             $envDefaultDomain = $null
-            Wait-WithPolling -Description "Container Apps Environment provisioning" -IntervalSeconds 10 -TimeoutSeconds 180 -Condition {
+            $environmentReady = Wait-WithPolling -Description "Container Apps Environment provisioning" -IntervalSeconds 10 -TimeoutSeconds 600 -Condition {
                 $env = Invoke-ArmApi -Path $caEnvPath -Method GET -Description "Check environment"
                 $state = $env.properties.provisioningState
                 Write-Host "    Environment state: $state" -ForegroundColor Gray
@@ -2073,7 +2081,10 @@ try {
                     return $true
                 }
                 return $false
-            } | Out-Null
+            }
+            if (-not $environmentReady) {
+                throw "Container Apps Environment '$ContainerAppEnvName' did not finish provisioning."
+            }
 
             if ($caEnvState.Exists) {
                 Write-Host "  Container Apps Environment already exists; configuration confirmed (no Log Analytics)" -ForegroundColor Green
@@ -2259,7 +2270,7 @@ exec caddy file-server --root /data --listen :80
 
             # Poll for provisioning
             $camiPrincipalId = $null
-            Wait-WithPolling -Description "Container App provisioning" -IntervalSeconds 10 -TimeoutSeconds 180 -Condition {
+            $containerAppReady = Wait-WithPolling -Description "Container App provisioning" -IntervalSeconds 10 -TimeoutSeconds 300 -Condition {
                 $ca = Invoke-ArmApi -Path $caPath -Method GET -Description "Check Container App"
                 $state = $ca.properties.provisioningState
                 Write-Host "    Container App state: $state" -ForegroundColor Gray
@@ -2268,7 +2279,10 @@ exec caddy file-server --root /data --listen :80
                     return $true
                 }
                 return $false
-            } | Out-Null
+            }
+            if (-not $containerAppReady) {
+                throw "Container App '$ContainerAppName' did not finish provisioning."
+            }
 
             if (-not $camiPrincipalId) {
                 throw "Container App provisioning succeeded but Managed Identity principal ID is not available."
@@ -2366,7 +2380,7 @@ exec caddy file-server --root /data --listen :80
         # Reuse the registration already wired to this Container App whenever
         # possible. This is the authoritative discriminator for legacy
         # deployments that accidentally created same-name registrations.
-        $appDisplayName = 'Defender Reporting Dashboard'
+        $appDisplayName = $EasyAuthAppDisplayName
         Write-Host "  Resolving app registration '$appDisplayName'..." -ForegroundColor Gray
         $appResult = $null
         $preferredAppClientId = $EasyAuthAppClientId
@@ -2405,7 +2419,7 @@ exec caddy file-server --root /data --listen :80
             $redirectMatchedApps = @(
                 $existingApps | Where-Object { @($_.web.redirectUris) -contains $redirectUri }
             )
-            $candidateApps = if ($redirectMatchedApps.Count -gt 0) { $redirectMatchedApps } else { $existingApps }
+            $candidateApps = @(if ($redirectMatchedApps.Count -gt 0) { $redirectMatchedApps } else { $existingApps })
 
             if ($candidateApps.Count -eq 1) {
                 $appResult = $candidateApps[0]
@@ -2435,12 +2449,13 @@ exec caddy file-server --root /data --listen :80
         }
 
         $resolvedAppDisplayName = if ($null -ne $appResult -and $appResult.displayName) { $appResult.displayName } else { $appDisplayName }
+        $existingRedirectUris = if ($null -ne $appResult) { @($appResult.web.redirectUris) } else { @() }
         $appBody = @{
             displayName    = $resolvedAppDisplayName
             signInAudience = 'AzureADMyOrg'
             web            = @{
                 redirectUris = @(
-                    @($appResult.web.redirectUris) + @($redirectUri) |
+                    $existingRedirectUris + @($redirectUri) |
                         Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
                         Select-Object -Unique
                 )

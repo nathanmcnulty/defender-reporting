@@ -84,6 +84,10 @@ Either compute type works with the Container App:
 ```
 
 `-SecurityGroup` accepts either an Entra object ID or a display name.
+For an isolated deployment, pass a unique `-EasyAuthAppDisplayName` so setup
+creates its own app registration instead of selecting an older registration
+with the default display name. Reruns use the registration already configured
+on that Container App.
 
 ## Hosted and dual packaging mode in Azure
 
@@ -128,6 +132,7 @@ For local validation of the hosted split-assets build, use a local HTTP server i
 | `-SecurityGroup` | With `-IncludeContainerApp` | Group allowed to access the Container App |
 | `-ContainerAppName` | No | Override the derived Container App name |
 | `-EasyAuthAppClientId` | No | Explicitly select an existing Easy Auth app registration when a legacy deployment has ambiguous duplicates and no usable Container App auth configuration |
+| `-EasyAuthAppDisplayName` | No | Name for a new Easy Auth registration; defaults to `Defender Reporting Dashboard` for compatibility. Use a unique name for an isolated deployment. |
 
 When migrating an existing Automation Account deployment to a Function App,
 pass `-AutomationAccountName` with the existing account and the script can
