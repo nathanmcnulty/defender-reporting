@@ -55,10 +55,29 @@ function Get-ValidationFileManifest([string]$Path) {
 }
 
 function Save-PublishedRunbookContent([string]$Path) {
-    $token = Invoke-AzValidationCli @('account','get-access-token','--resource','https://management.azure.com/','--query','accessToken','--output','tsv')
-    $uri = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$AutomationResourceGroup/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/runbooks/$RunbookName/content?api-version=2023-11-01"
-    Invoke-WebRequest -Uri $uri -Headers @{ Authorization = "Bearer $token" } -OutFile $Path -UseBasicParsing
+    try {
+        $token = Invoke-AzValidationCli @('account','get-access-token','--resource','https://management.azure.com/','--query','accessToken','--output','tsv')
+        $uri = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$AutomationResourceGroup/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/runbooks/$RunbookName/content?api-version=2023-11-01"
+        Invoke-WebRequest -Uri $uri -Headers @{ Authorization = "Bearer $token" } -OutFile $Path -UseBasicParsing
+    }
+    catch { throw 'Published runbook content download failed.' }
+    finally { $token = $null }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf) -or (Get-Item -LiteralPath $Path).Length -eq 0) { throw 'Published runbook content backup was empty.' }
+}
+
+function Set-ValidationRunbookContent {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'The validation harness gates deployment with ShouldProcess and must unconditionally restore its backup in finally.')]
+    [CmdletBinding()]
+    param([string]$Path)
+
+    $content = [System.IO.File]::ReadAllBytes([System.IO.Path]::GetFullPath($Path))
+    try {
+        $token = Invoke-AzValidationCli @('account','get-access-token','--resource','https://management.azure.com/','--query','accessToken','--output','tsv')
+        $uri = "https://management.azure.com/subscriptions/$SubscriptionId/resourceGroups/$AutomationResourceGroup/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/runbooks/$RunbookName/draft/content?api-version=2023-11-01"
+        Invoke-WebRequest -Uri $uri -Method Put -Headers @{ Authorization = "Bearer $token" } -Body $content -ContentType 'text/powershell' -UseBasicParsing | Out-Null
+    }
+    catch { throw 'Runbook draft content upload failed.' }
+    finally { $token = $null }
 }
 
 function Backup-ValidationContainer([string]$Container, [string]$Path) {
@@ -117,8 +136,7 @@ try {
 
     if (-not $PSCmdlet.ShouldProcess("$AutomationAccountName/$RunbookName and $StorageAccountName", 'Deploy candidate, seed validation dataset, run benchmark, and restore original state')) { return }
 
-    $candidateArg = '@' + [System.IO.Path]::GetFullPath($CandidateRunbookPath)
-    Invoke-AzValidationCli @('automation','runbook','replace-content','--automation-account-name',$AutomationAccountName,'--resource-group',$AutomationResourceGroup,'--name',$RunbookName,'--content',$candidateArg) -AllowEmpty | Out-Null
+    Set-ValidationRunbookContent $CandidateRunbookPath
     Invoke-AzValidationCli @('automation','runbook','publish','--automation-account-name',$AutomationAccountName,'--resource-group',$AutomationResourceGroup,'--name',$RunbookName) -AllowEmpty | Out-Null
     if ($FailureInjectionPoint -eq 'AfterDeploy') { throw 'Injected Azure validation failure after candidate deployment.' }
 
@@ -264,8 +282,7 @@ finally {
     if ($backupComplete) {
         Restore-ValidationContainer 'exports' (Join-Path $backupRoot 'exports')
         Restore-ValidationContainer 'dashboards' (Join-Path $backupRoot 'dashboards')
-        $originalArg = '@' + $originalRunbookPath
-        Invoke-AzValidationCli @('automation','runbook','replace-content','--automation-account-name',$AutomationAccountName,'--resource-group',$AutomationResourceGroup,'--name',$RunbookName,'--content',$originalArg) -AllowEmpty | Out-Null
+        Set-ValidationRunbookContent $originalRunbookPath
         Invoke-AzValidationCli @('automation','runbook','publish','--automation-account-name',$AutomationAccountName,'--resource-group',$AutomationResourceGroup,'--name',$RunbookName) -AllowEmpty | Out-Null
         $verifyRoot = Join-Path $runRoot 'restoration-verification'
         $restoredExports = Backup-ValidationContainer 'exports' (Join-Path $verifyRoot 'exports')

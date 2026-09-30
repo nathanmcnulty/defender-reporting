@@ -6466,7 +6466,7 @@ function Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration {
     Assert-True ($text.Contains("if (-not `$Execute)")) 'Expected Azure validation to require the explicit Execute guard.'
     Assert-True ($text.Contains("Restore-ValidationContainer 'exports'")) 'Expected Azure validation finally cleanup to restore exports.'
     Assert-True ($text.Contains("Restore-ValidationContainer 'dashboards'")) 'Expected Azure validation finally cleanup to restore dashboards.'
-    Assert-True ($text.Contains("'automation','runbook','replace-content'")) 'Expected Azure validation to restore published runbook content.'
+    Assert-True ($text.Contains('Set-ValidationRunbookContent $originalRunbookPath')) 'Expected Azure validation to restore published runbook bytes.'
     Assert-True ($text.Contains("'--if-none-match','*'")) 'Expected Azure validation to acquire its lock atomically.'
     Assert-True ($text.Contains('ValidatePublishedSemanticParity')) 'Expected Azure validation to expose published source-to-dashboard semantic sign-off.'
     Assert-True ($text.Contains('-ForceFullValidation')) 'Expected published semantic sign-off to bypass prior attestations and perform a fresh comparison.'
@@ -6477,6 +6477,128 @@ function Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration {
     }
     catch { $caught = $_ }
     Assert-True ($null -ne $caught -and $caught.Exception.Message -like '*Re-run with -Execute*') 'Expected the Azure harness to reject mutation without -Execute before contacting Azure.'
+}
+
+function Test-AzureValidationRunbookByteRestoration {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('azure-byte-restoration-' + [guid]::NewGuid().ToString('N'))
+    $datasetPath = Join-Path $tempRoot 'dataset'
+    $candidatePath = Join-Path $tempRoot 'candidate.ps1'
+    $state = @{}
+    function az {
+        $global:LASTEXITCODE = 0
+        $command = $args[0..2] -join ' '
+        if ($command -like 'account show*') { return '{"id":"test-subscription"}' }
+        if ($command -eq 'account get-access-token --resource') { return 'mock-secret-token' }
+        if ($command -eq 'automation runbook publish') {
+            $state.Published = $state.Draft.Clone()
+            return
+        }
+        if ($command -eq 'automation runbook replace-content') { throw 'Text-based runbook upload is forbidden.' }
+        if ($command -eq 'storage blob download-batch') {
+            $container = $args[[array]::IndexOf($args, '--source') + 1]
+            $destination = $args[[array]::IndexOf($args, '--destination') + 1]
+            foreach ($name in $state.Containers[$container].Keys) {
+                $path = Join-Path $destination $name
+                [void](New-Item -Path (Split-Path $path -Parent) -ItemType Directory -Force)
+                [System.IO.File]::WriteAllBytes($path, $state.Containers[$container][$name])
+            }
+            return
+        }
+        if ($command -eq 'storage blob delete-batch') {
+            $container = $args[[array]::IndexOf($args, '--source') + 1]
+            $state.Containers[$container] = @{}
+            return
+        }
+        if ($command -eq 'storage blob upload-batch') {
+            $container = $args[[array]::IndexOf($args, '--destination') + 1]
+            $source = $args[[array]::IndexOf($args, '--source') + 1]
+            foreach ($file in Get-ChildItem -LiteralPath $source -File -Recurse) {
+                $name = [System.IO.Path]::GetRelativePath($source, $file.FullName).Replace('\', '/')
+                $state.Containers[$container][$name] = [System.IO.File]::ReadAllBytes($file.FullName)
+            }
+            return
+        }
+        if ($command -eq 'storage blob upload') {
+            $name = $args[[array]::IndexOf($args, '--name') + 1]
+            $file = $args[[array]::IndexOf($args, '--file') + 1]
+            $state.Containers.dashboards[$name] = [System.IO.File]::ReadAllBytes($file)
+            return
+        }
+        if ($command -eq 'storage blob delete') {
+            $name = $args[[array]::IndexOf($args, '--name') + 1]
+            $state.Containers.dashboards.Remove($name)
+            return
+        }
+        if ($command -in @('automation runbook show', 'storage account show')) { return '{}' }
+        throw "Unexpected Azure mock command: $command"
+    }
+    function Invoke-WebRequest {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Regression shim captures outbound bytes without contacting Azure.')]
+        [CmdletBinding()]
+        param($Uri, $Method, $Headers, $Body, $ContentType, $OutFile, [switch]$UseBasicParsing)
+        Assert-True ([bool]$UseBasicParsing) 'Expected the production HTTP request signature.'
+        Assert-True ($Headers.Authorization -eq 'Bearer mock-secret-token') 'Expected management-token authentication.'
+        if ($Method -eq 'Put') {
+            Assert-True ($Uri -eq 'https://management.azure.com/subscriptions/test-subscription/resourceGroups/test-group/providers/Microsoft.Automation/automationAccounts/test-account/runbooks/test-runbook/draft/content?api-version=2023-11-01') 'Expected the documented ARM draft endpoint.'
+            Assert-True ($Body -is [byte[]] -and $ContentType -eq 'text/powershell') 'Expected raw PowerShell bytes as the outbound request body.'
+            $state.Uploads.Add([Convert]::ToBase64String($Body))
+            $state.Draft = $Body.Clone()
+            if (($state.Failure -eq 'CandidateUpload' -and $state.Uploads.Count -eq 1) -or ($state.Failure -eq 'RestorationUpload' -and $state.Uploads.Count -eq 2)) {
+                throw 'mock-secret-token sensitive-response-body'
+            }
+            return
+        }
+        Assert-True ($Uri -like '*/test-runbook/content?api-version=2023-11-01') 'Expected published content download.'
+        [System.IO.File]::WriteAllBytes($OutFile, $state.Published)
+    }
+    try {
+        [void](New-Item -Path $datasetPath -ItemType Directory -Force)
+        foreach ($newline in @("`r`n", "`n")) {
+            foreach ($bom in @($false, $true)) {
+                foreach ($failure in @('AfterDeploy', 'CandidateUpload', 'RestorationUpload')) {
+                    $encoding = [System.Text.UTF8Encoding]::new($bom)
+                    $original = [byte[]]($encoding.GetPreamble() + $encoding.GetBytes("# original $([char]0x00e9)$newline'original'$newline"))
+                    $candidate = [byte[]]($encoding.GetPreamble() + $encoding.GetBytes("# candidate $([char]0x03bb)$newline'candidate'$newline$newline"))
+                    [System.IO.File]::WriteAllBytes($candidatePath, $candidate)
+                    $state.Clear()
+                    $state.Published = $original.Clone()
+                    $state.Draft = $original.Clone()
+                    $state.Uploads = [System.Collections.Generic.List[string]]::new()
+                    $state.Failure = $failure
+                    $state.Containers = @{ exports = @{ 'nested/export.gz' = [byte[]](0, 255, 13, 10) }; dashboards = @{ 'dashboard.html' = [byte[]](1, 2, 10); 'assets/data.gz' = [byte[]](128, 13, 10) } }
+                    $before = @{}
+                    foreach ($container in @('exports', 'dashboards')) {
+                        $before[$container] = @($state.Containers[$container].Keys | Sort-Object | ForEach-Object { "$_|$([Convert]::ToBase64String($state.Containers[$container][$_]))" }) -join ';'
+                    }
+                    $caught = $null
+                    $outputRoot = Join-Path $tempRoot ([guid]::NewGuid().ToString('N'))
+                    try {
+                        & (Join-Path $PSScriptRoot 'Invoke-AzureRunbookValidation.ps1') -SubscriptionId test-subscription -AutomationAccountName test-account -AutomationResourceGroup test-group -RunbookName test-runbook -StorageAccountName test-storage -DatasetPath $datasetPath -CandidateRunbookPath $candidatePath -OutputRoot $outputRoot -ExpectedTotalRows 1 -FailureInjectionPoint AfterDeploy -Execute -Confirm:$false
+                    }
+                    catch { $caught = $_ }
+                    Assert-True ($null -ne $caught) 'Expected the injected failure.'
+                    $expectedError = if ($failure -eq 'AfterDeploy') { 'Injected Azure validation failure after candidate deployment.' } else { 'Runbook draft content upload failed.' }
+                    Assert-True ($caught.Exception.Message -eq $expectedError) 'Expected a deliberate failure without token or response-body disclosure.'
+                    Assert-True ($state.Uploads.Count -eq 2) 'Expected candidate and finally restoration requests.'
+                    Assert-True ($state.Uploads[0] -eq [Convert]::ToBase64String($candidate)) 'Expected byte-exact candidate upload.'
+                    Assert-True ($state.Uploads[1] -eq [Convert]::ToBase64String($original)) 'Expected byte-exact backup upload.'
+                    foreach ($container in @('exports', 'dashboards')) {
+                        $after = @($state.Containers[$container].Keys | Sort-Object | ForEach-Object { "$_|$([Convert]::ToBase64String($state.Containers[$container][$_]))" }) -join ';'
+                        Assert-True ($after -eq $before[$container]) 'Expected all canonical container bytes restored and the lock removed.'
+                    }
+                    if ($failure -ne 'RestorationUpload') {
+                        Assert-True ([Convert]::ToBase64String($state.Published) -eq [Convert]::ToBase64String($original)) 'Expected published bytes restored after deployment or partial candidate upload failure.'
+                        $restoredPath = @(Get-ChildItem -LiteralPath $outputRoot -Filter 'Invoke-DashboardPipeline.published.ps1' -File -Recurse | Where-Object FullName -Like '*restoration-verification*')[0].FullName
+                        Assert-True ((Get-FileHash -LiteralPath $restoredPath).Hash -eq [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($original))) 'Expected downloaded published restoration hash evidence.'
+                    }
+                }
+            }
+        }
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force } }
 }
 
 function Test-AzureValidationExpectedProjectionCountPreflight {
@@ -7148,6 +7270,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-ProgressStallAssessmentDistinguishesSlowAndStalledWork'; SuccessMessage = 'Progress stall warning/failure checks passed.' }
     @{ Name = 'Test-FullGarbageCollectionRequestsLargeObjectHeapCompaction'; SuccessMessage = 'Large-object heap compaction checks passed.' }
     @{ Name = 'Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration'; SuccessMessage = 'Azure validation guard and restoration checks passed.' }
+    @{ Name = 'Test-AzureValidationRunbookByteRestoration'; SuccessMessage = 'Azure byte-exact candidate upload and failure restoration checks passed.' }
     @{ Name = 'Test-AzureValidationExpectedProjectionCountPreflight'; SuccessMessage = 'Azure expected projection count preflight checks passed.' }
     @{ Name = 'Test-AzureDashboardCandidateEvidenceRejectsIncompletePublication'; SuccessMessage = 'Azure candidate artifact evidence checks passed.' }
     @{ Name = 'Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback'; SuccessMessage = 'Cardinality-aware normalization plan and legacy fallback checks passed.' }
