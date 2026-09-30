@@ -2,10 +2,10 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $false)]
     [ValidateScript({
         if (-not (Test-Path -LiteralPath $_ -PathType Leaf)) {
-            throw "Dashboard HTML path '$_' does not exist."
+            throw 'Dashboard HTML file does not exist.'
         }
         return $true
     })]
@@ -22,11 +22,18 @@ param(
     [int]$TimeoutSeconds = 45,
 
     [Parameter(Mandatory = $false)]
+    [string]$DiagnosticsPath,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ControlFixture,
+
+    [Parameter(Mandatory = $false)]
     [switch]$AllowSkip
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'helpers\HostedSmokeDiagnostics.ps1')
 
 function Get-FreeTcpPort {
     [CmdletBinding()]
@@ -56,7 +63,7 @@ function Resolve-EdgeExecutablePath {
             return [System.IO.Path]::GetFullPath($RequestedPath)
         }
 
-        throw "Microsoft Edge executable was not found at '$RequestedPath'."
+        throw 'Requested Microsoft Edge executable was not found.'
     }
 
     $candidateRoots = @(
@@ -73,7 +80,7 @@ function Resolve-EdgeExecutablePath {
         }
     }
 
-    $command = Get-Command -Name 'msedge.exe' -ErrorAction SilentlyContinue
+    $command = Get-Command -Name 'msedge.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($command -and (Test-Path -LiteralPath $command.Source -PathType Leaf)) {
         return [System.IO.Path]::GetFullPath($command.Source)
     }
@@ -179,12 +186,14 @@ function Start-StaticHttpServer {
     }
 }
 
-$resolvedDashboardPath = [System.IO.Path]::GetFullPath($DashboardPath)
-$dashboardRoot = Split-Path -Path $resolvedDashboardPath -Parent
-$dashboardFileName = Split-Path -Path $resolvedDashboardPath -Leaf
+if ($ControlFixture -and -not [string]::IsNullOrWhiteSpace($DashboardPath)) {
+    throw 'Use either -ControlFixture or -DashboardPath, not both.'
+}
+if (-not $ControlFixture -and [string]::IsNullOrWhiteSpace($DashboardPath)) {
+    throw 'Provide -DashboardPath or -ControlFixture.'
+}
 $Port = if ($Port -gt 0) { $Port } else { Get-FreeTcpPort }
 $edgeExecutablePath = Resolve-EdgeExecutablePath -RequestedPath $EdgePath
-Write-Verbose "Resolved dashboard '$resolvedDashboardPath' and Edge '$edgeExecutablePath'."
 
 if ([string]::IsNullOrWhiteSpace($edgeExecutablePath)) {
     if ($AllowSkip) {
@@ -196,17 +205,50 @@ if ([string]::IsNullOrWhiteSpace($edgeExecutablePath)) {
 }
 
 $serverJob = $null
-$edgeProcess = $null
-$profilePath = Join-Path ([System.IO.Path]::GetTempPath()) ('edge-dashboard-smoke-' + [guid]::NewGuid().ToString('N'))
-$smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('hosted-dashboard-smoke-' + [guid]::NewGuid().ToString('N'))
+$runId = 'hosted-smoke-' + [datetime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + [guid]::NewGuid().ToString('N')
+$repoRoot = Split-Path $PSScriptRoot -Parent
+if ([string]::IsNullOrWhiteSpace($DiagnosticsPath)) {
+    $DiagnosticsPath = Join-Path $repoRoot '.local\hosted-smoke-diagnostics'
+}
+$diagnosticRunPath = Join-Path ([IO.Path]::GetFullPath($DiagnosticsPath)) $runId
+$profilePath = Join-Path ([System.IO.Path]::GetTempPath()) ('edge dashboard smoke ' + [guid]::NewGuid().ToString('N'))
+$smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) $runId
 $servedRoot = Join-Path $smokeRoot 'site'
-$domOutputPath = Join-Path $smokeRoot 'dashboard.dom.html'
-$edgeErrorPath = Join-Path $smokeRoot 'edge.stderr.log'
+$outcome = 'setup-failure'
+$canaryResult = $null
+$dashboardResult = $null
+$extensionSessionCount = 0
+$setupPhase = 'temporary-directories'
+$failureClass = $null
+$failureLine = $null
+$priorCleanupFailures = @()
+$inputDashboardPath = $DashboardPath
 
 try {
+    [void](New-Item -Path $diagnosticRunPath -ItemType Directory -Force)
     [void](New-Item -Path $smokeRoot -ItemType Directory -Force)
     [void](New-Item -Path $servedRoot -ItemType Directory -Force)
-    Copy-Item -Path (Join-Path $dashboardRoot '*') -Destination $servedRoot -Recurse -Force
+    if ($ControlFixture) {
+        $setupPhase = 'fixture-generation'
+        $fixtureDataPath = Join-Path $smokeRoot 'fixture-data'
+        [void](New-Item -Path $fixtureDataPath -ItemType Directory -Force)
+        Copy-Item -Path (Join-Path $PSScriptRoot 'fixtures\legacy-migration\*') -Destination $fixtureDataPath -Recurse -Force
+        $setupPhase = 'hosted-generation'
+        $inputDashboardPath = Join-Path $servedRoot 'control.Hosted.html'
+        $LASTEXITCODE = 0
+        & (Join-Path $repoRoot 'Generate-VulnerabilityDashboard.ps1') -DirectoryPath $fixtureDataPath -OutputPath $inputDashboardPath -SplitAssets -ExportMachineData:$false *> $null
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $inputDashboardPath -PathType Leaf)) {
+            throw 'Control fixture Hosted generation failed.'
+        }
+    }
+    $setupPhase = 'probe-injection'
+    $resolvedDashboardPath = [System.IO.Path]::GetFullPath($inputDashboardPath)
+    $dashboardRoot = Split-Path -Path $resolvedDashboardPath -Parent
+    $dashboardFileName = Split-Path -Path $resolvedDashboardPath -Leaf
+    if (-not $ControlFixture) {
+        Copy-Item -Path (Join-Path $dashboardRoot '*') -Destination $servedRoot -Recurse -Force
+    }
+    Set-Content -LiteralPath (Join-Path $servedRoot 'canary.html') -Value '<!doctype html><html><body><script>document.body.setAttribute("data-hosted-smoke-canary", "ready");</script></body></html>' -Encoding utf8
 
     $probeDashboardPath = Join-Path $servedRoot $dashboardFileName
     $dashboardHtml = Get-Content -LiteralPath $probeDashboardPath -Raw
@@ -230,8 +272,17 @@ try {
     ];
     var probeCompleted = false;
     var latestDashboardReadyValidation = null;
+    var failurePhase = 'wait-ready';
+    var failureReason = 'readiness-timeout';
+    var failureClass = 'timeout';
 
-    function publishProbe(state, validation, message, payloadRows, runtimeChecks) {
+    function markFailure(phase, reason, errorClass) {
+        failurePhase = phase;
+        failureReason = reason;
+        failureClass = errorClass;
+    }
+
+    function publishProbe(state, validation, message, payloadRows, runtimeChecks, errorClass) {
         var existingProbe = document.getElementById(probeId);
         if (existingProbe && existingProbe.getAttribute('data-state') === 'ready') {
             return;
@@ -241,6 +292,11 @@ try {
         probe.id = probeId;
         probe.hidden = true;
         probe.setAttribute('data-state', state);
+        probe.setAttribute('data-failure-phase', failurePhase);
+        probe.setAttribute('data-failure-reason', failureReason);
+        if (errorClass) {
+            probe.setAttribute('data-error-class', errorClass);
+        }
         if (validation) {
             probe.setAttribute('data-dashboard-ready', String(Boolean(validation.ready)));
             probe.setAttribute('data-active-report', validation.activeReportId || '');
@@ -280,6 +336,7 @@ try {
     }
 
     function getDashboardConfig() {
+        markFailure('payload', 'payload-config', 'assertion');
         var configElement = document.getElementById('dashboardConfig');
         if (!configElement || !configElement.textContent) {
             throw new Error('dashboardConfig was not available.');
@@ -288,13 +345,15 @@ try {
         return JSON.parse(configElement.textContent);
     }
 
-    function assertRuntime(condition, message) {
+    function assertRuntime(condition, reason) {
         if (!condition) {
-            throw new Error(message);
+            markFailure(failurePhase, reason, 'assertion');
+            throw new Error('Hosted smoke assertion failed.');
         }
     }
 
-    function waitForCondition(description, predicate, timeoutMilliseconds) {
+    function waitForCondition(reason, predicate, timeoutMilliseconds) {
+        markFailure(failurePhase, reason, 'operation');
         var startedAt = Date.now();
         return new Promise(function (resolve, reject) {
             function poll() {
@@ -305,7 +364,8 @@ try {
                     }
 
                     if ((Date.now() - startedAt) > timeoutMilliseconds) {
-                        reject(new Error('Timed out waiting for ' + description + '.'));
+                        failureClass = 'timeout';
+                        reject(new Error('Hosted smoke condition timed out.'));
                         return;
                     }
 
@@ -320,7 +380,8 @@ try {
     }
 
     async function waitForDashboardReady() {
-        await waitForCondition('dashboard readiness', function () {
+        markFailure('wait-ready', 'readiness-timeout', 'timeout');
+        await waitForCondition('readiness-timeout', function () {
             var validation = getValidation();
             return validation && validation.ready === true;
         }, probeTimeoutMilliseconds);
@@ -329,60 +390,64 @@ try {
     }
 
     async function validateReportSwitching() {
+        markFailure('report-switch', 'report-selector', 'operation');
         var selector = document.getElementById('reportSelector');
-        assertRuntime(selector, 'Report selector was not available for runtime switching.');
+        assertRuntime(selector, 'report-selector');
 
         reportOptions.forEach(function (entry) {
             var option = Array.prototype.find.call(selector.options || [], function (candidate) {
                 return candidate.value === entry[0];
             });
-            assertRuntime(option, 'Missing report selector option for ' + entry[1] + '.');
+            assertRuntime(option, 'report-option');
         });
 
         for (var index = 0; index < reportOptions.length; index++) {
             var reportId = reportOptions[index][0];
-            var reportLabel = reportOptions[index][1];
             var expectedSectionId = reportId + '-section';
             var section = document.getElementById(expectedSectionId);
-            assertRuntime(section, 'Missing report section for ' + reportLabel + '.');
+            assertRuntime(section, 'report-section');
 
+            markFailure('report-switch', 'report-dispatch', 'operation');
             selector.value = reportId;
             selector.dispatchEvent(new Event('change', { bubbles: true }));
 
-            await waitForCondition(reportLabel + ' report activation', function () {
+            await waitForCondition('report-activation-timeout', function () {
                 return section.classList.contains('active') && !section.hasAttribute('aria-busy');
             }, Math.min(10000, probeTimeoutMilliseconds));
 
             var activeSections = Array.prototype.slice.call(document.querySelectorAll('.report-section.active'));
-            assertRuntime(activeSections.length === 1, 'Expected exactly one active report section after selecting ' + reportLabel + '.');
-            assertRuntime(activeSections[0].id === expectedSectionId, 'Unexpected active report section after selecting ' + reportLabel + '.');
+            assertRuntime(activeSections.length === 1, 'report-active-count');
+            assertRuntime(activeSections[0].id === expectedSectionId, 'report-active-id');
 
             var validation = getValidation();
-            assertRuntime(validation && validation.activeReportId === reportId, 'Dashboard validation did not track active report ' + reportLabel + '.');
+            assertRuntime(validation && validation.activeReportId === reportId, 'report-validation');
         }
     }
 
     async function validateFilterPopover() {
+        markFailure('filter-popover', 'filter-pill', 'operation');
         var severityPill = document.getElementById('filterPillSeverity');
         var popover = document.getElementById('filterPopover');
-        assertRuntime(severityPill, 'Severity filter pill was not available.');
-        assertRuntime(popover, 'Filter popover shell was not available.');
+        assertRuntime(severityPill, 'filter-pill');
+        assertRuntime(popover, 'filter-shell');
 
+        markFailure('filter-popover', 'filter-open', 'operation');
         severityPill.click();
-        await waitForCondition('severity filter popover to open', function () {
+        await waitForCondition('filter-open-timeout', function () {
             return popover.hidden === false
                 && popover.getAttribute('aria-hidden') === 'false'
                 && popover.getAttribute('data-filter-key') === 'filterSeverity';
         }, Math.min(5000, probeTimeoutMilliseconds));
 
-        assertRuntime(document.getElementById('filterPopoverBody'), 'Filter popover body was not available.');
-        assertRuntime(document.getElementById('filterPopoverApplyButton'), 'Filter popover apply button was not available.');
+        assertRuntime(document.getElementById('filterPopoverBody'), 'filter-body');
+        assertRuntime(document.getElementById('filterPopoverApplyButton'), 'filter-apply');
 
         var closeButton = document.getElementById('filterPopoverCloseButton');
-        assertRuntime(closeButton, 'Filter popover close button was not available.');
+        assertRuntime(closeButton, 'filter-close');
+        markFailure('filter-popover', 'filter-close', 'operation');
         closeButton.click();
 
-        await waitForCondition('severity filter popover to close', function () {
+        await waitForCondition('filter-close-timeout', function () {
             return popover.hidden === true && popover.getAttribute('aria-hidden') === 'true';
         }, Math.min(5000, probeTimeoutMilliseconds));
     }
@@ -396,32 +461,42 @@ try {
     async function runHostedAssetProbe() {
         var validation = await waitForDashboardReady();
         var config = getDashboardConfig();
+        markFailure('payload', 'payload-mode', 'assertion');
         if (!validation || validation.deliveryMode !== 'split-assets') {
             throw new Error('Dashboard validation snapshot did not report split-assets mode.');
         }
         if (!config.payloadUrl) {
+            markFailure('payload', 'payload-url', 'assertion');
             throw new Error('Split-assets dashboard config did not include a payloadUrl.');
         }
         if (!window.pako || typeof window.pako.inflate !== 'function') {
+            markFailure('inflate', 'inflate-runtime', 'assertion');
             throw new Error('pako did not load before the hosted asset probe.');
         }
 
+        markFailure('payload', 'payload-fetch', 'operation');
         var response = await fetch(config.payloadUrl, { cache: 'no-cache' });
         if (!response.ok) {
-            throw new Error('Hosted payload fetch failed: ' + response.status + ' ' + response.statusText);
+            markFailure('payload', 'payload-response', 'assertion');
+            throw new Error('Hosted payload fetch failed.');
         }
 
+        markFailure('payload', 'payload-read', 'operation');
         var compressedBytes = new Uint8Array(await response.arrayBuffer());
+        markFailure('inflate', 'inflate-operation', 'operation');
         var payloadText = window.pako.inflate(compressedBytes, { to: 'string' });
+        markFailure('inflate', 'inflate-parse', 'operation');
         var payload = JSON.parse(payloadText);
+        markFailure('count', 'payload-count', 'assertion');
         var payloadRows = getHostedPayloadRowCount(payload);
-        if (payloadRows < 0) {
+        if (payloadRows <= 0) {
             throw new Error('Hosted payload shape was not recognized.');
         }
 
         var runtimeChecks = await validateRuntimeInteractions();
 
         probeCompleted = true;
+        markFailure('complete', 'none', 'none');
         publishProbe('ready', getValidation() || validation, 'hosted-payload-ready', payloadRows, runtimeChecks);
     }
 
@@ -431,9 +506,10 @@ try {
     });
 
     function startProbe() {
-        runHostedAssetProbe().catch(function (error) {
+        runHostedAssetProbe().catch(function () {
+            if (probeCompleted) { return; }
             probeCompleted = true;
-            publishProbe('error', getValidation(), error && error.message ? error.message : String(error));
+            publishProbe(failureClass === 'timeout' ? 'timeout' : 'error', getValidation(), failureReason, undefined, undefined, failureClass);
         });
     }
 
@@ -445,7 +521,9 @@ try {
 
     window.setTimeout(function () {
         if (!probeCompleted) {
-            publishProbe('timeout', getValidation() || latestDashboardReadyValidation, 'Timed out waiting for dashboard readiness.');
+            probeCompleted = true;
+            failureClass = 'timeout';
+            publishProbe('timeout', getValidation() || latestDashboardReadyValidation, failureReason, undefined, undefined, failureClass);
         }
     }, probeTimeoutMilliseconds);
 })();
@@ -454,9 +532,10 @@ try {
     $dashboardHtml = $dashboardHtml.Insert($bodyCloseIndex, "`r`n$probeScript`r`n")
     Set-Content -LiteralPath $probeDashboardPath -Value $dashboardHtml -Encoding utf8 -NoNewline
 
+    $setupPhase = 'loopback-server'
     $serverJob = Start-StaticHttpServer -RootPath $servedRoot -IndexFileName $dashboardFileName -ListenPort $Port
     $dashboardUrl = 'http://127.0.0.1:{0}/{1}' -f $Port, [System.Uri]::EscapeDataString($dashboardFileName)
-    Write-Verbose "Started local hosted dashboard server at $dashboardUrl."
+    Write-Verbose 'Started loopback hosted dashboard server.'
 
     $serverReady = $false
     for ($attempt = 0; $attempt -lt 40 -and -not $serverReady; $attempt++) {
@@ -469,7 +548,7 @@ try {
         }
     }
     if (-not $serverReady) {
-        throw "Timed out waiting for local hosted dashboard server at $dashboardUrl."
+        throw 'Timed out waiting for loopback hosted dashboard server.'
     }
     Write-Verbose 'Local hosted dashboard server is ready.'
 
@@ -486,84 +565,105 @@ try {
         '--dump-dom',
         $dashboardUrl
     )
-
-    $edgeProcess = Start-Process `
-        -FilePath $edgeExecutablePath `
-        -ArgumentList $edgeArguments `
-        -RedirectStandardOutput $domOutputPath `
-        -RedirectStandardError $edgeErrorPath `
-        -PassThru `
-        -WindowStyle Hidden
-    Write-Verbose "Started Microsoft Edge process $($edgeProcess.Id)."
-
     $waitMilliseconds = ($TimeoutSeconds * 1000) + 15000
-    if (-not $edgeProcess.WaitForExit($waitMilliseconds)) {
-        $edgeErrors = if (Test-Path -LiteralPath $edgeErrorPath -PathType Leaf) { Get-Content -LiteralPath $edgeErrorPath -Raw } else { '' }
-        try { Stop-Process -Id $edgeProcess.Id -Force -ErrorAction SilentlyContinue } catch { Write-Verbose "Failed to stop timed-out Edge process $($edgeProcess.Id): $_" }
-        throw "Timed out waiting for Microsoft Edge to complete the hosted dashboard runtime smoke after $([math]::Round($waitMilliseconds / 1000, 1)) seconds. $edgeErrors"
+    $setupPhase = 'edge-session-check'
+    if ($IsWindows) {
+        $existingEdge = @(Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'")
+        $extensionSessionCount = @($existingEdge | Where-Object { $_.CommandLine -match '(?i)(?:vscode|copilot|playwright|--remote-debugging)' }).Count
+        if ($extensionSessionCount -gt 0) {
+            $outcome = 'existing-extension-session'
+            throw 'Existing automation/extension Edge session detected; no additional Edge session was launched or terminated.'
+        }
     }
-    Write-Verbose "Microsoft Edge exited with code $($edgeProcess.ExitCode)."
-
-    if ($edgeProcess.ExitCode -ne 0) {
-        $edgeErrors = if (Test-Path -LiteralPath $edgeErrorPath -PathType Leaf) { Get-Content -LiteralPath $edgeErrorPath -Raw } else { '' }
-        throw "Microsoft Edge exited with code $($edgeProcess.ExitCode). $edgeErrors"
+    $canaryArguments = @($edgeArguments[0..($edgeArguments.Count - 2)]) + @("http://127.0.0.1:$Port/canary.html")
+    $setupPhase = 'canary-capture'
+    $canaryResult = Invoke-HostedSmokeAttempt -Executable $edgeExecutablePath -Arguments $canaryArguments -WaitMilliseconds $waitMilliseconds -Kind canary -RunPath $diagnosticRunPath
+    $canaryCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath
+    if (-not $canaryCleanup.Confirmed -or $canaryCleanup.Failures.Count -gt 0) {
+        $priorCleanupFailures = @($canaryCleanup.Failures)
+        $outcome = 'cleanup-failure'
+        throw 'Canary process cleanup failed.'
     }
-
-    if (-not (Test-Path -LiteralPath $domOutputPath -PathType Leaf)) {
-        throw 'Microsoft Edge did not produce a DOM snapshot.'
-    }
-
-    $dom = Get-Content -LiteralPath $domOutputPath -Raw
-    if ([string]::IsNullOrWhiteSpace($dom)) {
-        throw 'Microsoft Edge produced an empty DOM snapshot.'
-    }
-    if ($dom -notmatch 'id="statsSummary"') {
-        throw 'Hosted dashboard DOM snapshot did not contain the summary cards.'
-    }
-    if ($dom -notmatch 'id="reportSelector"') {
-        throw 'Hosted dashboard DOM snapshot did not contain the report selector.'
-    }
-    if ($dom -notmatch 'id="hostedDashboardSmokeProbe"') {
-        throw 'Hosted dashboard DOM snapshot did not contain the runtime readiness smoke probe.'
-    }
-    if ($dom -notmatch 'data-state="ready"') {
-        $probeMatch = [regex]::Match($dom, '<div[^>]+id="hostedDashboardSmokeProbe"[^>]*>.*?</div>', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-        $probeDetails = if ($probeMatch.Success) { $probeMatch.Value } else { 'probe details unavailable' }
-        throw "Hosted dashboard runtime readiness probe did not report ready. $probeDetails"
-    }
-    if ($dom -notmatch 'data-delivery-mode="split-assets"') {
-        throw 'Hosted dashboard validation snapshot did not report split-assets delivery mode.'
-    }
-    if ($dom -notmatch 'data-runtime-checks="[^"]*report-switching[^"]*filter-popover[^"]*"') {
-        throw 'Hosted dashboard smoke probe did not confirm report switching and filter popover runtime checks.'
-    }
-    $payloadRowsMatch = [regex]::Match($dom, 'data-payload-rows="(?<Rows>-?\d+)"')
-    if (-not $payloadRowsMatch.Success -or [int]$payloadRowsMatch.Groups['Rows'].Value -le 0) {
-        throw 'Hosted dashboard smoke probe did not confirm a readable hosted payload.'
+    $setupPhase = 'dashboard-capture'
+    $dashboardResult = Invoke-HostedSmokeAttempt -Executable $edgeExecutablePath -Arguments $edgeArguments -WaitMilliseconds $waitMilliseconds -Kind dashboard -RunPath $diagnosticRunPath
+    $outcome = Get-HostedSmokeOutcome -Canary $canaryResult -Dashboard $dashboardResult
+    if ($outcome -ne 'passed') {
+        throw "Hosted smoke failed: $outcome; canary=$($canaryResult.state); dashboard=$($dashboardResult.state); diagnostics run=$runId."
     }
     Write-Verbose 'Hosted dashboard DOM smoke assertions passed.'
-
-    [PSCustomObject]@{
-        DashboardUrl = $dashboardUrl
-        DomLength = $dom.Length
-        EdgePath = $edgeExecutablePath
-        SmokeMode = 'edge-headless-dump-dom'
-    } | ConvertTo-Json -Depth 5
+}
+catch {
+    $failureClass = switch ($_.Exception.GetType().Name) {
+        'ParameterBindingValidationException' { 'parameter-validation' }
+        'ParameterBindingException' { 'parameter-binding' }
+        'RuntimeException' { 'runtime' }
+        'MethodInvocationException' { 'method-invocation' }
+        default { 'other' }
+    }
+    $failureLine = $_.InvocationInfo.ScriptLineNumber
+    throw "Hosted smoke outcome=$outcome; diagnostics run=$runId. See sanitized artifacts under the diagnostics root."
 }
 finally {
-    if ($edgeProcess -and -not $edgeProcess.HasExited) {
-        try { Stop-Process -Id $edgeProcess.Id -Force -ErrorAction SilentlyContinue } catch { Write-Verbose "Failed to stop Edge process $($edgeProcess.Id): $_" }
+    $originalOutcome = $outcome
+    $cleanupFailures = [Collections.Generic.List[string]]::new()
+    foreach ($code in $priorCleanupFailures) { $cleanupFailures.Add($code) }
+    $processCleanupConfirmed = $false
+    try {
+        $processCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath
+        $processCleanupConfirmed = $processCleanup.Confirmed
+        foreach ($code in $processCleanup.Failures) { $cleanupFailures.Add($code) }
     }
+    catch { $cleanupFailures.Add('process-cleanup-failure') }
     if ($serverJob) {
         Write-Verbose 'Removing local hosted dashboard server job.'
-        try { Stop-Job -Job $serverJob -ErrorAction SilentlyContinue } catch { Write-Verbose "Failed to stop hosted dashboard server job: $_" }
-        try { Wait-Job -Job $serverJob -Timeout 5 -ErrorAction SilentlyContinue | Out-Null } catch { Write-Verbose "Failed while waiting for hosted dashboard server job to stop: $_" }
-        try { Remove-Job -Job $serverJob -Force -ErrorAction SilentlyContinue } catch { Write-Verbose "Failed to remove hosted dashboard server job: $_" }
+        try { Stop-Job -Job $serverJob -ErrorAction Stop } catch { $cleanupFailures.Add('server-stop-failure') }
+        try { Wait-Job -Job $serverJob -Timeout 5 -ErrorAction Stop | Out-Null } catch { $cleanupFailures.Add('server-wait-failure') }
+        try { Remove-Job -Job $serverJob -Force -ErrorAction Stop } catch { $cleanupFailures.Add('server-removal-failure') }
     }
-    if (Test-Path -LiteralPath $profilePath) {
-        Remove-Item -LiteralPath $profilePath -Recurse -Force -ErrorAction SilentlyContinue
+    $profileRemoved = $false
+    try {
+        if (Test-Path -LiteralPath $profilePath -ErrorAction Stop) { Remove-Item -LiteralPath $profilePath -Recurse -Force -ErrorAction Stop }
+        $profileRemoved = -not (Test-Path -LiteralPath $profilePath -ErrorAction Stop)
+        if (-not $profileRemoved) { $cleanupFailures.Add('profile-remains') }
     }
-    if (Test-Path -LiteralPath $smokeRoot) {
-        Remove-Item -LiteralPath $smokeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    catch { $cleanupFailures.Add('profile-removal-failure') }
+    $temporarySiteRemoved = $false
+    try {
+        if (Test-Path -LiteralPath $smokeRoot -ErrorAction Stop) { Remove-Item -LiteralPath $smokeRoot -Recurse -Force -ErrorAction Stop }
+        $temporarySiteRemoved = -not (Test-Path -LiteralPath $smokeRoot -ErrorAction Stop)
+        if (-not $temporarySiteRemoved) { $cleanupFailures.Add('site-remains') }
     }
+    catch { $cleanupFailures.Add('site-removal-failure') }
+    if (-not $processCleanupConfirmed -or $cleanupFailures.Count -gt 0) { $outcome = 'cleanup-failure' }
+    try {
+        [ordered]@{
+            outcome = $outcome
+            originalOutcome = $originalOutcome
+            phase = $setupPhase
+            failureClass = $failureClass
+            failureLine = $failureLine
+            controlFixture = [bool]$ControlFixture
+            extensionSessionCount = $extensionSessionCount
+            processCleanupConfirmed = $processCleanupConfirmed
+            profileRemoved = $profileRemoved
+            temporarySiteRemoved = $temporarySiteRemoved
+            cleanupFailures = $cleanupFailures.ToArray()
+        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $diagnosticRunPath 'run.json') -Encoding utf8 -ErrorAction Stop
+    }
+    catch {
+        $cleanupFailures.Add('diagnostic-write-failure')
+        Write-Warning 'Hosted smoke diagnostic-write-failure.'
+    }
+    foreach ($code in $cleanupFailures) { Write-Verbose $code }
 }
+
+if ($outcome -eq 'cleanup-failure' -or $cleanupFailures.Count -gt 0) {
+    throw "Hosted smoke cleanup/diagnostic failure; diagnostics run=$runId. Temporary private files may remain; do not share them."
+}
+
+[PSCustomObject]@{
+    Outcome = $outcome
+    DiagnosticsRun = $runId
+    DomBytes = $dashboardResult.stdoutBytes
+    SmokeMode = 'edge-headless-dump-dom'
+} | ConvertTo-Json -Depth 5

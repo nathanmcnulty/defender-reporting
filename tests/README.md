@@ -49,6 +49,23 @@ The shared-helper regression lane now logs `START <Test-Name>` and a per-test el
 
 Helper rule: if a new test or benchmark script needs shared utilities, put them in `tests/helpers/` instead of copying helper functions into multiple entrypoints.
 
+## Hosted smoke diagnostics
+
+Run the isolated two-row Hosted dashboard control, generated from synthetic data without root exports, authentication, or cloud writes:
+
+```powershell
+pwsh -NoProfile -File .\tests\Invoke-HostedDashboardRuntimeSmoke.ps1 -ControlFixture
+pwsh -NoProfile -File .\tests\Invoke-HostedSmokeDiagnosticsRegression.ps1
+```
+
+The control copies the committed two-row synthetic legacy fixture into temporary storage and generates Hosted output through the normal generator with machine export disabled. The browser smoke first runs a JavaScript canary, then the real dashboard readiness/report-switching/filter-popover probe, sequentially with the same unique temporary Edge profile. An existing extension/automation Edge session blocks new launches; personal browsers are never terminated. Arguments use .NET `ProcessStartInfo.ArgumentList`, including profile paths containing spaces. An exit code of zero with empty or whitespace DOM is a failure, not a pass or skip. Probe state, phase, reason, and class (`timeout`, `assertion`, `operation`, or `none`) are allowlisted enums, never literal DOM, exception types, or error messages. Markers are assigned before readiness, payload, inflate, count, report-switch, and filter-popover operations; setup failures retain fixed phase/class labels and a source line number.
+
+Every started run retains sanitized diagnostics, on failure and success, in ignored `.local/hosted-smoke-diagnostics/hosted-smoke-<UTC timestamp>-<random ID>/`. `-DiagnosticsPath <directory>` selects a caller-owned root using the same deterministic prefix; keep that root private and out of version control. Errors print only the run ID and fixed outcome. `run.json` records outcome and cleanup; `canary.json` and `dashboard.json` retain exit codes, byte counts, capture limits, conventional scrubbed flags, and fixed states. Sibling `*.stderr.sanitized.log` files contain at most 128 category/redacted-example/SHA-256 records. Recognized Chromium sources map to fixed categories; unknown lines are hashed, never copied. No raw stderr examples, URLs, user paths, project metadata, DOM, stdout, or profile content is retained in these artifacts.
+
+Streams drain concurrently in memory: stdout retains at most 64 MiB for assertions; stderr retains at most 64 KiB for sanitization while byte counting continues. Truncated DOM or incomplete drains fail. Process enumeration/termination, server stop/wait/removal, profile removal, site removal, and final diagnostic write are independently guarded. `run.json` retains `originalOutcome`, `processCleanupConfirmed`, and fixed `cleanupFailures`; unknown process state is not a clean result. Diagnostic write failure emits only `diagnostic-write-failure`; when the destination is unavailable, the final record cannot be retained. Cleanup never replaces a pending original exception, and success is emitted only after cleanup. The PowerShell regression exercises the actual helper and extracted entire `finally`, including a real missing-directory provider write. The extracted-probe JavaScript regression uses a virtual clock to distinguish readiness timeout from payload assertion and operation failures. SHA-256 records are fingerprints, not reversible examples, but low-entropy text can still be guessed; treat diagnostics as private. Raw captured text is transient managed memory, not guaranteed cryptographically erased.
+
+`headless-control-failure` means the canary failed too; `dashboard-probe-failure` means the canary passed but the dashboard did not; `command-forwarding-suspected` requires recognized forwarding stderr. A missing forwarding hint does not rule forwarding out. These controls diagnose an empty-DOM environment; they do not turn a blocked browser launch into a dashboard pass. The browser-free injected-process/privacy regression is part of deterministic preflight; actual Edge remains a separate optional Windows gate.
+
 ## CI-aligned live dry run
 
 Run the exact live export and dashboard-generation path locally against your current Az context with:
