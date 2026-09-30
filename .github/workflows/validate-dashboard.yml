@@ -63,6 +63,14 @@ jobs:
           Install-Module -Name PSScriptAnalyzer -Force -AllowClobber -Scope CurrentUser
           Install-Module -Name Az.Accounts -Force -AllowClobber -Scope CurrentUser
 
+      - name: Install shell regression dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends jq
+          bash --version
+          jq --version
+
       - name: Run deterministic preflight
         shell: pwsh
         run: |

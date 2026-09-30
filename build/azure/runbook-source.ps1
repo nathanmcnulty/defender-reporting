@@ -170,6 +170,7 @@ $Script:DashboardHostedAssetRelativePaths = @(
 $Script:PipelineControlBlobName = '_diagnostics/ExportAndGenerate.control.json'
 $Script:PipelineStatusBlobName = '_diagnostics/ExportAndGenerate.status.json'
 $Script:PipelineRunId = [guid]::NewGuid().ToString('N')
+$Script:DashboardPublicationOutcome = 'NotAttempted'
 $Script:PipelineStartedOnUtc = [datetime]::UtcNow
 $Script:PipelineArchitectureVersion = 'monolithic-v1'
 $Script:PipelineArchitectureTrack = 'stage0-observability'
@@ -812,16 +813,20 @@ function Set-BlobContent {
         [string]$ContentType = 'application/octet-stream',
 
         [ValidateSet('Hot', 'Cool', 'Cold', 'Archive')]
-        [string]$AccessTier
+        [string]$AccessTier,
+
+        [hashtable]$Conditions = @{}
     )
 
     $baseUrl = "https://$AccountName.blob.core.windows.net"
     $uri = "$baseUrl/$Container/$BlobName"
     $headers = Get-BlobHeader -StorageToken $StorageToken
     $headers['x-ms-blob-type'] = 'BlockBlob'
+    $headers['x-ms-meta-sha256'] = Get-FileSha256Hex -Path $SourcePath
     if ($AccessTier) {
         $headers['x-ms-access-tier'] = $AccessTier
     }
+    foreach ($name in $Conditions.Keys) { $headers[$name] = $Conditions[$name] }
 
     Invoke-WebRequestWithRetry -Uri $uri -Method Put -Headers $headers -InFile $SourcePath -ContentType $ContentType | Out-Null
 }
@@ -947,6 +952,94 @@ function Get-PipelineExecutionControlSettings {
 # =============================================================================
 # HELPER FUNCTIONS - EXPORT TARGETS
 # =============================================================================
+
+function Invoke-DashboardPublicationLease {
+    [CmdletBinding()]
+    param([string]$AccountName, [string]$StorageToken, [string]$BlobName, [string]$LeaseId, [ValidateSet('acquire', 'renew', 'release')][string]$Action)
+    $headers = Get-BlobHeader -StorageToken $StorageToken
+    $headers['x-ms-lease-action'] = $Action
+    if ($Action -eq 'acquire') {
+        $headers['x-ms-lease-duration'] = '60'
+        $headers['x-ms-proposed-lease-id'] = $LeaseId
+    }
+    else { $headers['x-ms-lease-id'] = $LeaseId }
+    Invoke-WebRequest -Uri "https://$AccountName.blob.core.windows.net/$($Script:BlobContainers.Dashboards)/$BlobName`?comp=lease" -Method Put -Headers $headers -ErrorAction Stop | Out-Null
+}
+
+function Start-DashboardPublicationLock {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal publication lock must always acquire or fail closed.')]
+    [CmdletBinding()]
+    param([string]$AccountName, [string]$StorageToken, [string[]]$RootNames)
+    $lockName = '_publication/publication.lock'
+    $leaseId = [guid]::NewGuid().ToString()
+    $state = [hashtable]::Synchronized(@{ Failed = $false; Stop = $false; StopSignal = [System.Threading.ManualResetEventSlim]::new($false); Names = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new()); LeaseId = $leaseId; AccountName = $AccountName; StorageToken = $StorageToken })
+    try {
+        foreach ($name in @($lockName) + $RootNames) {
+            $headers = Get-BlobHeader -StorageToken $StorageToken
+            $headers['x-ms-blob-type'] = 'BlockBlob'
+            $headers['If-None-Match'] = '*'
+            try { Invoke-WebRequest -Uri "https://$AccountName.blob.core.windows.net/$($Script:BlobContainers.Dashboards)/$name" -Method Put -Headers $headers -Body ([byte[]]::new(0)) -ErrorAction Stop | Out-Null }
+            catch { if ((Get-BlobErrorStatusCode -ErrorRecord $_) -notin @(409, 412)) { throw } }
+            Invoke-DashboardPublicationLease -AccountName $AccountName -StorageToken $StorageToken -BlobName $name -LeaseId $leaseId -Action acquire
+            [void]$state.Names.Add($name)
+            if ($name -eq $lockName) {
+                $worker = [powershell]::Create()
+                [void]$worker.AddScript({
+                    param($State, $Container)
+                    while (-not $State.Stop) {
+                        if ($State.StopSignal.Wait(15000)) { break }
+                        try {
+                            foreach ($blob in $State.Names.ToArray()) {
+                                $headers = @{ Authorization = "Bearer $($State.StorageToken)"; 'x-ms-version' = '2020-10-02'; 'x-ms-date' = [datetime]::UtcNow.ToString('R'); 'x-ms-lease-action' = 'renew'; 'x-ms-lease-id' = $State.LeaseId }
+                                Invoke-WebRequest -Uri "https://$($State.AccountName).blob.core.windows.net/$Container/$blob`?comp=lease" -Method Put -Headers $headers -TimeoutSec 10 -ErrorAction Stop | Out-Null
+                            }
+                        }
+                        catch { $State.Failed = $true; break }
+                    }
+                }).AddArgument($state).AddArgument($Script:BlobContainers.Dashboards)
+                $state.Worker = $worker
+                $state.Async = $worker.BeginInvoke()
+            }
+        }
+        return $state
+    }
+    catch {
+        Stop-DashboardPublicationLock -Lock $state
+        throw
+    }
+}
+
+function Assert-DashboardPublicationLock {
+    [CmdletBinding()]
+    param($Lock)
+    if ($Lock.Failed) { throw 'Dashboard publication heartbeat failed; ownership is uncertain.' }
+    foreach ($name in $Lock.Names.ToArray()) {
+        try { Invoke-DashboardPublicationLease -AccountName $Lock.AccountName -StorageToken $Lock.StorageToken -BlobName $name -LeaseId $Lock.LeaseId -Action renew }
+        catch { $Lock.Failed = $true; throw }
+    }
+}
+
+function Stop-DashboardPublicationLock {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal finally cleanup must always release owned bounded leases.')]
+    [CmdletBinding()]
+    param($Lock)
+    $Lock.Stop = $true
+    $Lock.StopSignal.Set()
+    if ($Lock.ContainsKey('Worker')) { $Lock.Worker.Stop(); $Lock.Worker.Dispose() }
+    foreach ($name in $Lock.Names.ToArray()) {
+        try { Invoke-DashboardPublicationLease -AccountName $Lock.AccountName -StorageToken $Lock.StorageToken -BlobName $name -LeaseId $Lock.LeaseId -Action release }
+        catch { Write-Warning 'Publication lease release failed; bounded lease will expire.' }
+    }
+    $Lock.StorageToken = $null
+    $Lock.StopSignal.Dispose()
+}
+
+function Get-DashboardRootETag {
+    [CmdletBinding()]
+    param([string]$AccountName, [string]$StorageToken, [string]$BlobName)
+    $response = Invoke-WebRequest -Uri "https://$AccountName.blob.core.windows.net/$($Script:BlobContainers.Dashboards)/$BlobName" -Method Head -Headers (Get-BlobHeader -StorageToken $StorageToken) -ErrorAction Stop
+    return [string]$response.Headers.ETag[0]
+}
 
 function Export-ToBlobStorage {
     <#
@@ -1080,36 +1173,132 @@ function Export-ToBlobStorage {
             }
         )
 
-        $dashboardBlobNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($dashboardFile in $dashboardFiles) {
-            [void]$dashboardBlobNameSet.Add($dashboardFile.BlobName)
-        }
-
-        $trackedDashboardBlobs = @(
-            Get-BlobList -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -StorageToken $StorageToken |
-                Where-Object {
-                    $currentBlobName = $_
-                    ($Script:DashboardTrackedBlobNames -contains $currentBlobName) -or (@($Script:DashboardTrackedAssetDirectories | Where-Object { $currentBlobName -like "$_/*" }).Count -gt 0)
+        $retainedPrefixes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        $retainedNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        $backupRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-publication-' + [guid]::NewGuid().ToString('N'))
+        $recoveryPrefix = '_publication/recovery/' + [guid]::NewGuid().ToString('N') + '/'
+        $priorRoots = @{}
+        $rootETags = @{}
+        $uploadedRoots = [System.Collections.Generic.List[string]]::new()
+        $candidateRootNames = @($dashboardFiles | Where-Object { $_.BlobName -in $Script:DashboardTrackedBlobNames } | ForEach-Object { $_.BlobName })
+        $publicationLock = Start-DashboardPublicationLock -AccountName $AccountName -StorageToken $StorageToken -RootNames $candidateRootNames
+        try {
+            $existingNames = @(Get-BlobList -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -StorageToken $StorageToken)
+            foreach ($recoveryName in ($existingNames | Where-Object { $_ -match '^_publication/recovery/[0-9a-f]{32}/[^/]+\.html$' })) {
+                $recoveryPath = Join-Path $backupRoot 'recovery-root'
+                Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $recoveryName -DestinationPath $recoveryPath -StorageToken $StorageToken
+                $recoveryHtml = Get-Content -LiteralPath $recoveryPath -Raw
+                if ($recoveryHtml) {
+                    foreach ($reference in @(Get-DashboardRequiredAssetName -Html $recoveryHtml -HtmlBlobName ([System.IO.Path]::GetFileName($recoveryName)))) {
+                        [void]$retainedNames.Add($reference)
+                        if ($reference -match '^(.+?/generations/[0-9a-f]{32}/)') { [void]$retainedPrefixes.Add($Matches[1]) }
+                    }
                 }
-        )
-
-        foreach ($blobName in $trackedDashboardBlobs) {
-            if (-not $dashboardBlobNameSet.Contains($blobName)) {
-                Write-Output "  Removing stale dashboard blob $blobName..."
-                Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $blobName -StorageToken $StorageToken
             }
+            foreach ($rootName in $Script:DashboardTrackedBlobNames) {
+                if ($existingNames -contains $rootName) {
+                    $rootETags[$rootName] = Get-DashboardRootETag -AccountName $AccountName -StorageToken $StorageToken -BlobName $rootName
+                    $backupPath = Join-Path $backupRoot $rootName
+                    Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $rootName -DestinationPath $backupPath -StorageToken $StorageToken
+                    $priorHtml = Get-Content -LiteralPath $backupPath -Raw
+                    if ($priorHtml) {
+                        $priorRoots[$rootName] = $backupPath
+                        foreach ($reference in @(Get-DashboardRequiredAssetName -Html $priorHtml -HtmlBlobName $rootName)) {
+                            [void]$retainedNames.Add($reference)
+                            if ($reference -match '^(.+?/generations/[0-9a-f]{32}/)') { [void]$retainedPrefixes.Add($Matches[1]) }
+                        }
+                        Assert-DashboardPublicationLock -Lock $publicationLock
+                        Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName ($recoveryPrefix + $rootName) -SourcePath $backupPath -StorageToken $StorageToken -ContentType 'text/html' -Conditions @{'If-None-Match' = '*'}
+                        Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName ($recoveryPrefix + $rootName) -DestinationPath (Join-Path $backupRoot 'verified-recovery') -StorageToken $StorageToken
+                        if ((Get-FileSha256Hex -Path (Join-Path $backupRoot 'verified-recovery')) -ne (Get-FileSha256Hex -Path $backupPath)) { throw 'Durable recovery hash mismatch.' }
+                        $identityPath = Join-Path $backupRoot 'identity.json'
+                        Write-Utf8File -Path $identityPath -Content (@{ root = $rootName; sha256 = Get-FileSha256Hex -Path $backupPath; etag = $rootETags[$rootName] } | ConvertTo-Json -Compress)
+                        Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName ($recoveryPrefix + $rootName + '.identity.json') -SourcePath $identityPath -StorageToken $StorageToken -ContentType 'application/json' -Conditions @{'If-None-Match' = '*'}
+                    }
+                }
+            }
+            foreach ($dashboardFile in ($dashboardFiles | Where-Object { $_.BlobName -in $Script:DashboardTrackedBlobNames })) {
+                $candidateHtml = Get-Content -LiteralPath $dashboardFile.FullName -Raw
+                foreach ($reference in @(Get-DashboardRequiredAssetName -Html $candidateHtml -HtmlBlobName $dashboardFile.BlobName)) {
+                    $dependencyPath = Join-Path $resolvedDashboardRoot $reference
+                    if (-not (Test-Path -LiteralPath $dependencyPath -PathType Leaf) -or (Get-Item -LiteralPath $dependencyPath).Length -eq 0) { throw "Missing required dashboard dependency: $reference" }
+                    [void]$retainedNames.Add($reference)
+                }
+                if ((Get-DashboardHtmlScriptContent -Html $candidateHtml -ScriptId 'dataFormat') -eq 'external-compressed') {
+                    $candidatePrefix = Get-DashboardPublishedAssetPrefix -Html $candidateHtml -HtmlBlobName $dashboardFile.BlobName
+                    if ($candidatePrefix -notmatch '/generations/[0-9a-f]{32}/$') { throw 'Hosted publication requires immutable generation paths.' }
+                    [void]$retainedPrefixes.Add($candidatePrefix)
+                }
+            }
+            $manifestPath = Join-Path $backupRoot 'candidate.manifest.json'
+            $manifestAssets = @($dashboardFiles | Where-Object { $_.BlobName -notin $Script:DashboardTrackedBlobNames } | ForEach-Object { @{ name = $_.BlobName; sha256 = Get-FileSha256Hex -Path $_.FullName } })
+            Write-Utf8File -Path $manifestPath -Content (@{ assetCount = $manifestAssets.Count; assets = $manifestAssets; roots = $candidateRootNames } | ConvertTo-Json -Depth 8 -Compress)
+            Assert-DashboardPublicationLock -Lock $publicationLock
+            Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName ($recoveryPrefix + 'candidate.manifest.json') -SourcePath $manifestPath -StorageToken $StorageToken -ContentType 'application/json' -Conditions @{'If-None-Match' = '*'}
+            $verifiedAssetCount = 0
+            foreach ($dashboardFile in ($dashboardFiles | Where-Object { $_.BlobName -notin $Script:DashboardTrackedBlobNames } | Sort-Object BlobName)) {
+                if ($dashboardFile.BlobName -notmatch '\.assets/generations/[0-9a-f]{32}/') { throw 'Hosted publication refuses mutable asset paths.' }
+                if ($existingNames -contains $dashboardFile.BlobName) { throw "Generation asset already exists: $($dashboardFile.BlobName)" }
+                Assert-DashboardPublicationLock -Lock $publicationLock
+                Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $dashboardFile.BlobName -SourcePath $dashboardFile.FullName -StorageToken $StorageToken -ContentType (Get-DashboardBlobContentType -BlobName $dashboardFile.BlobName) -AccessTier $Script:BlobAccessTiers.Dashboards -Conditions @{'If-None-Match' = '*'}
+                $verificationPath = Join-Path $backupRoot 'verified-asset'
+                Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $dashboardFile.BlobName -DestinationPath $verificationPath -StorageToken $StorageToken
+                if ((Get-FileSha256Hex -Path $verificationPath) -ne (Get-FileSha256Hex -Path $dashboardFile.FullName)) { throw "Staged asset hash mismatch: $($dashboardFile.BlobName)" }
+                $verifiedAssetCount++
+            }
+            if ($verifiedAssetCount -ne $manifestAssets.Count) { throw 'Staged asset manifest count mismatch.' }
+            foreach ($dashboardFile in ($dashboardFiles | Where-Object { $_.BlobName -in $Script:DashboardTrackedBlobNames } | Sort-Object @{ Expression = { if ($_.BlobName -eq $Script:HostedDashboardBlobName) { 1 } else { 0 } } })) {
+                Assert-DashboardPublicationLock -Lock $publicationLock
+                $uploadedRoots.Add($dashboardFile.BlobName)
+                Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $dashboardFile.BlobName -SourcePath $dashboardFile.FullName -StorageToken $StorageToken -ContentType 'text/html' -AccessTier $Script:BlobAccessTiers.Dashboards -Conditions @{'If-Match' = $rootETags[$dashboardFile.BlobName]; 'x-ms-lease-id' = $publicationLock.LeaseId}
+                Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $dashboardFile.BlobName -DestinationPath (Join-Path $backupRoot 'verified-root') -StorageToken $StorageToken
+                if ((Get-FileSha256Hex -Path (Join-Path $backupRoot 'verified-root')) -ne (Get-FileSha256Hex -Path $dashboardFile.FullName)) { throw 'Published root hash mismatch.' }
+            }
+            $Script:DashboardPublicationOutcome = 'DashboardPublished'
+            try {
+                foreach ($blobName in $existingNames) {
+                    if (@($Script:DashboardTrackedAssetDirectories | Where-Object { $blobName.StartsWith("$_/", [System.StringComparison]::Ordinal) }).Count -eq 0) { continue }
+                    if ($blobName -notmatch '\.assets/generations/[0-9a-f]{32}/') { continue }
+                    if ($retainedNames.Contains($blobName)) { continue }
+                    if (@($retainedPrefixes | Where-Object { $blobName.StartsWith($_, [System.StringComparison]::Ordinal) }).Count -gt 0) { continue }
+                    Assert-DashboardPublicationLock -Lock $publicationLock
+                    Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $blobName -StorageToken $StorageToken
+                }
+                foreach ($rootName in $priorRoots.Keys) {
+                    Assert-DashboardPublicationLock -Lock $publicationLock
+                    Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName ($recoveryPrefix + $rootName) -StorageToken $StorageToken
+                    Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName ($recoveryPrefix + $rootName + '.identity.json') -StorageToken $StorageToken
+                }
+                Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName ($recoveryPrefix + 'candidate.manifest.json') -StorageToken $StorageToken
+            }
+            catch { Write-Warning "Dashboard published; retention cleanup failed: $_" }
         }
-
-        $orderedDashboardFiles = @(
-            $dashboardFiles | Sort-Object @(
-                @{ Expression = { if ($_.BlobName -eq $Script:DashboardBlobName) { 1 } else { 0 } } },
-                @{ Expression = { $_.BlobName } }
-            )
-        )
-
-        foreach ($dashboardFile in $orderedDashboardFiles) {
-            Write-Output "  Uploading $($dashboardFile.BlobName)..."
-            Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $dashboardFile.BlobName -SourcePath $dashboardFile.FullName -StorageToken $StorageToken -ContentType (Get-DashboardBlobContentType -BlobName $dashboardFile.BlobName) -AccessTier $Script:BlobAccessTiers.Dashboards
+        catch {
+            $publicationError = $_
+            $rollbackErrors = [System.Collections.Generic.List[System.Exception]]::new()
+            foreach ($rootName in $uploadedRoots) {
+                try {
+                    Assert-DashboardPublicationLock -Lock $publicationLock
+                    $restoreETag = Get-DashboardRootETag -AccountName $AccountName -StorageToken $StorageToken -BlobName $rootName
+                    if ($priorRoots.ContainsKey($rootName)) {
+                        Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $rootName -SourcePath $priorRoots[$rootName] -StorageToken $StorageToken -ContentType 'text/html' -AccessTier $Script:BlobAccessTiers.Dashboards -Conditions @{'If-Match' = $restoreETag; 'x-ms-lease-id' = $publicationLock.LeaseId}
+                        Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $rootName -DestinationPath (Join-Path $backupRoot 'restored-root') -StorageToken $StorageToken
+                        if ((Get-FileSha256Hex -Path (Join-Path $backupRoot 'restored-root')) -ne (Get-FileSha256Hex -Path $priorRoots[$rootName])) { throw 'Restored root hash mismatch.' }
+                    }
+                    else { throw 'No prior usable root exists; candidate root outcome is uncertain.' }
+                }
+                catch { $rollbackErrors.Add($_.Exception) }
+            }
+            $Script:DashboardPublicationOutcome = if ($rollbackErrors.Count) { 'DashboardPublicationIndeterminate' } else { 'DashboardPublicationFailedBeforeCommitOrRestored' }
+            if ($rollbackErrors.Count) {
+                $rollbackErrors.Insert(0, $publicationError.Exception)
+                throw [System.AggregateException]::new("DashboardPublicationIndeterminate; durable recovery retained at $recoveryPrefix", $rollbackErrors.ToArray())
+            }
+            throw $publicationError
+        }
+        finally {
+            Stop-DashboardPublicationLock -Lock $publicationLock
+            Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
 
         Write-Output "  Dashboard uploaded to '$($Script:BlobContainers.Dashboards)/$($Script:DashboardBlobName)'"
@@ -1934,7 +2123,8 @@ try {
             -LookupsJsonEscaped $lookupsJsonEscaped `
             -DataQualitySectionHtml $dataQualitySectionHtml `
             -DataQualityMetaScript $dataQualityMetaScript `
-            -SplitAssets $true
+            -SplitAssets $true `
+            -AssetGeneration $Script:PipelineRunId
 
         if ($dashboardArtifacts.AssetsPath) {
             Write-Output "  Hosted assets prepared in $($dashboardArtifacts.AssetsPath)"
@@ -2059,7 +2249,7 @@ try {
         $publishedName = [System.IO.Path]::GetRelativePath($tempDashboards, $publishedFile.FullName).Replace('\', '/')
         $publishedArtifactSha256[$publishedName] = Get-FileSha256Hex -Path $publishedFile.FullName
     }
-    [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'succeeded' -AdditionalProperties @{
+    $finalStatusUploaded = Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'succeeded' -AdditionalProperties @{
             vulnerabilities = [int]$vulnCount
             devices = [int]$deviceCount
             cves = [int]$cveCount
@@ -2067,14 +2257,18 @@ try {
             dashboardBlobName = $dashboardStatusBlobName
             hostedDashboardBlobName = if ($useDualDashboard) { $Script:HostedDashboardBlobName } else { $null }
             artifactSha256 = $publishedArtifactSha256
-        })
+        }
+    if (-not $finalStatusUploaded) {
+        $Script:DashboardPublicationOutcome = 'DashboardPublishedStatusFailed'
+        throw 'DashboardPublishedStatusFailed: dashboard roots were verified published; final status upload failed. No rollback attempted.'
+    }
 
     # -----------------------------------------------------------------
     # Cleanup
     # -----------------------------------------------------------------
     Write-Output "`n--- Cleanup ---"
     if (Test-Path $tempRoot) {
-        Remove-Item -Path $tempRoot -Recurse -Force
+        Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
         Write-Output "  Temporary files cleaned up"
     }
 
@@ -2103,6 +2297,7 @@ catch {
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'failed' -Message $failureMessage -AdditionalProperties @{
                 error = $failureMessage
                 stackTrace = [string]$_.ScriptStackTrace
+            publicationOutcome = $Script:DashboardPublicationOutcome
             })
     }
 

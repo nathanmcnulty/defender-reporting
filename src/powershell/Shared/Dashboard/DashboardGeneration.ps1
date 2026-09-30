@@ -2919,6 +2919,179 @@ function Get-DashboardPayloadSummaryJson {
     }
 }
 
+function Get-DashboardPublishedAssetPrefix {
+        [CmdletBinding()]
+        [OutputType([string])]
+        param(
+            [Parameter(Mandatory)][string]$Html,
+            [Parameter(Mandatory)][string]$HtmlBlobName
+        )
+
+        $assetRoot = ([System.IO.Path]::GetFileNameWithoutExtension($HtmlBlobName) + '.assets/')
+        $configJson = Get-DashboardHtmlScriptContent -Html $Html -ScriptId 'dashboardConfig'
+        if ([string]::IsNullOrWhiteSpace($configJson)) { return $assetRoot }
+        $config = $configJson | ConvertFrom-Json -Depth 20
+        $payloadProperty = $config.PSObject.Properties['payloadUrl']
+        if ($null -eq $payloadProperty) { return $assetRoot }
+        $payloadUrl = [string]$payloadProperty.Value
+        $pattern = '^' + [regex]::Escape($assetRoot) + '(generations/[0-9a-f]{32}/)?data/payload\.json\.gz$'
+        if ($payloadUrl -cnotmatch $pattern) { throw 'Invalid published hosted payload path.' }
+        $prefix = $payloadUrl.Substring(0, $payloadUrl.Length - 'data/payload.json.gz'.Length)
+        foreach ($propertyName in @('payloadSummaryUrl', 'chartJsUrl')) {
+            $property = $config.PSObject.Properties[$propertyName]
+            if ($null -ne $property -and ([string]$property.Value -cnotmatch ('^' + [regex]::Escape($prefix) + '[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$') -or [string]$property.Value -match '(^|/)\.{1,2}(/|$)')) {
+                throw "Invalid published hosted dependency '$propertyName'."
+            }
+        }
+        return $prefix
+    }
+
+function Get-DashboardDependencyPolicy {
+    [CmdletBinding()]
+    param()
+    return @{ hostedRequiredPaths = @('runtime/dashboard.css', 'runtime/dashboard.js', 'runtime/pako.js', 'data/payload.json.gz'); hostedRequiredProperties = @('payloadUrl', 'payloadSummaryUrl', 'chartJsUrl'); externalModes = @('pdfExportRuntime', 'pdfExportBundle') }
+}
+
+function Get-DashboardRequiredAssetName {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Html,
+        [Parameter(Mandatory)][string]$HtmlBlobName
+    )
+
+    $assetRoot = [System.IO.Path]::GetFileNameWithoutExtension($HtmlBlobName) + '.assets/'
+    $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $configJson = Get-DashboardHtmlScriptContent -Html $Html -ScriptId 'dashboardConfig'
+    if ([string]::IsNullOrWhiteSpace($configJson)) {
+        if ((Get-DashboardHtmlScriptContent -Html $Html -ScriptId 'dataFormat') -eq 'compressed' -and $Html -notmatch '<(?:script|link)\b[^>]*\b(?:src|href)\s*=') { return }
+        throw 'Dashboard config is required for publication.'
+    }
+    $config = $configJson | ConvertFrom-Json -Depth 20
+    $policy = Get-DashboardDependencyPolicy
+    foreach ($property in $config.PSObject.Properties) {
+        if ($property.Name -notlike '*Url' -or [string]::IsNullOrWhiteSpace([string]$property.Value)) { continue }
+        $name = [string]$property.Value
+        if (-not $name.StartsWith($assetRoot, [System.StringComparison]::Ordinal) -or $name -cnotmatch '^[A-Za-z0-9._/-]+$' -or $name -match '(^|/)\.{1,2}(/|$)|//|/$') {
+            if ($property.Name -like 'pdfExport*') { throw "Invalid configured published PDF asset '$name'." }
+            throw "Unsafe dashboard dependency '$name'."
+        }
+        [void]$names.Add([string]$property.Value)
+    }
+    foreach ($match in [regex]::Matches($Html, '<(?:script|link)\b[^>]*\b(?:src|href)\s*=\s*["'']([^"'']+)["'']', 'IgnoreCase')) {
+        [void]$names.Add($match.Groups[1].Value)
+    }
+    foreach ($dependency in $policy.externalModes) {
+        $mode = $config.PSObject.Properties[($dependency + 'Mode')]
+        $url = $config.PSObject.Properties[($dependency + 'Url')]
+        if ($null -ne $mode -and [string]$mode.Value -eq 'external' -and ($null -eq $url -or [string]::IsNullOrWhiteSpace([string]$url.Value))) { throw "Invalid configured published PDF asset for $dependency." }
+    }
+    if ((Get-DashboardHtmlScriptContent -Html $Html -ScriptId 'dataFormat') -eq 'external-compressed' -or $null -ne $config.PSObject.Properties['payloadUrl']) {
+        $prefix = Get-DashboardPublishedAssetPrefix -Html $Html -HtmlBlobName $HtmlBlobName
+        foreach ($relative in $policy.hostedRequiredPaths) { [void]$names.Add($prefix + $relative) }
+        foreach ($required in $policy.hostedRequiredProperties) {
+            if ($null -eq $config.PSObject.Properties[$required] -or [string]::IsNullOrWhiteSpace([string]$config.$required)) { throw "Missing configured $required." }
+        }
+    }
+    foreach ($name in $names) {
+        if (-not $name.StartsWith($assetRoot, [System.StringComparison]::Ordinal) -or $name -cnotmatch '^[A-Za-z0-9._/-]+$' -or $name -match '(^|/)\.{1,2}(/|$)|//|/$') { throw "Unsafe dashboard dependency '$name'." }
+        $name
+    }
+}
+
+function Get-DashboardContainerSyncScript {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][ValidatePattern('^[a-z0-9]{3,24}$')][string]$AccountName,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9_.-]+\.html$')][string]$HtmlBlobName
+    )
+    $policy = Get-DashboardDependencyPolicy | ConvertTo-Json -Depth 5 -Compress
+    $scriptText = @'
+#!/bin/sh
+set -eu
+DATA_ROOT=${DATA_ROOT:-/data}
+BLOB_BASE=https://__ACCOUNT__.blob.core.windows.net/dashboards
+ROOT_NAME=__ROOT__
+ASSET_ROOT=__ASSET_ROOT__
+POLICY='__POLICY__'
+get_token() {
+    response=$(curl --fail --silent --show-error --header "X-IDENTITY-HEADER: $IDENTITY_HEADER" "${IDENTITY_ENDPOINT}?resource=https%3A%2F%2Fstorage.azure.com&api-version=2019-08-01") || return 1
+    jq -er .access_token <<EOF || return 1
+$response
+EOF
+}
+download_blob() {
+    dest=$1
+    name=$2
+    mkdir -p "${dest%/*}" || return 1
+    curl --fail --silent --show-error --header "Authorization: Bearer $TOKEN" --header 'x-ms-version: 2020-10-02' --dump-header "$dest.headers" --output "$dest" "$BLOB_BASE/$name" || return 1
+    [ -s "$dest" ] || return 1
+    expected=$(awk 'tolower($1)=="x-ms-meta-sha256:" {gsub("\r", "", $2); print $2}' "$dest.headers") || return 1
+    if [ -n "$expected" ]; then
+        actual=$(sha256sum "$dest") || return 1
+        actual=${actual%% *}
+        [ "$expected" = "$actual" ] || return 1
+    else
+        curl --fail --silent --show-error --header "Authorization: Bearer $TOKEN" --header 'x-ms-version: 2020-10-02' --output "$dest.verify" "$BLOB_BASE/$name" || return 1
+        cmp -s "$dest" "$dest.verify" || return 1
+        rm -f "$dest.verify" || return 1
+    fi
+    rm -f "$dest.headers" || return 1
+}
+sync_dashboard() (
+    TOKEN=$(get_token) || exit 1
+    [ -n "$TOKEN" ] || exit 1
+    stage=$(mktemp -d "$DATA_ROOT/.sync.XXXXXX") || exit 1
+    trap 'rm -rf "$stage" || exit 1' EXIT HUP INT TERM
+    download_blob "$stage/index.html" "$ROOT_NAME" || exit 1
+    jq -Rse 'capture("(?is)<script\\b[^>]*\\bid=\"dashboardConfig\"[^>]*>(?<config>.*?)</script>").config | fromjson' "$stage/index.html" > "$stage/config.json" || exit 1
+    jq -Rse 'capture("(?is)<script\\b[^>]*\\bid=\"dataFormat\"[^>]*>(?<format>.*?)</script>").format' "$stage/index.html" > "$stage/format.json" || exit 1
+    jq -ne --argjson policy "$POLICY" --slurpfile config "$stage/config.json" --slurpfile format "$stage/format.json" --rawfile html "$stage/index.html" --arg root "$ASSET_ROOT" '
+        $config[0] as $cfg |
+        (if $format[0] == "external-compressed" then
+            ($cfg.payloadUrl | capture("^(?<prefix>" + ($root | gsub("\\."; "\\.")) + "(generations/[0-9a-f]{32}/)?)data/payload\\.json\\.gz$").prefix) as $prefix |
+            if all($policy.hostedRequiredProperties[]; . as $key | ($cfg[$key] | type) == "string" and ($cfg[$key] | length) > 0) then [$policy.hostedRequiredPaths[] | $prefix + .] else error("missing hosted config") end
+         else [] end) as $required |
+        if all($policy.externalModes[]; . as $key | $cfg[$key + "Mode"] != "external" or (($cfg[$key + "Url"] | type) == "string" and ($cfg[$key + "Url"] | length) > 0)) then
+            ([$cfg | to_entries[] | select(.key | endswith("Url")) | .value | select(. != null and . != "")] + $required + [$html | scan("(?is)<(?:script|link)\\b[^>]*\\b(?:src|href)=\"([^\"]+)\"") | .[0]]) | unique |
+            map(if startswith($root) and test("^[A-Za-z0-9._/-]+$") and (test("(^|/)\\.{1,2}(/|$)|//|/$") | not) then . else error("unsafe dependency") end)
+        else error("missing PDF config") end' > "$stage/dependencies.json" || exit 1
+    jq -r '.[]' "$stage/dependencies.json" > "$stage/names.raw" || exit 1
+    if ! tr -d '\r' < "$stage/names.raw" > "$stage/names"; then exit 1; fi
+    while IFS= read -r name; do
+        download_blob "$stage/$name" "$name" || exit 1
+    done < "$stage/names" || exit 1
+    generation=$(sha256sum "$stage/index.html") || exit 1
+    generation=${generation%% *}
+    while IFS= read -r name; do
+        case "$name" in
+            "$ASSET_ROOT"generations/*) local_name=$name ;;
+            *)
+                local_name="${ASSET_ROOT}local-generations/$generation/${name#"$ASSET_ROOT"}"
+                jq -Rrs --arg original "$name" --arg replacement "$local_name" 'split("\"" + $original + "\"") | join("\"" + $replacement + "\"")' "$stage/index.html" > "$stage/local.html" || exit 1
+                mv "$stage/local.html" "$stage/index.html" || exit 1
+                ;;
+        esac
+        mkdir -p "${DATA_ROOT}/${local_name%/*}" || exit 1
+        if [ -e "$DATA_ROOT/$local_name" ]; then
+            cmp -s "$stage/$name" "$DATA_ROOT/$local_name" || exit 1
+        else
+            mv "$stage/$name" "$DATA_ROOT/$local_name" || exit 1
+        fi
+    done < "$stage/names" || exit 1
+    mv "$stage/index.html" "$DATA_ROOT/index.html" || exit 1
+)
+mkdir -p "$DATA_ROOT" || exit 1
+if [ "${SYNC_ONCE:-0}" = 1 ]; then sync_dashboard; exit $?; fi
+apk add --no-cache curl jq coreutils >/dev/null || exit 1
+sync_dashboard || echo 'Dashboard sync failed; retaining the previous local generation.' >&2
+(while true; do sleep 60; sync_dashboard || echo 'Dashboard sync failed; retaining the previous local generation.' >&2; done) &
+exec caddy file-server --root "$DATA_ROOT" --listen :80
+'@
+    return $scriptText.Replace('__ACCOUNT__', $AccountName).Replace('__ROOT__', $HtmlBlobName).Replace('__ASSET_ROOT__', ([System.IO.Path]::GetFileNameWithoutExtension($HtmlBlobName) + '.assets/')).Replace('__POLICY__', $policy)
+}
+
 function Get-DashboardAssetUrl {
     [CmdletBinding()]
     [OutputType([string])]
@@ -2928,10 +3101,14 @@ function Get-DashboardAssetUrl {
 
         [Parameter(Mandatory = $true)]
         [Alias('AssetFileName')]
-        [string]$AssetRelativePath
+        [string]$AssetRelativePath,
+
+        [ValidatePattern('^$|^[0-9a-f]{32}$')]
+        [string]$AssetGeneration = ''
     )
 
     $normalizedRelativePath = ($AssetRelativePath -replace '\\', '/').TrimStart('/')
+    if ($AssetGeneration) { $normalizedRelativePath = "generations/$AssetGeneration/$normalizedRelativePath" }
     return ((Get-DashboardAssetsDirectoryName -HtmlPath $HtmlPath) + '/' + $normalizedRelativePath)
 }
 
@@ -2994,6 +3171,9 @@ function Write-DashboardArtifactBundle {
         [Parameter(Mandatory = $false)]
         [bool]$SplitAssets = $false,
 
+        [ValidatePattern('^$|^[0-9a-f]{32}$')]
+        [string]$AssetGeneration = '',
+
         [Parameter(Mandatory = $false)]
         [bool]$InsertBase64LineBreaks = $false
     )
@@ -3042,6 +3222,7 @@ function Write-DashboardArtifactBundle {
 
     if ($SplitAssets) {
         $dashboardAssetsPath = Get-DashboardAssetsDirectoryPath -HtmlPath $OutputPath
+        if ($AssetGeneration) { $dashboardAssetsPath = Join-Path $dashboardAssetsPath "generations/$AssetGeneration" }
         [void](New-Item -Path $dashboardAssetsPath -ItemType Directory -Force)
 
         $hostedAssetRelativePaths = Get-DashboardHostedAssetLayout
@@ -3054,14 +3235,14 @@ function Write-DashboardArtifactBundle {
         $pdfBundleAssetRelativePath = [string]$hostedAssetRelativePaths.PdfExportBundle
         $payloadAssetRelativePath = [string]$hostedAssetRelativePaths.Payload
 
-        $cssAssetPath = Join-Path $dashboardAssetsPath ($cssAssetRelativePath -replace '/', '\')
-        $jsAssetPath = Join-Path $dashboardAssetsPath ($jsAssetRelativePath -replace '/', '\')
-        $pakoAssetPath = Join-Path $dashboardAssetsPath ($pakoAssetRelativePath -replace '/', '\')
-        $chartJsAssetPath = Join-Path $dashboardAssetsPath ($chartJsAssetRelativePath -replace '/', '\')
-        $payloadSummaryAssetPath = Join-Path $dashboardAssetsPath ($payloadSummaryAssetRelativePath -replace '/', '\')
-        $pdfRuntimeAssetPath = Join-Path $dashboardAssetsPath ($pdfRuntimeAssetRelativePath -replace '/', '\')
-        $pdfBundleAssetPath = Join-Path $dashboardAssetsPath ($pdfBundleAssetRelativePath -replace '/', '\')
-        $payloadAssetPath = Join-Path $dashboardAssetsPath ($payloadAssetRelativePath -replace '/', '\')
+        $cssAssetPath = Join-Path $dashboardAssetsPath $cssAssetRelativePath
+        $jsAssetPath = Join-Path $dashboardAssetsPath $jsAssetRelativePath
+        $pakoAssetPath = Join-Path $dashboardAssetsPath $pakoAssetRelativePath
+        $chartJsAssetPath = Join-Path $dashboardAssetsPath $chartJsAssetRelativePath
+        $payloadSummaryAssetPath = Join-Path $dashboardAssetsPath $payloadSummaryAssetRelativePath
+        $pdfRuntimeAssetPath = Join-Path $dashboardAssetsPath $pdfRuntimeAssetRelativePath
+        $pdfBundleAssetPath = Join-Path $dashboardAssetsPath $pdfBundleAssetRelativePath
+        $payloadAssetPath = Join-Path $dashboardAssetsPath $payloadAssetRelativePath
 
         $assetPaths = @($cssAssetPath, $jsAssetPath, $pakoAssetPath, $chartJsAssetPath, $payloadSummaryAssetPath, $pdfBundleAssetPath, $payloadAssetPath)
         if ($dashboardAssetsConfig.pdfExportRuntimeMode -eq 'external') {
@@ -3087,17 +3268,17 @@ function Write-DashboardArtifactBundle {
         Copy-Item -LiteralPath $PayloadPath -Destination $payloadAssetPath -Force
 
         $dashboardAssetsConfig.hostedAssetLayout = 'grouped-v1'
-        $dashboardAssetsConfig.payloadSummaryUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $payloadSummaryAssetRelativePath
-        $dashboardAssetsConfig.payloadUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $payloadAssetRelativePath
-        $dashboardAssetsConfig.chartJsUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $chartJsAssetRelativePath
+        $dashboardAssetsConfig.payloadSummaryUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $payloadSummaryAssetRelativePath -AssetGeneration $AssetGeneration
+        $dashboardAssetsConfig.payloadUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $payloadAssetRelativePath -AssetGeneration $AssetGeneration
+        $dashboardAssetsConfig.chartJsUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $chartJsAssetRelativePath -AssetGeneration $AssetGeneration
         if ($dashboardAssetsConfig.pdfExportRuntimeMode -eq 'external') {
-            $dashboardAssetsConfig.pdfExportRuntimeUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $pdfRuntimeAssetRelativePath
+            $dashboardAssetsConfig.pdfExportRuntimeUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $pdfRuntimeAssetRelativePath -AssetGeneration $AssetGeneration
         }
-        $dashboardAssetsConfig.pdfExportBundleUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $pdfBundleAssetRelativePath
+        $dashboardAssetsConfig.pdfExportBundleUrl = Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $pdfBundleAssetRelativePath -AssetGeneration $AssetGeneration
 
-        $cssBlock = '<link rel="stylesheet" href="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $cssAssetRelativePath) + '">'
-        $pakoBlock = '<script src="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $pakoAssetRelativePath) + '"></script>'
-        $dashboardJsBlock = '<script src="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $jsAssetRelativePath) + '"></script>'
+        $cssBlock = '<link rel="stylesheet" href="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $cssAssetRelativePath -AssetGeneration $AssetGeneration) + '">'
+        $pakoBlock = '<script src="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $pakoAssetRelativePath -AssetGeneration $AssetGeneration) + '"></script>'
+        $dashboardJsBlock = '<script src="' + (Get-DashboardAssetUrl -HtmlPath $OutputPath -AssetRelativePath $jsAssetRelativePath -AssetGeneration $AssetGeneration) + '"></script>'
         $vulnsDataSegment = @{ Placeholder = '__VULNS_DATA__'; Value = '' }
         $chartJsSegment = @{ Placeholder = '__CHARTJS_CONTENT__'; Value = '' }
         $pdfExportBundleSegment = @{ Placeholder = '__PDF_EXPORT_BUNDLE_CONTENT__'; Value = '' }
