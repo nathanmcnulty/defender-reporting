@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -447,4 +447,4 @@ foreach ($templateFile in $publishState.Files) {
 Write-Output ("Published dashboard templates to: https://{0}.blob.core.windows.net/{1}/" -f $StorageAccountName, $ContainerName)
 Write-Output 'The dashboard pipeline runbook and Function App will download these templates at generation time.'
 
-# ArtifactFingerprint: 707ad804c822de4fe14de82f611f963e4d4ed8e60e7aab3439155efc51ce207c
+# ArtifactFingerprint: ac0343c80cd967773cda81de17d6c6b56451c2289fc7a578f83efb3893ef9283
