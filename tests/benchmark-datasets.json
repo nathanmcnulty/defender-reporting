@@ -11,7 +11,7 @@
     "targetTotalVulnRows": 120000,
     "contentTemplateCount": 2000,
     "expectedEnvelope": { "maximumWorkingSetMb": 400, "maximumPrivateMemoryMb": 300, "maximumElapsedSeconds": 600 },
-    "sourceRelativePath": "exports",
+    "sourceRelativePath": "tests",
     "outputRelativePath": ".local/benchmark-datasets/benchmark-medium-v1",
     "historyTags": ["benchmark-medium-v1", "production-representative", "durable-baseline"]
   },
@@ -28,7 +28,7 @@
     "contentTemplateCount": 5000,
     "expectedUniqueCveCount": 5000,
     "expectedEnvelope": { "maximumWorkingSetMb": 400, "maximumPrivateMemoryMb": 300, "maximumElapsedSeconds": 1200 },
-    "sourceRelativePath": "exports",
+    "sourceRelativePath": "tests",
     "outputRelativePath": ".local/large-datasets/synthetic-50k-1_5m",
     "historyTags": ["benchmark-large-50k-v1", "row-volume-stress", "large-seed"]
   },
@@ -45,7 +45,7 @@
     "contentTemplateCount": 187500,
     "expectedUniqueCveCount": 5000,
     "expectedEnvelope": { "maximumWorkingSetMb": 400, "maximumPrivateMemoryMb": 300, "maximumElapsedSeconds": 1800 },
-    "sourceRelativePath": "exports",
+    "sourceRelativePath": "tests",
     "outputRelativePath": ".local/benchmark-datasets/content-cardinality-187k-v1",
     "historyTags": ["content-cardinality-stress", "partitioning-gate"]
   },
@@ -61,7 +61,7 @@
     "targetTotalVulnRows": 1000000,
     "contentTemplateCount": 5000,
     "expectedEnvelope": { "maximumWorkingSetMb": 400, "maximumPrivateMemoryMb": 300, "maximumElapsedSeconds": 1200 },
-    "sourceRelativePath": "exports",
+    "sourceRelativePath": "tests",
     "outputRelativePath": ".local/benchmark-datasets/device-cardinality-100k-v1",
     "historyTags": ["device-cardinality-stress", "machine-index"]
   },
@@ -79,7 +79,7 @@
     "snapshotCount": 12,
     "churnRate": 0.25,
     "expectedEnvelope": { "maximumWorkingSetMb": 400, "maximumPrivateMemoryMb": 300, "maximumElapsedSeconds": 1200 },
-    "sourceRelativePath": "exports",
+    "sourceRelativePath": "tests",
     "outputRelativePath": ".local/benchmark-datasets/history-churn-v1",
     "historyTags": ["history-churn-stress", "overlay-chain"]
   },
@@ -96,7 +96,7 @@
     "contentTemplateCount": 2000,
     "optionalFieldSparsity": 0.35,
     "expectedEnvelope": { "maximumWorkingSetMb": 350, "maximumPrivateMemoryMb": 250, "maximumElapsedSeconds": 300 },
-    "sourceRelativePath": "exports",
+    "sourceRelativePath": "tests",
     "outputRelativePath": ".local/benchmark-datasets/unicode-sparsity-v1",
     "historyTags": ["unicode", "sparsity", "edge-cases"]
   }

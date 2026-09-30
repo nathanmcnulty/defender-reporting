@@ -4,7 +4,7 @@ This folder contains lightweight PowerShell regression coverage for the Defender
 
 ## Layout
 
-- `tests/fixtures/` contains committed, minimal regression datasets.
+- `tests/fixtures/` contains committed, minimal synthetic regression datasets, never live exports.
 - `tests/manual/` contains ad hoc troubleshooting harnesses that are useful during development but are not part of `build/Invoke-RegressionValidation.ps1`.
 - The top-level scripts in `tests/` are the supported automation entrypoints for regression validation, stress generation, benchmarking, and synthetic live-export creation.
 
@@ -62,7 +62,7 @@ Defaults:
 - includes Advanced Hunting by default
 - writes `dashboard-audit.json` and `dashboard-live-run-manifest.json` alongside the generated HTML
 
-Use `-UseRepositoryOutputPaths` only when you intentionally want the live dry run to write into the tracked `exports/` and `VulnerabilityDashboard.html` paths.
+Use `-UseRepositoryOutputPaths` only when you intentionally want the live dry run to write into the ignored local `exports/` and `VulnerabilityDashboard.html` paths. Keep all live outputs private and out of logs and PR evidence.
 
 ## Legacy migration fixture
 
@@ -77,6 +77,8 @@ These shapes match what the pipeline readers already support, even though NDJSON
 
 The fixture smoke runs in `build/Invoke-RegressionValidation.ps1` and the legacy fixture regression path both execute against temp copies so derived `.dashboard-cache/` output does not pollute the committed fixture.
 
+Automated regression checks do not require root `exports/`, a generated root dashboard, or report PDFs. Cardinality fallback uses a temporary one-device/one-template dictionary without a synthetic manifest. Procedural ordering keeps two fresh-process 12-device/300-row runs; semantic replay keeps 50 devices/5,000 observations. Hot-phase smoke generates a pinned 16-device/240-observation dataset (seed 4242, date 2026-07-11) in temp storage. All temporary datasets and dashboards are cleaned up after the checks.
+
 ## Large synthetic stress dataset
 
 Generate a large helper-compatible export set locally with:
@@ -90,6 +92,8 @@ Defaults:
 - target devices: `20,000`
 - target vulnerability rows: `1,500,000`
 - output path: `.\exports-synthetic`
+
+The procedural generator defaults `-SourcePath` to `tests/`, an existing neutral directory; it does not read source exports. Use an explicit synthetic fixture path with `-UseLegacyGenerator`, which does read its source. Benchmark workload definitions also use the neutral `tests/` directory. Memory and disk guards for large workloads remain enabled.
 
 Run an iterative local dashboard generation against that synthetic export set with:
 
@@ -238,7 +242,7 @@ pwsh -NoProfile -File .\tests\Invoke-AzureRunbookValidation.ps1 `
 
 The harness uses exact decompressed payload bytes for the high-cardinality compiled path. For modest compatibility workloads, enrichment lookup insertion order may legitimately change the serialized bytes, so parity falls back to canonical expanded-row equivalence. A successful acceptance must still have zero missing and zero extra rows, valid current/history/dictionary/ref artifacts, and a true pre-trim working-set peak below the 400 MB Automation ceiling. The status evidence records working set, private memory, GC heap, phase, row count, and compiled telemetry; keep the timestamped result under `.local\azure-validation\`.
 
-The checked-in `exports` dataset is a compatibility gate, not just a fixture. It exercises Advanced Hunting CVE/device-user/inventory data, NVD data, and both scalar and array machine-tag representations. Do not replace it with a content-only synthetic dataset when changing enrichment or machine lookup code.
+Compatibility gates use synthetic enrichment regressions and temporary copies of the minimal legacy fixtures, not checked-in live exports. When changing enrichment or machine lookup code, retain coverage for Advanced Hunting CVE/device-user/inventory data, NVD data, scalar and array machine tags, Unicode, and optional properties; a content-only synthetic dataset alone is insufficient.
 
 When the Function App is the isolated subject of a test, add `-SkipAutomationValidation` to the build validation command. The default still validates both compute paths; the switch only avoids running the paired Automation deployment/validation while preserving Function App deployment, seeding, execution, status polling, and temporary-setting cleanup.
 

@@ -39,7 +39,7 @@ function Test-IsExcludedRepoScriptPath {
         [switch]$ExcludeGeneratedOutputs
     )
 
-    $normalizedPath = $Path -replace '\\', '/'
+    $normalizedPath = '/' + ([System.IO.Path]::GetRelativePath($repoRoot, $Path) -replace '\\', '/')
     if ($normalizedPath -match '/azure/function-app/Modules/') {
         return $true
     }

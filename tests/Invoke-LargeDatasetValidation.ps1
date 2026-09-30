@@ -7,7 +7,7 @@ param(
     [string]$Preset = 'BalancedMediumHeavy',
 
     [Parameter(Mandatory = $false)]
-    [string]$SourcePath = (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'exports'),
+    [string]$SourcePath = $PSScriptRoot,
 
     [Parameter(Mandatory = $false)]
     [string]$SyntheticOutputPath = (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'exports-synthetic'),

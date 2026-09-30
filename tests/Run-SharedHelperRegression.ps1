@@ -6272,7 +6272,6 @@ function Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration {
     [CmdletBinding()]
     param()
 
-    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
     $path = Join-Path $PSScriptRoot 'Invoke-AzureRunbookValidation.ps1'
     Assert-True (Test-Path -LiteralPath $path -PathType Leaf) 'Expected the guarded Azure validation harness.'
     $text = Get-Content -LiteralPath $path -Raw
@@ -6286,7 +6285,7 @@ function Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration {
 
     $caught = $null
     try {
-        & $path -SubscriptionId 'test-subscription' -AutomationAccountName 'test-account' -AutomationResourceGroup 'test-group' -RunbookName 'test-runbook' -StorageAccountName 'test-storage' -DatasetPath (Join-Path $repoRoot 'exports')
+        & $path -SubscriptionId 'test-subscription' -AutomationAccountName 'test-account' -AutomationResourceGroup 'test-group' -RunbookName 'test-runbook' -StorageAccountName 'test-storage' -DatasetPath $PSScriptRoot
     }
     catch { $caught = $_ }
     Assert-True ($null -ne $caught -and $caught.Exception.Message -like '*Re-run with -Execute*') 'Expected the Azure harness to reject mutation without -Execute before contacting Azure.'
@@ -6364,9 +6363,10 @@ function Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback {
         $enriched = Get-NormalizationExecutionPlan -Path $tempRoot
         Assert-True ($enriched.SafeToExecute -eq $true -and $enriched.ContentNormalizationMode -eq 'compiled-bounded-standard-payload' -and $enriched.HasMachineInput) 'Expected enriched high content cardinality to select the enrichment-capable bounded normalizer.'
 
-        $repoRoot = Split-Path -Path $PSScriptRoot -Parent
-        $legacy = Get-NormalizationExecutionPlan -Path (Join-Path $repoRoot 'exports')
-        Assert-True ($legacy.SafeToExecute -eq $true -and $legacy.DeviceProfileCount -gt 0 -and $legacy.ContentTemplateCount -gt 0) 'Expected the checked-in exports dataset to remain supported without procedural metadata.'
+        Remove-Item -LiteralPath (Join-Path $tempRoot 'synthetic-manifest.json') -Force
+        Write-GzipTextFile -Path (Get-VulnContentDictionaryPath -BasePath $tempRoot) -Content '{"version":"content-dictionary-v1","deviceProfiles":[{"id":"synthetic-device"}],"contentTemplates":[{"cveId":"CVE-2026-7001"}]}'
+        $legacy = Get-NormalizationExecutionPlan -Path $tempRoot
+        Assert-True ($legacy.SafeToExecute -eq $true -and $legacy.DeviceProfileCount -eq 1 -and $legacy.ContentTemplateCount -eq 1) 'Expected exact dictionary cardinalities without procedural metadata.'
     }
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 }
@@ -6491,7 +6491,7 @@ function Test-LargeDatasetValidationSemanticModeForcesFullReplay {
         $diagnosticPhaseLogPath = Join-Path $tempRoot 'phase-log.tsv'
 
         & $validationScriptPath `
-            -SourcePath (Join-Path $repoRoot 'exports') `
+            -SourcePath $PSScriptRoot `
             -SyntheticOutputPath $syntheticOutputPath `
             -TargetDeviceCount 50 `
             -TargetTotalVulnRows 5000 `
@@ -6553,7 +6553,7 @@ function Test-GenerateSyntheticLargeExportsUsesStablePlannerOrdering {
                 '-File'
                 $generatorScriptPath
                 '-SourcePath'
-                (Join-Path $repoRoot 'exports')
+                $PSScriptRoot
                 '-OutputPath'
                 $runDirectory
                 '-TargetDeviceCount'
@@ -6657,6 +6657,8 @@ function Test-HotPhaseReviewArtifactsModeSmoke {
         $outputRoot = Join-Path $tempRoot 'review'
         $stdoutPath = Join-Path $tempRoot 'stdout.log'
         $stderrPath = Join-Path $tempRoot 'stderr.log'
+        $datasetPath = Join-Path $tempRoot 'synthetic'
+        & (Join-Path $PSScriptRoot 'Generate-SyntheticLargeExports.ps1') -SourcePath $PSScriptRoot -OutputPath $datasetPath -TargetDeviceCount 16 -TargetTotalVulnRows 240 -ContentTemplateCount 80 -Seed 4242 -GenerationDate '2026-07-11' -SnapshotCount 4 -ChurnRate 0.10 -OptionalFieldSparsity 0.05 -IncludeRawRows -MinimumAvailableMemoryGB 0.5 -MinimumFreeDiskGB 1 | Out-Null
 
         if (-not $IsWindows) {
             $pwshCommand = Get-Command -Name 'pwsh' -ErrorAction Stop
@@ -6665,7 +6667,7 @@ function Test-HotPhaseReviewArtifactsModeSmoke {
                 '-File'
                 $reviewScriptPath
                 '-DirectoryPath'
-                (Join-Path $repoRoot 'exports')
+                $datasetPath
                 '-OutputRoot'
                 $outputRoot
                 '-ValidationMode'
@@ -6688,7 +6690,7 @@ function Test-HotPhaseReviewArtifactsModeSmoke {
         }
 
         & $reviewScriptPath `
-            -DirectoryPath (Join-Path $repoRoot 'exports') `
+            -DirectoryPath $datasetPath `
             -OutputRoot $outputRoot `
             -ValidationMode artifacts `
             -PollIntervalSeconds 1 | Out-Null

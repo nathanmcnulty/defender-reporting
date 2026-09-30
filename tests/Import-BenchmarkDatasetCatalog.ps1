@@ -57,7 +57,7 @@ function Resolve-BenchmarkDatasetSourcePath {
 
     $sourceRelativePath = [string]$Definition.sourceRelativePath
     if ([string]::IsNullOrWhiteSpace($sourceRelativePath)) {
-        return (Join-Path $RepoRoot 'exports')
+        return (Join-Path $RepoRoot 'tests')
     }
 
     return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $sourceRelativePath))
