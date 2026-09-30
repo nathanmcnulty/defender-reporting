@@ -21375,7 +21375,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 95b430849efc595f1a502482b909ec3b9be66ca80893622dfffe6400ca9a8ca3
+# ArtifactFingerprint: d53ab12e846142200536023988fc0b383f6bd8e9b6a44d7ec2b853b1387d159f
 
 
 
