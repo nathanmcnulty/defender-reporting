@@ -649,10 +649,15 @@ async function denormalizeWithCaching() {
         logDebug('Compressed fingerprint:', compressedFp);
         const cached = await getCachedData(compressedFp);
         if (cached && cached.data && cached.data.length > 0) {
+            dashboardMetrics.counts.compressedCacheHits = (dashboardMetrics.counts.compressedCacheHits || 0) + 1;
             logDebug('Loaded', cached.data.length, 'records from IndexedDB cache (compressed fingerprint)');
             vulnerabilityData = cached.data;
+            const inflateStart = performance.now();
             const decompressed = pako.inflate(pendingCompressedBytes, { to: 'string' });
+            recordDashboardPhaseTiming('mainInflateMs', performance.now() - inflateStart);
+            const parseStart = performance.now();
             const payload = JSON.parse(decompressed);
+            recordDashboardPhaseTiming('mainParseMs', performance.now() - parseStart);
             if (cached.lookups) {
                 lookups = cached.lookups;
                 logDebug('Restored lookups from IndexedDB cache');
@@ -708,16 +713,23 @@ async function denormalizeWithCaching() {
         const elapsed = Math.round(performance.now() - startTime);
         logDebug('Worker + denormalize complete in', elapsed, 'ms');
     } catch (err) {
+        dashboardMetrics.counts.workerFallbacks = (dashboardMetrics.counts.workerFallbacks || 0) + 1;
+        const fallbackStart = performance.now();
         console.warn('Web Worker failed, falling back to main thread:', err);
         // Hosted summary-first loading seeds a lightweight lookup catalog before the
         // full payload arrives, so the fallback must detect incomplete lookups too.
         if (compBytes && (!hasFullDenormalizationLookups(lookups) || !rawVulns)) {
+            const inflateStart = performance.now();
             const decompressed = pako.inflate(compBytes, { to: 'string' });
+            recordDashboardPhaseTiming('mainInflateMs', performance.now() - inflateStart);
+            const parseStart = performance.now();
             const data = JSON.parse(decompressed);
+            recordDashboardPhaseTiming('mainParseMs', performance.now() - parseStart);
             lookups = data.lookups;
             rawVulns = data.vulns;
         }
         await denormalizeAllVulns({ allowYield: true });
+        recordDashboardPhaseTiming('mainFallbackMs', performance.now() - fallbackStart);
     }
 
     // Derived fields are computed inline in denormalizeAllVulns(); Worker rows
@@ -729,7 +741,7 @@ async function denormalizeWithCaching() {
 
     // 3. Cache the result (fire-and-forget) — skip for very large datasets
     // IndexedDB structured clone fails with out-of-memory for 500K+ records
-    if (vulnerabilityData.length < 500000) {
+    if (vulnerabilityData.length < MAX_IDB_CACHE_ROWS) {
         if (!fingerprint) {
             fingerprint = await computeDataFingerprint();
         }

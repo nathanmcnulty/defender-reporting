@@ -1,8 +1,14 @@
 ﻿const assert = require('assert');
 const { loadDashboardHarness } = require('./helpers/dashboard-test-harness');
 
-function main() {
+async function main() {
     let currentNow = 0;
+    let worker;
+    class TestWorker {
+        constructor() { worker = this; }
+        postMessage() {}
+        terminate() { this.terminated = true; }
+    }
     const dashboard = loadDashboardHarness(`
 module.exports = {
     document,
@@ -13,12 +19,17 @@ module.exports = {
     recordDashboardPhaseTiming,
     recordDashboardRenderTiming,
     markDashboardReady,
+    denormalizeInWorker,
     setActiveReportIdForTest(value) {
         activeReportId = value;
     }
 };
 `, {
+    Worker: TestWorker,
+    Blob,
+    URL: { createObjectURL() { return 'blob:test'; }, revokeObjectURL() {} },
         performance: {
+        timeOrigin: 1000,
             now() {
                 currentNow += 10;
                 return currentNow;
@@ -75,6 +86,31 @@ module.exports = {
     assert.strictEqual(dashboard.window.__lastEvent.type, 'dashboard-ready');
     assert.strictEqual(dashboard.window.__lastEvent.detail.metrics.ready, true);
     assert.strictEqual(dashboard.window.__lastEvent.detail.validation.activeReportId, 'impact-analysis');
+
+    const legacy = { rows: [], lookups: {}, rawVulns: {} };
+    const legacyOperation = dashboard.denormalizeInWorker();
+    worker.onmessage({ data: { phase: 'workerInflateMs', duration: 12.5 } });
+    assert(!worker.terminated, 'A phase message must not complete the worker operation.');
+    worker.onmessage({ data: { phase: 'workerParseMs', duration: 7.25 } });
+    worker.onmessage({ data: legacy });
+    assert.strictEqual(await legacyOperation, legacy, 'Legacy worker envelope must remain unchanged.');
+    assert(worker.terminated);
+    let metrics = dashboard.getDashboardMetricsSnapshot();
+    assert.strictEqual(metrics.phases.workerInflateMs, 12.5);
+    assert.strictEqual(metrics.phases.workerParseMs, 7.25);
+    assert(Number.isFinite(metrics.phases.workerWaitMs));
+
+    const timed = { rows: null, lookups: {}, rawVulns: {}, postedAt: 1000 + currentNow };
+    const timedOperation = dashboard.denormalizeInWorker();
+    worker.onmessage({ data: timed });
+    assert.strictEqual(await timedOperation, timed, 'Timed worker envelope must retain its payload shape.');
+    metrics = dashboard.getDashboardMetricsSnapshot();
+    assert(metrics.phases.workerDeliveryMs >= 0);
+
+    await require('./Measure-DashboardWorkerTransfer').mockProbes();
 }
 
-main();
+main().catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+});
