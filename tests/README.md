@@ -224,6 +224,8 @@ For a final large-data acceptance run, use the guarded validation harness rather
 
 Example for the prepared generated 50K raw replay seed (the raw replay lane publishes 1,187,395 onboarded rows):
 
+Count preflight accepts only an explicitly supplied `-ExpectedTotalRows` or authoritative numeric `expectedDashboardRows` in `synthetic-manifest.json` (for example, `"expectedDashboardRows": 1187395`). Counts must be whole numbers from 1 through 50,000,000. An explicit parameter takes priority, even when manifest metadata is malformed or has the wrong type. `actualTotalVulnRows` and `actualCurrentRows` count source observations, not onboarded normalized dashboard rows, and are never inferred as the expectation. Observation-only manifests, including existing generated datasets, require the parameter; determine it from a verified projection for the exact dataset and replay lane, not device ratios. Missing or invalid expectations fail before output/lock creation or Azure calls; preflight does not normalize the dataset.
+
 ```powershell
 pwsh -NoProfile -File .\tests\Invoke-AzureRunbookValidation.ps1 `
   -SubscriptionId '43babb60-9e73-4dc8-b769-4401c01aad73' `

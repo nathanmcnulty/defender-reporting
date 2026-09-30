@@ -6479,6 +6479,83 @@ function Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration {
     Assert-True ($null -ne $caught -and $caught.Exception.Message -like '*Re-run with -Execute*') 'Expected the Azure harness to reject mutation without -Execute before contacting Azure.'
 }
 
+function Test-AzureValidationExpectedProjectionCountPreflight {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('azure-count-preflight-' + [guid]::NewGuid().ToString('N'))
+    $datasetPath = Join-Path $tempRoot 'dataset'
+    $manifestPath = Join-Path $datasetPath 'synthetic-manifest.json'
+    $outputRoot = Join-Path $tempRoot 'output'
+    $azureCalls = [System.Collections.Generic.List[string]]::new()
+    function az {
+        $azureCalls.Add(($args -join ' '))
+        throw 'Count preflight passed; Azure stub stopped before mutation.'
+    }
+    $cases = @(
+        @{ Manifest = '{"actualDeviceCount":50000,"actualTotalVulnRows":1500000,"actualCurrentRows":500000}'; Expected = 0 }
+        @{ Manifest = '{"actualTotalVulnRows":1500000}'; Override = 1187395; Expected = 1187395 }
+        @{ Manifest = '{"actualCurrentRows":1187395}'; Expected = 0 }
+        @{ Manifest = '{"actualTotalVulnRows":1500000,"actualCurrentRows":1187395}'; Expected = 0 }
+        @{ Manifest = '{"expectedDashboardRows":1187395}'; Expected = 1187395 }
+        @{ Manifest = '{"expectedDashboardRows":1}'; Expected = 1 }
+        @{ Manifest = '{"expectedDashboardRows":50000000}'; Expected = 50000000 }
+        @{ Manifest = '{"expectedDashboardRows":1500000}'; Override = 1187395; Expected = 1187395 }
+        @{ Manifest = '{"expectedDashboardRows":"wrong"}'; Override = 1187395; Expected = 1187395 }
+        @{ Manifest = '{broken'; Override = 1187395; Expected = 1187395 }
+        @{ Manifest = $null; Override = 1187395; Expected = 1187395 }
+        @{ Manifest = $null; Expected = 0 }
+        @{ Manifest = '{broken'; Expected = 0 }
+    )
+    foreach ($validOverride in @(1, 50000000, '1', '50000000', '1187395', [decimal]1, [decimal]50000000)) {
+        $cases += @{ Manifest = $null; Override = $validOverride; Expected = [int]$validOverride }
+    }
+    foreach ($invalidValue in @('null', 'true', 'false', '"1187395"', '"wrong"', '{}', '[]', '1.5', '50000000.4', '0', '-1', '50000001', '9223372036854775808')) {
+        $cases += @{ Manifest = ('{"expectedDashboardRows":' + $invalidValue + '}'); Expected = 0 }
+        $cases += @{ Manifest = ('{"expectedDashboardRows":' + $invalidValue + '}'); Override = 1187395; Expected = 1187395 }
+    }
+    foreach ($invalidOverride in @(0, -1, 50000001, 1.5, 50000000.4, [decimal]1.5, [decimal]50000000.4, '0', '-1', '50000001', '1.5', '50000000.4', '1.0', '50000000.0', $true, $false, $null)) {
+        $cases += @{ Manifest = '{"expectedDashboardRows":1187395}'; Override = $invalidOverride; Expected = 0 }
+    }
+    try {
+        [void](New-Item -Path $datasetPath -ItemType Directory -Force)
+        foreach ($case in $cases) {
+            if ($null -eq $case.Manifest) { Remove-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue }
+            else { Set-Content -LiteralPath $manifestPath -Value $case.Manifest -Encoding utf8 }
+            $azureCalls.Clear()
+            $parameters = @{
+                SubscriptionId = 'test-subscription'; AutomationAccountName = 'test-account'; AutomationResourceGroup = 'test-group'
+                RunbookName = 'test-runbook'; StorageAccountName = 'test-storage'; DatasetPath = $datasetPath
+                OutputRoot = $outputRoot; Execute = $true; Confirm = $false
+            }
+            $resolverParameters = @{ DatasetPath = $datasetPath }
+            if ($case.ContainsKey('Override')) {
+                $parameters.ExpectedTotalRows = $case.Override
+                $resolverParameters.ExpectedTotalRows = $case.Override
+            }
+            $caught = $null
+            try { & (Join-Path $PSScriptRoot 'Invoke-AzureRunbookValidation.ps1') @parameters }
+            catch { $caught = $_ }
+            if ($case.Expected -gt 0) {
+                Assert-True ((Resolve-AzureValidationExpectedRowCount @resolverParameters) -eq $case.Expected) 'Expected the authoritative projection count or explicit override without coercing observation counts.'
+                Assert-True ($null -ne $caught -and $caught.Exception.Message -like 'Count preflight passed;*') 'Expected valid count preflight to reach only the Azure stub.'
+                Assert-True ($azureCalls.Count -eq 1 -and $azureCalls[0] -like 'account show *') 'Expected the first Azure call to be a read, with no mutations.'
+            }
+            else {
+                $resolverCaught = $null
+                try { $null = Resolve-AzureValidationExpectedRowCount @resolverParameters }
+                catch { $resolverCaught = $_ }
+                Assert-True ($null -ne $resolverCaught) 'Expected the resolver to reject the original invalid count without integer coercion.'
+                Assert-True ($null -ne $caught -and $caught.Exception.Message -notlike 'Count preflight passed;*') 'Expected invalid or observation-only counts to fail preflight.'
+                Assert-True ($azureCalls.Count -eq 0) 'Expected count rejection before any Azure call.'
+                Assert-True (-not (Test-Path -LiteralPath $outputRoot)) 'Expected count rejection before creating output or lock files.'
+            }
+            if (Test-Path -LiteralPath $outputRoot) { Remove-Item -LiteralPath $outputRoot -Recurse -Force }
+        }
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force } }
+}
+
 function Test-AzureDashboardCandidateEvidenceRejectsIncompletePublication {
     [CmdletBinding()]
     param()
@@ -7071,6 +7148,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-ProgressStallAssessmentDistinguishesSlowAndStalledWork'; SuccessMessage = 'Progress stall warning/failure checks passed.' }
     @{ Name = 'Test-FullGarbageCollectionRequestsLargeObjectHeapCompaction'; SuccessMessage = 'Large-object heap compaction checks passed.' }
     @{ Name = 'Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration'; SuccessMessage = 'Azure validation guard and restoration checks passed.' }
+    @{ Name = 'Test-AzureValidationExpectedProjectionCountPreflight'; SuccessMessage = 'Azure expected projection count preflight checks passed.' }
     @{ Name = 'Test-AzureDashboardCandidateEvidenceRejectsIncompletePublication'; SuccessMessage = 'Azure candidate artifact evidence checks passed.' }
     @{ Name = 'Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback'; SuccessMessage = 'Cardinality-aware normalization plan and legacy fallback checks passed.' }
     @{ Name = 'Test-BenchmarkWorkloadProfilesArePinned'; SuccessMessage = 'Versioned benchmark workload profile checks passed.' }

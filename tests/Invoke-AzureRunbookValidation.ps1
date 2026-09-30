@@ -13,7 +13,7 @@ param(
     [Parameter(Mandatory = $false)][ValidateSet('SelfContained', 'Hosted', 'Dual')][string]$DashboardDeliveryMode = 'SelfContained',
     [Parameter(Mandatory = $false)][string]$OutputRoot = (Join-Path (Split-Path -Path $PSScriptRoot -Parent) '.local\azure-validation'),
     [Parameter(Mandatory = $false)][ValidateRange(5, 120)][int]$PollIntervalSeconds = 15,
-    [Parameter(Mandatory = $false)][ValidateRange(0, 50000000)][int]$ExpectedTotalRows = 0,
+    [Parameter(Mandatory = $false)]$ExpectedTotalRows = 0,
     [Parameter(Mandatory = $false)][ValidateRange(60, 86400)][int]$StallWarningSeconds = 300,
     [Parameter(Mandatory = $false)][ValidateRange(120, 172800)][int]$StallFailureSeconds = 1800,
     [Parameter(Mandatory = $false)][switch]$UseExistingExportsOnly,
@@ -31,13 +31,9 @@ $repoRoot = Split-Path -Path $PSScriptRoot -Parent
 if (-not $Execute) { throw 'Azure validation is mutation-capable. Re-run with -Execute after reviewing the target parameters.' }
 if (-not (Test-Path -LiteralPath $DatasetPath -PathType Container)) { throw "Dataset path '$DatasetPath' was not found." }
 if (-not (Test-Path -LiteralPath $CandidateRunbookPath -PathType Leaf)) { throw "Candidate runbook '$CandidateRunbookPath' was not found." }
-$manifestPath = Join-Path $DatasetPath 'synthetic-manifest.json'
-$resolvedExpectedTotalRows = $ExpectedTotalRows
-if ($resolvedExpectedTotalRows -le 0 -and (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-    $datasetManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 30
-    $resolvedExpectedTotalRows = if ($datasetManifest.PSObject.Properties['actualTotalVulnRows']) { [int]$datasetManifest.actualTotalVulnRows } elseif ($datasetManifest.PSObject.Properties['actualCurrentRows']) { [int]$datasetManifest.actualCurrentRows } else { 0 }
-}
-if ($resolvedExpectedTotalRows -le 0) { throw 'ExpectedTotalRows is required when the dataset does not provide row-count metadata.' }
+$expectedRowParameters = @{ DatasetPath = $DatasetPath }
+if ($PSBoundParameters.ContainsKey('ExpectedTotalRows')) { $expectedRowParameters.ExpectedTotalRows = $ExpectedTotalRows }
+$resolvedExpectedTotalRows = Resolve-AzureValidationExpectedRowCount @expectedRowParameters
 
 function Invoke-AzValidationCli {
     param([Parameter(Mandatory = $true)][string[]]$Arguments, [switch]$Json, [switch]$AllowEmpty)
