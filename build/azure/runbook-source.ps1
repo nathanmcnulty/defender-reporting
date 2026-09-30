@@ -678,27 +678,37 @@ function Get-BlobList {
     $baseUrl = "https://$AccountName.blob.core.windows.net"
     $uri = "$baseUrl/$Container`?restype=container&comp=list"
     if ($Prefix) {
-        $uri += "&prefix=$Prefix"
+        $uri += "&prefix=$([System.Uri]::EscapeDataString($Prefix))"
     }
 
     $headers = Get-BlobHeader -StorageToken $StorageToken
 
     try {
-        $webResponse = Invoke-WebRequestWithRetry -Uri $uri -Headers $headers -Method Get
-        $xmlContent = $webResponse.Content.TrimStart([char]0xFEFF)
-        $xmlDoc = [System.Xml.XmlDocument]::new()
-        $xmlDoc.LoadXml($xmlContent)
-        $blobsNode = $xmlDoc.SelectSingleNode('/EnumerationResults/Blobs')
-        if ($null -eq $blobsNode) {
-            return @()
-        }
+        $names = [System.Collections.Generic.List[string]]::new()
+        $seenMarkers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        $marker = ''
+        do {
+            $pageUri = $uri
+            if ($marker) {
+                $pageUri += "&marker=$([System.Uri]::EscapeDataString($marker))"
+            }
+            $webResponse = Invoke-WebRequestWithRetry -Uri $pageUri -Headers $headers -Method Get
+            $xmlContent = $webResponse.Content.TrimStart([char]0xFEFF)
+            $xmlDoc = [System.Xml.XmlDocument]::new()
+            $xmlDoc.LoadXml($xmlContent)
+            foreach ($blobNode in $xmlDoc.SelectNodes('/EnumerationResults/Blobs/Blob')) {
+                $name = $blobNode.SelectSingleNode('Name')?.InnerText
+                if (-not [string]::IsNullOrWhiteSpace($name)) {
+                    $names.Add($name)
+                }
+            }
+            $marker = [string]$xmlDoc.SelectSingleNode('/EnumerationResults/NextMarker')?.InnerText
+            if ($marker -and -not $seenMarkers.Add($marker)) {
+                throw 'Blob listing returned a repeated continuation marker.'
+            }
+        } while ($marker)
 
-        $blobNodes = @($blobsNode.SelectNodes('Blob'))
-        if ($blobNodes.Count -eq 0) {
-            return @()
-        }
-
-        return @($blobNodes | ForEach-Object { $_.SelectSingleNode('Name')?.InnerText } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        return $names.ToArray()
     }
     catch {
         $statusCode = Get-BlobErrorStatusCode -ErrorRecord $_
