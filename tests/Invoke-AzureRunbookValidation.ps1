@@ -17,6 +17,8 @@ param(
     [Parameter(Mandatory = $false)][ValidateRange(60, 86400)][int]$StallWarningSeconds = 300,
     [Parameter(Mandatory = $false)][ValidateRange(120, 172800)][int]$StallFailureSeconds = 1800,
     [Parameter(Mandatory = $false)][switch]$UseExistingExportsOnly,
+    [Parameter(Mandatory = $false)][bool]$UseBoundedPublicationMetadataReader = $false,
+    [Parameter(Mandatory = $false)][switch]$UseDirectMergeDeviceLookup,
     [Parameter(Mandatory = $false)][switch]$ValidatePublishedSemanticParity,
     [Parameter(Mandatory = $false)][ValidateSet('None', 'AfterBackup', 'AfterDeploy', 'AfterSeed')][string]$FailureInjectionPoint = 'None',
     [Parameter(Mandatory = $false)][switch]$Execute
@@ -170,6 +172,7 @@ try {
         -SubscriptionId $SubscriptionId -RepoPath $repoRoot -AutomationAccountName $AutomationAccountName -AutomationResourceGroup $AutomationResourceGroup `
         -RunbookName $RunbookName -StorageAccountName $StorageAccountName -UseExistingExportsOnly:$UseExistingExportsOnly `
         -DashboardDeliveryMode $DashboardDeliveryMode `
+        -UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader -UseDirectMergeDeviceLookup:$UseDirectMergeDeviceLookup `
         -ExpectedTotalRows $resolvedExpectedTotalRows `
         -PollIntervalSeconds $PollIntervalSeconds -StallWarningSeconds $StallWarningSeconds -StallFailureSeconds $StallFailureSeconds `
         -SkipDeployRunbook -SkipTemplateUpload -ResultsOutputPath $resultPath

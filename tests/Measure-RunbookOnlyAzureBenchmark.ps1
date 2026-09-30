@@ -31,6 +31,9 @@ param(
     [switch]$UseDirectMergeDeviceLookup,
 
     [Parameter(Mandatory = $false)]
+    [bool]$UseBoundedPublicationMetadataReader = $false,
+
+    [Parameter(Mandatory = $false)]
     [int]$ExpectedTotalRows = 1500000,
 
     [Parameter(Mandatory = $false)]
@@ -66,6 +69,7 @@ $script:StorageAccountName = $StorageAccountName
 $script:DashboardDeliveryMode = $DashboardDeliveryMode
 $script:UseExistingExportsOnly = if ($PSBoundParameters.ContainsKey('UseExistingExportsOnly')) { [bool]$UseExistingExportsOnly } else { $true }
 $script:UseDirectMergeDeviceLookup = if ($PSBoundParameters.ContainsKey('UseDirectMergeDeviceLookup')) { [bool]$UseDirectMergeDeviceLookup } else { $false }
+$script:UseBoundedPublicationMetadataReader = $UseBoundedPublicationMetadataReader
 $script:ExpectedTotalRows = $ExpectedTotalRows
 $script:PollIntervalSeconds = $PollIntervalSeconds
 . (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
@@ -244,6 +248,9 @@ function Start-RunbookBenchmark {
     }
     if ($script:UseDirectMergeDeviceLookup) {
         $parameterPairs += 'UseDirectMergeDeviceLookup=true'
+    }
+    if ($script:UseBoundedPublicationMetadataReader) {
+        $parameterPairs += 'UseBoundedPublicationMetadataReader=true'
     }
 
     $arguments = @(
@@ -561,6 +568,7 @@ $result = [ordered]@{
         dashboard_delivery_mode = $script:DashboardDeliveryMode
         use_existing_exports_only = $script:UseExistingExportsOnly
         use_direct_merge_device_lookup = $script:UseDirectMergeDeviceLookup
+        use_bounded_publication_metadata_reader = $script:UseBoundedPublicationMetadataReader
         expected_total_rows = $script:ExpectedTotalRows
     }
     runbook_events = @($runbookEvents)

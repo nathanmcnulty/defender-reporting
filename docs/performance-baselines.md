@@ -15,6 +15,176 @@ Do not compare those lanes as if they were interchangeable. Replay benchmarks ar
 
 The current bounded-content-store acceptance is recorded below. The older tables and triage entries remain useful historical comparisons, but they predate the disk-partitioned publisher and compiled streaming standard-payload path.
 
+## Issue 69 controlled baseline (2026-09-30)
+
+This is a measured **baseline, not an optimization result or a sub-400 MiB acceptance pass**. The lane is retained synthetic existing-export replay, cold normalized-payload cache, `UseExistingExportsOnly=true`, `UseDirectMergeDeviceLookup=false`, source base `8317b76`. It contains 1,187,395 current references and zero references in the five history files; output has 49,476 devices and 5,000 CVEs. It is not a fresh MDE export or Function App measurement. Both Automation workers reported PowerShell 7.4.6, .NET 8.0.28, X64, one processor, and workstation GC.
+
+| Mode | Job creation-to-completion | Sampled peak WS | Process high-water WS | Peak private | Peak GC heap | Result |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Hosted | 786.80 s | 421.2 MiB, normalization | 569.9 MiB | 716.4 MiB, Completed | 180.0 MiB, normalization | Completed; artifact validation passed |
+| Dual | 769.42 s | 681.3 MiB, Completed | 681.3 MiB | 704.8 MiB, Completed | 373.8 MiB, Completed | Completed; recovered artifact validation passed |
+
+The two modes are controls, not baseline/candidate variants. Their elapsed difference is not evidence of an improvement. Both exceed 400 MiB. Hosted's 569.9 MiB process high-water was not captured as an instantaneous working-set sample: no method-level attribution is possible. At its final sample WS was only 194.1 MiB. Dual's final sample is the observed 681.3 MiB crest. Event-derived headlines under-report memory (Dual reports 379.0 MiB), so use status snapshots and process high-water values. Hosted event-derived stage durations are incomplete (its reported Generate dashboard duration is only 10.91 s); do not use them as exclusive phase timings. The recovered Dual lacks the original local polling timeline, but preserves all 104 final cloud snapshots and job events; Hosted also preserves 104 snapshots.
+
+### Controlled identity and parity
+
+- Dataset manifest SHA-256: `3c8b18135dd2af0df8bd837b905644541621e43b95870c4e29073b5ea467d9e3`.
+- Template manifest SHA-256: `c08987a504a22c8d1e530d69e0a62e83af98f13d72b38b83ac89b2f4ba11d932`.
+- Instrumented deployed source SHA-256: `dffdaa04368a38cd3362e6bb45340c1558e82bf91abb96a227d489fbb2b4d577` (same in both modes).
+- Exact decompressed Hosted/Dual payload equality: 65,580,317 bytes, SHA-256 `764d32ef55b7188dbc4d0b56b5bf358192824ccf1261aed0157e0c56e33aaf56`. Gzip payload: 15,351,202 bytes, SHA-256 `cd928b05840107bd9a694ec3c17030e5569300999115e40160c316dcaa6a9740`.
+- Hosted primary HTML: 21,637 bytes; Hosted generation summary: 3,486,143 bytes. Dual self-contained primary HTML: 22,575,578 bytes. These are artifact sizes, not heap-retention measurements.
+- Hosted job resource: `15a4b9fa-b17b-4c83-98b3-4359f208d495`; runtime job: `b0b069cd-d8bc-4822-9963-d489c6c724cf`. Dual job resource: `69d08e91-315f-4868-b4b5-8dd1e1ec024d`; runtime job: `3ab07c2b-a5a2-4d96-a4c1-7553b6eb38a6`.
+
+Raw machine-local evidence is under `.local/controlled-20260930-run3/{Hosted,Dual}/`: `experiment-result.json`, `benchmark-result.json`, `candidate-dashboards/`, exact backups and restored files. Each benchmark's `runbook_status.memoryTimelineTail` retains every phase snapshot, including UTC time, process peak, cumulative allocation bytes, Gen0/1/2 counts, last-GC heap/fragmentation/committed bytes, and LOH before/after size and fragmentation. Do not commit raw tenant artifacts.
+
+### All-stage snapshot summary
+
+Each row covers every saved sample in that stage. WS, private and GC are independent sampled maxima, not necessarily simultaneous. Allocation and GC deltas span the first to last sample **within** the stage and exclude inter-stage gaps; zero means a single sample, not zero work. LOH is the last sample's last-GC size after collection, not an instantaneous live heap. All memory is MiB; allocations are GiB. These counters characterize allocation pressure and collection activity, not exclusive method allocations or proven retained objects.
+
+| Mode | Stage | Max WS | Max private | Max GC | Allocation delta | Gen0/1/2 delta | Last-GC LOH after |
+| --- | --- | ---: | ---: | ---: | ---: | --- | ---: |
+| Hosted | Authentication | 242.8 | 117.8 | 61.2 | 0.113 | 7/3/0 | 16.28 |
+| Hosted | DownloadHistoricalData | 303.7 | 163.8 | 73.8 | 0.380 | 26/8/1 | 18.08 |
+| Hosted | ExportFreshMdeData (skipped) | 303.9 | 163.8 | 88.5 | 0.025 | 4/2/2 | 17.19 |
+| Hosted | GenerateDashboard | 290.3 | 149.8 | 85.1 | 0 | 0/0/0 | 17.19 |
+| Hosted | CheckDashboardPayloadCache | 291.9 | 151.2 | 75.2 | 0.008 | 2/2/2 | 17.19 |
+| Hosted | ReadNormalizationInputs | 333.5 | 188.4 | 94.7 | 0.768 | 52/14/4 | 20.22 |
+| Hosted | NormalizeDashboardData | 421.2 | 250.3 | 180.0 | 181.287 | 11672/564/50 | 11.64 |
+| Hosted | PrepareDashboardPayload | 370.5 | 199.0 | 93.6 | 0.032 | 6/4/4 | 11.90 |
+| Hosted | PrepareDashboardLibraries | 372.3 | 200.8 | 93.7 | 0.023 | 3/2/2 | 12.15 |
+| Hosted | LoadDashboardTemplates | 375.2 | 203.2 | 96.7 | 0.031 | 4/2/2 | 13.26 |
+| Hosted | WriteHostedDashboard | 378.7 | 205.8 | 98.8 | 5.131 | 329/6/4 | 22.29 |
+| Hosted | ExportResults | 378.6 | 205.5 | 98.1 | 0 | 0/0/0 | 22.29 |
+| Hosted | Completed | 194.1 | 716.4 | 168.0 | 0 | 0/0/0 | 86.79 |
+| Dual | Authentication | 237.7 | 114.6 | 55.8 | 0.123 | 8/3/0 | 16.50 |
+| Dual | DownloadHistoricalData | 301.2 | 161.4 | 88.6 | 0.362 | 24/8/1 | 18.30 |
+| Dual | ExportFreshMdeData (skipped) | 301.5 | 161.5 | 87.6 | 0.025 | 4/3/2 | 17.31 |
+| Dual | GenerateDashboard | 287.7 | 147.1 | 84.6 | 0 | 0/0/0 | 17.31 |
+| Dual | CheckDashboardPayloadCache | 289.3 | 148.5 | 74.8 | 0.008 | 2/2/2 | 17.31 |
+| Dual | ReadNormalizationInputs | 335.9 | 187.9 | 94.2 | 0.751 | 51/14/4 | 20.35 |
+| Dual | NormalizeDashboardData | 421.1 | 249.4 | 179.8 | 181.090 | 11658/605/49 | 11.64 |
+| Dual | PrepareDashboardPayload | 370.6 | 198.4 | 93.6 | 0.032 | 6/4/4 | 11.90 |
+| Dual | PrepareDashboardLibraries | 372.2 | 199.5 | 93.6 | 0.023 | 3/2/2 | 12.15 |
+| Dual | LoadDashboardTemplates | 374.8 | 201.9 | 96.7 | 0.031 | 4/2/2 | 13.26 |
+| Dual | WriteHostedDashboard | 379.0 | 204.8 | 94.3 | 5.131 | 330/6/4 | 22.39 |
+| Dual | WriteSelfContainedDashboard | 379.0 | 204.7 | 108.5 | 0.068 | 7/4/4 | 13.91 |
+| Dual | ExportResults | 339.1 | 163.0 | 90.1 | 0 | 0/0/0 | 13.91 |
+| Dual | Completed | 681.3 | 704.8 | 373.8 | 0 | 0/0/0 | 293.96 |
+
+Start-to-final cumulative allocation deltas were 188.622 GiB (Hosted) and 189.082 GiB (Dual), with Gen0/1/2 deltas 12124/613/73 and 12123/666/79 respectively. Those large allocation totals are not resident memory. Normalization dominates allocation churn, but does not explain the final Dual working-set crest on its own.
+
+### Peak localization and next proposal
+
+The pre-lookup payload crest (`PayloadClose PreLookupGc batchTitles`) was 421.2/421.1 MiB WS and 180.0/179.8 MiB GC for Hosted/Dual. The existing lookup GC reduced GC to 107.7 MiB in both modes; normalization cleanup reached 79.3 MiB GC in both. The transient-context release before payload close already exists and is covered by `Test-InvokeContentStoreNormalizationReleasesTransientContextBeforePayloadClose`; repeating it is not a new candidate.
+
+Hosted assembly ended at 378.7 MiB WS; Dual hosted assembly at 378.9 MiB and self-contained assembly at 342.4 MiB. Both still reported a process high-water of 421.2 MiB through assembly. Dual's process peak rose only in the later publication/completion interval, so these measurements do not justify changing generator base64/template substitution.
+
+| ExportResults sample to Completed sample | Hosted | Dual |
+| --- | ---: | ---: |
+| Sample-to-sample seconds (not exclusive export time) | 23.981 | 39.543 |
+| Allocation delta, bytes | 727,889,536 | 1,364,492,472 |
+| Gen0/1/2 delta | 14/6/2 | 20/12/5 |
+| Final last-GC generation | 2 | 1 |
+| Final last-GC heap, bytes | 170,907,328 | 390,400,672 |
+| Final last-GC committed, bytes | 676,880,384 | 441,217,024 |
+| Final last-GC total fragmentation, bytes | 1,543,320 | 4,276,312 |
+| Final last-GC LOH before/after, bytes | 542,519,848 / 91,007,640 | 308,243,672 / 308,243,672 |
+| Final last-GC LOH fragmentation before/after, bytes | 1,214,032 / 1,213,712 | 2,262,360 / 2,262,360 |
+
+The Astra-approved baseline led to the network-free exact-owner probe below. The final cloud stage also includes uploads, verification, hashing and status serialization, so its snapshots alone cannot causally identify a specific call. The later strict-comment candidate trial is recorded separately below.
+
+### Local reference-reader candidate (2026-09-30)
+
+The actual policy owners are `Get-DashboardRequiredAssetName`, `Get-DashboardPublishedAssetPrefix`, and `Get-DashboardDependencyPolicy`. The baseline used byte-exact pre-agent `DashboardGeneration.ps1` (SHA-256 `e19d2413ea973dca3af55b1a601245440360fc7a10311dc0a18a6f605b896eac`), not a reconstructed approximation. Before any canonical edit, the first probe established meaningful whole-HTML read/reference allocation pressure; its corrected final replay supplies the numbers below. Initial LOH readings were superseded after discovering that PowerShell could not expose the span-backed generation statistics; the final harness reads those statistics in C#.
+
+Each lane used a fresh, sequential `pwsh -NoProfile` child, both saved Dual backup roots (including the 22,575,578-byte self-contained root), and its own saved run-3 candidate roots. Prior/candidate string lifetimes follow the publisher loops: prior roots use the tracked-root order; candidates use the actual recursive file enumeration, not that prior-root list. There was no payload decode or cloud access. Guards required at least 2 GiB free RAM before launch and throughout execution, and child process high-water WS at most 2 GiB; no concurrent children or unrelated process termination occurred. Every read, required-reference call, format call and applicable prefix call recorded allocation bytes, elapsed time, instantaneous/process-peak WS, private/peak-commit bytes, GC heap/collection counters and last-GC LOH. End-of-interval OS high-water and independent 20-ms sampled maxima are retained separately. Logs contain scalars, counts and hashes only.
+
+| Local lane | Allocated MiB, old/new | Process-peak WS MiB, old/new | Sampled-peak private MiB, old/new | Max last-GC LOH MiB, old/new | Relevant-call seconds, old/new |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Hosted | 545.33 / 16.98 | 724.20 / 183.55 | 667.33 / 90.96 | 498.73 / 4.14 | 2.509 / 0.387 |
+| Dual | 1147.98 / 16.78 | 866.52 / 184.22 | 799.65 / 91.53 | 240.37 / 4.14 | 5.666 / 0.578 |
+
+Sampled WS maxima were 724.19/183.55 MiB (Hosted old/new) and 866.52/184.21 MiB (Dual old/new), within 0.01 MiB of the independently recorded OS high-water. Last-GC LOH is not an instantaneous retained-object measurement. These are single local reference-resolution comparisons, not full-pipeline timing, Azure memory, or acceptance claims.
+
+`Get-DashboardReferenceHtmlFromPath` uses a buffered `TextReader` scanner, retaining only `dashboardConfig`/`dataFormat` script bodies and external script/link tags. It never materializes the embedded compressed payload or PDF bundle. Markup/config/aggregate metadata limits fail explicitly rather than clipping. The compact metadata goes through the **unchanged** string policy and structured JSON parser. Publication replaces only the recovery/prior/candidate reference reads; lease, ETag, recovery identities, rollback and artifact checks are unchanged. The string API and service validator remain available unchanged.
+
+Exact root-byte hashes, required-reference counts/hashes, formats and asset prefixes matched for all saved old/new generated roots. All other canonical source/template bytes matched the pre-agent inventory except the intended owning helper and publisher call sites. These historical measurements precede the parser blocker repair below; the earlier single-quoted/reordered-ID acceptance was unsafe normalization, not compatibility evidence. A separately guarded streamed 64-MiB inline-PDF control produced 149 metadata characters from 67,109,095 HTML bytes with zero references and unchanged file SHA-256; read/policy allocation was 344,704 bytes (Hosted child) and 330,744 bytes (Dual child). Its full HTML was never read into a string.
+
+Full deterministic preflight and Azure release build passed. AST comparisons confirmed source/generated/extracted-package helper and publisher identity and unchanged original string-policy bodies. Extracted release probes also preserved exact root/reference parity: process peaks were 190.16/190.16 MiB for Hosted/Dual, allocations 17.04/16.81 MiB. Shared/runbook/Function fingerprint is `e13fc2a49f98f595e658b50ec0709749133ea66fb3e12d0ad69713fb1d8e528e`; release ZIP SHA-256 is `45a2c7a1c05c522146b7cc72e8afde7af676ee41414b25149057f76e8d0a3976`. The generated template publisher was normalized mechanically to BOM+LF, preserving regenerated fingerprint `707ad804c822de4fe14de82f611f963e4d4ed8e60e7aab3439155efc51ce207c`; only that fingerprint differs from its Git baseline. Its supported `-WhatIf` smoke passed after formatting. The release retains the builder's original artifact bytes, with its own raw-hash manifest.
+
+Evidence: `.local/reference-probe/` contains immutable pre-agent hashes, exact baseline source copy, per-call `Baseline-*`, `Candidate-*` and `Packaged-*` scalar JSON, separate `LargeInline-*` controls, `comparison.json`, full preflight/release logs and the extracted release. The harness is `.local/Probe-Issue69References.ps1`. Raw HTML remains private.
+
+**Next cloud gate, separate authorization required:** use the same retained synthetic dataset/template identities, cold payload cache, existing-export/no-direct-merge flags and instrumentation, comparing the candidate against the controlled Dual 769.42-second baseline. The 10% ceiling is **846.36 seconds**. Review all phases, sampled WS and true process high-water independently; both must be **below 400 MiB**, with exact payload/reference parity and byte-exact restoration. Earlier normalization/assembly already reached about 421.2 MiB, so eliminating publication pressure alone does not establish that target. No cloud writes, new jobs, commits, agents or main-worktree changes were made for this candidate. **Issue 69 remains open; the memory target is not met.**
+
+### Bounded reader compatibility contract
+
+The reader is opt-in. Runbook and publisher `UseBoundedPublicationMetadataReader` default to `false`: production continues to use whole-HTML `Get-Content -Raw` for recovery, prior and candidate roots. The Function App fixes this flag to `false`, with no new environment setting. Unsupported comment variants, including internal double hyphens, are outside this reader's contract; rejection does not imply every such input is invalid browser HTML.
+
+The file reader is a bounded projection for generated dashboard HTML, not an arbitrary HTML parser or an equivalent replacement for the unsafe string regex on every possible input. The original string-policy functions remain unchanged. Selected metadata opening tags and JSON bodies are preserved verbatim, including order, quoting and case of HTML tag/attribute names. Metadata IDs are case-sensitive and must be exactly `dashboardConfig` or `dataFormat`, unique, first attributes, and double-quoted as required by the existing string policy. Reordered, single-quoted, unquoted, encoded, wrong-case, duplicate or external metadata declarations are rejected rather than normalized into a newly accepted contract.
+
+Actual script/link attributes are tokenized outside quoted values, including ordinary quoted/unquoted and boolean attributes; text such as `data-note=' id="dashboardConfig"'` is not an ID. External reference attributes must be quoted, singular per tag, and match the existing regex's exact result; ignored unquoted references, conflicting src/href and reference-like text inside another attribute are rejected. Supported comments terminate on `-->` independently of quotes and cannot select metadata or emit references. Internal double hyphens, nested comment openings (including partial nested openings that reach an internal double hyphen), abrupt `<!-->`/`<!--->` openings, unterminated comments and over-limit comments are rejected, not normalized as arbitrary browser HTML. HTML DOCTYPE is supported; XML processing instructions, CDATA and other declarations are rejected. This does not support arbitrary foreign content, alternate raw-text elements, browser error recovery or scripting-generated metadata.
+
+Skipped script raw text terminates at case-insensitive `</script>` or `</script` followed by HTML whitespace and `>`, even inside JavaScript quotes. Following script/link asset tags are retained. Metadata-body whitespace closing tags are rejected because the original string policy cannot extract them. Script bodies are not harvested for phantom references: reference-like script/link markup in a skipped body is rejected conservatively because removing it could change the old regex's result. Comments intentionally differ from the string API's unsafe false positives; normative generated variants require exact string/file required-reference sets, not merely successful parsing or equal counts.
+
+Malformed/over-limit tags, comments, metadata bodies or aggregate metadata throw without clipping. Existing publication failure handling prevents pruning or candidate root commit when prior-root inspection fails, preserves all prior-generation bytes, and releases the lease in `finally`; Dual may already have written a durable recovery backup for its first valid root. The existing atomic publisher regression exercises the actual in-memory publisher with external PDF prior roots, fake quoted IDs, apostrophe comments, both whitespace closers, duplicate IDs, raw-text phantom markup and bounded failures. Valid cases retain both PDF assets and the complete generation; rejected cases preserve all prior blobs and publish no candidate blobs.
+
+Final repaired-source full deterministic preflight and release build passed, including the source/generated exact-reference matrix and actual publisher reproductions in SelfContained, Hosted and Dual (four valid and seven rejected prior-root cases per mode). Editor diagnostics and `git diff --check` were clean. The exact embedded C# reader compiled with C# 12 against managed .NET 8 runtime assemblies only, then executed on installed .NET 8.0.31 with runtime roll-forward disabled: six normative and fifteen rejection controls passed, and all six saved-root metadata hashes matched a fresh PowerShell process. This validates the reader on .NET 8 locally, not PowerShell 7.4 Azure imports, Automation 8.0.28, or a deployed publisher. Persistent PowerShell `Add-Type` caching required fresh processes; an initial stale-session hash mismatch is not runtime evidence.
+
+Fresh sequential source and extracted-release probes preserved exact saved-root bytes, required-reference sets, formats and prefixes against the original baseline. These final comparisons exclude the separate 64-MiB control from their measured call sequence.
+
+| Repaired local lane | Implementation | Allocated MiB | Process-peak WS MiB | Sampled-peak WS MiB | Relevant-call seconds |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Hosted | Source | 17.47 | 185.81 | 185.77 | 0.674 |
+| Dual | Source | 16.80 | 189.56 | 189.50 | 1.139 |
+| Hosted | Extracted release | 16.93 | 193.64 | 193.61 | 0.694 |
+| Dual | Extracted release | 16.78 | 191.45 | 191.40 | 1.080 |
+
+The separate repaired-source streamed 64-MiB controls returned 149 metadata characters and zero references with unchanged file hashes. Source/generated/extracted-release helper and publisher AST identity passed, and all four original string-policy function bodies matched the pre-agent baseline exactly. Final shared/runbook/Function fingerprint: `67055bbd8ae03d895652fe22e4c7317fb1c75016a87a1ff45b9367954544817d`. Repaired release ZIP SHA-256: `3791173b33525942724e1b66acb96e459bf24d0964c8b33a57d8e664c92517e2`. Evidence is under `.local/reference-probe/`: `repair-preflight.txt`, `repair-release.txt`, `repair-comparison.json`, `Repair-{Candidate,Packaged,LargeInline}-{Hosted,Dual}.json`, `net8-repair/result.txt`, and `Azure-issue69-parser-repair.zip`. The historical candidate files/package above are superseded for parser safety. No cloud writes/jobs, agents, commits or main edits occurred; issue 69's Azure memory target remains unverified and unmet.
+
+The third-review strict-comment release supersedes the parser-repair release above. Its current shared/runbook/Function fingerprint is `5c7aa687b2bbc44401555d679fe3c6655e79465e48fcb318ef96889bbebf8276`, ZIP SHA-256 is `04266253d265c89b4ba40bb3ea7d9e7fd506b8add4a7b24afeb16b8c4d6a4c61`, and manifest-recorded runbook SHA-256 is `723e706466c26fdde7d7cee3598aefb2e72f1803805849d0a7cd31b16112ef2f`. Evidence: `.local/reference-probe/net8-strict-comment/{Azure-issue69-strict-comment.manifest.json,final-preflight.txt,packaged-publisher.txt,release-build.txt}`. Normative generated-root string/file reference equality remains required; comment rejection controls do not imply arbitrary HTML compatibility. The candidate trial below uses these reviewed bytes without source optimization.
+
+### Strict-comment Dual trial and default-off gate
+
+The saved candidate completed with artifact validation passed, exact compressed/decompressed payload parity (1,187,395 rows), `restored_exactly=true`, and zero restoration errors. These are **not performance acceptance**. Independent local hashing revalidated all 23 exports, 11 dashboards and 23 templates against the captured original manifest, plus the saved original/restored runbook SHA-256 `9c8d25a60ef44b035042ad078a8f702fe4110bfb007552d6b093ff6dfb32b3df`. This verification did not restore anything or start another job. Raw identities and evidence remain private under `.local/candidate-strict-comment-20260930-144011/Dual/`; the comparison also rechecks all 27 control-stage rows and exact generated-root reference sets.
+
+| Measure | Controlled Dual | Strict-comment candidate | Gate |
+| --- | ---: | ---: | --- |
+| Creation-to-completion | 769.42 s | 875.39 s (+13.77%) | Failed: ceiling 846.36 s |
+| Sampled peak WS | 681.3 MiB | 413.8 MiB, NormalizeDashboardData | Failed: below 400 MiB required |
+| True process high-water WS | 681.3 MiB | 413.8 MiB | Failed: below 400 MiB required |
+| Artifact/payload parity | Passed | Passed | Separate artifact gate passed |
+| Captured byte-exact restoration | Passed | Passed; independently rehashed | Separate restoration gate passed |
+
+The within-stage normalization sample span increased by 105.96 s; the ExportResults-to-Completed sample interval shortened by 24.09 s (39.543 to 15.457 s). These are phase observations, not exclusive method timings or causal reader costs. The workers have the same reported runtime class (PowerShell 7.4.6, .NET 8.0.28, X64, one processor, workstation GC), but are different pooled workers with one measurement each. This does not establish why normalization timing varied. **The full-pipeline memory target remains unmet and issue 69 remains open.**
+
+The gate preserves the publisher's existing API: omitting the new optional boolean selects the original whole-HTML reader. Bounded-reader parser/retention tests explicitly opt in; the default legacy upload-fault matrix remains required for source, generated runbook, Function and extracted package. The reader/parser and original string policy are unchanged by this gate.
+
+For a separately authorized, temporarily deployed candidate, the explicit benchmark reader selection is reproducible as follows (not executed in this continuation):
+
+```powershell
+& .\tests\Measure-RunbookOnlyAzureBenchmark.ps1 `
+  -SubscriptionId $subscriptionId -AutomationAccountName $automationAccount `
+  -AutomationResourceGroup $resourceGroup -RunbookName $runbookName `
+  -StorageAccountName $storageAccount -DashboardDeliveryMode Dual `
+  -UseExistingExportsOnly:$true -UseBoundedPublicationMetadataReader $true `
+  -UseDirectMergeDeviceLookup:$false -ExpectedTotalRows 1187395 `
+  -SkipDeployRunbook -SkipTemplateUpload -ResultsOutputPath $privateResultPath
+```
+
+This benchmark alone does not own backup/restoration: use it only inside the approved guarded trial, after matching retained dataset/template identities, cold payload cache and candidate bytes. Permanent defaults remain unchanged. The guarded `Invoke-AzureRunbookValidation.ps1` wrapper forwards both experimental flags and keeps bounded reading default-off.
+
+**Next planned trial, blocked pending parent Astra gate review, treatment eligibility and separate cloud authorization:** Dual, `UseExistingExportsOnly=true`, `UseBoundedPublicationMetadataReader=true`, `UseDirectMergeDeviceLookup=true`, matched 1,187,395-row dataset/templates and cold payload cache. The read-only streaming precheck on the actual saved gzip machine snapshot and current dictionary **failed at profile index 0**; no IDs were logged and profiles were not reordered. Removed machine entries are ignored exactly as in the existing helper. Do not launch this combined trial on the current dataset. A partitioned dictionary, blank/mismatched ID, unavailable direct path or `Post-DirectMergeFallbackMachineRead` outcome fails treatment eligibility even if a job completes. Keep the original 846.36-second ceiling, both sub-400-MiB memory gates, exact artifact parity and independent restoration requirements. The existing 10,000-template compiled-selection threshold is unchanged; this 5,000-template lane must not be forced onto a new compiled path.
+
+### Earlier control restoration
+
+Default-off gate validation passed: focused benchmark argument/evidence forwarding, full `build/Invoke-RegressionValidation.ps1`, local `build/Build-AzureReleasePackage.ps1`, and the same atomic publisher matrix in source, generated runbook, generated Function and both extracted package entry points. Each mode passed six opted-in valid prior-root PDF retention cases and eleven opted-in fail-closed rejections; default legacy SelfContained/Hosted/Dual retained 4/14/15 upload-fault controls, recovery, hashes, leases and pruning checks. The unchanged reviewed reader passed actual .NET 8.0.31 with 8 normative, 22 rejection, 1,080 boundary checks and six saved-root exact metadata hashes. This is local validation, not new cloud acceptance.
+
+The gate release is private at `.local/reference-probe/default-off-release/Azure-issue69-default-off.zip`, SHA-256 `cb4eb2dbeadb3fc064d0b8819182a04873b12f64c4292c9c556f061a7dd2cf18`; manifest-recorded runbook SHA-256 is `539f020c79da10abc00fb42b6dc9803b6451e6abf958585dfd14292ba6240bf3`. The shared/parser fingerprint remains `5c7aa687b2bbc44401555d679fe3c6655e79465e48fcb318ef96889bbebf8276`. Logs are `.local/reference-probe/default-off-{preflight,release-build,evidence-check,net8}.txt` and the release directory's per-artifact publisher logs. The package retains builder bytes; workspace template-publisher newline-only churn was removed with its fingerprint preserved. No cloud writes, jobs, repeated restoration, agents, commits or main-worktree edits occurred. Parent Astra review remains pending.
+
+Both saved results are `passed`, `restored_exactly=true`, with no restoration errors. Original published runbook SHA-256 is `9c8d25a60ef44b035042ad078a8f702fe4110bfb007552d6b093ff6dfb32b3df`; all original exports, dashboards and templates, status inventory, auth, resources, runtime and disabled schedules were restored/verified. Dual recovery reused the already-completed job; it did not create another job. The read-only final parity task completed successfully in terminal `f5dc647b-47f6-4666-aac3-82dec2b03b88`. Restoration must not be repeated.
+
+Continuation read-only cloud checks found zero `_validation/` or `_publication/recovery/` blobs, zero active jobs, and `DashboardPipeline-Daily` disabled. Local available RAM was 7.20 GiB after the parent's cleanup. No process termination, deployment, new job, schedule change, commit, agent launch or main-worktree edit was performed in this continuation. Parent Astra review and any later candidate authorization remain separate gates.
+
 ## Issue 70 worker-transfer evidence (2026-09-30)
 
 **Large baseline: incomplete, RAM-blocked.** The prior capture stopped at 1,745,756,160 bytes free RAM (about 1.63 GiB), below the unchanged 2 GiB floor. No large browser run was launched during this repair. There is no completed large readiness measurement, cold/reload parity result, baseline/candidate comparison, or worker-timeout diagnosis. No transfer candidate or performance fix is claimed. The 3 GiB owned-family cap and production worker timeout remain unchanged.
