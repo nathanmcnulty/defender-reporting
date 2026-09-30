@@ -66,6 +66,7 @@ param(
 
     [Parameter(Mandatory = $false)]
     [bool]$UseDirectMergeDeviceLookup = $false,
+    [bool]$UseBoundedPublicationMetadataReader = $false,
 
     [Parameter(Mandatory = $false)]
     [ValidateSet('BlobStorage', 'SharePoint', 'StaticWebApp')]
@@ -235,16 +236,60 @@ function Get-PipelineMemorySnapshot {
         [string]$Label = ''
     )
 
+    if (-not ('DefenderReporting.Diagnostics.GcSnapshot' -as [type])) {
+        Add-Type -TypeDefinition @'
+namespace DefenderReporting.Diagnostics
+{
+    public static class GcSnapshot
+    {
+        public static long[] ReadLoh(System.GCMemoryInfo info)
+        {
+            var generations = info.GenerationInfo.ToArray();
+            if (generations.Length <= 3) return new long[4];
+            var loh = generations[3];
+            return new[] { loh.SizeBeforeBytes, loh.SizeAfterBytes, loh.FragmentationBeforeBytes, loh.FragmentationAfterBytes };
+        }
+    }
+}
+'@
+    }
+
+    $gcInfo = [System.GC]::GetGCMemoryInfo()
+    $loh = [DefenderReporting.Diagnostics.GcSnapshot]::ReadLoh($gcInfo)
     $process = [System.Diagnostics.Process]::GetCurrentProcess()
-    return [PSCustomObject]@{
-        sampledOnUtc = ([datetime]::UtcNow).ToString('o')
-        stage = $Script:PipelineCurrentStage
-        label = $Label
-        workingSetMb = [math]::Round(($process.WorkingSet64 / 1MB), 1)
-        privateMemoryMb = [math]::Round(($process.PrivateMemorySize64 / 1MB), 1)
-        gcHeapMb = [math]::Round(([System.GC]::GetTotalMemory($false) / 1MB), 1)
-        handleCount = [int]$process.HandleCount
-        threadCount = [int]$process.Threads.Count
+    try {
+        return [PSCustomObject]@{
+            sampledOnUtc = ([datetime]::UtcNow).ToString('o')
+            stage = $Script:PipelineCurrentStage
+            label = $Label
+            workingSetMb = [math]::Round(($process.WorkingSet64 / 1MB), 1)
+            processPeakWorkingSetMb = [math]::Round(($process.PeakWorkingSet64 / 1MB), 1)
+            privateMemoryMb = [math]::Round(($process.PrivateMemorySize64 / 1MB), 1)
+            gcHeapMb = [math]::Round(([System.GC]::GetTotalMemory($false) / 1MB), 1)
+            allocatedBytes = [System.GC]::GetTotalAllocatedBytes($false)
+            gen0Collections = [System.GC]::CollectionCount(0)
+            gen1Collections = [System.GC]::CollectionCount(1)
+            gen2Collections = [System.GC]::CollectionCount(2)
+            lastGcIndex = $gcInfo.Index
+            lastGcGeneration = $gcInfo.Generation
+            lastGcHeapSizeBytes = $gcInfo.HeapSizeBytes
+            lastGcFragmentedBytes = $gcInfo.FragmentedBytes
+            lastGcCommittedBytes = $gcInfo.TotalCommittedBytes
+            lastGcLohSizeBeforeBytes = $loh[0]
+            lastGcLohSizeAfterBytes = $loh[1]
+            lastGcLohFragmentationBeforeBytes = $loh[2]
+            lastGcLohFragmentationAfterBytes = $loh[3]
+            serverGc = [System.Runtime.GCSettings]::IsServerGC
+            runtimeVersion = [System.Environment]::Version.ToString()
+            powershellVersion = $PSVersionTable.PSVersion.ToString()
+            processArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+            processorCount = [System.Environment]::ProcessorCount
+            handleCount = [int]$process.HandleCount
+            threadCount = [int]$process.Threads.Count
+        }
+    }
+    finally {
+        $process.Dispose()
     }
 }
 
@@ -1068,7 +1113,9 @@ function Export-ToBlobStorage {
 
         [string[]]$LegacyVulnerabilityBlobNames = @(),
 
-        [bool]$UseGzip = $true
+        [bool]$UseGzip = $true,
+
+        [bool]$UseBoundedPublicationMetadataReader = $false
     )
 
     Write-Output "`nUploading results to blob storage..."
@@ -1187,7 +1234,7 @@ function Export-ToBlobStorage {
             foreach ($recoveryName in ($existingNames | Where-Object { $_ -match '^_publication/recovery/[0-9a-f]{32}/[^/]+\.html$' })) {
                 $recoveryPath = Join-Path $backupRoot 'recovery-root'
                 Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $recoveryName -DestinationPath $recoveryPath -StorageToken $StorageToken
-                $recoveryHtml = Get-Content -LiteralPath $recoveryPath -Raw
+                $recoveryHtml = if ($UseBoundedPublicationMetadataReader) { Get-DashboardReferenceHtmlFromPath -Path $recoveryPath } else { Get-Content -LiteralPath $recoveryPath -Raw }
                 if ($recoveryHtml) {
                     foreach ($reference in @(Get-DashboardRequiredAssetName -Html $recoveryHtml -HtmlBlobName ([System.IO.Path]::GetFileName($recoveryName)))) {
                         [void]$retainedNames.Add($reference)
@@ -1200,7 +1247,7 @@ function Export-ToBlobStorage {
                     $rootETags[$rootName] = Get-DashboardRootETag -AccountName $AccountName -StorageToken $StorageToken -BlobName $rootName
                     $backupPath = Join-Path $backupRoot $rootName
                     Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $rootName -DestinationPath $backupPath -StorageToken $StorageToken
-                    $priorHtml = Get-Content -LiteralPath $backupPath -Raw
+                    $priorHtml = if ($UseBoundedPublicationMetadataReader) { Get-DashboardReferenceHtmlFromPath -Path $backupPath } else { Get-Content -LiteralPath $backupPath -Raw }
                     if ($priorHtml) {
                         $priorRoots[$rootName] = $backupPath
                         foreach ($reference in @(Get-DashboardRequiredAssetName -Html $priorHtml -HtmlBlobName $rootName)) {
@@ -1218,7 +1265,7 @@ function Export-ToBlobStorage {
                 }
             }
             foreach ($dashboardFile in ($dashboardFiles | Where-Object { $_.BlobName -in $Script:DashboardTrackedBlobNames })) {
-                $candidateHtml = Get-Content -LiteralPath $dashboardFile.FullName -Raw
+                $candidateHtml = if ($UseBoundedPublicationMetadataReader) { Get-DashboardReferenceHtmlFromPath -Path $dashboardFile.FullName } else { Get-Content -LiteralPath $dashboardFile.FullName -Raw }
                 foreach ($reference in @(Get-DashboardRequiredAssetName -Html $candidateHtml -HtmlBlobName $dashboardFile.BlobName)) {
                     $dependencyPath = Join-Path $resolvedDashboardRoot $reference
                     if (-not (Test-Path -LiteralPath $dependencyPath -PathType Leaf) -or (Get-Item -LiteralPath $dependencyPath).Length -eq 0) { throw "Missing required dashboard dependency: $reference" }
@@ -2212,7 +2259,8 @@ try {
                 -LegacyMachineBlobNames $legacyMachineBlobs `
                 -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -LegacyVulnerabilityBlobNames $legacyVulnerabilityBlobs `
-                -UseGzip $useGzip
+                -UseGzip $useGzip `
+                -UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader
         }
         'SharePoint' {
             # Still upload to blob as primary, then also to SharePoint
@@ -2225,7 +2273,8 @@ try {
                 -LegacyMachineBlobNames $legacyMachineBlobs `
                 -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -LegacyVulnerabilityBlobNames $legacyVulnerabilityBlobs `
-                -UseGzip $useGzip
+                -UseGzip $useGzip `
+                -UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader
             Export-ToSharePoint -DashboardPath $dashboardStatusOutputPath
         }
         'StaticWebApp' {
@@ -2238,7 +2287,8 @@ try {
                 -LegacyMachineBlobNames $legacyMachineBlobs `
                 -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -LegacyVulnerabilityBlobNames $legacyVulnerabilityBlobs `
-                -UseGzip $useGzip
+                -UseGzip $useGzip `
+                -UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader
             Export-ToStaticWebApp -DashboardPath $dashboardStatusOutputPath
         }
     }

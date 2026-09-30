@@ -6367,6 +6367,41 @@ function Test-BenchmarkEvidenceEnvelopeWritesTransactionally {
     }
 }
 
+function Test-PipelineMemorySnapshotActualGcMetric {
+    [CmdletBinding()]
+    param()
+
+    $sourcePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'build\azure\runbook-source.ps1'
+    $parseErrors = $null
+    $sourceAst = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$null, [ref]$parseErrors)
+    Assert-True ($parseErrors.Count -eq 0) 'Expected the diagnostic source to parse.'
+    $definition = $sourceAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-PipelineMemorySnapshot' }, $true)
+    . ([scriptblock]::Create($definition.Extent.Text))
+    $originalStage = Get-Variable -Name PipelineCurrentStage -Scope Script -ErrorAction Ignore
+    try {
+        $Script:PipelineCurrentStage = 'diagnostic-test'
+        $before = Get-PipelineMemorySnapshot -Label 'before'
+        $allocation = [byte[]]::new(2097152)
+        $allocation[0] = 1
+        [System.GC]::Collect(2)
+        $after = Get-PipelineMemorySnapshot -Label 'after'
+        foreach ($field in @('allocatedBytes', 'gen0Collections', 'gen1Collections', 'gen2Collections', 'lastGcIndex', 'lastGcGeneration', 'lastGcHeapSizeBytes', 'lastGcFragmentedBytes', 'lastGcCommittedBytes', 'lastGcLohSizeBeforeBytes', 'lastGcLohSizeAfterBytes', 'lastGcLohFragmentationBeforeBytes', 'lastGcLohFragmentationAfterBytes')) {
+            Assert-True ($null -ne $after.$field -and $after.$field -ge 0) "Expected a nonnegative actual GC field: $field."
+        }
+        Assert-True ($after.allocatedBytes -gt $before.allocatedBytes) 'Expected cumulative allocations to increase.'
+        Assert-True ($after.gen2Collections -gt $before.gen2Collections) 'Expected the actual Gen2 collection count to increase.'
+        Assert-True ($after.lastGcLohSizeAfterBytes -ge $allocation.Length) 'Expected the last-GC LOH size to include the retained buffer.'
+        Assert-True ($after.stage -eq 'diagnostic-test' -and $after.label -eq 'after') 'Expected stage and sample labels to be preserved.'
+        Assert-True (($after | ConvertTo-Json -Compress).Length -le 2048) 'Expected a bounded diagnostic snapshot.'
+        Assert-True ($after.powershellVersion -eq $PSVersionTable.PSVersion.ToString() -and $after.runtimeVersion -eq [System.Environment]::Version.ToString()) 'Expected actual runtime identity.'
+        [System.GC]::KeepAlive($allocation)
+    }
+    finally {
+        if ($null -eq $originalStage) { Remove-Variable -Name PipelineCurrentStage -Scope Script -ErrorAction Ignore }
+        else { $Script:PipelineCurrentStage = $originalStage.Value }
+    }
+}
+
 function Test-GetBlobListPagination {
     [CmdletBinding()]
     param()
@@ -6757,6 +6792,45 @@ function Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback {
         Assert-True ($legacy.SafeToExecute -eq $true -and $legacy.DeviceProfileCount -eq 1 -and $legacy.ContentTemplateCount -eq 1) 'Expected exact dictionary cardinalities without procedural metadata.'
     }
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
+function Test-RunbookBenchmarkPublicationReaderOptIn {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path $PSScriptRoot -Parent
+    $benchmarkPath = Join-Path $PSScriptRoot 'Measure-RunbookOnlyAzureBenchmark.ps1'
+    $benchmarkAst = [System.Management.Automation.Language.Parser]::ParseFile($benchmarkPath, [ref]$null, [ref]$null)
+    $parameter = $benchmarkAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'UseBoundedPublicationMetadataReader' }
+    Assert-True ($parameter.DefaultValue.Extent.Text -eq '$false') 'Benchmark reader flag must default false.'
+    $startDefinition = $benchmarkAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Start-RunbookBenchmark' }, $true)
+    . ([scriptblock]::Create($startDefinition.Extent.Text))
+    . (Join-Path $PSScriptRoot 'helpers/TestScriptSupport.ps1')
+    function Invoke-AzCli {
+        param($Arguments, [switch]$ExpectJson)
+        if (-not $ExpectJson) { throw 'Benchmark startup must request structured job evidence.' }
+        $script:ReaderBenchmarkArguments = @($Arguments)
+        [pscustomobject]@{ name = 'fixture'; jobId = 'fixture'; status = 'New'; creationTime = '2026-09-30T00:00:00Z' }
+    }
+    $script:AutomationAccountName = 'fixture'
+    $script:AutomationResourceGroup = 'fixture'
+    $script:RunbookName = 'fixture'
+    $script:DashboardDeliveryMode = 'Dual'
+    $script:UseExistingExportsOnly = $true
+    $script:UseDirectMergeDeviceLookup = $true
+    foreach ($enabled in @($false, $true)) {
+        $script:UseBoundedPublicationMetadataReader = $enabled
+        $null = Start-RunbookBenchmark -Confirm:$false
+        Assert-True (($script:ReaderBenchmarkArguments -contains 'UseBoundedPublicationMetadataReader=true') -eq $enabled) 'Benchmark job reader selection differs from requested treatment.'
+        Assert-True ($script:ReaderBenchmarkArguments -contains 'UseExistingExportsOnly=true' -and $script:ReaderBenchmarkArguments -contains 'UseDirectMergeDeviceLookup=true') 'Benchmark omitted replay/direct-merge trial flags.'
+    }
+    Assert-True ($benchmarkAst.Extent.Text.Contains('use_bounded_publication_metadata_reader = $script:UseBoundedPublicationMetadataReader')) 'Benchmark must record its reader selection.'
+    $validationAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Invoke-AzureRunbookValidation.ps1'), [ref]$null, [ref]$null)
+    $validationParameter = $validationAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'UseBoundedPublicationMetadataReader' }
+    Assert-True ($validationParameter.DefaultValue.Extent.Text -eq '$false') 'Guarded wrapper must default to legacy reading.'
+    Assert-True ($validationAst.Extent.Text.Contains('-UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader -UseDirectMergeDeviceLookup:$UseDirectMergeDeviceLookup')) 'Guarded wrapper must forward trial treatment flags.'
+    $functionBuilder = Get-Content (Join-Path $repoRoot 'build/azure/Build-FunctionApp.ps1') -Raw
+    Assert-True ($functionBuilder.Contains('$UseBoundedPublicationMetadataReader = $false') -and -not $functionBuilder.Contains('$env:USE_BOUNDED_PUBLICATION_METADATA_READER')) 'Function must stay legacy without a new setting.'
 }
 
 function Test-BenchmarkWorkloadProfilesArePinned {
@@ -7186,6 +7260,134 @@ function Test-AtomicDashboardExecutableDiscovery {
     }
 }
 
+function Test-DashboardReferencePathReader {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path $PSScriptRoot -Parent
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dashboard-reference-metadata-' + [guid]::NewGuid().ToString('N'))
+    [void][System.IO.Directory]::CreateDirectory($tempRoot)
+    $check = {
+        $rootName = 'Control.html'
+        $prefix = 'Control.assets/generations/' + ('a' * 32) + '/'
+        $config = [ordered]@{ payloadUrl = $prefix + 'data/payload.json.gz'; payloadSummaryUrl = $prefix + 'data/summary.json'; chartJsUrl = $prefix + 'runtime/chart.js'; pdfExportRuntimeMode = 'external'; pdfExportRuntimeUrl = $prefix + 'runtime/pdf.js'; pdfExportBundleMode = 'external'; pdfExportBundleUrl = $prefix + 'data/pdf.json.gz'; label = "escaped \ quote `" and unicode $([char]0x263a)" } | ConvertTo-Json -Compress
+        $formatTag = '<script id="dataFormat">external-compressed</script>'
+        $configTag = '<script id="dashboardConfig" type="application/json">' + $config + '</script>'
+        $dependencyTag = '<link href="' + $prefix + 'runtime/dashboard.css"><script src="' + $prefix + 'runtime/dashboard.js"></script>'
+        $inline = '<script id="compressedData">' + ('A' * (2MB + 8191)) + '</script><script id="pdfExportBundle">' + ('B' * 2MB) + '</script>'
+        foreach ($bom in @($false, $true)) {
+            foreach ($ending in @("`n", "`r`n", '')) {
+                $html = @('<!doctype html>', $formatTag, $configTag, $dependencyTag, $inline) -join $ending
+                $path = Join-Path $tempRoot 'control.html'
+                [System.IO.File]::WriteAllText($path, $html, [System.Text.UTF8Encoding]::new($bom))
+                $beforeHash = (Get-FileHash -LiteralPath $path).Hash
+                $metadata = Get-DashboardReferenceHtmlFromPath -Path $path
+                Assert-True ($metadata.Length -lt 4096) 'Expected bounded metadata without inline data or PDF bundle.'
+                Assert-True ((Get-DashboardHtmlScriptContent -Html $metadata -ScriptId 'dashboardConfig') -ceq $config) 'Expected JSON escapes and Unicode to remain exact.'
+                $expected = @(Get-DashboardRequiredAssetName -Html $html -HtmlBlobName $rootName | Sort-Object -CaseSensitive)
+                $actual = @(Get-DashboardRequiredAssetName -Html $metadata -HtmlBlobName $rootName | Sort-Object -CaseSensitive)
+                Assert-True (($actual -join "`n") -ceq ($expected -join "`n")) 'Expected exact path/string reference parity.'
+                Assert-True ((Get-DashboardPublishedAssetPrefix -Html $metadata -HtmlBlobName $rootName) -ceq $prefix) 'Expected the immutable generation prefix.'
+                Assert-True ((Get-FileHash -LiteralPath $path).Hash -ceq $beforeHash) 'Expected source HTML bytes to remain unchanged.'
+            }
+        }
+        $variants = @(
+            ('<SCRIPT ID="dashboardConfig" type="application/json">' + ($config | ConvertFrom-Json | ConvertTo-Json -Depth 20) + '</SCRIPT>'),
+            ('<script id="dashboardConfig" data-note='' id="fake"'' type="application/json">' + $config + '</script>')
+        )
+        foreach ($variant in $variants) {
+            $html = $formatTag + $variant + $dependencyTag
+            [System.IO.File]::WriteAllText($path, $html)
+            $metadata = Get-DashboardReferenceHtmlFromPath -Path $path
+            Assert-True ($metadata.Contains([regex]::Replace($variant, '</script>$', '', 'IgnoreCase'))) 'Expected original metadata opening tag, attribute order, quoting and body.'
+            $expected = @(Get-DashboardRequiredAssetName -Html $html -HtmlBlobName $rootName | Sort-Object -CaseSensitive)
+            $actual = @(Get-DashboardRequiredAssetName -Html $metadata -HtmlBlobName $rootName | Sort-Object -CaseSensitive)
+            Assert-True ($expected.Count -eq 8 -and ($actual -join "`n") -ceq ($expected -join "`n")) 'Expected exact normative string/file policy parity.'
+        }
+        foreach ($closing in @('</script >', "</ScRiPt`t>", '</script>')) {
+            $html = '<!DOCTYPE html><!-- user''s note --><script data-note='' id="dashboardConfig"''>{}</script><script>const text="' + $closing + $formatTag + $configTag + $dependencyTag
+            [System.IO.File]::WriteAllText($path, $html)
+            $metadata = Get-DashboardReferenceHtmlFromPath -Path $path
+            $expected = @(Get-DashboardRequiredAssetName -Html $html -HtmlBlobName $rootName | Sort-Object -CaseSensitive)
+            $actual = @(Get-DashboardRequiredAssetName -Html $metadata -HtmlBlobName $rootName | Sort-Object -CaseSensitive)
+            Assert-True ($expected.Count -eq 8 -and ($actual -join "`n") -ceq ($expected -join "`n")) 'Expected true HTML raw-text termination and both following asset tags.'
+            Assert-True (-not $metadata.Contains('data-note')) 'Fake quoted ID leaked into metadata.'
+        }
+        $comment = '<!-- user''s <script id="dashboardConfig">{}</script><link href="Control.assets/fake.js"> -->'
+        [System.IO.File]::WriteAllText($path, $comment + $formatTag + $configTag + $dependencyTag)
+        $metadata = Get-DashboardReferenceHtmlFromPath -Path $path
+        $expected = @(Get-DashboardRequiredAssetName -Html ($formatTag + $configTag + $dependencyTag) -HtmlBlobName $rootName | Sort-Object -CaseSensitive)
+        $actual = @(Get-DashboardRequiredAssetName -Html $metadata -HtmlBlobName $rootName | Sort-Object -CaseSensitive)
+        Assert-True (($actual -join "`n") -ceq ($expected -join "`n") -and -not $metadata.Contains('fake.js')) 'Comments must not select metadata or leak phantom references; intentionally differs from the string regex.'
+        foreach ($boundary in @(8192, 65536)) {
+            foreach ($offset in -32..3) {
+                foreach ($validComment in @('<!---->', '<!-- user''s note -->', '<!-- single-hyphen - note -->')) {
+                    $html = (' ' * ($boundary + $offset)) + $validComment + $formatTag + $configTag + $dependencyTag
+                    [System.IO.File]::WriteAllText($path, $html, [System.Text.UTF8Encoding]::new($false))
+                    $metadata = Get-DashboardReferenceHtmlFromPath -Path $path
+                    $actual = @(Get-DashboardRequiredAssetName -Html $metadata -HtmlBlobName $rootName | Sort-Object -CaseSensitive)
+                    Assert-True (($actual -join "`n") -ceq ($expected -join "`n")) "Valid comment lost config at boundary $boundary offset $offset."
+                }
+                foreach ($invalidComment in @('<!-->', '<!--->', '<!-- note --!>', '<!--<!-->', '<!-- nested <!-- note -->', '<!-- note -- x -->', '<!-- note --->')) {
+                    $html = (' ' * ($boundary + $offset)) + $invalidComment + $formatTag + $configTag + $dependencyTag + '<!-- end -->'
+                    [System.IO.File]::WriteAllText($path, $html, [System.Text.UTF8Encoding]::new($false))
+                    $failed = $false
+                    try { $null = Get-DashboardReferenceHtmlFromPath -Path $path } catch { $failed = $true }
+                    Assert-True $failed "Invalid comment accepted at boundary $boundary offset $offset."
+                }
+            }
+        }
+        foreach ($legacy in @('<script id="dataFormat">compressed</script><script id="compressedData">AAAA</script>', '<html><body>unknown old dashboard</body></html>')) {
+            [System.IO.File]::WriteAllText($path, $legacy)
+            $metadata = Get-DashboardReferenceHtmlFromPath -Path $path
+            Assert-True (-not [string]::IsNullOrEmpty($metadata)) 'Expected nonempty unknown roots to reach publisher validation.'
+            $oldFailed = $false
+            $newFailed = $false
+            try { $null = @(Get-DashboardRequiredAssetName -Html $legacy -HtmlBlobName $rootName) } catch { $oldFailed = $true }
+            try { $null = @(Get-DashboardRequiredAssetName -Html $metadata -HtmlBlobName $rootName) } catch { $newFailed = $true }
+            Assert-True ($oldFailed -eq $newFailed) 'Expected unchanged legacy missing-config acceptance/rejection.'
+        }
+        foreach ($invalid in @(
+            ('<script type="application/json" id=''dashboardConfig''>' + $config + '</script>'),
+            ('<script type="application/json" id="dashboardConfig">' + $config + '</script>'),
+            ('<script id=dashboardConfig>' + $config + '</script>'),
+            ('<script id="DashboardConfig">' + $config + '</script>'),
+            ($configTag + $configTag),
+            '<script id="dashboardConfig" ID="other">{}</script>',
+            $configTag.Replace('</script>', '</script >'),
+            ($configTag + '<script>const phantom='' <link href="Control.assets/fake.js">'';</script>'),
+            ($configTag + '<script src=Control.assets/unquoted.js></script>'),
+            ($configTag + '<script src="Control.assets/real.js" data-note='' src="Control.assets/fake.js"''></script>'),
+            ($configTag + '<script src="Control.assets/real.js" href="Control.assets/other.js"></script>'),
+            '<!-- user''s unterminated note',
+            ('<!--' + (' ' * 1MB) + '-->'),
+            '<![CDATA[<script id="dashboardConfig">{}</script>]]>',
+            ('<?xml version="1.0"?>' + $configTag),
+            '<script id="dashboardConfig">{broken}</script>',
+            '<script id="dashboardConfig">{"pdfExportBundleMode":"external"}</script>',
+            '<script id="dashboardConfig">{"payloadUrl":"../unsafe.json.gz"}</script>',
+            '<script id="dashboardConfig">{"pdfExportRuntimeUrl":"https://unsafe/pdf.js"}</script>',
+            '<script id="dashboardConfig">{"payloadUrl":"Control.assets/data/payload.json.gz"}</script>',
+            ('<script id="dashboardConfig">' + (' ' * 1MB) + '{}</script>'),
+            '<script id="dashboardConfig">{"unfinished":true}',
+            '<script id="dashboardConfig"'
+        )) {
+            [System.IO.File]::WriteAllText($path, $invalid)
+            $failed = $false
+            try { $metadata = Get-DashboardReferenceHtmlFromPath -Path $path; $null = @(Get-DashboardRequiredAssetName -Html $metadata -HtmlBlobName $rootName) } catch { $failed = $true }
+            Assert-True $failed 'Expected malformed, over-limit or unsafe metadata to fail, never clip.'
+        }
+    }
+    try {
+        & $check
+        & {
+            . (Join-Path $repoRoot 'src/powershell/Shared/Dashboard/DashboardGeneration.ps1')
+            & $check
+        }
+    }
+    finally { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
 function Invoke-SharedHelperRegressionTest {
     [CmdletBinding()]
     param(
@@ -7208,6 +7410,7 @@ function Invoke-SharedHelperRegressionTest {
 
 Write-Output 'Running shared-helper regression checks...'
 $sharedHelperRegressionTests = @(
+    @{ Name = 'Test-DashboardReferencePathReader'; SuccessMessage = 'Source/generated bounded reference metadata parity checks passed.' }
     @{ Name = 'Test-ArtifactManifestRejectsOutputInsideSourceRoot'; SuccessMessage = 'Artifact manifest output-root guard checks passed.' }
     @{ Name = 'Test-ArtifactManifestRejectsSourceRootOverlap'; SuccessMessage = 'Artifact manifest overlap guard checks passed.' }
     @{ Name = 'Test-ArtifactManifestRejectsSourceFileOutsideSourceRoot'; SuccessMessage = 'Artifact manifest source-root boundary checks passed.' }
@@ -7270,6 +7473,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-ConvertToNormalizedDataPreservesOptionalNvdFallback'; SuccessMessage = 'Optional NVD fallback normalization checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose'; SuccessMessage = 'Consuming payload-close lookup checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader'; SuccessMessage = 'Content-store streaming normalization checks passed.' }
+    @{ Name = 'Test-RunbookBenchmarkPublicationReaderOptIn'; SuccessMessage = 'Runbook benchmark reader opt-in/default and trial flag forwarding checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataSupportsDirectMergeDeviceLookup'; SuccessMessage = 'Direct-merge device lookup success-path checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataDirectMergeDeviceLookupRejectsOutOfOrderMachineStream'; SuccessMessage = 'Direct-merge device lookup exact-order guard checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataDirectMergeDeviceLookupRejectsBlankDeviceId'; SuccessMessage = 'Direct-merge device lookup blank-device guard checks passed.' }
@@ -7280,6 +7484,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-WriteCombinedPayloadGzipPreservesColumnPayload'; SuccessMessage = 'Combined payload writer column-path checks passed.' }
     @{ Name = 'Test-NormalizedVulnColumnCacheRebuildsPayloadWithFreshLookups'; SuccessMessage = 'Normalized vuln column cache reuse checks passed.' }
     @{ Name = 'Test-NormalizedVulnColumnCacheRefreshesInventoryColumn'; SuccessMessage = 'Inventory-backed normalized vuln column cache reuse checks passed.' }
+    @{ Name = 'Test-PipelineMemorySnapshotActualGcMetric'; SuccessMessage = 'Actual pipeline GC metric checks passed.' }
     @{ Name = 'Test-WriteBase64FileContentMatchesReferenceOutput'; SuccessMessage = 'Streamed base64 writer checks passed.' }
     @{ Name = 'Test-BenchmarkSeriesSummaryHandlesAzureOnlyRunMode'; SuccessMessage = 'Benchmark series mode checks passed.' }
     @{ Name = 'Test-BenchmarkSeriesSummaryHandlesCombinedRunMode'; SuccessMessage = 'Benchmark series mode checks passed.' }

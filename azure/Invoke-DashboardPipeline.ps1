@@ -66,6 +66,7 @@ param(
 
     [Parameter(Mandatory = $false)]
     [bool]$UseDirectMergeDeviceLookup = $false,
+    [bool]$UseBoundedPublicationMetadataReader = $false,
 
     [Parameter(Mandatory = $false)]
     [ValidateSet('BlobStorage', 'SharePoint', 'StaticWebApp')]
@@ -13445,6 +13446,195 @@ function Get-CompressedPayloadVulnCount {
     }
 }
 
+function Get-DashboardReferenceHtmlFromPath {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    if (-not ('DashboardReferenceMetadataReader' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
+public static class DashboardReferenceMetadataReader {
+    const int Limit = 1048576;
+    static readonly Regex TagName = new Regex(@"^<(?<name>script|link)(?=[\t\n\f\r />])", RegexOptions.IgnoreCase);
+    static readonly Regex External = new Regex(@"\b(?:src|href)\s*=", RegexOptions.IgnoreCase);
+    static readonly Regex Reference = new Regex(@"^<(?:script|link)\b[^>]*\b(?:src|href)\s*=\s*[""']([^""']+)[""']", RegexOptions.IgnoreCase);
+    static readonly Regex MetadataOpening = new Regex(@"^<script\s+id=""(?:dashboardConfig|dataFormat)""[^>]*>$", RegexOptions.IgnoreCase);
+    sealed class Input {
+        readonly TextReader reader;
+        readonly char[] buffer = new char[8192];
+        int offset, length;
+        public Input(TextReader reader) { this.reader = reader; }
+        public int Read() {
+            if (offset == length) { length = reader.Read(buffer, 0, buffer.Length); offset = 0; }
+            return length == 0 ? -1 : buffer[offset++];
+        }
+    }
+    static bool Space(char value) { return value == ' ' || value == '\t' || value == '\n' || value == '\r' || value == '\f'; }
+    static string ReadTag(Input input, string start) {
+        var tag = new StringBuilder(start);
+        char quote = '\0';
+        int value;
+        while ((value = input.Read()) >= 0) {
+            char current = (char)value;
+            tag.Append(current);
+            if (tag.Length > Limit) throw new InvalidDataException("Dashboard markup exceeds metadata limit.");
+            if (quote != '\0') { if (current == quote) quote = '\0'; }
+            else if (current == '\'' || current == '"') quote = current;
+            else if (current == '>') return tag.ToString();
+        }
+        throw new InvalidDataException("Unterminated dashboard markup.");
+    }
+    static void ReadComment(Input input) {
+        const string nestedOpening = "<!--";
+        int count = 0, dashes = 0, nestedMatched = 0, value;
+        while ((value = input.Read()) >= 0) {
+            if (++count > Limit) throw new InvalidDataException("Dashboard comment exceeds metadata limit.");
+            if ((count == 1 || (count == 2 && dashes == 1)) && value == '>')
+                throw new InvalidDataException("Unsupported abrupt dashboard comment start.");
+            nestedMatched = value == nestedOpening[nestedMatched] ? nestedMatched + 1 : value == '<' ? 1 : 0;
+            if (nestedMatched == nestedOpening.Length) throw new InvalidDataException("Nested dashboard comments are not supported.");
+            if (dashes == 2) {
+                if (value == '>') return;
+                throw new InvalidDataException("Unsupported dashboard comment double hyphen.");
+            }
+            dashes = value == '-' ? dashes + 1 : 0;
+        }
+        throw new InvalidDataException("Unterminated dashboard comment.");
+    }
+    static Dictionary<string, string> Attributes(string tag, int offset) {
+        var attributes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        while (offset < tag.Length - 1) {
+            if (!Space(tag[offset])) throw new InvalidDataException("Unsupported dashboard attribute separator.");
+            while (offset < tag.Length - 1 && Space(tag[offset])) offset++;
+            if (offset == tag.Length - 1) break;
+            int start = offset;
+            while (offset < tag.Length - 1 && !Space(tag[offset]) && tag[offset] != '=') {
+                if ("/<'\"`".IndexOf(tag[offset]) >= 0) throw new InvalidDataException("Unsupported dashboard attribute name.");
+                offset++;
+            }
+            if (offset == start) throw new InvalidDataException("Missing dashboard attribute name.");
+            string name = tag.Substring(start, offset - start), content = "";
+            int afterName = offset;
+            while (offset < tag.Length - 1 && Space(tag[offset])) offset++;
+            if (offset < tag.Length - 1 && tag[offset] == '=') {
+                offset++;
+                while (offset < tag.Length - 1 && Space(tag[offset])) offset++;
+                if (offset == tag.Length - 1) throw new InvalidDataException("Missing dashboard attribute value.");
+                char quote = tag[offset];
+                if (quote == '\'' || quote == '"') {
+                    start = ++offset;
+                    while (offset < tag.Length - 1 && tag[offset] != quote) offset++;
+                    if (offset == tag.Length - 1) throw new InvalidDataException("Unterminated dashboard attribute value.");
+                    content = tag.Substring(start, offset++ - start);
+                } else {
+                    start = offset;
+                    while (offset < tag.Length - 1 && !Space(tag[offset])) {
+                        if ("<'\"`=".IndexOf(tag[offset]) >= 0) throw new InvalidDataException("Unsupported unquoted dashboard attribute.");
+                        offset++;
+                    }
+                    content = tag.Substring(start, offset - start);
+                }
+            } else offset = afterName;
+            if (attributes.ContainsKey(name)) throw new InvalidDataException("Duplicate dashboard attribute.");
+            attributes.Add(name, content);
+        }
+        return attributes;
+    }
+    static string ReadScript(Input input, bool retain) {
+        const string closing = "</script";
+        const string scriptOpening = "<script", linkOpening = "<link";
+        var body = retain ? new StringBuilder() : null;
+        int matched = 0, closingLength = 0, scriptMatched = 0, linkMatched = 0, value;
+        while ((value = input.Read()) >= 0) {
+            char current = (char)value;
+            if (retain) {
+                body.Append(current);
+                if (body.Length > Limit) throw new InvalidDataException("Dashboard config exceeds metadata limit.");
+            }
+            if (!retain) {
+                if ((scriptMatched == scriptOpening.Length || linkMatched == linkOpening.Length) && !(char.IsLetterOrDigit(current) || current == '_'))
+                    throw new InvalidDataException("Unsupported reference-like markup in dashboard script raw text.");
+                scriptMatched = scriptMatched < scriptOpening.Length && char.ToLowerInvariant(current) == scriptOpening[scriptMatched] ? scriptMatched + 1 : current == '<' ? 1 : 0;
+                linkMatched = linkMatched < linkOpening.Length && char.ToLowerInvariant(current) == linkOpening[linkMatched] ? linkMatched + 1 : current == '<' ? 1 : 0;
+            }
+            if (matched == closing.Length) {
+                if (++closingLength > Limit) throw new InvalidDataException("Dashboard script closing tag exceeds metadata limit.");
+                if (current == '>') {
+                    if (!retain) return null;
+                    if (closingLength != closing.Length + 1) throw new InvalidDataException("Unsupported metadata script closing tag.");
+                    body.Length -= closingLength;
+                    return body.ToString();
+                }
+                if (Space(current)) continue;
+                matched = current == '<' ? 1 : 0;
+            } else if (char.ToLowerInvariant(current) == closing[matched]) {
+                matched++;
+                if (matched == closing.Length) closingLength = closing.Length;
+            } else matched = current == '<' ? 1 : 0;
+        }
+        throw new InvalidDataException("Unterminated dashboard script.");
+    }
+    public static string Read(string path) {
+        using (var reader = new StreamReader(path, Encoding.UTF8, true, 8192)) {
+            var input = new Input(reader);
+            var metadata = new StringBuilder();
+            var metadataIds = new HashSet<string>(StringComparer.Ordinal);
+            bool hasContent = false;
+            int value;
+            while ((value = input.Read()) >= 0) {
+                hasContent = true;
+                if (value != '<') continue;
+                int next = input.Read();
+                if (next < 0) throw new InvalidDataException("Unterminated dashboard markup.");
+                if (next == '!') {
+                    int first = input.Read(), second = input.Read();
+                    if (first == '-' && second == '-') { ReadComment(input); continue; }
+                    if (first < 0 || second < 0) throw new InvalidDataException("Unterminated dashboard declaration.");
+                    string declaration = ReadTag(input, "<!" + (char)first + (char)second);
+                    if (!Regex.IsMatch(declaration, @"^<!doctype\s+html(?:\s|>)", RegexOptions.IgnoreCase)) throw new InvalidDataException("Unsupported dashboard declaration.");
+                    continue;
+                }
+                if (next == '?') throw new InvalidDataException("XML dashboard markup is not supported.");
+                string tag = ReadTag(input, "<" + (char)next);
+                var name = TagName.Match(tag);
+                if (!name.Success) continue;
+                bool script = name.Groups["name"].Value.Equals("script", StringComparison.OrdinalIgnoreCase);
+                var attributes = Attributes(tag, name.Length);
+                string scriptId;
+                if (!attributes.TryGetValue("id", out scriptId)) scriptId = "";
+                if (scriptId.Contains("&")) throw new InvalidDataException("Encoded dashboard IDs are not supported.");
+                bool knownId = scriptId.Equals("dashboardConfig", StringComparison.OrdinalIgnoreCase) || scriptId.Equals("dataFormat", StringComparison.OrdinalIgnoreCase);
+                bool retain = script && knownId;
+                if (knownId && (!script || (scriptId != "dashboardConfig" && scriptId != "dataFormat") || !MetadataOpening.IsMatch(tag) || !metadataIds.Add(scriptId)))
+                    throw new InvalidDataException("Unsupported or duplicate dashboard metadata ID.");
+                bool external = attributes.ContainsKey("src") || attributes.ContainsKey("href");
+                int referenceAttributes = (attributes.ContainsKey("src") ? 1 : 0) + (attributes.ContainsKey("href") ? 1 : 0);
+                var reference = Reference.Match(tag);
+                if (External.Matches(tag).Count != referenceAttributes || referenceAttributes > 1 ||
+                    (external && (!reference.Success || reference.Groups[1].Value != attributes[attributes.ContainsKey("src") ? "src" : "href"])))
+                    throw new InvalidDataException("Unsupported dashboard reference attribute grammar.");
+                if (retain && external) throw new InvalidDataException("External dashboard metadata is not supported.");
+                string body = script ? ReadScript(input, retain) : null;
+                if (retain) metadata.Append(tag).Append(body).Append("</script>");
+                if (external) metadata.Append(tag).Append(script ? "</script>" : "");
+                if (metadata.Length > Limit) throw new InvalidDataException("Dashboard reference metadata exceeds limit.");
+            }
+            return metadata.Length == 0 && hasContent ? "<!doctype html>" : metadata.ToString();
+        }
+    }
+}
+'@
+    }
+    return [DashboardReferenceMetadataReader]::Read($Path)
+}
+
 function Get-DashboardHtmlScriptContent {
     [CmdletBinding()]
     [OutputType([string])]
@@ -21557,7 +21747,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: a47c51458ebddb5d780e73e6fb188b6e5d5f3133299db41c7eecf63f3c37546b
+# ArtifactFingerprint: 5c7aa687b2bbc44401555d679fe3c6655e79465e48fcb318ef96889bbebf8276
 
 
 
@@ -21573,16 +21763,60 @@ function Get-PipelineMemorySnapshot {
         [string]$Label = ''
     )
 
+    if (-not ('DefenderReporting.Diagnostics.GcSnapshot' -as [type])) {
+        Add-Type -TypeDefinition @'
+namespace DefenderReporting.Diagnostics
+{
+    public static class GcSnapshot
+    {
+        public static long[] ReadLoh(System.GCMemoryInfo info)
+        {
+            var generations = info.GenerationInfo.ToArray();
+            if (generations.Length <= 3) return new long[4];
+            var loh = generations[3];
+            return new[] { loh.SizeBeforeBytes, loh.SizeAfterBytes, loh.FragmentationBeforeBytes, loh.FragmentationAfterBytes };
+        }
+    }
+}
+'@
+    }
+
+    $gcInfo = [System.GC]::GetGCMemoryInfo()
+    $loh = [DefenderReporting.Diagnostics.GcSnapshot]::ReadLoh($gcInfo)
     $process = [System.Diagnostics.Process]::GetCurrentProcess()
-    return [PSCustomObject]@{
-        sampledOnUtc = ([datetime]::UtcNow).ToString('o')
-        stage = $Script:PipelineCurrentStage
-        label = $Label
-        workingSetMb = [math]::Round(($process.WorkingSet64 / 1MB), 1)
-        privateMemoryMb = [math]::Round(($process.PrivateMemorySize64 / 1MB), 1)
-        gcHeapMb = [math]::Round(([System.GC]::GetTotalMemory($false) / 1MB), 1)
-        handleCount = [int]$process.HandleCount
-        threadCount = [int]$process.Threads.Count
+    try {
+        return [PSCustomObject]@{
+            sampledOnUtc = ([datetime]::UtcNow).ToString('o')
+            stage = $Script:PipelineCurrentStage
+            label = $Label
+            workingSetMb = [math]::Round(($process.WorkingSet64 / 1MB), 1)
+            processPeakWorkingSetMb = [math]::Round(($process.PeakWorkingSet64 / 1MB), 1)
+            privateMemoryMb = [math]::Round(($process.PrivateMemorySize64 / 1MB), 1)
+            gcHeapMb = [math]::Round(([System.GC]::GetTotalMemory($false) / 1MB), 1)
+            allocatedBytes = [System.GC]::GetTotalAllocatedBytes($false)
+            gen0Collections = [System.GC]::CollectionCount(0)
+            gen1Collections = [System.GC]::CollectionCount(1)
+            gen2Collections = [System.GC]::CollectionCount(2)
+            lastGcIndex = $gcInfo.Index
+            lastGcGeneration = $gcInfo.Generation
+            lastGcHeapSizeBytes = $gcInfo.HeapSizeBytes
+            lastGcFragmentedBytes = $gcInfo.FragmentedBytes
+            lastGcCommittedBytes = $gcInfo.TotalCommittedBytes
+            lastGcLohSizeBeforeBytes = $loh[0]
+            lastGcLohSizeAfterBytes = $loh[1]
+            lastGcLohFragmentationBeforeBytes = $loh[2]
+            lastGcLohFragmentationAfterBytes = $loh[3]
+            serverGc = [System.Runtime.GCSettings]::IsServerGC
+            runtimeVersion = [System.Environment]::Version.ToString()
+            powershellVersion = $PSVersionTable.PSVersion.ToString()
+            processArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+            processorCount = [System.Environment]::ProcessorCount
+            handleCount = [int]$process.HandleCount
+            threadCount = [int]$process.Threads.Count
+        }
+    }
+    finally {
+        $process.Dispose()
     }
 }
 
@@ -22406,7 +22640,9 @@ function Export-ToBlobStorage {
 
         [string[]]$LegacyVulnerabilityBlobNames = @(),
 
-        [bool]$UseGzip = $true
+        [bool]$UseGzip = $true,
+
+        [bool]$UseBoundedPublicationMetadataReader = $false
     )
 
     Write-Output "`nUploading results to blob storage..."
@@ -22525,7 +22761,7 @@ function Export-ToBlobStorage {
             foreach ($recoveryName in ($existingNames | Where-Object { $_ -match '^_publication/recovery/[0-9a-f]{32}/[^/]+\.html$' })) {
                 $recoveryPath = Join-Path $backupRoot 'recovery-root'
                 Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $recoveryName -DestinationPath $recoveryPath -StorageToken $StorageToken
-                $recoveryHtml = Get-Content -LiteralPath $recoveryPath -Raw
+                $recoveryHtml = if ($UseBoundedPublicationMetadataReader) { Get-DashboardReferenceHtmlFromPath -Path $recoveryPath } else { Get-Content -LiteralPath $recoveryPath -Raw }
                 if ($recoveryHtml) {
                     foreach ($reference in @(Get-DashboardRequiredAssetName -Html $recoveryHtml -HtmlBlobName ([System.IO.Path]::GetFileName($recoveryName)))) {
                         [void]$retainedNames.Add($reference)
@@ -22538,7 +22774,7 @@ function Export-ToBlobStorage {
                     $rootETags[$rootName] = Get-DashboardRootETag -AccountName $AccountName -StorageToken $StorageToken -BlobName $rootName
                     $backupPath = Join-Path $backupRoot $rootName
                     Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Dashboards -BlobName $rootName -DestinationPath $backupPath -StorageToken $StorageToken
-                    $priorHtml = Get-Content -LiteralPath $backupPath -Raw
+                    $priorHtml = if ($UseBoundedPublicationMetadataReader) { Get-DashboardReferenceHtmlFromPath -Path $backupPath } else { Get-Content -LiteralPath $backupPath -Raw }
                     if ($priorHtml) {
                         $priorRoots[$rootName] = $backupPath
                         foreach ($reference in @(Get-DashboardRequiredAssetName -Html $priorHtml -HtmlBlobName $rootName)) {
@@ -22556,7 +22792,7 @@ function Export-ToBlobStorage {
                 }
             }
             foreach ($dashboardFile in ($dashboardFiles | Where-Object { $_.BlobName -in $Script:DashboardTrackedBlobNames })) {
-                $candidateHtml = Get-Content -LiteralPath $dashboardFile.FullName -Raw
+                $candidateHtml = if ($UseBoundedPublicationMetadataReader) { Get-DashboardReferenceHtmlFromPath -Path $dashboardFile.FullName } else { Get-Content -LiteralPath $dashboardFile.FullName -Raw }
                 foreach ($reference in @(Get-DashboardRequiredAssetName -Html $candidateHtml -HtmlBlobName $dashboardFile.BlobName)) {
                     $dependencyPath = Join-Path $resolvedDashboardRoot $reference
                     if (-not (Test-Path -LiteralPath $dependencyPath -PathType Leaf) -or (Get-Item -LiteralPath $dependencyPath).Length -eq 0) { throw "Missing required dashboard dependency: $reference" }
@@ -23550,7 +23786,8 @@ try {
                 -LegacyMachineBlobNames $legacyMachineBlobs `
                 -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -LegacyVulnerabilityBlobNames $legacyVulnerabilityBlobs `
-                -UseGzip $useGzip
+                -UseGzip $useGzip `
+                -UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader
         }
         'SharePoint' {
             # Still upload to blob as primary, then also to SharePoint
@@ -23563,7 +23800,8 @@ try {
                 -LegacyMachineBlobNames $legacyMachineBlobs `
                 -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -LegacyVulnerabilityBlobNames $legacyVulnerabilityBlobs `
-                -UseGzip $useGzip
+                -UseGzip $useGzip `
+                -UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader
             Export-ToSharePoint -DashboardPath $dashboardStatusOutputPath
         }
         'StaticWebApp' {
@@ -23576,7 +23814,8 @@ try {
                 -LegacyMachineBlobNames $legacyMachineBlobs `
                 -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -LegacyVulnerabilityBlobNames $legacyVulnerabilityBlobs `
-                -UseGzip $useGzip
+                -UseGzip $useGzip `
+                -UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader
             Export-ToStaticWebApp -DashboardPath $dashboardStatusOutputPath
         }
     }

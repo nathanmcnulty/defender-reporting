@@ -2,7 +2,8 @@
 [CmdletBinding()]
 param(
     [string]$JqPath = $env:DASHBOARD_SYNC_JQ,
-    [string]$BashPath = $env:DASHBOARD_SYNC_BASH
+    [string]$BashPath = $env:DASHBOARD_SYNC_BASH,
+    [string]$RunbookSourcePath = (Join-Path (Split-Path $PSScriptRoot -Parent) 'build/azure/runbook-source.ps1')
 )
 
 Set-StrictMode -Version Latest
@@ -38,7 +39,7 @@ if ($LASTEXITCODE -ne 0) { throw 'The configured jq executable could not run.' }
 . (Join-Path $repoRoot 'build/Import-SharedHelpers.ps1')
 . (Join-Path $repoRoot 'src/powershell/Provisioning/Azure/AzureProvisioning.ps1')
 $parseErrors = $null
-$ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $repoRoot 'build/azure/runbook-source.ps1'), [ref]$null, [ref]$parseErrors)
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($RunbookSourcePath, [ref]$null, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 foreach ($name in @('Export-ToBlobStorage', 'Get-DashboardBlobContentType', 'Compress-GzipFile')) {
     $definition = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
@@ -48,6 +49,28 @@ if (-not $ast.Extent.Text.Contains('-AssetGeneration $Script:PipelineRunId')) { 
 $statusFailureDefinition = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text -eq '-not $finalStatusUploaded' }, $true)
 if (-not $statusFailureDefinition) { throw 'Final status upload is not checked.' }
 $statusFailureCheck = [scriptblock]::Create($statusFailureDefinition.Extent.Text)
+$script:BoundedMetadataReader = ${function:Get-DashboardReferenceHtmlFromPath}
+$script:BoundedMetadataReads = 0
+function Get-DashboardReferenceHtmlFromPath {
+    param([string]$Path)
+    $script:BoundedMetadataReads++
+    & $script:BoundedMetadataReader -Path $Path
+}
+$readerParameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'UseBoundedPublicationMetadataReader' }
+if ($readerParameter) {
+    if ($readerParameter.DefaultValue.Extent.Text -ne '$false') { throw 'Runbook bounded metadata reader must default to false.' }
+}
+elseif (-not $ast.Extent.Text.Contains('$UseBoundedPublicationMetadataReader = $false')) { throw 'Function bounded metadata reader must remain fixed false.' }
+$publisherDefinition = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Export-ToBlobStorage' }, $true)
+$publisherParameter = $publisherDefinition.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'UseBoundedPublicationMetadataReader' }
+if ($publisherParameter.DefaultValue.Extent.Text -ne '$false') { throw 'Publisher bounded metadata reader must default to false.' }
+$readerBranches = @($publisherDefinition.Body.FindAll({ param($node) $node -is [System.Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text -eq '$UseBoundedPublicationMetadataReader' }, $true))
+if ($readerBranches.Count -ne 3) { throw 'All three publication metadata reads must be gated.' }
+foreach ($branch in $readerBranches) {
+    if ($branch.Clauses[0].Item2.Extent.Text -notlike '*Get-DashboardReferenceHtmlFromPath -Path*' -or $branch.ElseClause.Extent.Text -notlike '*Get-Content -LiteralPath* -Raw*') { throw 'Metadata reader branch changed the legacy default.' }
+}
+$publisherCalls = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Export-ToBlobStorage' }, $true))
+if ($publisherCalls.Count -ne 3 -or @($publisherCalls | Where-Object { $_.Extent.Text -notlike '*-UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader*' }).Count) { throw 'Pipeline export calls must forward the reader flag.' }
 $Script:BlobContainers = @{ Exports = 'exports'; Dashboards = 'dashboards' }
 $Script:BlobAccessTiers = @{ Exports = 'Hot'; Dashboards = 'Hot' }
 $Script:DashboardBlobName = 'VulnerabilityDashboard.html'
@@ -355,10 +378,13 @@ try {
             $versions += [pscustomobject]@{ Root = $root; Generation = $generation }
         }
         $publish = {
-            param($Root, [bool]$ExplicitRoot = $true)
+            param($Root, [bool]$ExplicitRoot = $true, [bool]$UseBoundedPublicationMetadataReader = $false)
             $rootParameter = @{}
             if ($ExplicitRoot) { $rootParameter.DashboardRootPath = $Root }
+            if ($UseBoundedPublicationMetadataReader) { $rootParameter.UseBoundedPublicationMetadataReader = $true }
+            $script:BoundedMetadataReads = 0
             Export-ToBlobStorage -AccountName fixture -StorageToken fixture -ExportsPath $exports -DashboardPath (Join-Path $Root $Script:DashboardBlobName) @rootParameter | Out-Null
+            Assert-True (($script:BoundedMetadataReads -gt 0) -eq $UseBoundedPublicationMetadataReader) 'Publisher selected the wrong metadata reader.'
         }
         $script:Uploads.Clear()
         & $publish $versions[0].Root $false
@@ -384,6 +410,61 @@ try {
             $untouchedReferences += $legacyName
         }
         $prior = $script:Blobs.Clone()
+        $metadataRoot = if ($mode -eq 'Dual') { $Script:HostedDashboardBlobName } else { $Script:DashboardBlobName }
+        $pdfPrefix = [System.IO.Path]::GetFileNameWithoutExtension($metadataRoot) + '.assets/generations/' + ('e' * 32) + '/'
+        $pdfNames = @(($pdfPrefix + 'runtime/pdf.js'), ($pdfPrefix + 'data/pdf.json.gz'), ($pdfPrefix + 'optional/unreferenced.js'))
+        $pdfConfig = [ordered]@{ pdfExportRuntimeMode = 'external'; pdfExportRuntimeUrl = $pdfNames[0]; pdfExportBundleMode = 'external'; pdfExportBundleUrl = $pdfNames[1] } | ConvertTo-Json -Compress
+        $pdfHtml = '<script id="dataFormat">compressed</script><script id="dashboardConfig" type="application/json">' + $pdfConfig + '</script><script src="' + $pdfNames[0] + '"></script><link href="' + $pdfNames[1] + '">'
+        $validPriorVariants = @(
+            ('<script data-note='' id="dashboardConfig"''>{}</script>' + $pdfHtml),
+            ('<!-- user''s <script id="dashboardConfig">{}</script><link href="fake.js"> -->' + $pdfHtml),
+            ('<!---->' + $pdfHtml),
+            ('<!-- user''s normal note -->' + $pdfHtml),
+            ('<!DOCTYPE html><script>const text="</script >' + $pdfHtml),
+            ('<script>const text="</ScRiPt' + "`t>" + $pdfHtml)
+        )
+        foreach ($variant in $validPriorVariants) {
+            $script:Blobs = $prior.Clone()
+            $script:Blobs[$metadataRoot] = [Text.Encoding]::UTF8.GetBytes($variant)
+            foreach ($name in $pdfNames) { $script:Blobs[$name] = [System.IO.File]::ReadAllBytes($library) }
+            $pdfPrior = $script:Blobs.Clone()
+            $script:Uploads.Clear()
+            & $publish $versions[1].Root $true $true
+            Assert-True (-not $script:LockHeld) 'Valid metadata publication leaked the lease.'
+            foreach ($name in $pdfNames) {
+                Assert-True ($script:Blobs.ContainsKey($name) -and (Get-BlobHash $script:Blobs[$name]) -ceq (Get-BlobHash $pdfPrior[$name])) "Previous PDF generation lost bytes: $name"
+            }
+        }
+        $invalidPriorVariants = @(
+            ('<script id="dataFormat">compressed</script><!-->' + $pdfHtml.Replace('<script id="dataFormat">compressed</script>', '') + '<!-- end -->'),
+            ('<script id="dataFormat">compressed</script><!--->' + $pdfHtml.Replace('<script id="dataFormat">compressed</script>', '') + '<!-- end -->'),
+            ('<script id="dataFormat">compressed</script><!-- note --!>' + $pdfHtml.Replace('<script id="dataFormat">compressed</script>', '') + '<!-- end -->'),
+            ('<!--<!-->' + $pdfHtml + '<!-- end -->'),
+            ($pdfHtml + '<script id="dashboardConfig">{}</script>'),
+            $pdfHtml.Replace('id="dashboardConfig"', 'type="application/json" id=''dashboardConfig'''),
+            ($pdfHtml + '<script>const phantom='' <link href="fake.js">'';</script>'),
+            ('<!-- user''s unfinished note' + $pdfHtml),
+            ('<!--' + (' ' * 1MB) + '-->' + $pdfHtml),
+            ('<script id="dashboardConfig">' + (' ' * 1MB) + '{}</script>'),
+            ('<![CDATA[ignored]]>' + $pdfHtml)
+        )
+        foreach ($variant in $invalidPriorVariants) {
+            $script:Blobs = $prior.Clone()
+            $script:Blobs[$metadataRoot] = [Text.Encoding]::UTF8.GetBytes($variant)
+            foreach ($name in $pdfNames) { $script:Blobs[$name] = [System.IO.File]::ReadAllBytes($library) }
+            $pdfPrior = $script:Blobs.Clone()
+            $script:Uploads.Clear()
+            $failed = $false
+            try { & $publish $versions[1].Root $true $true } catch { $failed = $true }
+            Assert-True ($script:BoundedMetadataReads -gt 0) 'Parser rejection did not select the opted-in bounded reader.'
+            Assert-True $failed 'Ambiguous or unsupported prior metadata was accepted.'
+            Assert-PriorUnchanged $pdfPrior
+            Assert-True (-not $script:LockHeld) 'Rejected prior metadata leaked the lease.'
+            Assert-True (@($script:Uploads | Where-Object { $_ -notlike '_publication/recovery/*' }).Count -eq 0) 'Rejected prior metadata wrote candidate blobs.'
+        }
+        $script:Blobs = $prior.Clone()
+        $script:Uploads.Clear()
+        Write-Output "$mode metadata publisher: $($validPriorVariants.Count) valid PDF retention and $($invalidPriorVariants.Count) fail-closed whole-generation/lease checks passed."
         $uploadCount = 1 + @(Get-ChildItem -LiteralPath $versions[1].Root -File -Recurse).Count + 2 * @($prior.Keys | Where-Object { $_ -in $Script:DashboardTrackedBlobNames -and $prior[$_].Length -gt 0 }).Count
         foreach ($failurePosition in 1..$uploadCount) {
             $script:Blobs = $prior.Clone()
