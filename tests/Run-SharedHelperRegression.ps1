@@ -6367,6 +6367,63 @@ function Test-BenchmarkEvidenceEnvelopeWritesTransactionally {
     }
 }
 
+function Test-GetBlobListPagination {
+    [CmdletBinding()]
+    param()
+
+    $sourcePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'build\azure\runbook-source.ps1'
+    $parseTokens = $null
+    $parseErrors = $null
+    $sourceAst = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$parseTokens, [ref]$parseErrors)
+    Assert-True ($parseErrors.Count -eq 0) 'Expected the runbook source to parse.'
+    $definition = $sourceAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-BlobList' }, $true)
+    . ([scriptblock]::Create($definition.Extent.Text))
+
+    function Get-BlobHeader { param($StorageToken) return @{ Authorization = "Bearer $StorageToken" } }
+    function Get-BlobErrorStatusCode { param($ErrorRecord) return $ErrorRecord.Exception.PSObject.Properties['StatusCode']?.Value }
+    function Invoke-WebRequestWithRetry {
+        param($Uri, $Headers, $Method)
+        Assert-True ($Method -eq 'Get' -and $Headers.Authorization -eq 'Bearer fixture-token') 'Expected authenticated GET requests.'
+        $requests.Add([string]$Uri)
+        Assert-True ($pages.Count -gt 0) 'Expected pagination to terminate without an extra request.'
+        return [PSCustomObject]@{ Content = $pages.Dequeue() }
+    }
+
+    $special = 'history + / ? & ' + [char]0x96EA
+    $historyName = 'VulnHistory_2026_Q3.json.gz'
+    $cases = @(
+        @{ Pages = @('<EnumerationResults><Blobs><Blob><Name>VulnCurrent.json.gz</Name></Blob></Blobs><NextMarker>next</NextMarker></EnumerationResults>', "<EnumerationResults><Blobs><Blob><Name>$historyName</Name></Blob></Blobs><NextMarker /></EnumerationResults>"); Expected = @('VulnCurrent.json.gz', $historyName); Marker = 'next'; Fails = $false }
+        @{ Pages = @("<EnumerationResults><Blobs /><NextMarker>$([System.Security.SecurityElement]::Escape($special))</NextMarker></EnumerationResults>", "<EnumerationResults><Blobs><Blob><Name>$historyName</Name></Blob></Blobs></EnumerationResults>"); Expected = @($historyName); Marker = $special; Fails = $false }
+        @{ Pages = @('<EnumerationResults><Blobs /><NextMarker /></EnumerationResults>'); Expected = @(); Marker = ''; Fails = $false }
+        @{ Pages = @('<EnumerationResults><NextMarker /></EnumerationResults>'); Expected = @(); Marker = ''; Fails = $false }
+        @{ Pages = @('<EnumerationResults><Blobs /><NextMarker>same</NextMarker></EnumerationResults>', '<EnumerationResults><Blobs /><NextMarker>same</NextMarker></EnumerationResults>'); Expected = @(); Marker = 'same'; Fails = $true }
+        @{ Pages = @('<EnumerationResults><Blobs /><NextMarker>first</NextMarker></EnumerationResults>', '<EnumerationResults><Blobs /><NextMarker>second</NextMarker></EnumerationResults>', '<EnumerationResults><Blobs /><NextMarker>first</NextMarker></EnumerationResults>'); Expected = @(); Marker = 'first'; Fails = $true }
+        @{ Pages = @('<EnumerationResults><Blobs /><NextMarker>A</NextMarker></EnumerationResults>', '<EnumerationResults><Blobs /><NextMarker>a</NextMarker></EnumerationResults>', "<EnumerationResults><Blobs><Blob><Name>$historyName</Name></Blob></Blobs><NextMarker /></EnumerationResults>"); Expected = @($historyName); Marker = 'A'; Fails = $false }
+    )
+    foreach ($case in $cases) {
+        $pages = [System.Collections.Generic.Queue[string]]::new()
+        foreach ($page in $case.Pages) { $pages.Enqueue($page) }
+        $requests = [System.Collections.Generic.List[string]]::new()
+        $failure = $null
+        $actual = @()
+        try { $actual = @(Get-BlobList -AccountName 'fixture' -Container 'exports' -StorageToken 'fixture-token' -Prefix $special) }
+        catch { $failure = $_ }
+        Assert-True ($requests.Count -eq $case.Pages.Count) 'Expected every continuation page to be requested exactly once.'
+        $baseUri = 'https://fixture.blob.core.windows.net/exports?restype=container&comp=list&prefix=' + [System.Uri]::EscapeDataString($special)
+        Assert-True ($requests[0] -ceq $baseUri) 'Expected the prefix to be URI encoded without an initial marker.'
+        if ($requests.Count -gt 1) {
+            Assert-True ($requests[1] -ceq ($baseUri + '&marker=' + [System.Uri]::EscapeDataString($case.Marker))) 'Expected the continuation marker to be URI encoded exactly once.'
+        }
+        if ($case.Fails) {
+            Assert-True ($null -ne $failure -and $failure.Exception.Message -like '*repeated continuation marker*') 'Expected a repeated marker or cycle to fail instead of returning truncated names.'
+        }
+        else {
+            Assert-True ($null -eq $failure) "Expected successful pagination: $failure"
+            Assert-True ($actual.Count -eq $case.Expected.Count -and ($actual -join '|') -ceq ($case.Expected -join '|')) 'Expected all names, including second-page history, or an empty result.'
+        }
+    }
+}
+
 function Test-ProgressStallAssessmentDistinguishesSlowAndStalledWork {
     [CmdletBinding()]
     param()
@@ -7010,6 +7067,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-FunctionAppWriteOutputNoEnumeratePreservesJObject'; SuccessMessage = 'Function App Write-Output -NoEnumerate checks passed.' }
     @{ Name = 'Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo'; SuccessMessage = 'Function execution status summary metadata checks passed.' }
     @{ Name = 'Test-BenchmarkEvidenceEnvelopeWritesTransactionally'; SuccessMessage = 'Benchmark evidence schema and transactional publication checks passed.' }
+    @{ Name = 'Test-GetBlobListPagination'; SuccessMessage = 'Blob listing pagination, encoding, empty-page, and cycle checks passed.' }
     @{ Name = 'Test-ProgressStallAssessmentDistinguishesSlowAndStalledWork'; SuccessMessage = 'Progress stall warning/failure checks passed.' }
     @{ Name = 'Test-FullGarbageCollectionRequestsLargeObjectHeapCompaction'; SuccessMessage = 'Large-object heap compaction checks passed.' }
     @{ Name = 'Test-AzureValidationHarnessRequiresExecutionGuardAndRestoration'; SuccessMessage = 'Azure validation guard and restoration checks passed.' }
