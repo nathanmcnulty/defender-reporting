@@ -61,15 +61,15 @@ function Test-AzurePublishedDashboardEvidence {
         if ([string]$status.automationJobId -ne $ExpectedJobId -or [datetimeoffset]$status.startedOnUtc -lt $NotBefore -or [string]::IsNullOrWhiteSpace([string]$status.runId)) { throw 'Published status is stale or belongs to a different validation job.' }
         if ([string]$status.dashboardDeliveryMode -ne $DashboardDeliveryMode -or [string]$status.storageAccountName -ne $AccountName -or $status.useExistingExportsOnly -ne $true) { throw 'Published status does not match the seeded validation request.' }
         $dashboardPath = & $download ([string]$status.dashboardBlobName)
-        foreach ($asset in @(Get-AzureDashboardConfiguredPdfAssetName -DashboardPath $dashboardPath -DashboardBlobName ([string]$status.dashboardBlobName))) { $null = & $download $asset }
+        foreach ($asset in @(Get-DashboardRequiredAssetName -Html (Get-Content -LiteralPath $dashboardPath -Raw) -HtmlBlobName ([string]$status.dashboardBlobName))) { $null = & $download $asset }
         if ($DashboardDeliveryMode -in @('Hosted', 'Dual')) {
             $hostedName = if ($DashboardDeliveryMode -eq 'Dual') { [string]$status.hostedDashboardBlobName } else { [string]$status.dashboardBlobName }
             if ($DashboardDeliveryMode -eq 'Dual') {
                 $hostedPath = & $download $hostedName
-                foreach ($asset in @(Get-AzureDashboardConfiguredPdfAssetName -DashboardPath $hostedPath -DashboardBlobName $hostedName)) { $null = & $download $asset }
+                foreach ($asset in @(Get-DashboardRequiredAssetName -Html (Get-Content -LiteralPath $hostedPath -Raw) -HtmlBlobName $hostedName)) { $null = & $download $asset }
             }
-            $assetRoot = ($hostedName -replace '\.[^./]+$', '') + '.assets'
-            foreach ($asset in @('runtime/dashboard.css', 'runtime/dashboard.js', 'runtime/pako.js', 'vendor/chart.js', 'data/summary.json', 'data/payload.json.gz')) { $null = & $download "$assetRoot/$asset" }
+            $hostedLocalPath = if ($DashboardDeliveryMode -eq 'Dual') { $hostedPath } else { $dashboardPath }
+            foreach ($asset in @(Get-DashboardRequiredAssetName -Html (Get-Content -LiteralPath $hostedLocalPath -Raw) -HtmlBlobName $hostedName)) { $null = & $download $asset }
         }
         $result = Assert-AzureDashboardCandidateEvidence -DashboardRootPath $root -RunbookStatus $status -DashboardDeliveryMode $DashboardDeliveryMode -ExpectedTotalRows $ExpectedTotalRows -ExpectedJobId $ExpectedJobId -ExpectedRunId ([string]$status.runId) -NotBefore $NotBefore
         $lastStatusPath = & $download '_diagnostics/ExportAndGenerate.status.json'
@@ -155,7 +155,7 @@ function Assert-AzureDashboardCandidateEvidence {
     }
     $dashboardBlobName = [string]$RunbookStatus.dashboardBlobName
     $dashboardPath = & $resolveArtifact $dashboardBlobName
-    foreach ($asset in @(Get-AzureDashboardConfiguredPdfAssetName -DashboardPath $dashboardPath -DashboardBlobName $dashboardBlobName)) { $null = & $resolveArtifact $asset }
+    foreach ($asset in @(Get-DashboardRequiredAssetName -Html (Get-Content -LiteralPath $dashboardPath -Raw) -HtmlBlobName $dashboardBlobName)) { $null = & $resolveArtifact $asset }
     $result = [ordered]@{
         dashboard_blob_name = $dashboardBlobName
         dashboard_sha256 = (Get-FileHash -LiteralPath $dashboardPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -177,11 +177,10 @@ function Assert-AzureDashboardCandidateEvidence {
         $hostedBlobName = if ($DashboardDeliveryMode -eq 'Dual') { [string]$RunbookStatus.hostedDashboardBlobName } else { $dashboardBlobName }
         $hostedPath = & $resolveArtifact $hostedBlobName
         if ($DashboardDeliveryMode -eq 'Dual') {
-            foreach ($asset in @(Get-AzureDashboardConfiguredPdfAssetName -DashboardPath $hostedPath -DashboardBlobName $hostedBlobName)) { $null = & $resolveArtifact $asset }
+            foreach ($asset in @(Get-DashboardRequiredAssetName -Html (Get-Content -LiteralPath $hostedPath -Raw) -HtmlBlobName $hostedBlobName)) { $null = & $resolveArtifact $asset }
         }
-        $assetDirectoryName = ($hostedBlobName -replace '\.[^./]+$', '') + '.assets'
-        $requiredAssets = @('runtime/dashboard.css', 'runtime/dashboard.js', 'runtime/pako.js', 'vendor/chart.js', 'data/summary.json', 'data/payload.json.gz')
-        foreach ($relativeAssetPath in $requiredAssets) { $null = & $resolveArtifact "$assetDirectoryName/$relativeAssetPath" }
+        $assetDirectoryName = (Get-DashboardPublishedAssetPrefix -Html (Get-Content -LiteralPath $hostedPath -Raw) -HtmlBlobName $hostedBlobName).TrimEnd('/')
+        foreach ($asset in @(Get-DashboardRequiredAssetName -Html (Get-Content -LiteralPath $hostedPath -Raw) -HtmlBlobName $hostedBlobName)) { $null = & $resolveArtifact $asset }
         $payloadPath = & $resolveArtifact "$assetDirectoryName/data/payload.json.gz"
         $summaryPath = & $resolveArtifact "$assetDirectoryName/data/summary.json"
         $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json -Depth 30
@@ -197,6 +196,7 @@ function Assert-AzureDashboardCandidateEvidence {
             if (-not $hostedHtml.Contains("$assetDirectoryName/$relativeAssetPath")) { throw "Hosted dashboard HTML does not reference '$relativeAssetPath'." }
         }
         $result['hosted_blob_name'] = $hostedBlobName
+        $result['hosted_payload_blob_name'] = "$assetDirectoryName/data/payload.json.gz"
         $result['payload_sha256'] = $payloadSha256
         $result['payload_row_count'] = [int64]$payloadRowCount
         $result['payload_bytes'] = [int64](Get-Item -LiteralPath $payloadPath).Length
