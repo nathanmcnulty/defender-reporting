@@ -247,6 +247,9 @@ Write-Output 'Running shared-helper regression tests...'
 Write-Output 'Running Setup scheduling regression tests...'
 & (Join-Path $repoRoot 'tests\Invoke-SetupSchedulingRegression.ps1')
 
+Write-Output 'Running Setup published artifact validation regression tests...'
+& (Join-Path $repoRoot 'tests\Invoke-SetupArtifactValidationRegression.ps1')
+
 Write-Output 'Running dashboard JavaScript regression tests...'
 $dashboardAssertionPaths = @(
     Get-ChildItem -Path (Join-Path $repoRoot 'tests') -Filter 'Assert-Dashboard*.js' -File -ErrorAction Stop |

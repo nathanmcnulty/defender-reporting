@@ -83,6 +83,7 @@ try {
     $stagedProvisioningHelperPath = Join-Path $stagingRoot 'azure\AzureProvisioning.ps1'
     Copy-Item -Path $azureProvisioningSourcePath -Destination $stagedProvisioningHelperPath -Force
     Assert-BuildPath -Path $stagedProvisioningHelperPath -PathType Leaf
+    Copy-Item -LiteralPath $azureBuildContext.SharedHelpersPath -Destination (Join-Path $stagingRoot 'azure\shared-helpers.ps1') -Force
 
     $stagedTemplatePublisherPath = Join-Path $stagingRoot 'azure\Upload-Templates.ps1'
     Assert-BuildPath -Path $stagedTemplatePublisherPath -PathType Leaf
@@ -135,6 +136,10 @@ $packageManifest = [PSCustomObject]@{
         [PSCustomObject]@{
             path = 'azure/AzureProvisioning.ps1'
             sha256 = Get-FileContentSha256Hex -Path $azureProvisioningSourcePath
+        }
+        [PSCustomObject]@{
+            path = 'azure/shared-helpers.ps1'
+            sha256 = Get-FileContentSha256Hex -Path $azureBuildContext.SharedHelpersPath
         }
     )
 }

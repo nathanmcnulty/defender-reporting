@@ -21375,7 +21375,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: d53ab12e846142200536023988fc0b383f6bd8e9b6a44d7ec2b853b1387d159f
+# ArtifactFingerprint: 95b430849efc595f1a502482b909ec3b9be66ca80893622dfffe6400ca9a8ca3
 
 
 
@@ -21558,6 +21558,7 @@ function Write-PipelineExecutionStatus {
         $statusDocument = [ordered]@{
             version = 2
             runId = $Script:PipelineRunId
+            automationJobId = if ($null -ne (Get-Variable PSPrivateMetadata -ErrorAction SilentlyContinue)) { [string]$PSPrivateMetadata.JobId } else { $null }
             executionHost = $Script:PipelineExecutionHost
             executionHostEvidence = if ($null -ne $Script:PipelineExecutionHostDescriptor) { [string]$Script:PipelineExecutionHostDescriptor.Evidence } else { $null }
             pipelineArchitectureVersion = $Script:PipelineArchitectureVersion
@@ -23210,6 +23211,11 @@ try {
     }
 
     Set-PipelineExecutionStage -Stage 'Completed' -Message 'Pipeline completed successfully.'
+    $publishedArtifactSha256 = @{}
+    foreach ($publishedFile in (Get-ChildItem -LiteralPath $tempDashboards -File -Recurse)) {
+        $publishedName = [System.IO.Path]::GetRelativePath($tempDashboards, $publishedFile.FullName).Replace('\', '/')
+        $publishedArtifactSha256[$publishedName] = Get-FileSha256Hex -Path $publishedFile.FullName
+    }
     [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'succeeded' -AdditionalProperties @{
             vulnerabilities = [int]$vulnCount
             devices = [int]$deviceCount
@@ -23217,6 +23223,7 @@ try {
             dashboardSizeMb = [math]::Round([double]$finalSize, 2)
             dashboardBlobName = $dashboardStatusBlobName
             hostedDashboardBlobName = if ($useDualDashboard) { $Script:HostedDashboardBlobName } else { $null }
+            artifactSha256 = $publishedArtifactSha256
         })
 
     # -----------------------------------------------------------------

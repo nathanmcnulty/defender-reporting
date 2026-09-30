@@ -30,6 +30,9 @@ param(
     [string]$FunctionExecutionDatasetPath,
 
     [Parameter(Mandatory = $false)]
+    $ValidationExpectedTotalRows,
+
+    [Parameter(Mandatory = $false)]
     [switch]$SkipFunctionExecution,
 
     [Parameter(Mandatory = $false)]
@@ -1758,6 +1761,9 @@ $setupCommonParameters = @{
 
 if (-not [string]::IsNullOrWhiteSpace($resolvedValidationDatasetPath)) {
     $setupCommonParameters.ValidationDatasetPath = $resolvedValidationDatasetPath
+}
+if ($PSBoundParameters.ContainsKey('ValidationExpectedTotalRows')) {
+    $setupCommonParameters.ValidationExpectedTotalRows = $ValidationExpectedTotalRows
 }
 
 if ($ResourceGroupName) {

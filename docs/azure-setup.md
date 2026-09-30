@@ -126,6 +126,8 @@ For local validation of the hosted split-assets build, use a local HTTP server i
 | `-StorageAccountName` | First run only | Storage account name (auto-detected on re-runs) |
 | `-Location` | No | Azure region, default `westus2` |
 | `-SkipMdePermissions` | No | Skip automatic MDE app role assignment |
+| `-ValidationDatasetPath` | No | Local dataset to seed Automation validation with `-SkipMdePermissions` |
+| `-ValidationExpectedTotalRows` | Seeded Automation validation unless authoritative metadata exists | Expected onboarded normalized dashboard rows, not raw source observations |
 | `-SkipValidation` | No | Skip the post-provisioning validation run |
 | `-DashboardDeliveryMode` | No | `Auto`, `SelfContained`, `Hosted`, or `Dual`; `Auto` chooses `Hosted` with `-IncludeContainerApp`, otherwise `SelfContained` |
 | `-IncludeContainerApp` | No | Deploy the Entra-protected Container App |
@@ -137,6 +139,10 @@ For local validation of the hosted split-assets build, use a local HTTP server i
 `-SkipMdePermissions` disables recurring execution for both compute types: the Automation daily schedule is explicitly disabled and verified through ARM, and the Function App sets and verifies `AzureWebJobs.ExportAndGenerate.Disabled=true`. Existing Function App settings, including secrets and unrelated function settings, are preserved; setup updates only its owned keys. After configuring the required MDE app roles, rerun setup without `-SkipMdePermissions` to explicitly enable the Automation schedule or set the Function disable setting to `false`.
 
 Manual seeded validation can still use `UseExistingExportsOnly=true`. Disabling recurring execution does not force manual jobs into seeded mode. Use `-SkipValidation` to avoid starting a setup validation job, and specify `-DashboardDeliveryMode Dual` when retaining an existing Dual deployment without hosting configuration. Omit `-IncludeContainerApp` when only updating compute scheduling to leave hosting and Easy Auth untouched.
+
+Seeded Automation setup (`-SkipMdePermissions` without `-SkipValidation`) requires `-ValidationExpectedTotalRows` or an authoritative JSON integer `expectedDashboardRows` in the dataset's `synthetic-manifest.json`. An explicit count takes precedence. Counts must be integers from 1 to 50,000,000; source fields such as `actualTotalVulnRows` and `actualCurrentRows` are not inferred as dashboard counts. Missing or invalid expectations fail before Azure provisioning or export seeding. `-SkipValidation` remains deployment-only and does not require a dataset or expected count. The deployment-validation wrapper accepts and forwards the same expected-count parameter.
+
+A completed seeded job passes only after Entra-authenticated reads verify the current Automation job ID, run ID and start time, succeeded/Completed status, expected vulnerability count and positive device/CVE counts, required HTML/assets, and each artifact's SHA-256 against the completion status. External PDF runtime and bundle assets declared in the embedded `dashboardConfig` JSON are required, downloaded, and hash-checked even though they reside in the `optional` directory; configured paths must remain within the dashboard's asset directory, not remote URLs or traversal paths. Inline SelfContained PDF defaults do not require external files. Hosted summary counts and payload SHA-256 must match, and a streaming payload check must count the expected rows. Dual mode also requires byte-identical compressed payloads in the self-contained and hosted artifacts. The release includes the production provisioning validator and shared runtime helpers; no tests folder is required. These lightweight checks do not replace optional full source-row semantic replay.
 
 When migrating an existing Automation Account deployment to a Function App,
 pass `-AutomationAccountName` with the existing account and the script can

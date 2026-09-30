@@ -2,6 +2,210 @@
 
 $script:LastArmTokenSource = $null
 
+function Get-AzureDashboardConfiguredPdfAssetName {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)][string]$DashboardPath,
+        [Parameter(Mandatory = $true)][string]$DashboardBlobName
+    )
+
+    $configJson = Get-DashboardHtmlScriptContent -Html (Get-Content -LiteralPath $DashboardPath -Raw) -ScriptId 'dashboardConfig'
+    if ([string]::IsNullOrWhiteSpace($configJson)) { return }
+    $config = $configJson | ConvertFrom-Json -Depth 20
+    $assetRoot = ($DashboardBlobName -replace '\.[^./]+$', '') + '.assets/'
+    foreach ($dependency in @('pdfExportRuntime', 'pdfExportBundle')) {
+        $mode = $config.PSObject.Properties[($dependency + 'Mode')]
+        if ($null -eq $mode -or [string]$mode.Value -ne 'external') { continue }
+        $url = $config.PSObject.Properties[($dependency + 'Url')]
+        $name = if ($null -ne $url) { [string]$url.Value } else { '' }
+        if (-not $name.StartsWith($assetRoot, [System.StringComparison]::Ordinal) -or
+            $name -notmatch '^[A-Za-z0-9._/-]+$' -or $name -match '(^|/)\.{1,2}(/|$)|//|/$') {
+            throw "Invalid configured published PDF asset '$name'."
+        }
+        $name
+    }
+}
+
+function Test-AzurePublishedDashboardEvidence {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)][string]$AccountName,
+        [Parameter(Mandatory = $true)][ValidateSet('SelfContained', 'Hosted', 'Dual')][string]$DashboardDeliveryMode,
+        [Parameter(Mandatory = $true)]$ExpectedTotalRows,
+        [Parameter(Mandatory = $true)][string]$ExpectedJobId,
+        [Parameter(Mandatory = $true)][datetimeoffset]$NotBefore
+    )
+
+    $ExpectedTotalRows = Resolve-AzureValidationExpectedRowCount -ExpectedTotalRows $ExpectedTotalRows
+    if (-not (Get-Command Get-DashboardEmbeddedPayloadInspection -ErrorAction SilentlyContinue)) {
+        $packagedRuntime = Join-Path $PSScriptRoot 'shared-helpers.ps1'
+        if (Test-Path -LiteralPath $packagedRuntime -PathType Leaf) { . $packagedRuntime }
+        else { . (Join-Path $PSScriptRoot '..\..\..\..\build\Import-SharedHelpers.ps1') }
+    }
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('setup-dashboard-evidence-' + [guid]::NewGuid().ToString('N'))
+    $headers = Get-StorageBlobRestHeaderSet
+    $download = {
+        param([string]$Name)
+        if ([string]::IsNullOrWhiteSpace($Name) -or $Name -match '(^/|\\|:|(^|/)\.\.(/|$))') { throw 'Invalid published blob name.' }
+        $path = Join-Path $root ($Name -replace '/', [System.IO.Path]::DirectorySeparatorChar)
+        [void](New-Item -Path (Split-Path $path -Parent) -ItemType Directory -Force)
+        $encodedName = [System.Uri]::EscapeDataString($Name).Replace('%2F', '/')
+        Invoke-WebRequest -Uri "https://$AccountName.blob.core.windows.net/dashboards/$encodedName" -Headers $headers -OutFile $path -UseBasicParsing | Out-Null
+        return $path
+    }
+    try {
+        $statusPath = & $download '_diagnostics/ExportAndGenerate.status.json'
+        $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json -Depth 30
+        if ([string]$status.automationJobId -ne $ExpectedJobId -or [datetimeoffset]$status.startedOnUtc -lt $NotBefore -or [string]::IsNullOrWhiteSpace([string]$status.runId)) { throw 'Published status is stale or belongs to a different validation job.' }
+        if ([string]$status.dashboardDeliveryMode -ne $DashboardDeliveryMode -or [string]$status.storageAccountName -ne $AccountName -or $status.useExistingExportsOnly -ne $true) { throw 'Published status does not match the seeded validation request.' }
+        $dashboardPath = & $download ([string]$status.dashboardBlobName)
+        foreach ($asset in @(Get-AzureDashboardConfiguredPdfAssetName -DashboardPath $dashboardPath -DashboardBlobName ([string]$status.dashboardBlobName))) { $null = & $download $asset }
+        if ($DashboardDeliveryMode -in @('Hosted', 'Dual')) {
+            $hostedName = if ($DashboardDeliveryMode -eq 'Dual') { [string]$status.hostedDashboardBlobName } else { [string]$status.dashboardBlobName }
+            if ($DashboardDeliveryMode -eq 'Dual') {
+                $hostedPath = & $download $hostedName
+                foreach ($asset in @(Get-AzureDashboardConfiguredPdfAssetName -DashboardPath $hostedPath -DashboardBlobName $hostedName)) { $null = & $download $asset }
+            }
+            $assetRoot = ($hostedName -replace '\.[^./]+$', '') + '.assets'
+            foreach ($asset in @('runtime/dashboard.css', 'runtime/dashboard.js', 'runtime/pako.js', 'vendor/chart.js', 'data/summary.json', 'data/payload.json.gz')) { $null = & $download "$assetRoot/$asset" }
+        }
+        $result = Assert-AzureDashboardCandidateEvidence -DashboardRootPath $root -RunbookStatus $status -DashboardDeliveryMode $DashboardDeliveryMode -ExpectedTotalRows $ExpectedTotalRows -ExpectedJobId $ExpectedJobId -ExpectedRunId ([string]$status.runId) -NotBefore $NotBefore
+        $lastStatusPath = & $download '_diagnostics/ExportAndGenerate.status.json'
+        $lastStatus = Get-Content -LiteralPath $lastStatusPath -Raw | ConvertFrom-Json -Depth 30
+        if ([string]$lastStatus.runId -ne [string]$status.runId -or [string]$lastStatus.updatedOnUtc -ne [string]$status.updatedOnUtc) { throw 'Published status changed during artifact validation.' }
+        return $result
+    }
+    finally {
+        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Resolve-AzureValidationExpectedRowCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $false)][string]$DatasetPath,
+        [Parameter(Mandatory = $false)]$ExpectedTotalRows
+    )
+
+    if ($PSBoundParameters.ContainsKey('ExpectedTotalRows')) {
+        $count = $ExpectedTotalRows
+        $invalidCountMessage = 'ExpectedTotalRows must be an integer between 1 and 50000000.'
+        if ($count -is [string]) {
+            $parsedCount = 0
+            if ([int]::TryParse($count, [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsedCount)) { $count = $parsedCount }
+        }
+    }
+    else {
+        $manifest = $null
+        if (-not [string]::IsNullOrWhiteSpace($DatasetPath)) {
+            $manifestPath = Join-Path $DatasetPath 'synthetic-manifest.json'
+            if (Test-Path -LiteralPath $manifestPath -PathType Leaf) { $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 30 }
+        }
+        if ($null -eq $manifest -or -not $manifest.PSObject.Properties['expectedDashboardRows']) {
+            throw 'ExpectedTotalRows is required: supply an explicit expected onboarded dashboard row count or authoritative expectedDashboardRows in synthetic-manifest.json. Source observation counts are not dashboard row counts.'
+        }
+        $count = $manifest.expectedDashboardRows
+        $invalidCountMessage = 'synthetic-manifest.json expectedDashboardRows must be a JSON integer between 1 and 50000000.'
+    }
+    $isNumber = $count -is [int] -or $count -is [long] -or $count -is [double] -or $count -is [decimal] -or $count -is [System.Numerics.BigInteger]
+    if (-not $isNumber -or $count -lt 1 -or $count -gt 50000000 -or $count -ne [math]::Truncate([double]$count)) { throw $invalidCountMessage }
+    return [int]$count
+}
+
+function Assert-AzureDashboardCandidateEvidence {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param(
+        [Parameter(Mandatory = $true)][string]$DashboardRootPath,
+        [Parameter(Mandatory = $true)]$RunbookStatus,
+        [Parameter(Mandatory = $true)][ValidateSet('SelfContained', 'Hosted', 'Dual')][string]$DashboardDeliveryMode,
+        [Parameter(Mandatory = $true)]$ExpectedTotalRows,
+        [Parameter(Mandatory = $false)][scriptblock]$PayloadRowCounter,
+        [Parameter(Mandatory = $false)][string]$ExpectedRunId,
+        [Parameter(Mandatory = $false)][string]$ExpectedJobId,
+        [Parameter(Mandatory = $false)][datetimeoffset]$NotBefore
+    )
+
+    $ExpectedTotalRows = Resolve-AzureValidationExpectedRowCount -ExpectedTotalRows $ExpectedTotalRows
+    if ([string]$RunbookStatus.status -ne 'succeeded' -or [string]$RunbookStatus.stage -ne 'Completed') { throw 'Runbook status evidence is not a succeeded Completed document.' }
+    if ($ExpectedRunId -and [string]$RunbookStatus.runId -ne $ExpectedRunId) { throw 'Runbook status belongs to a different job/run identity.' }
+    if ($ExpectedJobId -and [string]$RunbookStatus.automationJobId -ne $ExpectedJobId) { throw 'Runbook status belongs to a different Automation job.' }
+    if ([string]::IsNullOrWhiteSpace([string]$RunbookStatus.runId)) { throw 'Runbook status is missing runId.' }
+    if ($PSBoundParameters.ContainsKey('NotBefore') -and [datetimeoffset]$RunbookStatus.startedOnUtc -lt $NotBefore) { throw 'Runbook status predates the current validation job.' }
+    if ([int64]$RunbookStatus.vulnerabilities -ne $ExpectedTotalRows) { throw "Runbook status reported $($RunbookStatus.vulnerabilities) vulnerabilities; expected $ExpectedTotalRows." }
+    foreach ($countName in @('devices', 'cves')) {
+        if (-not $RunbookStatus.PSObject.Properties[$countName] -or [int]$RunbookStatus.$countName -le 0) { throw "Runbook status is missing a positive '$countName' count." }
+    }
+
+    $root = [System.IO.Path]::GetFullPath($DashboardRootPath) + [System.IO.Path]::DirectorySeparatorChar
+    $resolveArtifact = {
+        param([string]$Name)
+        if ([string]::IsNullOrWhiteSpace($Name) -or [System.IO.Path]::IsPathRooted($Name) -or $Name.Contains(':')) { throw 'Invalid published artifact name.' }
+        $path = [System.IO.Path]::GetFullPath((Join-Path $root ($Name -replace '/', [System.IO.Path]::DirectorySeparatorChar)))
+        if (-not $path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Published artifact escapes the dashboard root.' }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -eq 0) { throw "Published dashboard asset '$Name' is missing or empty." }
+        if ($ExpectedJobId) {
+            $expectedHash = [string]$RunbookStatus.artifactSha256.PSObject.Properties[$Name].Value
+            if ($expectedHash -notmatch '^[0-9a-f]{64}$' -or (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedHash) { throw "Published artifact '$Name' SHA-256 does not match the current job status." }
+        }
+        return $path
+    }
+    $dashboardBlobName = [string]$RunbookStatus.dashboardBlobName
+    $dashboardPath = & $resolveArtifact $dashboardBlobName
+    foreach ($asset in @(Get-AzureDashboardConfiguredPdfAssetName -DashboardPath $dashboardPath -DashboardBlobName $dashboardBlobName)) { $null = & $resolveArtifact $asset }
+    $result = [ordered]@{
+        dashboard_blob_name = $dashboardBlobName
+        dashboard_sha256 = (Get-FileHash -LiteralPath $dashboardPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        dashboard_bytes = [int64](Get-Item -LiteralPath $dashboardPath).Length
+        vulnerabilities = [int64]$RunbookStatus.vulnerabilities
+        devices = [int]$RunbookStatus.devices
+        cves = [int]$RunbookStatus.cves
+        hosted_assets_validated = $false
+    }
+
+    $embedded = $null
+    if ($DashboardDeliveryMode -in @('SelfContained', 'Dual')) {
+        $embedded = Get-DashboardEmbeddedPayloadInspection -Path $dashboardPath
+        if ($embedded.DataFormat -ne 'compressed' -or $embedded.PayloadRowCount -ne $ExpectedTotalRows) { throw 'Self-contained payload format/count does not match the expected dashboard rows.' }
+        $result['payload_row_count'] = $embedded.PayloadRowCount
+        $result['payload_sha256'] = $embedded.PayloadSha256
+    }
+    if ($DashboardDeliveryMode -in @('Hosted', 'Dual')) {
+        $hostedBlobName = if ($DashboardDeliveryMode -eq 'Dual') { [string]$RunbookStatus.hostedDashboardBlobName } else { $dashboardBlobName }
+        $hostedPath = & $resolveArtifact $hostedBlobName
+        if ($DashboardDeliveryMode -eq 'Dual') {
+            foreach ($asset in @(Get-AzureDashboardConfiguredPdfAssetName -DashboardPath $hostedPath -DashboardBlobName $hostedBlobName)) { $null = & $resolveArtifact $asset }
+        }
+        $assetDirectoryName = ($hostedBlobName -replace '\.[^./]+$', '') + '.assets'
+        $requiredAssets = @('runtime/dashboard.css', 'runtime/dashboard.js', 'runtime/pako.js', 'vendor/chart.js', 'data/summary.json', 'data/payload.json.gz')
+        foreach ($relativeAssetPath in $requiredAssets) { $null = & $resolveArtifact "$assetDirectoryName/$relativeAssetPath" }
+        $payloadPath = & $resolveArtifact "$assetDirectoryName/data/payload.json.gz"
+        $summaryPath = & $resolveArtifact "$assetDirectoryName/data/summary.json"
+        $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json -Depth 30
+        $payloadSha256 = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ([string]$summary.meta.payloadSha256 -ne $payloadSha256) { throw 'Hosted payload SHA-256 does not match summary metadata.' }
+        if ([int64]$summary.meta.vulnCount -ne $ExpectedTotalRows) { throw 'Hosted summary vulnerability count does not match the expected row count.' }
+        if ([int]$summary.meta.deviceCount -ne [int]$RunbookStatus.devices -or [int]$summary.meta.cveCount -ne [int]$RunbookStatus.cves) { throw 'Hosted summary device/CVE counts do not match runbook status.' }
+        $payloadRowCount = if ($PayloadRowCounter) { & $PayloadRowCounter $payloadPath } else { Get-CompressedPayloadVulnCount -Path $payloadPath }
+        if ($payloadRowCount -ne $ExpectedTotalRows) { throw "Published payload contains $payloadRowCount rows; expected $ExpectedTotalRows." }
+        if ($embedded -and $embedded.PayloadSha256 -ne $payloadSha256) { throw 'Dual self-contained and hosted payload SHA-256 identities differ.' }
+        $hostedHtml = Get-Content -LiteralPath $hostedPath -Raw
+        foreach ($relativeAssetPath in @('data/payload.json.gz', 'data/summary.json', 'runtime/dashboard.js')) {
+            if (-not $hostedHtml.Contains("$assetDirectoryName/$relativeAssetPath")) { throw "Hosted dashboard HTML does not reference '$relativeAssetPath'." }
+        }
+        $result['hosted_blob_name'] = $hostedBlobName
+        $result['payload_sha256'] = $payloadSha256
+        $result['payload_row_count'] = [int64]$payloadRowCount
+        $result['payload_bytes'] = [int64](Get-Item -LiteralPath $payloadPath).Length
+        $result['summary_sha256'] = (Get-FileHash -LiteralPath $summaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $result['hosted_assets_validated'] = $true
+    }
+    return [PSCustomObject]$result
+}
+
 function Write-ProvisioningLogLine {
     [CmdletBinding()]
     param(
