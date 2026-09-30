@@ -2,7 +2,9 @@
 
 <img width="2592" height="1641" alt="image" src="https://github.com/user-attachments/assets/5249ddf2-1c42-4bc7-bcaa-d19aecd19841" />
 
-Defender for Endpoint vulnerability reporting has always been a pain point, and this felt like a great opportunity to use AI-assisted coding to build a dashboard without a dependency on Power BI or other expensive tools. The result is a PowerShell-built dashboard that defaults to a self-contained HTML artifact for direct-open use, with an opt-in split-assets mode for hosted deployments, along with validation tooling, Azure automation assets, GitHub Actions workflows, and sample PDF report outputs.
+Defender for Endpoint vulnerability reporting has always been a pain point, and this felt like a great opportunity to use AI-assisted coding to build a dashboard without a dependency on Power BI or other expensive tools. The result is a PowerShell-built dashboard that defaults to a self-contained HTML artifact for direct-open use, with an opt-in split-assets mode for hosted deployments, along with validation tooling, Azure automation assets, GitHub Actions workflows, and PDF report generation.
+
+Live exports, generated dashboards, and report PDFs are local/private outputs, not checked-in samples. Regression tests use deterministic synthetic datasets in temporary directories and minimal synthetic legacy fixtures under `tests/fixtures/`. Do not commit live data or include it in logs or PR evidence. Public live workflows remain private-repository-only and disabled. Removing current-tree outputs does not remove historical copies; issue #68 remains open for the separate private historical response.
 
 ## How it works
 

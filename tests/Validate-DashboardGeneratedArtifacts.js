@@ -1,6 +1,8 @@
 ﻿const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const zlib = require('zlib');
 
 const reportOptions = [
     ['active-vulnerabilities', 'Active Vulnerabilities'],
@@ -177,6 +179,26 @@ function validateHosted(hostedPath) {
     assert(!html.includes('<style>'), 'hosted: should not contain embedded stylesheet markup.');
 }
 
+function validatePackageParity(selfContainedPath, hostedPath) {
+    const html = readUtf8(selfContainedPath);
+    const embeddedPayload = html.match(/<script id="vulnsData" type="application\/json">\s*([A-Za-z0-9+/=\s]+)<\/script>/);
+    assert(embeddedPayload, 'self-contained: expected embedded gzip payload.');
+    const selfPayload = JSON.parse(zlib.gunzipSync(Buffer.from(embeddedPayload[1].replace(/\s/g, ''), 'base64')));
+    const assetDirectory = path.join(path.dirname(hostedPath), `${path.basename(hostedPath, path.extname(hostedPath))}.assets`, 'data');
+    const hostedBytes = fs.readFileSync(path.join(assetDirectory, 'payload.json.gz'));
+    const hostedPayload = JSON.parse(zlib.gunzipSync(hostedBytes));
+    assert.deepStrictEqual(selfPayload, hostedPayload, 'dual-package: expected identical rows and lookups.');
+
+    const summary = JSON.parse(readUtf8(path.join(assetDirectory, 'summary.json')));
+    const rowCount = Array.isArray(hostedPayload.vulns) ? hostedPayload.vulns.length : hostedPayload.vulns.d.length;
+    assert(rowCount > 0, 'dual-package: expected nonempty synthetic fixture rows.');
+    assert.strictEqual(summary.meta.vulnCount, rowCount, 'summary: vulnerability count must match both payloads.');
+    assert.strictEqual(summary.meta.deviceCount, hostedPayload.lookups.devices.length, 'summary: device count must match both payloads.');
+    assert.strictEqual(summary.meta.cveCount, hostedPayload.lookups.cves.length, 'summary: CVE count must match both payloads.');
+    assert.strictEqual(summary.filterCatalog.devices.length, hostedPayload.lookups.devices.length, 'summary: device catalog must match the payload.');
+    assert.strictEqual(summary.meta.payloadSha256, crypto.createHash('sha256').update(hostedBytes).digest('hex'), 'summary: payload hash must match the hosted asset.');
+}
+
 function main() {
     const [, , selfContainedPath, hostedPath] = process.argv;
     if (!selfContainedPath || !hostedPath) {
@@ -186,6 +208,7 @@ function main() {
 
     validateSelfContained(path.resolve(selfContainedPath));
     validateHosted(path.resolve(hostedPath));
+    validatePackageParity(path.resolve(selfContainedPath), path.resolve(hostedPath));
 }
 
 main();
