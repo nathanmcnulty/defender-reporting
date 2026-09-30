@@ -134,6 +134,10 @@ For local validation of the hosted split-assets build, use a local HTTP server i
 | `-EasyAuthAppClientId` | No | Explicitly select an existing Easy Auth app registration when a legacy deployment has ambiguous duplicates and no usable Container App auth configuration |
 | `-EasyAuthAppDisplayName` | No | Name for a new Easy Auth registration; defaults to `Defender Reporting Dashboard` for compatibility. Use a unique name for an isolated deployment. |
 
+`-SkipMdePermissions` disables recurring execution for both compute types: the Automation daily schedule is explicitly disabled and verified through ARM, and the Function App sets and verifies `AzureWebJobs.ExportAndGenerate.Disabled=true`. Existing Function App settings, including secrets and unrelated function settings, are preserved; setup updates only its owned keys. After configuring the required MDE app roles, rerun setup without `-SkipMdePermissions` to explicitly enable the Automation schedule or set the Function disable setting to `false`.
+
+Manual seeded validation can still use `UseExistingExportsOnly=true`. Disabling recurring execution does not force manual jobs into seeded mode. Use `-SkipValidation` to avoid starting a setup validation job, and specify `-DashboardDeliveryMode Dual` when retaining an existing Dual deployment without hosting configuration. Omit `-IncludeContainerApp` when only updating compute scheduling to leave hosting and Easy Auth untouched.
+
 When migrating an existing Automation Account deployment to a Function App,
 pass `-AutomationAccountName` with the existing account and the script can
 auto-discover the shared resource group, location, and storage account. You can

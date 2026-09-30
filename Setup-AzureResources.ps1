@@ -952,6 +952,21 @@ try {
         # 3b: Create Function App with system-assigned Managed Identity
         $functionAppPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/${FunctionAppName}?api-version=$($Script:ArmApiVersions.WebApp)"
         $functionAppState = Get-OptionalArmResource -Path $functionAppPath -Description 'Check Function App'
+        $functionAppSettingsPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/sites/${FunctionAppName}/config/appsettings/list?api-version=$($Script:ArmApiVersions.WebApp)"
+        $functionAppSettings = @{}
+        if ($functionAppState.Exists) {
+            $existingFunctionAppSettings = Invoke-ArmApi -Path $functionAppSettingsPath -Method POST -Description 'Read existing Function App settings'
+            $functionAppSettings = $existingFunctionAppSettings.properties | ConvertTo-Json -Depth 10 | ConvertFrom-Json -AsHashtable
+            if ($null -eq $functionAppSettings) {
+                throw 'Existing Function App settings were not returned; refusing to replace them.'
+            }
+        }
+        $functionAppSettings['AzureWebJobsStorage__accountName'] = $StorageAccountName
+        $functionAppSettings['FUNCTIONS_EXTENSION_VERSION'] = '~4'
+        $functionAppSettings['STORAGE_ACCOUNT_NAME'] = $StorageAccountName
+        $functionAppSettings['DASHBOARD_DELIVERY_MODE'] = $effectiveDashboardDeliveryMode
+        $functionAppSettings['INCLUDE_ADVANCED_HUNTING'] = 'true'
+        $functionAppSettings['AzureWebJobs.ExportAndGenerate.Disabled'] = $SkipMdePermissions.ToString().ToLowerInvariant()
 
         $functionAppPayload = Get-CreateOnlyProvisioningPayload -Payload ([ordered]@{
             location   = $Location
@@ -963,11 +978,9 @@ try {
                 serverFarmId    = "/subscriptions/$subscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Web/serverfarms/$planName"
                 siteConfig      = @{
                     appSettings = @(
-                        @{ name = "AzureWebJobsStorage__accountName"; value = $StorageAccountName }
-                        @{ name = "FUNCTIONS_EXTENSION_VERSION"; value = "~4" }
-                        @{ name = "STORAGE_ACCOUNT_NAME"; value = $StorageAccountName }
-                        @{ name = "DASHBOARD_DELIVERY_MODE"; value = $effectiveDashboardDeliveryMode }
-                        @{ name = "INCLUDE_ADVANCED_HUNTING"; value = "true" }
+                        foreach ($settingName in $functionAppSettings.Keys) {
+                            @{ name = $settingName; value = $functionAppSettings[$settingName] }
+                        }
                     )
                 }
                 functionAppConfig = @{
@@ -994,6 +1007,10 @@ try {
 
         if ($PSCmdlet.ShouldProcess($FunctionAppName, "Create/update Function App")) {
             $null = Invoke-ArmApi -Path $functionAppPath -Method PUT -Payload $functionAppPayload -Description "Create/update Function App"
+            $functionAppSettingsState = Invoke-ArmApi -Path $functionAppSettingsPath -Method POST -Description 'Verify Function App timer state'
+            if ($functionAppSettingsState.properties.'AzureWebJobs.ExportAndGenerate.Disabled' -ne $functionAppSettings['AzureWebJobs.ExportAndGenerate.Disabled']) {
+                throw "Function App '$FunctionAppName' did not reach the requested timer disabled state ($SkipMdePermissions)."
+            }
             if ($functionAppState.Exists) {
                 Write-Host "  Function App '$FunctionAppName' already exists; configuration and Managed Identity confirmed" -ForegroundColor Green
             }
@@ -1558,7 +1575,7 @@ try {
             startTime   = $startTime
             frequency   = "Day"
             interval    = 1
-            isEnabled   = $true
+            isEnabled   = (-not $SkipMdePermissions)
             timeZone    = "UTC"
         }
     } | ConvertTo-Json -Depth 5
@@ -1579,6 +1596,16 @@ try {
 
         Invoke-ArmApi -Path $schedulePath -Method PUT -Payload $schedulePayload -Description "Create schedule" | Out-Null
         Write-Host "  Schedule created: daily starting $startTime" -ForegroundColor Green
+        $scheduleEnabled = -not $SkipMdePermissions
+        $scheduleStatePayload = @{ properties = @{ isEnabled = $scheduleEnabled } } | ConvertTo-Json -Depth 3
+        Invoke-ArmApi -Path $schedulePath -Method PATCH -Payload $scheduleStatePayload -Description 'Configure daily schedule state' | Out-Null
+        $scheduleState = Invoke-ArmApi -Path $schedulePath -Method GET -Description 'Verify daily schedule state'
+        if ($scheduleState.properties.isEnabled -ne $scheduleEnabled) {
+            throw "Schedule '$scheduleName' did not reach the requested enabled state ($scheduleEnabled)."
+        }
+        if ($SkipMdePermissions) {
+            Write-Host '  Schedule disabled until MDE permissions are configured.' -ForegroundColor Yellow
+        }
 
         # Link schedule to runbook
         $jobScheduleId = [guid]::NewGuid().ToString()
@@ -2668,9 +2695,9 @@ exec caddy file-server --root /data --listen :80
     Write-Host "  Managed Identity:    $miPrincipalId" -ForegroundColor Gray
     Write-Host "  Blob Containers:     $($Script:BlobContainers -join ', ')" -ForegroundColor Gray
     if ($ComputeType -eq 'AutomationAccount') {
-        Write-Host "  Schedule:            Daily" -ForegroundColor Gray
+        Write-Host "  Schedule:            $(if ($SkipMdePermissions) { 'Disabled (MDE permissions skipped)' } else { 'Daily' })" -ForegroundColor Gray
     } else {
-        Write-Host "  Timer Trigger:       Daily at 2:00 AM UTC" -ForegroundColor Gray
+        Write-Host "  Timer Trigger:       $(if ($SkipMdePermissions) { 'Disabled (MDE permissions skipped)' } else { 'Daily at 2:00 AM UTC' })" -ForegroundColor Gray
     }
     if ($IncludeContainerApp) {
         Write-Host "  Container App Env:   $ContainerAppEnvName" -ForegroundColor Gray
@@ -2684,7 +2711,9 @@ exec caddy file-server --root /data --listen :80
     if ($IncludeContainerApp) {
         Write-Host "  1. Open https://$caFqdn in a browser to access the dashboard" -ForegroundColor Gray
         Write-Host "  2. Sign in with a user in the '$securityGroupName' security group" -ForegroundColor Gray
-        if ($ComputeType -eq 'AutomationAccount') {
+        if ($SkipMdePermissions) {
+            Write-Host '  3. Recurring execution is disabled; rerun setup without -SkipMdePermissions after configuring MDE permissions' -ForegroundColor Gray
+        } elseif ($ComputeType -eq 'AutomationAccount') {
             Write-Host "  3. The runbook will update the dashboard daily" -ForegroundColor Gray
         } else {
             Write-Host "  3. The function app will update the dashboard daily at 2:00 AM UTC" -ForegroundColor Gray
@@ -2704,7 +2733,9 @@ exec caddy file-server --root /data --listen :80
         else {
             Write-Host "  1. Download VulnerabilityDashboard.html from the 'dashboards' container" -ForegroundColor Gray
         }
-        if ($ComputeType -eq 'AutomationAccount') {
+        if ($SkipMdePermissions) {
+            Write-Host "  2. Recurring execution is disabled; rerun setup without -SkipMdePermissions after configuring MDE permissions`n" -ForegroundColor Gray
+        } elseif ($ComputeType -eq 'AutomationAccount') {
             Write-Host "  2. The runbook will run automatically every day`n" -ForegroundColor Gray
         } else {
             Write-Host "  2. The function app will run automatically every day at 2:00 AM UTC`n" -ForegroundColor Gray
@@ -2712,7 +2743,9 @@ exec caddy file-server --root /data --listen :80
     }
     else {
         Write-Host "  1. Upload templates: .\azure\Upload-Templates.ps1 -StorageAccountName $StorageAccountName" -ForegroundColor Gray
-        if ($ComputeType -eq 'AutomationAccount') {
+        if ($SkipMdePermissions) {
+            Write-Host '  2. Recurring execution is disabled; validate manually only with UseExistingExportsOnly=true and seeded exports' -ForegroundColor Gray
+        } elseif ($ComputeType -eq 'AutomationAccount') {
             Write-Host "  2. Run the pipeline: start the runbook manually from the Azure portal" -ForegroundColor Gray
         } else {
             Write-Host "  2. Run the pipeline: trigger the function app manually from the Azure portal" -ForegroundColor Gray
