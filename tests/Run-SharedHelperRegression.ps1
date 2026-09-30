@@ -911,6 +911,137 @@ function Test-MdeMachineRefreshPublishPlanSupportsStateHashOnlyCurrentMap {
     }
 }
 
+function Test-MdeMachineRefreshFailureRemovesStagedFile {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('machine-refresh-failure-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    $originalRestMethod = (Get-Command -Name Invoke-RestMethodWithRetry -CommandType Function).ScriptBlock
+    $originalJsonWrite = (Get-Command -Name Write-JsonValueToWriter -CommandType Function).ScriptBlock
+
+    try {
+        $script:MockMachineRefreshOriginalJsonWrite = $originalJsonWrite
+        Set-Item -Path Function:Invoke-RestMethodWithRetry -Value {
+            param([string]$Uri, [hashtable]$Headers, [string]$Method)
+            [void]$Uri
+            [void]$Headers
+            [void]$Method
+            $script:MockMachineRefreshFailurePage++
+            if ($script:MockMachineRefreshFailurePage -eq 1) {
+                $response = [PSCustomObject]@{
+                    value = @((Get-TestMachineRecord -Id 'machine-002'))
+                }
+                if ($script:MockMachineRefreshPageFailure) {
+                    $response | Add-Member -NotePropertyName '@odata.nextLink' -NotePropertyValue 'https://example.invalid/api/machines?page=2'
+                }
+                return $response
+            }
+            throw 'Injected second-page failure'
+        }
+        Set-Item -Path Function:Write-JsonValueToWriter -Value {
+            param([Newtonsoft.Json.JsonTextWriter]$Writer, [AllowNull()][object]$Value)
+            if ($null -eq $Writer.PSObject.Properties['MockRefreshWriterIndex']) {
+                $writerIndex = $script:MockMachineRefreshWriters.Count
+                $script:MockMachineRefreshWriters.Add($Writer)
+                $Writer | Add-Member -NotePropertyName MockRefreshWriterIndex -NotePropertyValue $writerIndex
+                if ($script:MockMachineRefreshFailDisposeIndices -contains $writerIndex) {
+                    $streamWriterField = [Newtonsoft.Json.JsonTextWriter].GetField('_writer', [System.Reflection.BindingFlags]'Instance,NonPublic')
+                    $streamWriter = $streamWriterField.GetValue($Writer)
+                    $streamWriter | Add-Member -MemberType ScriptMethod -Name Dispose -Force -Value {
+                        $script:MockMachineRefreshDisposeFailureAttempted = $true
+                        $this.psbase.Dispose()
+                        throw 'Injected stream dispose failure'
+                    }
+                }
+                $Writer | Add-Member -MemberType ScriptMethod -Name Close -Force -Value {
+                    $script:MockMachineRefreshCloseAttempts.Add([int]$this.MockRefreshWriterIndex)
+                    if ($script:MockMachineRefreshFailCloseIndices -contains [int]$this.MockRefreshWriterIndex) {
+                        throw "Injected writer close failure $($this.MockRefreshWriterIndex)"
+                    }
+                    $this.psbase.Close()
+                }
+                foreach ($stagedFile in Get-ChildItem -LiteralPath $script:MockMachineRefreshFailureRoot -Filter '.*.json.gz' -File -Force) {
+                    [void]$script:MockMachineRefreshStagedPaths.Add($stagedFile.FullName)
+                }
+            }
+            & $script:MockMachineRefreshOriginalJsonWrite -Writer $Writer -Value $Value
+        }
+        $mockJsonWrite = (Get-Command -Name Write-JsonValueToWriter -CommandType Function).ScriptBlock
+
+        foreach ($scenario in @(
+            @{ Name = 'PageFailure'; PageFailure = $true; FailCloseIndices = @(); ExpectedError = 'Injected second-page failure' }
+            @{ Name = 'PageAndBothCloseFailures'; PageFailure = $true; FailCloseIndices = @(0, 1); ExpectedError = 'Injected second-page failure' }
+            @{ Name = 'CurrentCloseFailure'; PageFailure = $false; FailCloseIndices = @(0); ExpectedError = 'Injected writer close failure 0' }
+            @{ Name = 'HistoryCloseFailure'; PageFailure = $false; FailCloseIndices = @(1); ExpectedError = 'Injected writer close failure 1' }
+            @{ Name = 'BothCloseFailures'; PageFailure = $false; FailCloseIndices = @(0, 1); ExpectedError = 'Injected writer close failure 0' }
+            @{ Name = 'StreamDisposeFailure'; PageFailure = $false; FailCloseIndices = @(); FailDisposeIndices = @(0); ExpectedError = 'Injected stream dispose failure' }
+            @{ Name = 'PageAndStreamDisposeFailure'; PageFailure = $true; FailCloseIndices = @(); FailDisposeIndices = @(0); ExpectedError = 'Injected second-page failure' }
+        )) {
+            $scenarioRoot = Join-Path $tempRoot $scenario.Name
+            [void](New-Item -Path $scenarioRoot -ItemType Directory -Force)
+            $currentPath = Get-MachineCurrentPath -BasePath $scenarioRoot
+            $historyPath = Get-MachineHistoryQuarterlyPath -BasePath $scenarioRoot -PeriodKey '2026Q2'
+            $seedRecord = New-MachineSnapshotRecord -Machine (Get-TestMachineRecord -Id 'machine-001') -ObservedOn '2026-05-10'
+            Set-Item -Path Function:Write-JsonValueToWriter -Value $originalJsonWrite
+            Write-NdjsonRecordsFile -Path $currentPath -Records @($seedRecord)
+            Write-NdjsonRecordsFile -Path $historyPath -Records @($seedRecord)
+            $publishedBefore = @{}
+            foreach ($publishedPath in @($currentPath, $historyPath)) {
+                $publishedBefore[$publishedPath] = @{
+                    Hash = (Get-FileHash -LiteralPath $publishedPath -Algorithm SHA256).Hash
+                    Content = ConvertTo-Json -InputObject @(Read-MachineRecordsFromFile -Path $publishedPath) -Depth 20 -Compress
+                }
+            }
+            $script:MockMachineRefreshFailureRoot = $scenarioRoot
+            $script:MockMachineRefreshFailurePage = 0
+            $script:MockMachineRefreshPageFailure = $scenario.PageFailure
+            $script:MockMachineRefreshFailCloseIndices = $scenario.FailCloseIndices
+            $script:MockMachineRefreshFailDisposeIndices = if ($scenario.ContainsKey('FailDisposeIndices')) { $scenario.FailDisposeIndices } else { @() }
+            $script:MockMachineRefreshDisposeFailureAttempted = $false
+            $script:MockMachineRefreshWriters = [System.Collections.Generic.List[object]]::new()
+            $script:MockMachineRefreshCloseAttempts = [System.Collections.Generic.List[int]]::new()
+            $script:MockMachineRefreshStagedPaths = [System.Collections.Generic.HashSet[string]]::new()
+            Set-Item -Path Function:Write-JsonValueToWriter -Value $mockJsonWrite
+
+            $failure = $null
+            $refreshResult = $null
+            try {
+                $refreshResult = Invoke-MdeMachineStoreRefresh -Headers @{ Authorization = 'Bearer test' } -OutputPath $scenarioRoot -BaseApiUrl 'https://example.invalid'
+            }
+            catch {
+                $failure = $_
+            }
+
+            Assert-True ($null -ne $failure -and $failure.Exception.Message -like "*$($scenario.ExpectedError)*") "Expected $($scenario.Name) to propagate its primary failure."
+            Assert-True ($null -eq $refreshResult) "Expected $($scenario.Name) not to return a successful publish result."
+            Assert-True (($script:MockMachineRefreshCloseAttempts -join ',') -eq '0,1') "Expected $($scenario.Name) to attempt both writer closes independently."
+            if ($scenario.ContainsKey('FailDisposeIndices')) {
+                Assert-True $script:MockMachineRefreshDisposeFailureAttempted "Expected $($scenario.Name) to exercise the underlying stream disposal failure."
+            }
+            Assert-True ($script:MockMachineRefreshStagedPaths.Count -eq 2) "Expected $($scenario.Name) to exercise staged current and history files."
+            foreach ($stagedPath in $script:MockMachineRefreshStagedPaths) {
+                Assert-True (-not (Test-Path -LiteralPath $stagedPath)) "Expected $($scenario.Name) to remove staged file '$stagedPath'."
+            }
+            Assert-True (@(Get-ChildItem -LiteralPath $scenarioRoot -Filter '*.json.gz' -File -Force).Count -eq 2) "Expected $($scenario.Name) to leave only the two seeded published files."
+            foreach ($publishedPath in @($currentPath, $historyPath)) {
+                Assert-True ((Get-FileHash -LiteralPath $publishedPath -Algorithm SHA256).Hash -ceq $publishedBefore[$publishedPath].Hash) "Expected $($scenario.Name) to preserve published bytes at '$publishedPath'."
+                $publishedContent = ConvertTo-Json -InputObject @(Read-MachineRecordsFromFile -Path $publishedPath) -Depth 20 -Compress
+                Assert-True ($publishedContent -ceq $publishedBefore[$publishedPath].Content) "Expected $($scenario.Name) to preserve published machine content at '$publishedPath'."
+            }
+            Write-Output "  $($scenario.Name): primary error preserved; both closes attempted; both staged files removed; current/history hashes and content unchanged."
+        }
+    }
+    finally {
+        Set-Item -Path Function:Invoke-RestMethodWithRetry -Value $originalRestMethod
+        Set-Item -Path Function:Write-JsonValueToWriter -Value $originalJsonWrite
+        Remove-Variable -Name MockMachineRefreshOriginalJsonWrite, MockMachineRefreshFailureRoot, MockMachineRefreshFailurePage, MockMachineRefreshPageFailure, MockMachineRefreshFailCloseIndices, MockMachineRefreshFailDisposeIndices, MockMachineRefreshDisposeFailureAttempted, MockMachineRefreshWriters, MockMachineRefreshCloseAttempts, MockMachineRefreshStagedPaths -Scope Script -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet {
     [CmdletBinding()]
     param()
@@ -6781,6 +6912,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-InitializeMachineHistoryStoreBackfillsCurrentRecordMetadata'; SuccessMessage = 'Machine store initialization checks passed.' }
     @{ Name = 'Test-InitializeMachineHistoryStoreSupportsStateHashOnlyCurrentMap'; SuccessMessage = 'Machine store stateHash-only initialization checks passed.' }
     @{ Name = 'Test-MdeMachineRefreshPublishPlanSupportsStateHashOnlyCurrentMap'; SuccessMessage = 'Machine refresh plan stateHash-only checks passed.' }
+    @{ Name = 'Test-MdeMachineRefreshFailureRemovesStagedFile'; SuccessMessage = 'Machine refresh failure cleanup checks passed.' }
     @{ Name = 'Test-MachineHistoryRemovePathsAllowsEmptyPublishedHistorySet'; SuccessMessage = 'Machine history cleanup empty-set checks passed.' }
     @{ Name = 'Test-RestoreStoreTransactionRejectsInvalidJournalShape'; SuccessMessage = 'Store transaction journal validation checks passed.' }
     @{ Name = 'Test-InitializeMachineHistoryStoreRejectsExpiredLegacyMigration'; SuccessMessage = 'Machine legacy migration cutoff checks passed.' }

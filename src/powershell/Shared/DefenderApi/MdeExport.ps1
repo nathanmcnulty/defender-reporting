@@ -986,6 +986,8 @@ function Get-MdeMachineRefreshPublishPlan {
     $historyGzipStream = $null
     $historyWriter = $null
     $historyJsonWriter = $null
+    $planCompleted = $false
+    $planFailure = $null
 
     try {
         $currentFileStream = [System.IO.File]::Create($StagedCurrentPath)
@@ -1077,17 +1079,43 @@ function Get-MdeMachineRefreshPublishPlan {
             $historyWriter.WriteLine()
             $changeCount++
         }
+        $planCompleted = $true
+    }
+    catch {
+        $planFailure = $_
+        throw
     }
     finally {
-        if ($currentJsonWriter) { $currentJsonWriter.Close() }
-        elseif ($currentWriter) { $currentWriter.Dispose() }
-        elseif ($currentGzipStream) { $currentGzipStream.Dispose() }
-        elseif ($currentFileStream) { $currentFileStream.Dispose() }
+        $finalizationFailure = $null
+        foreach ($jsonWriter in @($currentJsonWriter, $historyJsonWriter)) {
+            if ($null -ne $jsonWriter) {
+                try { $jsonWriter.Close() }
+                catch {
+                    if ($null -eq $finalizationFailure) { $finalizationFailure = $_ }
+                    $planCompleted = $false
+                }
+            }
+        }
+        foreach ($stream in @($currentWriter, $historyWriter, $currentGzipStream, $historyGzipStream, $currentFileStream, $historyFileStream)) {
+            if ($null -ne $stream) {
+                try { $stream.Dispose() }
+                catch {
+                    if ($null -eq $finalizationFailure) { $finalizationFailure = $_ }
+                    $planCompleted = $false
+                }
+            }
+        }
 
-        if ($historyJsonWriter) { $historyJsonWriter.Close() }
-        elseif ($historyWriter) { $historyWriter.Dispose() }
-        elseif ($historyGzipStream) { $historyGzipStream.Dispose() }
-        elseif ($historyFileStream) { $historyFileStream.Dispose() }
+        if (-not $planCompleted) {
+            foreach ($stagedPath in @($StagedCurrentPath, $stagedHistoryPath)) {
+                if ($stagedPath -and (Test-Path -LiteralPath $stagedPath -PathType Leaf)) {
+                    Remove-Item -LiteralPath $stagedPath -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        if ($null -eq $planFailure -and $null -ne $finalizationFailure) {
+            throw $finalizationFailure
+        }
     }
 
     return [PSCustomObject]@{
