@@ -219,8 +219,7 @@ try {
                 if (Test-FileBackedNormalizationMachineLookup -Machines $referenceMachines) { Remove-FileBackedNormalizationMachineLookup -Machines $referenceMachines }
             }
             if ([int64]$referenceResult.VulnCount -ne $resolvedExpectedTotalRows) { throw 'Fresh source-reference projection row count does not match the expected Azure workload.' }
-            $hostedAssetDirectory = [System.IO.Path]::GetFileNameWithoutExtension([string]$candidateValidation.hosted_blob_name) + '.assets'
-            $publishedPayloadPath = Join-Path $candidateDashboardPath (Join-Path $hostedAssetDirectory 'data\payload.json.gz')
+            $publishedPayloadPath = Join-Path $candidateDashboardPath ([string]$candidateValidation.hosted_payload_blob_name)
             $referenceContent = Get-GzipDecompressedContentEvidence -Path $referencePayloadPath
             $publishedContent = Get-GzipDecompressedContentEvidence -Path $publishedPayloadPath
             $expandedComparison = $null

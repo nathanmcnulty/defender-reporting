@@ -2,7 +2,9 @@
 [CmdletBinding()]
 param(
     [string]$ReleaseRoot,
-    [string]$PublishedFixturePath
+    [string]$PublishedFixturePath,
+    [ValidatePattern('^$|^[0-9a-f]{32}$')]
+    [string]$AssetGeneration
 )
 
 Set-StrictMode -Version Latest
@@ -97,6 +99,7 @@ try {
     foreach ($mode in @('SelfContained', 'Hosted', 'Dual')) {
         $hostedName = if ($mode -eq 'Dual') { 'VulnerabilityDashboard.Hosted.html' } else { 'VulnerabilityDashboard.html' }
         $assetName = ($hostedName -replace '\.html$', '') + '.assets'
+        if ($AssetGeneration) { $assetName += "/generations/$AssetGeneration" }
         $assetRoot = Join-Path $script:FixtureRoot $assetName
         $assets = @('runtime/dashboard.css', 'runtime/dashboard.js', 'runtime/pako.js', 'vendor/chart.js', 'data/summary.json', 'data/payload.json.gz', 'optional/pdf-export.bundle.js', 'optional/pdf-export.runtime.js')
         foreach ($asset in $assets) {
@@ -112,6 +115,8 @@ try {
         if ($mode -ne 'SelfContained') {
             $target = if ($mode -eq 'Dual') { $hostedPath } else { $selfPath }
             $config = [ordered]@{
+                payloadUrl = "$assetName/data/payload.json.gz"; payloadSummaryUrl = "$assetName/data/summary.json"
+                chartJsUrl = "$assetName/vendor/chart.js"
                 pdfExportRuntimeMode = 'external'; pdfExportRuntimeUrl = "$assetName/optional/pdf-export.runtime.js"
                 pdfExportBundleMode = 'external'; pdfExportBundleUrl = "$assetName/optional/pdf-export.bundle.js"
             }
@@ -271,7 +276,9 @@ try {
         $script:BlobReads.Clear()
         $evidence = Test-AzurePublishedDashboardEvidence @parameters
         Assert-True ($evidence.payload_row_count -eq 2 -and $evidence.hosted_assets_validated) 'Saved production candidate did not validate.'
-        $pdfName = 'VulnerabilityDashboard.Hosted.assets/optional/pdf-export.runtime.js'
+        $publishedHostedName = if ($fixtureStatus.dashboardDeliveryMode -eq 'Dual') { $fixtureStatus.hostedDashboardBlobName } else { $fixtureStatus.dashboardBlobName }
+        $publishedConfig = Get-DashboardHtmlScriptContent -Html (Get-Content -LiteralPath (Join-Path $script:FixtureRoot $publishedHostedName) -Raw) -ScriptId 'dashboardConfig' | ConvertFrom-Json -Depth 20
+        $pdfName = [string]$publishedConfig.pdfExportRuntimeUrl
         Assert-True ($script:BlobReads.Contains($pdfName)) 'Saved production candidate PDF runtime was not downloaded.'
         Assert-True ($fixtureStatus.artifactSha256.PSObject.Properties[$pdfName].Value -eq (Get-FileHash -LiteralPath (Join-Path $script:FixtureRoot $pdfName)).Hash.ToLowerInvariant()) 'Saved production candidate lacks the matching optional runtime hash.'
         Write-Host 'Saved two-row production candidate passed offline with configured PDF runtime download and current-status hash.'

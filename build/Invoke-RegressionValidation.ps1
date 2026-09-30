@@ -250,6 +250,12 @@ Write-Output 'Running Setup scheduling regression tests...'
 Write-Output 'Running Setup published artifact validation regression tests...'
 & (Join-Path $repoRoot 'tests\Invoke-SetupArtifactValidationRegression.ps1')
 
+Write-Output 'Running Setup generation-scoped artifact validation regression tests...'
+& (Join-Path $repoRoot 'tests\Invoke-SetupArtifactValidationRegression.ps1') -AssetGeneration '11111111111111111111111111111111'
+
+Write-Output 'Running atomic dashboard publication regression tests...'
+& (Join-Path $repoRoot 'tests\Invoke-AtomicDashboardPublicationRegression.ps1')
+
 Write-Output 'Running dashboard JavaScript regression tests...'
 $dashboardAssertionPaths = @(
     Get-ChildItem -Path (Join-Path $repoRoot 'tests') -Filter 'Assert-Dashboard*.js' -File -ErrorAction Stop |

@@ -6696,7 +6696,8 @@ function Test-AzureDashboardCandidateEvidenceRejectsIncompletePublication {
         $payloadSha = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $summary = [ordered]@{ version = 1; meta = [ordered]@{ payloadSha256 = $payloadSha; vulnCount = 1; deviceCount = 1; cveCount = 1 }; filterCatalog = [ordered]@{ groups = @(); tags = @(); devices = @() } }
         [System.IO.File]::WriteAllText((Join-Path $assetRoot 'data\summary.json'), ($summary | ConvertTo-Json -Compress -Depth 10), [System.Text.UTF8Encoding]::new($false))
-        $html = 'VulnerabilityDashboard.assets/data/payload.json.gz VulnerabilityDashboard.assets/data/summary.json VulnerabilityDashboard.assets/runtime/dashboard.js'
+        $config = @{ payloadUrl = 'VulnerabilityDashboard.assets/data/payload.json.gz'; payloadSummaryUrl = 'VulnerabilityDashboard.assets/data/summary.json'; chartJsUrl = 'VulnerabilityDashboard.assets/vendor/chart.js'; pdfExportBundleMode = 'external'; pdfExportBundleUrl = 'VulnerabilityDashboard.assets/optional/pdf-export.bundle.js' } | ConvertTo-Json -Compress
+        $html = '<script id="dataFormat" type="application/json">external-compressed</script><script id="dashboardConfig" type="application/json">' + $config + '</script><script src="VulnerabilityDashboard.assets/runtime/dashboard.js"></script>'
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'VulnerabilityDashboard.html'), $html, [System.Text.UTF8Encoding]::new($false))
         $status = [PSCustomObject]@{ status = 'succeeded'; stage = 'Completed'; runId = 'fixture'; vulnerabilities = 1; devices = 1; cves = 1; dashboardBlobName = 'VulnerabilityDashboard.html'; hostedDashboardBlobName = $null }
 
