@@ -39,6 +39,8 @@ Standard large Azure acceptance dataset:
 
 For a guarded candidate run against the real Automation account, use `tests/Invoke-AzureRunbookValidation.ps1` with an explicit subscription, `-ValidatePublishedSemanticParity`, and `-Execute`. The harness backs up and restores the runbook and storage state. Run both the high-cardinality content-only seed and the checked-in `exports` compatibility lane before accepting normalization or memory changes. Large compiled payloads use exact decompressed-byte equality; enriched compatibility payloads use canonical expanded-row equivalence when lookup ordering changes serialized bytes.
 
+Supply the verified projected count explicitly, for example `-ExpectedTotalRows 1187395` for the prepared 50K content-only replay described above, or provide authoritative `expectedDashboardRows` in the synthetic manifest. Do not reuse that count for a different dataset or enrichment lane. The old `actualTotalVulnRows`/`actualCurrentRows` fields describe observations and cannot establish the normalized onboarded count. Explicit overrides take priority over manifest metadata; otherwise missing, malformed, fractional, nonpositive, or above-50-million expectations fail before Azure calls. See the complete CLI example in `tests/README.md`.
+
 ## Hosted local runtime checkpoints
 
 Use the local `exports\` lane as a quick browser/runtime checkpoint before escalating to Azure or the large semantic lanes.

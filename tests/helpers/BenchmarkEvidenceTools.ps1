@@ -2,6 +2,40 @@
 
 $script:BenchmarkEvidenceSchemaVersion = 1
 
+function Resolve-AzureValidationExpectedRowCount {
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)][string]$DatasetPath,
+        [Parameter(Mandatory = $false)]$ExpectedTotalRows = 0
+    )
+
+    if ($PSBoundParameters.ContainsKey('ExpectedTotalRows')) {
+        $count = $ExpectedTotalRows
+        $invalidCountMessage = 'ExpectedTotalRows must be an integer between 1 and 50000000.'
+        if ($count -is [string]) {
+            $parsedCount = 0
+            if ([int]::TryParse($count, [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsedCount)) {
+                $count = $parsedCount
+            }
+        }
+    }
+    else {
+        $manifestPath = Join-Path $DatasetPath 'synthetic-manifest.json'
+        $manifest = if (Test-Path -LiteralPath $manifestPath -PathType Leaf) { Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 30 }
+        if ($null -eq $manifest -or -not $manifest.PSObject.Properties['expectedDashboardRows']) {
+            throw 'ExpectedTotalRows is required: supply -ExpectedTotalRows or authoritative expectedDashboardRows in synthetic-manifest.json. actualTotalVulnRows and actualCurrentRows count source observations, not onboarded normalized dashboard rows.'
+        }
+        $count = $manifest.expectedDashboardRows
+        $invalidCountMessage = 'synthetic-manifest.json expectedDashboardRows must be a JSON integer between 1 and 50000000. Supply -ExpectedTotalRows to override metadata.'
+    }
+    $isNumber = $count -is [int] -or $count -is [long] -or $count -is [double] -or $count -is [decimal] -or $count -is [System.Numerics.BigInteger]
+    if (-not $isNumber -or $count -lt 1 -or $count -gt 50000000 -or $count -ne [math]::Truncate([double]$count)) {
+        throw $invalidCountMessage
+    }
+    return [int]$count
+}
+
 function Get-BenchmarkGitEvidence {
     [CmdletBinding()]
     [OutputType([pscustomobject])]
