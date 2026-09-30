@@ -8,13 +8,14 @@ on:
 
 permissions:
   actions: read
-  contents: write
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   export-pdfs:
+    if: ${{ github.event.repository.private == true }}
     runs-on: ubuntu-latest
 
     steps:
@@ -131,27 +132,3 @@ jobs:
       - name: Export reports to PDF
         if: steps.freshness.outputs.should_export == 'true'
         run: node .github/scripts/export-pdf-reports.js
-
-      - name: Commit PDF reports
-        if: steps.freshness.outputs.should_export == 'true'
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add reports
-
-          if git diff --staged --quiet; then
-            echo "No PDF report changes to commit"
-          else
-            git commit -m "Update PDF reports"
-            git push origin "HEAD:${GITHUB_REF#refs/heads/}"
-          fi
-
-      - name: Upload PDF reports
-        if: steps.freshness.outputs.should_export == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: vulnerability-reports-${{ github.run_number }}
-          path: reports/*.pdf
-          retention-days: 30

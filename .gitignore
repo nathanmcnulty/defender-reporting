@@ -8,3 +8,6 @@
 # Derived dashboard caches are rebuilt on demand and should not be committed.
 .dashboard-cache/
 /azure/function-app/Modules/
+/exports/
+/VulnerabilityDashboard.html
+/reports/*.pdf

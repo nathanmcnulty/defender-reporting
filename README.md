@@ -134,7 +134,7 @@ For managed identity auth, Azure provisioning, and GitHub workflow setup, use th
 
 Recommended project convention:
 
-- Commit `VulnerabilityDashboard.html` as the canonical repo artifact.
+- Keep live `VulnerabilityDashboard.html` and exports in access-controlled storage, not in this public repository or workflow artifacts.
 - When you need both delivery models, generate `VulnerabilityDashboard.Hosted.html` with `-DualPackage` so both outputs share the same normalized payload bytes.
 
 Azure note: `Setup-AzureResources.ps1` resolves this automatically. With `-IncludeContainerApp`, Azure defaults to the hosted split-assets mode. Without a Container App, Azure defaults to the self-contained mode unless you override it.
@@ -195,16 +195,17 @@ The root scripts above are the primary user-facing entrypoints. Maintainer and a
 flowchart TD
     A["Same export and generation scripts"] --> B["Run locally"]
     A --> C["Run in Azure Automation"]
-    A --> D["Run in GitHub Actions"]
+    A --> D["Run in GitHub Actions (private repositories only)"]
     A --> H["Run in Azure Function App"]
     B --> E["Open HTML directly"]
     C --> F["Publish to blob storage\nand optional Container App"]
-    D --> G["Commit updated exports\nand dashboard"]
+    D --> G["Validate on ephemeral runner\nwithout committing or uploading live outputs"]
     H --> F
 ```
 
 ## Notes
 
+- The live dashboard update and PDF export workflows run only in private repositories. In public repositories, keep both workflows disabled; their job-level guards skip execution even if triggered. Exporter logs can expose RBAC group IDs and counts, so withholding output files alone is not sufficient.
 - Build sources and build scripts now live under `build/`.
 - `build/generated/shared-helpers.ps1`, `build/generated/validation-helpers.ps1`, and `azure/function-app/ExportAndGenerate/run.ps1` are generated on demand and ignored by git.
 - `azure/Invoke-DashboardPipeline.ps1` is generated from the `build/` sources and can be refreshed locally or by CI.
@@ -224,7 +225,7 @@ flowchart TD
 - Run `./build/Build-AzureReleasePackage.ps1` when you want the exact local packaging path used by both workflows.
 - Run `./Invoke-NvdCveExport.ps1` to build or refresh the optional `NvdCve_Current.json.gz` enrichment cache consumed by dashboard generation; see `docs/nvd-enrichment.md` for usage details.
 - Legacy `VulnExport_<group>_<date>.json(.gz)` compatibility remains temporary through `2026-07-01`.
-- Sample PDF outputs are committed under `reports/`.
+- Existing PDF outputs under `reports/` remain tracked pending private history review; keep new live PDFs in access-controlled storage, not this public repository or workflow artifacts.
 - `.dashboard-cache/` directories are derived local caches and are intentionally ignored by git.
 - Manual troubleshooting harnesses live under `tests/manual/` and default to ignored local output paths.
 - Recorded benchmark baselines are summarized in `docs/performance-baselines.md`; raw benchmark JSON stays local-only.
