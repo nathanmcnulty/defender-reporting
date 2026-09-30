@@ -2,39 +2,7 @@
 
 $script:BenchmarkEvidenceSchemaVersion = 1
 
-function Resolve-AzureValidationExpectedRowCount {
-    [CmdletBinding()]
-    [OutputType([int])]
-    param(
-        [Parameter(Mandatory = $true)][string]$DatasetPath,
-        [Parameter(Mandatory = $false)]$ExpectedTotalRows = 0
-    )
-
-    if ($PSBoundParameters.ContainsKey('ExpectedTotalRows')) {
-        $count = $ExpectedTotalRows
-        $invalidCountMessage = 'ExpectedTotalRows must be an integer between 1 and 50000000.'
-        if ($count -is [string]) {
-            $parsedCount = 0
-            if ([int]::TryParse($count, [System.Globalization.NumberStyles]::Integer, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsedCount)) {
-                $count = $parsedCount
-            }
-        }
-    }
-    else {
-        $manifestPath = Join-Path $DatasetPath 'synthetic-manifest.json'
-        $manifest = if (Test-Path -LiteralPath $manifestPath -PathType Leaf) { Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 30 }
-        if ($null -eq $manifest -or -not $manifest.PSObject.Properties['expectedDashboardRows']) {
-            throw 'ExpectedTotalRows is required: supply -ExpectedTotalRows or authoritative expectedDashboardRows in synthetic-manifest.json. actualTotalVulnRows and actualCurrentRows count source observations, not onboarded normalized dashboard rows.'
-        }
-        $count = $manifest.expectedDashboardRows
-        $invalidCountMessage = 'synthetic-manifest.json expectedDashboardRows must be a JSON integer between 1 and 50000000. Supply -ExpectedTotalRows to override metadata.'
-    }
-    $isNumber = $count -is [int] -or $count -is [long] -or $count -is [double] -or $count -is [decimal] -or $count -is [System.Numerics.BigInteger]
-    if (-not $isNumber -or $count -lt 1 -or $count -gt 50000000 -or $count -ne [math]::Truncate([double]$count)) {
-        throw $invalidCountMessage
-    }
-    return [int]$count
-}
+. (Join-Path $PSScriptRoot '..\..\src\powershell\Provisioning\Azure\AzureProvisioning.ps1')
 
 function Get-BenchmarkGitEvidence {
     [CmdletBinding()]
@@ -143,91 +111,6 @@ function Write-BenchmarkEvidenceEnvelope {
     finally {
         if (Test-Path -LiteralPath $stagePath -PathType Leaf) { Remove-Item -LiteralPath $stagePath -Force -ErrorAction SilentlyContinue }
     }
-}
-
-function Assert-AzureDashboardCandidateEvidence {
-    [CmdletBinding()]
-    [OutputType([pscustomobject])]
-    param(
-        [Parameter(Mandatory = $true)][string]$DashboardRootPath,
-        [Parameter(Mandatory = $true)]$RunbookStatus,
-        [Parameter(Mandatory = $true)][ValidateSet('SelfContained', 'Hosted', 'Dual')][string]$DashboardDeliveryMode,
-        [Parameter(Mandatory = $true)][ValidateRange(1, 50000000)][int]$ExpectedTotalRows,
-        [Parameter(Mandatory = $false)][scriptblock]$PayloadRowCounter
-    )
-
-    if ([string]$RunbookStatus.status -ne 'succeeded' -or [string]$RunbookStatus.stage -ne 'Completed') {
-        throw "Runbook status evidence is not a succeeded Completed document."
-    }
-    if ([int64]$RunbookStatus.vulnerabilities -ne $ExpectedTotalRows) {
-        throw "Runbook status reported $($RunbookStatus.vulnerabilities) vulnerabilities; expected $ExpectedTotalRows."
-    }
-    foreach ($countName in @('devices', 'cves')) {
-        if (-not $RunbookStatus.PSObject.Properties[$countName] -or [int]$RunbookStatus.$countName -le 0) {
-            throw "Runbook status is missing a positive '$countName' count."
-        }
-    }
-
-    $dashboardBlobName = [string]$RunbookStatus.dashboardBlobName
-    if ([string]::IsNullOrWhiteSpace($dashboardBlobName)) { throw 'Runbook status is missing dashboardBlobName.' }
-    $dashboardPath = Join-Path $DashboardRootPath ($dashboardBlobName -replace '/', [System.IO.Path]::DirectorySeparatorChar)
-    if (-not (Test-Path -LiteralPath $dashboardPath -PathType Leaf)) { throw "Published dashboard '$dashboardBlobName' is missing." }
-
-    $result = [ordered]@{
-        dashboard_blob_name = $dashboardBlobName
-        dashboard_sha256 = (Get-FileHash -LiteralPath $dashboardPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        dashboard_bytes = [int64](Get-Item -LiteralPath $dashboardPath).Length
-        vulnerabilities = [int64]$RunbookStatus.vulnerabilities
-        devices = [int]$RunbookStatus.devices
-        cves = [int]$RunbookStatus.cves
-        hosted_assets_validated = $false
-    }
-
-    if ($DashboardDeliveryMode -in @('Hosted', 'Dual')) {
-        $hostedBlobName = if ($DashboardDeliveryMode -eq 'Dual') { [string]$RunbookStatus.hostedDashboardBlobName } else { $dashboardBlobName }
-        if ([string]::IsNullOrWhiteSpace($hostedBlobName)) { throw 'Runbook status is missing the hosted dashboard blob name.' }
-        $hostedPath = Join-Path $DashboardRootPath ($hostedBlobName -replace '/', [System.IO.Path]::DirectorySeparatorChar)
-        if (-not (Test-Path -LiteralPath $hostedPath -PathType Leaf)) { throw "Published hosted dashboard '$hostedBlobName' is missing." }
-        $assetDirectoryName = [System.IO.Path]::GetFileNameWithoutExtension($hostedBlobName) + '.assets'
-        $assetRoot = Join-Path $DashboardRootPath $assetDirectoryName
-        $requiredAssets = @(
-            'runtime/dashboard.css', 'runtime/dashboard.js', 'runtime/pako.js', 'vendor/chart.js',
-            'data/summary.json', 'data/payload.json.gz', 'optional/pdf-export.bundle.js'
-        )
-        foreach ($relativeAssetPath in $requiredAssets) {
-            $assetPath = Join-Path $assetRoot ($relativeAssetPath -replace '/', [System.IO.Path]::DirectorySeparatorChar)
-            if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) { throw "Published hosted dashboard asset '$assetDirectoryName/$relativeAssetPath' is missing." }
-        }
-
-        $payloadPath = Join-Path $assetRoot 'data\payload.json.gz'
-        $summaryPath = Join-Path $assetRoot 'data\summary.json'
-        $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json -Depth 30
-        $payloadSha256 = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ([string]$summary.meta.payloadSha256 -ne $payloadSha256) { throw 'Hosted payload SHA-256 does not match summary metadata.' }
-        foreach ($countName in @('vulnCount', 'deviceCount', 'cveCount')) {
-            if (-not $summary.meta.PSObject.Properties[$countName]) { throw "Hosted summary metadata is missing '$countName'." }
-        }
-        if ([int64]$summary.meta.vulnCount -ne $ExpectedTotalRows) { throw 'Hosted summary vulnerability count does not match the expected row count.' }
-        if ([int]$summary.meta.deviceCount -ne [int]$RunbookStatus.devices -or [int]$summary.meta.cveCount -ne [int]$RunbookStatus.cves) {
-            throw 'Hosted summary device/CVE counts do not match runbook status.'
-        }
-        if ($null -ne $PayloadRowCounter) {
-            $payloadRowCount = [int64](& $PayloadRowCounter $payloadPath)
-            if ($payloadRowCount -ne $ExpectedTotalRows) { throw "Published payload contains $payloadRowCount rows; expected $ExpectedTotalRows." }
-            $result['payload_row_count'] = $payloadRowCount
-        }
-        $hostedHtml = Get-Content -LiteralPath $hostedPath -Raw
-        foreach ($relativeAssetPath in @('data/payload.json.gz', 'data/summary.json', 'runtime/dashboard.js')) {
-            if (-not $hostedHtml.Contains("$assetDirectoryName/$relativeAssetPath")) { throw "Hosted dashboard HTML does not reference '$relativeAssetPath'." }
-        }
-        $result['hosted_blob_name'] = $hostedBlobName
-        $result['payload_sha256'] = $payloadSha256
-        $result['payload_bytes'] = [int64](Get-Item -LiteralPath $payloadPath).Length
-        $result['summary_sha256'] = (Get-FileHash -LiteralPath $summaryPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        $result['hosted_assets_validated'] = $true
-    }
-
-    return [PSCustomObject]$result
 }
 
 function Get-GzipDecompressedContentEvidence {
