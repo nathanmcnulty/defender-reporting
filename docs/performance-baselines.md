@@ -15,6 +15,16 @@ Do not compare those lanes as if they were interchangeable. Replay benchmarks ar
 
 The current bounded-content-store acceptance is recorded below. The older tables and triage entries remain useful historical comparisons, but they predate the disk-partitioned publisher and compiled streaming standard-payload path.
 
+## Issue 70 worker-transfer evidence (2026-09-30)
+
+**Large baseline: incomplete, RAM-blocked.** The prior capture stopped at 1,745,756,160 bytes free RAM (about 1.63 GiB), below the unchanged 2 GiB floor. No large browser run was launched during this repair. There is no completed large readiness measurement, cold/reload parity result, baseline/candidate comparison, or worker-timeout diagnosis. No transfer candidate or performance fix is claimed. The 3 GiB owned-family cap and production worker timeout remain unchanged.
+
+The harness repair adds final-sample completion gating, asynchronous prelaunch/pre-CDP fail-closed inventory, browser-clock readiness instrumentation, independent owned cleanup with actual final inventory, and explicit count/cache eligibility assertions. Browser-free probes cover a final-sample cap breach, inventory exceptions including before CDP, final-sample minimum RAM, non-overlapping asynchronous sampling, bounded owned-root termination and already-exited races, missing Edge/server closure, owned profile removal, actual nonzero remaining process counts, and zero-row/cache-miss rejection. The existing telemetry lane also checks worker phase messages and backward-compatible payload envelopes.
+
+Validation: full deterministic preflight completed successfully with no skip switch under a separate 1 GiB PowerShell memory guard (573.17 seconds). Browser limits were not reduced. Focused telemetry/cache/report-semantic regressions passed. Two actual two-row diagnostic controls timed out before dashboard readiness and are not acceptance passes. Both final inventories recorded zero owned processes and removed their profiles; their HTTP servers closed. The second recorded a guard-stop termination race; the subsequent already-exited repair is covered by mocks, not another browser run. Final external inventory must remain part of any renewed capture. Raw machine-local diagnostics, stacks, and profiles are not public evidence.
+
+Large performance acceptance still requires an adequately provisioned session that maintains at least 2 GiB free RAM throughout the run. Keep eligible small-cache controls separate from large cache-ineligible reloads. See `tests/README.md` for the guarded command and timing/cleanup limitations.
+
 ## Current bounded-path acceptance (2026-07-12)
 
 | Dataset / lane | Rows | Azure elapsed | True compiled peak WS | Private / GC peak | Semantic proof |
