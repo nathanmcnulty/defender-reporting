@@ -6626,7 +6626,7 @@ function Test-LargeDatasetValidationSemanticModeForcesFullReplay {
             -SyntheticOutputPath $syntheticOutputPath `
             -TargetDeviceCount 50 `
             -TargetTotalVulnRows 5000 `
-            -MinimumAvailableMemoryGB 4 `
+            -MinimumAvailableMemoryGB 1 `
             -Validate `
             -ValidationMode semantic `
             -ForceFullValidation `
