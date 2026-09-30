@@ -189,6 +189,9 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Optional local dataset path used to seed the exports container for deterministic validation when -SkipMdePermissions is set")]
     [string]$ValidationDatasetPath,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Expected onboarded normalized dashboard rows for seeded Automation validation; alternatively use authoritative expectedDashboardRows metadata")]
+    $ValidationExpectedTotalRows,
+
     [Parameter(Mandatory = $false, HelpMessage = "Skip end-to-end validation (template upload, pipeline run, result check)")]
     [switch]$SkipValidation,
 
@@ -617,6 +620,15 @@ if (-not $provisioningHelperPath) {
 }
 
 . $provisioningHelperPath
+
+$resolvedValidationDatasetPath = $null
+$resolvedValidationExpectedTotalRows = $null
+if (-not $SkipValidation -and $SkipMdePermissions -and $ComputeType -eq 'AutomationAccount') {
+    $resolvedValidationDatasetPath = Resolve-ValidationDatasetPath -RequestedPath $ValidationDatasetPath
+    $expectedRowParameters = @{ DatasetPath = $resolvedValidationDatasetPath }
+    if ($PSBoundParameters.ContainsKey('ValidationExpectedTotalRows')) { $expectedRowParameters.ExpectedTotalRows = $ValidationExpectedTotalRows }
+    $resolvedValidationExpectedTotalRows = Resolve-AzureValidationExpectedRowCount @expectedRowParameters
+}
 
 function Get-OptionalArmResource {
     [CmdletBinding()]
@@ -1856,9 +1868,7 @@ try {
         }
 
         if ($ComputeType -eq 'AutomationAccount') {
-            $resolvedValidationDatasetPath = $null
             if ($SkipMdePermissions) {
-                $resolvedValidationDatasetPath = Resolve-ValidationDatasetPath -RequestedPath $ValidationDatasetPath
                 if (-not [string]::IsNullOrWhiteSpace($resolvedValidationDatasetPath)) {
                     Write-Host ("  Seeding exports container from local validation dataset: {0}" -f $resolvedValidationDatasetPath) -ForegroundColor Gray
                     Initialize-ValidationExportsContainer -AccountName $StorageAccountName -DatasetPath $resolvedValidationDatasetPath
@@ -1888,6 +1898,7 @@ try {
                 }
             } | ConvertTo-Json -Depth 5
 
+            $validationStartedOnUtc = [datetimeoffset]::UtcNow
             Invoke-ArmApi -Path $jobPath -Method PUT -Payload $jobPayload -Description "Start validation job" | Out-Null
             Write-Host "  Job $jobId started" -ForegroundColor Gray
 
@@ -1903,9 +1914,17 @@ try {
             # 14d: Get final status and report results
             $finalJob = Invoke-ArmApi -Path "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/${jobId}?api-version=$($Script:ArmApiVersions.AutomationAccount)" -Method GET -Description "Get final job status"
             $finalStatus = $finalJob.properties.status
+            $validationJobId = [string]$finalJob.properties.jobId
 
             if ($finalStatus -eq 'Completed') {
-                Write-Host "  Validation PASSED - runbook completed successfully" -ForegroundColor Green
+                if ($SkipMdePermissions) {
+                    if ([string]::IsNullOrWhiteSpace($validationJobId)) { throw 'Completed Automation job readback is missing its runtime job ID.' }
+                    $artifactEvidence = Test-AzurePublishedDashboardEvidence -AccountName $StorageAccountName -DashboardDeliveryMode $effectiveDashboardDeliveryMode -ExpectedTotalRows $resolvedValidationExpectedTotalRows -ExpectedJobId $validationJobId -NotBefore $validationStartedOnUtc
+                    Write-Host ("  Validation PASSED - published dashboard verified ({0} onboarded rows, SHA-256 {1})" -f $artifactEvidence.payload_row_count, $artifactEvidence.payload_sha256) -ForegroundColor Green
+                }
+                else {
+                    Write-Host "  Validation PASSED - runbook completed successfully" -ForegroundColor Green
+                }
 
                 # Get summary from last few output streams
                 $streamsPath = "$subPath/resourceGroups/$ResourceGroupName/providers/Microsoft.Automation/automationAccounts/$AutomationAccountName/jobs/$jobId/streams?`$filter=properties/streamType eq 'Output'&api-version=$($Script:ArmApiVersions.AutomationAccount)"

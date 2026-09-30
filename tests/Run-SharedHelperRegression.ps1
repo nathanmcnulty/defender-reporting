@@ -6698,7 +6698,7 @@ function Test-AzureDashboardCandidateEvidenceRejectsIncompletePublication {
         [System.IO.File]::WriteAllText((Join-Path $assetRoot 'data\summary.json'), ($summary | ConvertTo-Json -Compress -Depth 10), [System.Text.UTF8Encoding]::new($false))
         $html = 'VulnerabilityDashboard.assets/data/payload.json.gz VulnerabilityDashboard.assets/data/summary.json VulnerabilityDashboard.assets/runtime/dashboard.js'
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'VulnerabilityDashboard.html'), $html, [System.Text.UTF8Encoding]::new($false))
-        $status = [PSCustomObject]@{ status = 'succeeded'; stage = 'Completed'; vulnerabilities = 1; devices = 1; cves = 1; dashboardBlobName = 'VulnerabilityDashboard.html'; hostedDashboardBlobName = $null }
+        $status = [PSCustomObject]@{ status = 'succeeded'; stage = 'Completed'; runId = 'fixture'; vulnerabilities = 1; devices = 1; cves = 1; dashboardBlobName = 'VulnerabilityDashboard.html'; hostedDashboardBlobName = $null }
 
         $valid = Assert-AzureDashboardCandidateEvidence -DashboardRootPath $tempRoot -RunbookStatus $status -DashboardDeliveryMode Hosted -ExpectedTotalRows 1 -PayloadRowCounter { param($Path) Get-CompressedPayloadVulnCount -Path $Path }
         Assert-True ($valid.hosted_assets_validated -eq $true -and $valid.payload_row_count -eq 1) 'Expected complete hosted candidate evidence to pass.'
