@@ -9,6 +9,7 @@ const DIGEST_TIMEOUT_MS = 2000;
 const IDB_OPERATION_TIMEOUT_MS = 2000;
 const WORKER_OPERATION_TIMEOUT_MS = 10000;
 const MAX_IDB_CACHE_ENTRIES = 4;
+const MAX_IDB_CACHE_ROWS = 500000;
 
 function bytesToHex(bytes) {
     let output = '';

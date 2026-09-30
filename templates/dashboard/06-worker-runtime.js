@@ -13,6 +13,7 @@ self.onmessage = async function(e) {
     var lookups = e.data.lookups;
     var rawVulns = e.data.rawVulns;
     var decompressOnly = !!e.data.decompressOnly;
+    var inflateStart = performance.now();
 
     // If compressed data was transferred, decompress it first
     if (e.data.compressedBytes) {
@@ -23,11 +24,16 @@ self.onmessage = async function(e) {
             var blob = new Blob([e.data.compressedBytes]);
             var decompressedStream = blob.stream().pipeThrough(ds);
             var text = await new Response(decompressedStream).text();
+            self.postMessage({ phase: 'workerInflateMs', duration: performance.now() - inflateStart });
+            var parseStart = performance.now();
             data = JSON.parse(text);
         } else {
             var decompressed = pako.inflate(e.data.compressedBytes, { to: 'string' });
+            self.postMessage({ phase: 'workerInflateMs', duration: performance.now() - inflateStart });
+            var parseStart = performance.now();
             data = JSON.parse(decompressed);
         }
+        self.postMessage({ phase: 'workerParseMs', duration: performance.now() - parseStart });
         lookups = data.lookups;
         rawVulns = data.vulns;
     }
@@ -35,7 +41,7 @@ self.onmessage = async function(e) {
     // For large compressed datasets, return raw data without denormalizing
     // to avoid structured-clone memory limits on postMessage
     if (decompressOnly) {
-        self.postMessage({ rows: null, lookups: lookups, rawVulns: rawVulns });
+        self.postMessage({ rows: null, lookups: lookups, rawVulns: rawVulns, postedAt: performance.timeOrigin + performance.now() });
         return;
     }
 
@@ -228,6 +234,7 @@ self.onmessage = async function(e) {
  * @returns {Promise<{rows: Array, lookups?: Object, rawVulns?: Object}>}
  */
 async function denormalizeInWorker(compressedBytes) {
+    const operationStart = performance.now();
     // When decompressing in Worker, include pako source in the blob
     let workerParts = [];
     if (compressedBytes) {
@@ -251,12 +258,22 @@ async function denormalizeInWorker(compressedBytes) {
             const url = URL.createObjectURL(blob);
             const worker = new Worker(url);
             const timeoutId = setTimeout(() => {
+                recordDashboardPhaseTiming('workerWaitMs', performance.now() - operationStart);
+                dashboardMetrics.counts.workerTimeouts = (dashboardMetrics.counts.workerTimeouts || 0) + 1;
                 worker.terminate();
                 URL.revokeObjectURL(url);
                 reject(new Error('Worker denormalization timed out.'));
             }, WORKER_OPERATION_TIMEOUT_MS);
 
             worker.onmessage = function(e) {
+                if (e.data.phase === 'workerInflateMs' || e.data.phase === 'workerParseMs') {
+                    recordDashboardPhaseTiming(e.data.phase, e.data.duration);
+                    return;
+                }
+                recordDashboardPhaseTiming('workerWaitMs', performance.now() - operationStart);
+                if (Number.isFinite(e.data.postedAt)) {
+                    recordDashboardPhaseTiming('workerDeliveryMs', performance.timeOrigin + performance.now() - e.data.postedAt);
+                }
                 clearTimeout(timeoutId);
                 worker.terminate();
                 URL.revokeObjectURL(url);

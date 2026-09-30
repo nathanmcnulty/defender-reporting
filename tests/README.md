@@ -49,6 +49,29 @@ The shared-helper regression lane now logs `START <Test-Name>` and a per-test el
 
 Helper rule: if a new test or benchmark script needs shared utilities, put them in `tests/helpers/` instead of copying helper functions into multiple entrypoints.
 
+## Guarded worker-transfer measurements
+
+`Measure-DashboardWorkerTransfer.js` is a Windows/Edge measurement harness, not a worker-transfer optimization. Its browser-free safety probes also run through the existing telemetry regression in deterministic preflight:
+
+```powershell
+node .\tests\Measure-DashboardWorkerTransfer.js --mock
+node .\tests\Assert-DashboardTelemetry.js
+```
+
+For an actual measurement, set `PLAYWRIGHT_MODULE` to an installed Playwright module and supply the retained Hosted dashboard directory, a private evidence destination, repeats (1-10), and an explicit expected normalized row count:
+
+```powershell
+node .\tests\Measure-DashboardWorkerTransfer.js .\.local\two-row-control .\.local\worker-control.json 1 2
+```
+
+Use the committed `fixtures/legacy-migration` dataset through the normal generator for the two-row control; never infer a large normalized count from raw source observations. Run full deterministic preflight first. A smaller PowerShell preflight memory guard does not lower the browser guard. Existing automation Edge sessions must be cleared by their owner before starting a separate measurement; personal browsers must remain untouched.
+
+The harness requires at least 2 GiB free RAM before launch and throughout sampling, caps the owned Edge family at 3 GiB, and bounds readiness at 120 seconds. Inventory is asynchronous, single-flight, fail-closed, and starts before launch, then immediately after spawn before CDP polling. Every successful run must pass an awaited final resource sample. Caps, floor breaches, inventory exceptions, and other aborts immediately request bounded termination of only the spawned/profile-owned family. Cleanup attempts process termination, launcher exit, CDP/browser closure, final inventory, profile removal, and HTTP server closure independently. Unknown remaining process state is not zero or success. Original measurement errors remain separate from fixed cleanup failure labels; raw stacks, command lines, and profile paths are not evidence fields.
+
+`ttiBrowserMs` records the first browser `dashboard-ready` event using `performance.now()` from navigation time origin; it is a readiness measure, not interaction latency. Host observation wall time and later snapshot time are separate. Memory samples carry host monotonic and epoch timestamps, with browser phase/message epoch timestamps for correlation. Phase observations and process working-set peaks are sampled, not instantaneous boundaries or proven absolute peaks. Heap scope is the main renderer only. Heap/readiness instrumentation adds measurement overhead. Worker return format labels distinguish phase messages, legacy arrays, row envelopes, and lookup/raw-column envelopes without changing the runtime payload contract.
+
+Counts must equal the explicit expectation and agree across cold/reload runs. Required reports, impact/active counts, severity-card hashes, and report-summary hashes must agree. The harness inspects the matching compressed-fingerprint IndexedDB entry and the runtime's row/entry limits. Eligible reloads must actually hit cache; ineligible reloads are labelled `cachedEligible: false` with an explicit reason, never forced into the cached lane. There is currently no separate byte soft limit or cache feature flag. Production cache writes remain disabled at 500,000 rows and above. A passed mock, small control, or full preflight cannot establish a large-data performance result.
+
 ## Hosted smoke diagnostics
 
 Run the isolated two-row Hosted dashboard control, generated from synthetic data without root exports, authentication, or cloud writes:
