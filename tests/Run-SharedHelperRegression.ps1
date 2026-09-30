@@ -7130,6 +7130,62 @@ function Test-GetDashboardTemplateContentAcceptsExplicitTemplatesPathWithEmptyDe
     }
 }
 
+function Test-AtomicDashboardExecutableDiscovery {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Discovery variables are consumed by the extracted atomic regression startup statements.')]
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $atomicPath = Join-Path $PSScriptRoot 'Invoke-AtomicDashboardPublicationRegression.ps1'
+    $parseErrors = $null
+    $atomicAst = [System.Management.Automation.Language.Parser]::ParseFile($atomicPath, [ref]$null, [ref]$parseErrors)
+    Assert-True ($parseErrors.Count -eq 0) 'Expected atomic regression startup to parse.'
+    $statements = @($atomicAst.EndBlock.Statements)
+    $start = $statements | Where-Object { $_.Extent.Text -like 'if (-not $JqPath)*' } | Select-Object -First 1
+    $end = $statements | Where-Object { $_.Extent.Text -eq '$BashPath = (Resolve-Path -LiteralPath $BashPath).Path' }
+    Assert-True ($null -ne $start -and $null -ne $end) 'Expected executable discovery startup boundaries.'
+    $discovery = [scriptblock]::Create(($statements | Where-Object { $_.Extent.StartOffset -ge $start.Extent.StartOffset -and $_.Extent.EndOffset -le $end.Extent.EndOffset }).Extent.Text -join "`n")
+    $realJq = Microsoft.PowerShell.Core\Get-Command jq -CommandType Application -ErrorAction Stop | Select-Object -First 1
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('atomic-discovery-' + [guid]::NewGuid().ToString('N'))
+    $savedPath = $env:PATH
+    $savedJq = $env:DASHBOARD_SYNC_JQ
+    $savedBash = $env:DASHBOARD_SYNC_BASH
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $expectedJq = Join-Path $tempRoot $realJq.Name
+        Copy-Item -LiteralPath $realJq.Source -Destination $expectedJq
+        $env:PATH = $tempRoot + [System.IO.Path]::PathSeparator + $savedPath
+        Remove-Item Env:DASHBOARD_SYNC_JQ, Env:DASHBOARD_SYNC_BASH -ErrorAction SilentlyContinue
+        Assert-True (@(Microsoft.PowerShell.Core\Get-Command jq -CommandType Application).Count -ge 2) 'Expected multiple real jq PATH matches.'
+        & {
+            function Get-Command {
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Child-scope Azure-only mock verifies that real executable discovery bypasses mocks.')]
+                [CmdletBinding()]
+                param([string]$Name)
+                if ($Name -eq 'az') { return [pscustomobject]@{ Source = 'mock-az' } }
+            }
+            Assert-True ($null -eq (Get-Command jq)) 'Expected caller-scope mock to hide jq from unqualified lookup.'
+            $JqPath = $env:DASHBOARD_SYNC_JQ
+            $BashPath = $env:DASHBOARD_SYNC_BASH
+            . $discovery
+            Assert-True ($JqPath -eq (Resolve-Path -LiteralPath $expectedJq).Path) 'Expected exactly the first real jq PATH match despite the caller mock.'
+            Assert-True (Test-Path -LiteralPath $BashPath -PathType Leaf) 'Expected one real Bash executable despite the caller mock.'
+        }
+        $fallback = $atomicAst.Find({ param($node) $node -is [System.Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text -eq '-not $BashPath' -and $node.Extent.Text -like '*$bashCommand*' -and $node.Extent.Text -notlike '*$gitCommand*' }, $true)
+        Assert-True ($null -ne $fallback) 'Expected non-Windows Bash PATH fallback.'
+        $BashPath = ''
+        . ([scriptblock]::Create($fallback.Extent.Text))
+        $expectedBash = Microsoft.PowerShell.Core\Get-Command bash -CommandType Application -ErrorAction Stop | Select-Object -First 1
+        Assert-True ($BashPath -eq $expectedBash.Source) 'Expected the non-Windows fallback to select exactly the first real Bash PATH match.'
+    }
+    finally {
+        $env:PATH = $savedPath
+        $env:DASHBOARD_SYNC_JQ = $savedJq
+        $env:DASHBOARD_SYNC_BASH = $savedBash
+        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Invoke-SharedHelperRegressionTest {
     [CmdletBinding()]
     param(
@@ -7278,6 +7334,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-BenchmarkWorkloadProfilesArePinned'; SuccessMessage = 'Versioned benchmark workload profile checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationExpandedParity'; SuccessMessage = 'Compiled bounded content normalization expanded-parity checks passed.' }
     @{ Name = 'Test-SyntheticUploadManifestSelectsRawReplayArtifact'; SuccessMessage = 'Synthetic raw replay upload-manifest checks passed.' }
+    @{ Name = 'Test-AtomicDashboardExecutableDiscovery'; SuccessMessage = 'Atomic executable discovery duplicate PATH, caller mock, and non-Windows fallback checks passed.' }
 )
 
 function Get-SharedHelperRegressionCategory {

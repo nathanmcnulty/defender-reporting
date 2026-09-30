@@ -9,19 +9,19 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 if (-not $JqPath) {
-    $jqCommand = Get-Command jq -CommandType Application -ErrorAction SilentlyContinue
+    $jqCommand = Microsoft.PowerShell.Core\Get-Command jq -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($jqCommand) { $JqPath = $jqCommand.Source }
 }
 if (-not $BashPath) {
     if ($IsWindows) {
-        $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
+        $gitCommand = Microsoft.PowerShell.Core\Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($gitCommand) {
             $gitBash = Join-Path (Split-Path $gitCommand.Source -Parent) '../bin/bash.exe'
             if (Test-Path -LiteralPath $gitBash -PathType Leaf) { $BashPath = (Resolve-Path -LiteralPath $gitBash).Path }
         }
     }
     if (-not $BashPath) {
-        $bashCommand = Get-Command bash -CommandType Application -ErrorAction SilentlyContinue
+        $bashCommand = Microsoft.PowerShell.Core\Get-Command bash -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($bashCommand) { $BashPath = $bashCommand.Source }
     }
 }
