@@ -223,6 +223,71 @@ Renewed repair validation: focused ownership, privacy and telemetry/lifecycle ch
 
 Next actual-run gate: diagnose and stabilize the process inventory, then obtain a complete real-library two-row positive-control cold/reload pass, including final resource samples and successful cleanup, before another large capture. Keep the existing memory guards unchanged. This is partial measurement work for Refs #70, not issue closure or large-performance acceptance.
 
+### Inventory diagnostic expectation follow-up (2026-09-30)
+
+**One small control blocked; performance acceptance remains unverified.** The sole additional harness edit corrected the invalid-C# `Add-Type` diagnostic expectation to `unclassified`, retained the compile phase and fixed private error, and added a real `System.InvalidOperationException` label check. The allowlist, ownership selection, timeouts and resource guards were not changed. Ownership, privacy, mock self-test and telemetry checks each exited 0; full deterministic preflight passed without skip switches. Its generated Azure-script churn was discarded.
+
+Fresh exact-profile inventory completed in `1690.0 ms` with zero owned processes, below the unchanged `5000 ms` timeout. Exactly one real-library Edge control was attempted using the existing measurement worktree's two-row historical fixture and the manual `2026-01-01/2026-01-02` range. The requested recent generation-2 fixture could not be identified from the supplied shorthand, so this retained fixture is not proof of that fixture's behavior. Private evidence: `.local/issue-70-measurement/.local/measurements/control-inventory-diagnostic-only.json` relative to the parent workspace.
+
+Cold readiness was observed at `387.8 ms`, with exactly `2` raw and normalized rows, successful initialization, all five report markers and a matching compressed-cache entry. The positive-control assertions failed: selected active rows, impact rows and severity-card total were each `2`, not the required `1`. The public failure remained `operation-failed` / `unclassified`; these observations do not make the control pass. Reload, real reload cache hit, cold/reload parity and final resource resampling were not reached. Final cap/floor acceptance and performance metrics remain unchecked. Partial resource samples are not final acceptance evidence.
+
+No sampler timed out. Host inventory durations were `1733.2`, `3593.4` and `1542.1 ms`, all exit 0; termination calls took `2092.7 ms` (exit 1, phase `termination`) and `1336.0 ms` (exit 0). These are whole-call durations, not separate compile/CIM/selection timings. Cleanup retained a `Guard stop` error but verified zero owned processes, profile removal and HTTP server closure. Independent external inventory found zero automation Edge processes and preserved all eight unrelated Edge process identities. This candidate's actual enforced limits were the stricter `2 GiB` family cap and `3 GiB` free-memory floor, unchanged from its existing code. No retry, second source correction, large capture, production/Azure edit, commit, agent or main-worktree change was made.
+
+### Fixture-only positive-control preparation (2026-09-30)
+
+The named ignored fixture `.local/two-row-positive-control` in the parent workspace was generated with existing canonical shared writers, `New-SyntheticLiveExport.ps1` and `Generate-VulnerabilityDashboard.ps1`. Its two temporal observations share one CVE, device, software and remediation target but have different software versions. The historical observation has supported `None` severity; the current observation has `High` severity. Both overlap the unchanged `2026-01-01/2026-01-02` custom range. Card total one depends on these severity states, not CVE deduplication.
+
+Artifact-only preflight decoded and materialized the generated columnar payload through existing runtime APIs: raw rows `2`, normalized rows `2`, selected source rows `2`, distinct CVEs/devices `1/1`, active-table rows `1`, impact rows `1`, severity-card total `1`. Chart.js and pako were copied only into ignored generated assets after matching their hashes to prior actual real-library evidence. The private fixture manifest records declared row IDs/ordinals, row/group hashes, artifact digests, expected counts and the scope of this non-browser check. Payload SHA-256: `f5c8d18bb322f076d16c9e1d321c44b7ee8f74c55b84ce18567a106f23560d3d`.
+
+**Blocked before Edge; no cold/reload pass claimed.** The requested `3 GiB` family cap and `2 GiB` free-memory floor differ from the unchanged inventory harness's `2 GiB` cap and `3 GiB` floor. No harness, production, selector, ownership, timeout or expectation changes were made to resolve that constraint conflict. No browser, profile or HTTP server was created. The external resource sample recorded zero automation/Issue 70 Edge processes and `5020463104` free-memory bytes. Live cache-hit/parity, final browser-family resource acceptance and performance remain unverified. The earlier focused/full preflight results were not rerun or relabeled as this fixture's live acceptance.
+
+### Authorized strict fixture-only actual control (2026-09-30; capture 2026-10-01 UTC)
+
+**Overall failed: actual Node exit 1; no successful control acceptance claimed.** Parent authorization resolved the earlier configuration conflict by accepting the current, unchanged harness defaults at `tests/Measure-DashboardWorkerTransfer.js:748`: owned-family working set cap `2147483648` bytes (2 GiB), free-memory floor `3221225472` bytes (3 GiB), readiness `120000 ms`, inventory `5000 ms`, termination `15000 ms`. Earlier references to an unchanged 3 GiB cap / 2 GiB floor describe prior capture configuration, not this inventory harness. The guarded-command README's 3/2 description is also historical and does not override the current 2/3 source bounds. No threshold was raised or switched.
+
+Exactly one actual attempt used the existing documented CLI shape, explicit positive-control mode, the prepared parent-workspace fixture and existing cached Playwright:
+
+```powershell
+$env:PLAYWRIGHT_MODULE = 'C:/Users/NathanMcNulty/AppData/Local/npm-cache/_npx/9833c18b2d85bc59/node_modules/playwright'
+& 'C:/Program Files/nodejs/node.exe' .local/issue-70-inventory/tests/Measure-DashboardWorkerTransfer.js .local/two-row-positive-control .local/two-row-positive-control/actual-strict-control.json 1 2 --positive-control
+```
+
+The command was run from the parent workspace; Node was resolved with `Get-Command -CommandType Application | Select-Object -First 1`, and the prior environment value was restored afterward. Prelaunch verification matched eight manifest hashes, including real Chart.js/pako and assembled runtime; independent preflight free RAM was `4943732736` bytes. Harness SHA-256 remained `a42b1675448fc1120e51441c7173027f93d690556b705550998516ccf23ee9c3`, and assembled-runtime SHA-256 remained `248630e168d864943fa8a1be5fd04d89348057038f7cb54672f33bef3e496467` before/after.
+
+| Observation | Cold | Reload |
+| --- | ---: | ---: |
+| Per-load assertion status | passed | passed |
+| Browser readiness ms / host observation ms | 466.5 / 560.2 | 267.3 / 306.6 |
+| Raw / normalized / selected source rows | 2 / 2 / 2 | 2 / 2 / 2 |
+| Active-table / impact / severity-card total | 1 / 1 / 1 | 1 / 1 / 1 |
+| Eligible cache state / compressed-cache hits | cold / 0 | hit / 1 |
+| IndexedDB entries / matching compressed-entry rows | 2 / 2 | 2 / 2 |
+| External requests / page errors / failed resources / failed responses | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+
+Both loads completed initialization, selected `2026-01-01/2026-01-02`, rendered all five required reports, passed positive-control observations and awaited separate successful final resource samples. Their identical `readinessCacheDigest` is `372693ce28c6993afec25e2b0cef3dce7f141ac101a60d6274b9f4e640f804c3`. This is limited readiness/cache consistency, not full report-content semantic proof or large-data performance acceptance. Browser readiness is not interaction latency.
+
+| Actual resource sample stage | Owned processes | Family working-set bytes | Family private bytes | Free-memory bytes |
+| --- | ---: | ---: | ---: | ---: |
+| prelaunch | 0 | 0 | 0 | 4800880640 |
+| post-spawn | 15 | 880865280 | 356913152 | 4542459904 |
+| cold final | 17 | 988372992 | 391127040 | 4512215040 |
+| reload:readiness | 17 | 1011015680 | 404590592 | 4475097088 |
+| reload final | 17 | 1008312320 | 404742144 | 4489273344 |
+
+Every recorded sample stayed strictly below the 2 GiB family cap and above the 3 GiB free floor. Sampled family peak was `1011015680` bytes; sampled minimum free RAM was `4475097088` bytes. These are sampled bounds, not continuous or absolute high-water proof. No actual resource-guard breach is recorded, and there is no `Guard stop` cleanup error. After both valid final samples, teardown reported the fixed cleanup label `Owned family termination`; the allowlisted failure was phase `browser`, reason `cleanup`, code `unclassified`. No raw dynamic error message or more specific underlying inventory diagnostic was retained; do not infer one. This cleanup failure makes overall status `blocked-or-failed` and Node exit 1 despite both per-load passes.
+
+Cleanup and independent final inventory nevertheless verified zero remaining owned/automation Edge processes, removed profiles (zero before/after), and closed HTTP server. All eight unrelated Edge PID/creation-time identities survived unchanged (eight before/after); no unrelated browser was terminated. Independent final sample at `2026-10-01T01:39:00.2369815Z` recorded owned-family bytes `0` and free RAM `5037191168` bytes. Private raw evidence is `.local/two-row-positive-control/actual-strict-control.json` relative to the parent workspace, SHA-256 `05f45241566ab18dc85465e5b5e9dab78821591cfeccf73b51e8c53b9d6eb7af`. The fixture manifest's earlier blocked-before-browser entry remains a historical preparation record, superseded for this attempt by this evidence and outcome. No blind rerun, simulation, source/test/fixture/harness patch, main-worktree edit, agent, Azure write or commit occurred. Only this documentation follow-up was made; successful overall small-control acceptance and all large acceptance gates remain unverified.
+
+### Narrow teardown diagnostic probe (2026-09-30)
+
+**Root cause unresolved; no repair or new actual-control acceptance claimed.** The retained strict actual control still has Node exit 1 and the fixed `Owned family termination` failure. Its original serialized record has no underlying termination diagnostic, so neither a deadline nor an exit race can be established from that record. Final owned count zero does not turn this failed cleanup into success.
+
+The isolated inventory harness now retains fixed cleanup labels, numeric elapsed milliseconds, and an allowlisted `deadline`, `process-inventory`, or `unclassified` code. Existing allowlisted inventory category, exception type, exit code and phase are retained when available; raw error messages, stacks and private paths are not serialized. This is a reversible diagnostic probe, not a termination-policy change.
+
+Focused `node tests/Measure-DashboardWorkerTransfer.js --mock` passed after three harness patches, including one correction to the nested mock's diagnostic-phase expectation. Actual PowerShell probes verified legitimate empty-family termination, selected processes disappearing before fresh inventory, fresh unknown-root rejection, independent snapshots, root PID reuse and exact profile selection. Synthetic timeout, cancellation and shutdown failures remained cleanup errors even when a separate final inventory returned zero. A never-resolving promise remained bounded, and private sentinel messages were excluded. Disposable non-browser process probes did not reproduce a StartTime exit failure; a read-only fresh CIM query did not establish a command deadline failure.
+
+No fourth harness patch, full deterministic preflight, new browser attempt, large capture, threshold override, production/Azure edit, agent or commit was made. The named actual evidence was not overwritten or relabeled. Current limits remain the 2 GiB family cap / 3 GiB free-memory floor, 5000 ms inventory bound and 15000 ms outer termination bound; historical 3/2 limits do not override them. The next controlling evidence must identify the helper's actual structured failure before a grounded termination repair and the authorized single small-control rerun. Overall successful small-control acceptance and all large acceptance gates remain unverified.
+
 ## Current bounded-path acceptance (2026-07-12)
 
 | Dataset / lane | Rows | Azure elapsed | True compiled peak WS | Private / GC peak | Semantic proof |
