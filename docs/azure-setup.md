@@ -103,6 +103,31 @@ creates its own app registration instead of selecting an older registration
 with the default display name. Reruns use the registration already configured
 on that Container App.
 
+For guest or cross-tenant administration, the Azure subscription tenant and
+the active Microsoft Graph tenant can differ. Easy Auth uses the tenant of
+the Graph session that manages the app registration and security group:
+the Graph access token's `tid` in Az-token mode, or the connected
+`Get-MgContext` tenant in SDK mode. Setup validates this tenant as a non-empty
+GUID string immediately after selecting the Container App Graph context,
+using strict UTF-8 decoding and a JSON object in Az-token mode. Malformed
+UTF-8 (even in an unrelated claim), BOM-prefixed JSON, primitive or array
+roots, and invalid tenant claims stop before any Graph lookup or Container
+App ARM operation with a static, non-sensitive error. Valid UTF-8 Unicode
+claims, including non-ASCII display names and emoji, remain supported.
+Setup then validates any explicit `-EasyAuthAppClientId` with a read-only, filtered
+application lookup in that same Graph tenant. The supplied GUID must be an
+application client ID, not an object ID, and exactly one matching application
+must exist. Invalid tenant claims, invalid client IDs, missing applications,
+and failed application reads stop this Container App block before environment,
+Container App, storage RBAC, identity, or Easy Auth writes. Read-only Graph
+lookups are allowed only after tenant validation. This is not an all-Setup ARM preflight:
+earlier resource-group, compute, and storage steps are outside this boundary
+and are not rolled back. New app creation remains after the actual Container
+App FQDN is available for its redirect URI.
+There is no implicit Azure or home-tenant fallback. Select the intended Graph
+session rather than relying on the Azure resource context to identify the
+app-registration tenant.
+
 ## Hosted and dual packaging mode in Azure
 
 `Setup-AzureResources.ps1` resolves the Azure dashboard packaging mode automatically:
