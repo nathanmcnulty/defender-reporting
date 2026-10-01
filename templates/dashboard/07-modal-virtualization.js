@@ -24,6 +24,7 @@ class VirtualModalTable {
         this.renderedStart = -1;
         this.renderedEnd = -1;
         this.renderPending = false;
+        this.destroyed = false;
 
         // Spacer rows for maintaining scroll height
         this.topSpacer = document.createElement('tr');
@@ -38,18 +39,20 @@ class VirtualModalTable {
     }
 
     _onScroll() {
-        if (this.renderPending) {
+        if (this.destroyed || this.renderPending) {
             return;
         }
 
         this.renderPending = true;
         requestAnimationFrame(() => {
             this.renderPending = false;
+            if (this.destroyed) return;
             this.render();
         });
     }
 
     render() {
+        if (this.destroyed) return;
         const totalRows = this.items.length;
         if (totalRows === 0) return;
 
@@ -99,7 +102,11 @@ class VirtualModalTable {
     }
 
     destroy() {
+        if (this.destroyed) return;
+        this.destroyed = true;
         this.container.removeEventListener('scroll', this._onScroll);
+        this.items = [];
+        this.rowBuilder = null;
     }
 }
 

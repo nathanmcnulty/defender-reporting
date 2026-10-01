@@ -253,19 +253,32 @@ async function denormalizeInWorker(compressedBytes) {
     workerParts.push(buildWorkerSource());
 
     return new Promise((resolve, reject) => {
+        let worker = null;
+        let url = null;
+        let timeoutId = null;
+        let settled = false;
+        const settle = (error, data) => {
+            if (settled) return;
+            settled = true;
+            if (timeoutId != null) clearTimeout(timeoutId);
+            try { if (worker) worker.terminate(); } catch { }
+            try { if (url) URL.revokeObjectURL(url); } catch { }
+            if (error) reject(error);
+            else resolve(data);
+        };
         try {
             const blob = new Blob(workerParts, { type: 'application/javascript' });
-            const url = URL.createObjectURL(blob);
-            const worker = new Worker(url);
-            const timeoutId = setTimeout(() => {
+            url = URL.createObjectURL(blob);
+            worker = new Worker(url);
+            timeoutId = setTimeout(() => {
+                if (settled) return;
                 recordDashboardPhaseTiming('workerWaitMs', performance.now() - operationStart);
                 dashboardMetrics.counts.workerTimeouts = (dashboardMetrics.counts.workerTimeouts || 0) + 1;
-                worker.terminate();
-                URL.revokeObjectURL(url);
-                reject(new Error('Worker denormalization timed out.'));
+                settle(new Error('Worker denormalization timed out.'));
             }, WORKER_OPERATION_TIMEOUT_MS);
 
             worker.onmessage = function(e) {
+                if (settled) return;
                 if (e.data.phase === 'workerInflateMs' || e.data.phase === 'workerParseMs') {
                     recordDashboardPhaseTiming(e.data.phase, e.data.duration);
                     return;
@@ -274,16 +287,10 @@ async function denormalizeInWorker(compressedBytes) {
                 if (Number.isFinite(e.data.postedAt)) {
                     recordDashboardPhaseTiming('workerDeliveryMs', performance.timeOrigin + performance.now() - e.data.postedAt);
                 }
-                clearTimeout(timeoutId);
-                worker.terminate();
-                URL.revokeObjectURL(url);
-                resolve(e.data);
+                settle(null, e.data);
             };
             worker.onerror = function(err) {
-                clearTimeout(timeoutId);
-                worker.terminate();
-                URL.revokeObjectURL(url);
-                reject(err);
+                settle(err);
             };
 
             if (compressedBytes) {
@@ -295,7 +302,7 @@ async function denormalizeInWorker(compressedBytes) {
                 worker.postMessage({ lookups, rawVulns });
             }
         } catch (err) {
-            reject(err);
+            settle(err);
         }
     });
 }
@@ -312,8 +319,8 @@ async function getPakoSource() {
     for (const script of scripts) {
         if (script.src && script.src.indexOf('pako') !== -1) {
             try {
-                const response = await fetch(script.src);
-                if (response.ok) return await response.text();
+                const source = await fetchDashboardResource(script.src, {}, 'worker pako source', response => response.ok ? response.text() : null);
+                if (source) return source;
             } catch (e) { /* ignore — will try inline or fall back */ }
         }
     }

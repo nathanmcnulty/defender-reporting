@@ -11,46 +11,53 @@ let pendingCompressedBytesPromise = null;
 let dashboardPayloadSummary = null;
 const EXTERNAL_FETCH_TIMEOUT_MS = 30000;
 
-async function fetchDashboardResource(url, options = {}, label = 'dashboard resource') {
+async function fetchDashboardResource(url, options = {}, label = 'dashboard resource', consumeResponse = response => response) {
     const requestOptions = Object.assign({}, options);
-    const canUseInternalAbortController = typeof AbortController === 'function' && !requestOptions.signal;
-    const controller = canUseInternalAbortController ? new AbortController() : null;
+    const callerSignal = requestOptions.signal;
+    const callerAbortReason = () => callerSignal.reason || Object.assign(new Error(`Cancelled loading ${label}.`), { name: 'AbortError' });
+    if (callerSignal && callerSignal.aborted) throw callerAbortReason();
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
     if (controller) {
         requestOptions.signal = controller.signal;
     }
 
     let timeoutHandle = null;
+    let abortListener = null;
+    const cancellation = new Promise((resolve, reject) => {
+        timeoutHandle = setTimeout(() => {
+            const error = new Error(`Timed out loading ${label}.`);
+            reject(error);
+            if (controller) controller.abort(error);
+        }, EXTERNAL_FETCH_TIMEOUT_MS);
+        if (callerSignal) {
+            abortListener = () => {
+                const error = callerAbortReason();
+                reject(error);
+                if (controller) controller.abort(error);
+            };
+            callerSignal.addEventListener('abort', abortListener, { once: true });
+        }
+    });
     try {
-        if (controller) {
-            timeoutHandle = setTimeout(() => controller.abort(), EXTERNAL_FETCH_TIMEOUT_MS);
-            return await fetch(url, requestOptions);
-        }
-
         return await Promise.race([
-            fetch(url, requestOptions),
-            new Promise((resolve, reject) => {
-                timeoutHandle = setTimeout(() => reject(new Error(`Timed out loading ${label}.`)), EXTERNAL_FETCH_TIMEOUT_MS);
-            })
+            Promise.resolve().then(() => fetch(url, requestOptions)).then(consumeResponse),
+            cancellation
         ]);
-    } catch (error) {
-        if (controller && controller.signal.aborted) {
-            throw new Error(`Timed out loading ${label}.`);
-        }
-        throw error;
     } finally {
         if (timeoutHandle != null) {
             clearTimeout(timeoutHandle);
         }
+        if (callerSignal && abortListener) callerSignal.removeEventListener('abort', abortListener);
     }
 }
 
 async function loadExternalCompressedPayloadBytes(url, signal) {
-    const response = await fetchDashboardResource(url, { cache: 'no-cache', signal }, 'dashboard payload');
-    if (!response.ok) {
-        throw new Error(`Failed to load dashboard payload (${response.status} ${response.statusText}).`);
-    }
-
-    return new Uint8Array(await response.arrayBuffer());
+    return fetchDashboardResource(url, { cache: 'no-cache', signal }, 'dashboard payload', async response => {
+        if (!response.ok) {
+            throw new Error(`Failed to load dashboard payload (${response.status} ${response.statusText}).`);
+        }
+        return new Uint8Array(await response.arrayBuffer());
+    });
 }
 
 async function ensurePendingCompressedBytesLoaded() {
@@ -82,18 +89,26 @@ async function loadData() {
             const compressedBytesPromise = loadExternalCompressedPayloadBytes(
                 dashboardConfig.payloadUrl,
                 fetchController ? fetchController.signal : undefined
-            );
+            ).catch(error => {
+                if (fetchController) fetchController.abort(error);
+                throw error;
+            });
             try {
-                const summaryResponse = await fetchDashboardResource(
+                const summaryPromise = fetchDashboardResource(
                     dashboardConfig.payloadSummaryUrl,
                     { cache: 'no-cache', signal: fetchController ? fetchController.signal : undefined },
-                    'dashboard summary'
+                    'dashboard summary',
+                    async response => {
+                        if (!response.ok) {
+                            throw new Error(`Failed to load dashboard summary (${response.status} ${response.statusText}).`);
+                        }
+                        return response.json();
+                    }
                 );
-                if (!summaryResponse.ok) {
-                    throw new Error(`Failed to load dashboard summary (${summaryResponse.status} ${summaryResponse.statusText}).`);
-                }
-
-                dashboardPayloadSummary = await summaryResponse.json();
+                dashboardPayloadSummary = await Promise.race([
+                    summaryPromise,
+                    compressedBytesPromise.then(() => summaryPromise)
+                ]);
                 if (dashboardPayloadSummary && dashboardPayloadSummary.filterCatalog) {
                     lookups = {
                         devices: Array.isArray(dashboardPayloadSummary.filterCatalog.devices) ? dashboardPayloadSummary.filterCatalog.devices : [],
@@ -104,9 +119,8 @@ async function loadData() {
                 pendingCompressedBytesPromise = compressedBytesPromise;
             } catch (error) {
                 if (fetchController) {
-                    fetchController.abort();
+                    fetchController.abort(error);
                 }
-                await compressedBytesPromise.catch(() => { });
                 throw error;
             }
         } else {
@@ -300,6 +314,26 @@ async function denormalizeAllVulns(options = {}) {
     const lkAffSoftware = lookups.affSoftware;
     const lkInventory = lookups.inventory || [];
 
+    function canonicalizeIssueLookup(values, encode) {
+        const identities = new Map();
+        const emptyId = 0;
+        identities.set(encode(null), emptyId);
+        const indices = values.map(value => {
+            const identity = encode(value);
+            if (!identities.has(identity)) identities.set(identity, identities.size);
+            return identities.get(identity);
+        });
+        return { indices, emptyId, count: identities.size };
+    }
+    const cveIdentities = canonicalizeIssueLookup(lkCves, value => JSON.stringify(value && value.id || ''));
+    const softwareIdentities = canonicalizeIssueLookup(lkSoftware, value => JSON.stringify([
+        value && getLookupValue(lkVendors, value.v) || '', value && value.n || ''
+    ]));
+    const versionIdentities = canonicalizeIssueLookup(lkVersions, value => JSON.stringify(value || ''));
+    const softwareRadix = softwareIdentities.count;
+    const versionRadix = versionIdentities.count;
+    const numericIssueKeys = Number.isSafeInteger(cveIdentities.count * softwareRadix * versionRadix);
+
     // Pre-format all date strings once (lkDates typically has ~365 entries)
     const preFormattedDates = new Array(lkDates ? lkDates.length : 0);
     for (let di = 0; di < preFormattedDates.length; di++) {
@@ -380,7 +414,7 @@ async function denormalizeAllVulns(options = {}) {
     // Pre-compute per-(update, batchTitle) remediation string
     const remStrCache = new Map();
     function getRemediationStrCached(updIdx, btIdx) {
-        const ck = (updIdx + 1) * 100000 + (btIdx + 1);
+        const ck = JSON.stringify([updIdx, btIdx]);
         let cached = remStrCache.get(ck);
         if (cached !== undefined) return cached;
         const uo = updIdx >= 0 ? lkUpdates[updIdx] : null;
@@ -448,8 +482,10 @@ async function denormalizeAllVulns(options = {}) {
             }
         }
 
-        // Track earliest first-seen per environment issue key (numeric key avoids string concat)
-        const issueKey = cveIdx * 1000000 + swIdx * 10000 + (verIdx + 1);
+        const versionIdentity = versionIdentities.indices[verIdx] ?? versionIdentities.emptyId;
+        const issueKey = numericIssueKeys
+            ? (cveIdentities.indices[cveIdx] * softwareRadix + softwareIdentities.indices[swIdx]) * versionRadix + versionIdentity
+            : cveIdentities.indices[cveIdx] + ':' + softwareIdentities.indices[swIdx] + ':' + versionIdentity;
         if (firstSeen) {
             const existing = earliestFirstSeenByIssue.get(issueKey);
             if (!existing || firstSeen < existing) {
@@ -515,6 +551,7 @@ async function denormalizeAllVulns(options = {}) {
     for (let i = 0; i < vulnerabilityData.length; i++) {
         const v = vulnerabilityData[i];
         v._environmentFirstSeenDate = earliestFirstSeenByIssue.get(v._issueKey) || v._firstSeenDate;
+        v._issueKey = null;
 
         qualitySummary.totalRecords++;
         const deviceKey = getDeviceIdentityKey(v);
@@ -560,6 +597,26 @@ async function denormalizeAllVulns(options = {}) {
  * @param {Object} v - Vulnerability row object
  * @returns {Object} The same object, enriched with deferred properties
  */
+function materializeAggregateRow(v) {
+    if (v._aggregateMat || v._mat || !rawVulns || !lookups || v._index == null) return v;
+    const rec = getRawVulnRecord(v._index);
+    if (!rec) return v;
+    const device = getLookupRecord(lookups.devices, rec[0]);
+    const cve = getLookupRecord(lookups.cves, rec[1]);
+    const software = getLookupRecord(lookups.software, rec[2]);
+    if (!device || !cve || !software) return v;
+    const updateObj = getLookupValue(lookups.updates, rec[7]);
+    v.CveBatchUrl = cve.u;
+    v.CveBatchTitle = getLookupValue(lookups.batchTitles, cve.bt);
+    v.RecommendedSecurityUpdateId = updateObj ? (updateObj.id || null) : null;
+    v.RecommendedSecurityUpdateUrl = updateObj ? (updateObj.url || null) : null;
+    v.OSVersion = device.ov;
+    v.SecurityUpdateAvailable = rec[6] === 1;
+    v.RecommendationReference = software.r;
+    v._aggregateMat = true;
+    return v;
+}
+
 function materializeRow(v) {
     if (v._mat) return v;
     // For rows loaded from IndexedDB cache, properties are already set;
@@ -742,14 +799,12 @@ async function denormalizeWithCaching() {
     // 3. Cache the result (fire-and-forget) — skip for very large datasets
     // IndexedDB structured clone fails with out-of-memory for 500K+ records
     if (vulnerabilityData.length < MAX_IDB_CACHE_ROWS) {
-        if (!fingerprint) {
+        if (!fingerprint && !compressedFp) {
             fingerprint = await computeDataFingerprint();
         }
-        logDebug('Data fingerprint:', fingerprint);
-        setCachedData(fingerprint, vulnerabilityData);
-        if (compressedFp) {
-            setCachedData(compressedFp, vulnerabilityData);
-        }
+        const cacheFingerprint = compressedFp || fingerprint;
+        logDebug('Data fingerprint:', cacheFingerprint);
+        setCachedData(cacheFingerprint, vulnerabilityData);
     } else {
         console.log('[perf] Skipping IndexedDB cache for', vulnerabilityData.length, 'records (too large for structured clone)');
     }

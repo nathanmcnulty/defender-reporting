@@ -76,6 +76,7 @@ let chartJsLoadPromise = null;
 let pdfLibrariesLoadPromise = null;
 let pdfExportRuntimeLoadPromise = null;
 const loadedScriptPromises = new Map();
+const loadedScriptCleanups = new Map();
 
 // Device facet catalog used by filtering
 let deviceFilterCatalog = [];
@@ -83,6 +84,7 @@ let deviceFilterLabelByKey = new Map();
 let deviceDuplicateNameCounts = new Map();
 let cascadingFilterOptions = {};
 let cascadingFilterState = {};
+let scopedFilterOptionsCache = null;
 
 // Constant for devices without tags
 const NO_TAGS_VALUE = '(No Tags)';
@@ -177,6 +179,10 @@ const DENORMALIZE_YIELD_ROW_INTERVAL = Number.isFinite(configuredDenormalizeYiel
     ? Math.floor(configuredDenormalizeYieldRowInterval)
     : 25000;
 const PDF_PAGE_COUNT_TIMEOUT_MS = 10000;
+const configuredExternalScriptTimeoutMs = Number(dashboardConfig.externalScriptTimeoutMs);
+const EXTERNAL_SCRIPT_TIMEOUT_MS = Number.isFinite(configuredExternalScriptTimeoutMs) && configuredExternalScriptTimeoutMs > 0
+    ? configuredExternalScriptTimeoutMs
+    : 15000;
 const APPLY_FILTER_DEBOUNCE_MS = 50;
 const FACET_SEARCH_MIN_OPTIONS = 8;
 const FILTER_POPOVER_BATCH_FLOOR = 100;
@@ -265,6 +271,10 @@ const REMEDIATION_REPORT_MODE_SNAPSHOT = 'snapshot';
 const MAX_VISIBLE_DEVICE_REMEDIATIONS = 10;
 
 let applyFiltersTimer = null;
+let filterRenderGeneration = 0;
+let currentFilterRenderRequest = null;
+let initialReportStart = null;
+let initialPaintOpportunityStart = null;
 let activeReportId = 'active-vulnerabilities';
 let remediationReportMode = REMEDIATION_REPORT_MODE_SNAPSHOT;
 const initializedReports = new Set();
@@ -342,6 +352,9 @@ function createEmptyDashboardMetricsState() {
             loadDataMs: 0,
             denormalizeMs: 0,
             applyFiltersMs: 0,
+            filterComputationMs: 0,
+            filterRenderCompletionMs: 0,
+            filterPaintOpportunityMs: 0,
             initTotalMs: 0
         },
         reports: {},
@@ -502,6 +515,7 @@ function dispatchDashboardEvent(name, detail) {
 
 function markDashboardReady() {
     const dashboardScope = getDashboardGlobalScope();
+    if (dashboardScope._dashboardReady) return;
     dashboardScope._dashboardReady = true;
     const detail = publishDashboardDiagnostics();
     dispatchDashboardEvent('dashboard-ready', detail);
@@ -885,10 +899,6 @@ function formatFilterSelectionProgress(selectedCount, totalCount) {
 }
 
 function getScopedFilterOptionCount(filterKey, state = filterState) {
-    if (state === filterState && activeFilterPopoverKey === filterKey && activeFilterPopoverOptions.length > 0) {
-        return activeFilterPopoverOptions.length;
-    }
-
     return getScopedFilterOptions(filterKey, state).length;
 }
 
@@ -1380,6 +1390,8 @@ function syncFilterStateFromDom() {
 }
 
 function scheduleApplyFilters(immediate = false) {
+    filterRenderGeneration++;
+    currentFilterRenderRequest = null;
     if (applyFiltersTimer) {
         clearTimeout(applyFiltersTimer);
         applyFiltersTimer = null;
@@ -1524,6 +1536,8 @@ function unloadExternalScript(url) {
         return;
     }
 
+    const cancelLoad = loadedScriptCleanups.get(url);
+    if (cancelLoad) cancelLoad(new Error(`Script loading cancelled: ${url}`));
     loadedScriptPromises.delete(url);
     Array.from(document.querySelectorAll('script[data-runtime-src]')).forEach(script => {
         if (script.dataset.runtimeSrc === url) {
@@ -1541,21 +1555,53 @@ function loadExternalScript(url) {
         return loadedScriptPromises.get(url);
     }
 
+    let resolveLoad;
+    let rejectLoad;
     const promise = new Promise((resolve, reject) => {
-        const script = document.createElement('script');
+        resolveLoad = resolve;
+        rejectLoad = reject;
+    });
+    let script = null;
+    let timeoutHandle = null;
+    let settled = false;
+    const finish = error => {
+        if (settled) return;
+        settled = true;
+        if (timeoutHandle != null) clearTimeout(timeoutHandle);
+        if (script) {
+            script.onload = null;
+            script.onerror = null;
+        }
+        if (loadedScriptPromises.get(url) === promise) {
+            loadedScriptCleanups.delete(url);
+            if (error) loadedScriptPromises.delete(url);
+        }
+        if (error) {
+            try {
+                if (script) script.remove();
+            } catch (cleanupError) {
+                console.error('Failed to remove script:', cleanupError);
+            }
+            rejectLoad(error);
+        } else {
+            resolveLoad();
+        }
+    };
+    loadedScriptPromises.set(url, promise);
+    loadedScriptCleanups.set(url, finish);
+    try {
+        script = document.createElement('script');
         script.src = url;
         script.async = false;
         script.dataset.runtimeSrc = url;
-        script.onload = () => resolve();
-        script.onerror = () => {
-            loadedScriptPromises.delete(url);
-            script.remove();
-            reject(new Error(`Failed to load script: ${url}`));
-        };
+        script.onload = () => finish();
+        script.onerror = () => finish(new Error(`Failed to load script: ${url}`));
+        timeoutHandle = window.setTimeout(() => finish(new Error(`Script loading timed out: ${url}`)), EXTERNAL_SCRIPT_TIMEOUT_MS);
         document.head.appendChild(script);
-    });
+    } catch (error) {
+        finish(error);
+    }
 
-    loadedScriptPromises.set(url, promise);
     return promise;
 }
 

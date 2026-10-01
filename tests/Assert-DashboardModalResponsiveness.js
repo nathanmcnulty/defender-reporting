@@ -1,5 +1,34 @@
 ﻿const assert = require('assert');
-const { loadDashboardHarness } = require('./helpers/dashboard-test-harness');
+const { loadDashboardHarness, createStubElement } = require('./helpers/dashboard-test-harness');
+
+function assertDisposedScrollRender() {
+    const frames = [];
+    let rowBuilds = 0;
+    let removals = 0;
+    const dashboard = loadDashboardHarness('module.exports = { VirtualModalTable };', {
+        requestAnimationFrame(callback) { frames.push(callback); }
+    });
+    const container = createStubElement({
+        scrollTop: 0,
+        clientHeight: 360,
+        removeEventListener() { removals++; }
+    });
+    const tbody = createStubElement({ parentElement: createStubElement({
+        getBoundingClientRect() { return { top: -container.scrollTop }; }
+    }) });
+    const table = new dashboard.VirtualModalTable(container, tbody,
+        Array.from({ length: 500 }, (_, index) => index), () => { rowBuilds++; return '<tr></tr>'; });
+    container.scrollTop = 7200;
+    table._onScroll();
+    const previousBuilds = rowBuilds;
+    table.destroy();
+    frames.shift()();
+    table._onScroll();
+    table.render();
+    assert.strictEqual(rowBuilds, previousBuilds, 'Destroyed tables must ignore queued and direct renders.');
+    assert.strictEqual(frames.length, 0, 'Destroyed tables must not schedule more scroll work.');
+    assert.strictEqual(removals, 1);
+}
 
 function createDetail(index, overrides = {}) {
     const suffix = String(index).padStart(4, '0');
@@ -25,6 +54,7 @@ function createDetail(index, overrides = {}) {
 }
 
 function main() {
+    assertDisposedScrollRender();
     const dashboard = loadDashboardHarness(`
 module.exports = {
     buildDetailsModalSections,

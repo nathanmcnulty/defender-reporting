@@ -38,9 +38,16 @@ function renderChart() {
 
     const cutoffIndex = sortedDates.findIndex(date => date > mostRecentLastSeenDate);
     const dataArrays = [severityCounts.Critical, severityCounts.High, severityCounts.Medium, severityCounts.Low, totalCounts, deviceCounts];
+    const tooltipFooter = tooltipItems => {
+        const dateIndex = tooltipItems[0]?.dataIndex;
+        return cutoffIndex !== -1 && dateIndex >= cutoffIndex
+            ? '\n⚠ Projected data (no recent scans)'
+            : '';
+    };
 
     if (chartInstance && chartInstance.data.datasets.length === dataArrays.length) {
         chartInstance.data.labels = sortedDates;
+        chartInstance.options.plugins.tooltip.callbacks.footer = tooltipFooter;
         dataArrays.forEach((arr, idx) => {
             chartInstance.data.datasets[idx].data = arr;
             chartInstance.data.datasets[idx].segment = createSegmentStyle(cutoffIndex);
@@ -151,14 +158,7 @@ function renderChart() {
                         mode: 'index',
                         intersect: false,
                         callbacks: {
-                            footer: function(tooltipItems) {
-                                const dateIndex = tooltipItems[0].dataIndex;
-                                const date = sortedDates[dateIndex];
-                                if (cutoffIndex !== -1 && dateIndex >= cutoffIndex) {
-                                    return '\n⚠ Projected data (no recent scans)';
-                                }
-                                return '';
-                            }
+                            footer: tooltipFooter
                         }
                     }
                 },

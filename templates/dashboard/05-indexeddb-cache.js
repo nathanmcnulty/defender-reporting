@@ -3,8 +3,9 @@
 // =============================================================================
 
 const VULNDB_NAME = 'VulnDashboardCache';
-const VULNDB_VERSION = 1;
+const VULNDB_VERSION = 2;
 const VULNDB_STORE = 'denormalized';
+const DERIVED_CACHE_SCHEMA = 2;
 const DIGEST_TIMEOUT_MS = 2000;
 const IDB_OPERATION_TIMEOUT_MS = 2000;
 const WORKER_OPERATION_TIMEOUT_MS = 10000;
@@ -76,12 +77,12 @@ function getEmbeddedPayloadFingerprintInput() {
  */
 async function computeDataFingerprint() {
     const len = getRawVulnCount();
-    if (len === 0) return 'empty';
+    if (len === 0) return `derived_${DERIVED_CACHE_SCHEMA}_empty`;
 
     const input = getEmbeddedPayloadFingerprintInput();
     const bytes = new TextEncoder().encode(input);
     const hash = await computeDigestHex(bytes);
-    return `fp_${len}_${hash}`;
+    return `derived_${DERIVED_CACHE_SCHEMA}_fp_${len}_${hash}`;
 }
 
 /**
@@ -93,7 +94,7 @@ async function computeDataFingerprint() {
 async function computeCompressedFingerprint(bytes) {
     const len = bytes.length;
     const hash = await computeDigestHex(bytes);
-    return `cfp_${len}_${hash}`;
+    return `derived_${DERIVED_CACHE_SCHEMA}_cfp_${len}_${hash}`;
 }
 
 /**
@@ -120,6 +121,7 @@ function openVulnDB() {
 
         const settleResolve = value => {
             if (settled) {
+                try { value.close(); } catch { }
                 return;
             }
 
@@ -141,8 +143,11 @@ function openVulnDB() {
         req = indexedDB.open(VULNDB_NAME, VULNDB_VERSION);
         req.onupgradeneeded = () => {
             const db = req.result;
-            if (!db.objectStoreNames.contains(VULNDB_STORE)) {
-                db.createObjectStore(VULNDB_STORE, { keyPath: 'fingerprint' });
+            const store = db.objectStoreNames.contains(VULNDB_STORE)
+                ? req.transaction.objectStore(VULNDB_STORE)
+                : db.createObjectStore(VULNDB_STORE, { keyPath: 'fingerprint' });
+            if (!store.indexNames.contains('ts')) {
+                store.createIndex('ts', 'ts');
             }
         };
         req.onsuccess = () => settleResolve(req.result);
@@ -173,20 +178,25 @@ async function getCachedData(fingerprint) {
                 resolve(value);
             };
 
-            const timeoutId = setTimeout(() => {
-                try { tx.abort(); } catch { /* ignore abort failures */ }
-                settle(null);
-            }, IDB_OPERATION_TIMEOUT_MS);
             const tx = db.transaction(VULNDB_STORE, 'readonly');
             const store = tx.objectStore(VULNDB_STORE);
+            const timeoutId = setTimeout(() => {
+                try { tx.abort(); } catch { }
+                settle(null);
+            }, IDB_OPERATION_TIMEOUT_MS);
             const req = store.get(fingerprint);
             req.onsuccess = () => {
-                if (!req.result) return settle(null);
+                if (!req.result || req.result.schema !== DERIVED_CACHE_SCHEMA
+                    || !Array.isArray(req.result.data)
+                    || req.result.data.length >= 500000
+                    || !req.result.data.every(row => row && typeof row === 'object' && !Array.isArray(row))
+                    || (req.result.lookups && !hasFullDenormalizationLookups(req.result.lookups))) return settle(null);
                 // Return both data and cached lookups (if available)
                 return settle({ data: req.result.data, lookups: req.result.lookups || null });
             };
             req.onerror = () => settle(null);
             tx.onabort = () => settle(null);
+            tx.onerror = () => settle(null);
         });
     } catch (error) {
         logDebug('IndexedDB cache read skipped:', error && error.message ? error.message : error);
@@ -203,6 +213,7 @@ async function getCachedData(fingerprint) {
  * @param {Array} data
  */
 async function setCachedData(fingerprint, data) {
+    if (!Array.isArray(data) || data.length >= 500000) return;
     let db = null;
     try {
         db = await openVulnDB();
@@ -226,26 +237,23 @@ async function setCachedData(fingerprint, data) {
                 settle();
             }, IDB_OPERATION_TIMEOUT_MS);
 
-            store.put({ fingerprint, data, lookups: lookups || null, ts: Date.now() });
-            const pruneRequest = store.getAll();
-            pruneRequest.onsuccess = () => {
-                const cachedEntries = Array.isArray(pruneRequest.result) ? pruneRequest.result : [];
-                if (cachedEntries.length <= MAX_IDB_CACHE_ENTRIES) {
-                    return;
-                }
-
-                cachedEntries
-                    .sort((left, right) => (Number(right.ts) || 0) - (Number(left.ts) || 0))
-                    .slice(MAX_IDB_CACHE_ENTRIES)
-                    .forEach(entry => {
-                        if (entry && entry.fingerprint) {
-                            store.delete(entry.fingerprint);
-                        }
-                    });
-            };
             tx.oncomplete = () => settle();
             tx.onerror = () => settle();
             tx.onabort = () => settle();
+            try {
+                store.put({ fingerprint, data, lookups: lookups || null, schema: DERIVED_CACHE_SCHEMA, ts: Date.now() });
+                const pruneRequest = store.index('ts').openKeyCursor(null, 'prev');
+                let retained = 0;
+                pruneRequest.onsuccess = () => {
+                    const cursor = pruneRequest.result;
+                    if (!cursor) return;
+                    if (++retained > MAX_IDB_CACHE_ENTRIES) store.delete(cursor.primaryKey);
+                    cursor.continue();
+                };
+            } catch (error) {
+                try { tx.abort(); } catch { }
+                settle();
+            }
         });
     } catch (error) {
         logDebug('IndexedDB cache write skipped:', error && error.message ? error.message : error);

@@ -45,12 +45,11 @@ function getFirstSeenDate(v) {
 }
 
 function getEnvironmentIssueKey(v) {
-    return [
-        v.CveId || '',
-        v.SoftwareVendor || '',
-        v.SoftwareName || '',
-        v.SoftwareVersion || ''
-    ].join('|');
+    return encodeEnvironmentIssueKey(v.CveId, v.SoftwareVendor, v.SoftwareName, v.SoftwareVersion);
+}
+
+function encodeEnvironmentIssueKey(cveId, vendor, name, version) {
+    return JSON.stringify([cveId, vendor, name, version].map(value => String(value || '')));
 }
 
 function getEnvironmentFirstSeenDate(v) {
@@ -138,7 +137,7 @@ function formatAffectedSoftware(softwareStr) {
  * @returns {string} Formatted remediation string
  */
 function buildRemediationString(v) {
-    materializeRow(v);
+    materializeAggregateRow(v);
     const kbId = v.RecommendedSecurityUpdateId
         ? (v.RecommendedSecurityUpdateId.toString().startsWith('KB') ? v.RecommendedSecurityUpdateId : 'KB' + v.RecommendedSecurityUpdateId)
         : null;

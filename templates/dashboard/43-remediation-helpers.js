@@ -472,7 +472,7 @@ function getRemediationFamilyKey(recommendationReference, advisoryTitle, updateN
 }
 
 function buildRemediationDescriptor(v) {
-    materializeRow(v);
+    materializeAggregateRow(v);
 
     const descriptorCacheKey = buildMemoCacheKey([
         v.SoftwareVendor,

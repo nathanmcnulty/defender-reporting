@@ -431,6 +431,14 @@ function matchesFilterState(v, state = filterState) {
  */
 function applyFilters() {
     const _t0 = performance.now();
+    const renderRequest = {
+        generation: ++filterRenderGeneration,
+        state: filterState,
+        filterKey: filterState.key,
+        startedAt: _t0,
+        completed: false
+    };
+    currentFilterRenderRequest = renderRequest;
     cancelDeferredVisibleReportRender();
     invalidateAggregateCache();
     syncUrlViewState();
@@ -442,9 +450,11 @@ function applyFilters() {
         updateStats();
         updateRemediationReportModeUi(activeReportId);
         markAllReportsDirty();
-        renderActiveReport(true);
         dashboardMetrics.counts.applyFilters += 1;
-        recordDashboardPhaseTiming('applyFiltersMs', performance.now() - _t0);
+        const computationMs = performance.now() - _t0;
+        recordDashboardPhaseTiming('applyFiltersMs', computationMs);
+        recordDashboardPhaseTiming('filterComputationMs', computationMs);
+        renderCurrentFilteredReport(renderRequest);
         return;
     }
 
@@ -501,10 +511,9 @@ function applyFilters() {
     dashboardMetrics.counts.applyFilters += 1;
     const applyFiltersDurationMs = performance.now() - _t0;
     recordDashboardPhaseTiming('applyFiltersMs', applyFiltersDurationMs);
+    recordDashboardPhaseTiming('filterComputationMs', applyFiltersDurationMs);
     requestAnimationFrame(() => {
-        renderActiveReport(true);
-        scheduleReportDataWarmup();
-        publishDashboardDiagnostics();
+        renderCurrentFilteredReport(renderRequest);
     });
     console.log(`[perf] applyFilters: ${applyFiltersDurationMs.toFixed(1)}ms  (${result.length}/${len} rows passed)`);
 }
