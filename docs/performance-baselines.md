@@ -15,6 +15,58 @@ Do not compare those lanes as if they were interchangeable. Replay benchmarks ar
 
 The current bounded-content-store acceptance is recorded below. The older tables and triage entries remain useful historical comparisons, but they predate the disk-partitioned publisher and compiled streaming standard-payload path.
 
+## Issue 67 fresh-import phase baseline (2026-09-30)
+
+**Partial investigation, not an optimization or closure. Refs #67.** Production helpers, compile thresholds, templates, and performance defaults are unchanged. No candidate was deployed and no new Automation job was started.
+
+### Original synthetic snapshot import
+
+Original job `5ff9dd3f-f773-4856-bbc2-8b376cd613d2` completed on 2026-09-29. Its archived status reports Automation, `UseExistingExportsOnly=true`, and a fresh legacy-snapshot canonicalization inside Stage C. This is **not** completed-store replay and **not** an MDE API download: synthetic legacy snapshots were already in Blob storage. The reference declares 50,000 target machines and 1,500,000 source observations; the published projection has 1,187,395 current rows and 49,476 devices. Source observations are not expected dashboard rows.
+
+Read-only GET recovery of this exact job preserved its status and both stream pages (196 streams). No other cloud jobs, resources, permissions, schedules, or authentication settings were queried or changed. Historical source commit/helper fingerprint was not recovered from the stream summaries; current source must not be represented as byte-identical to that job.
+
+| Original interval | Start UTC | End UTC | Seconds |
+| --- | --- | --- | ---: |
+| Job start to completion | 19:12:21.902 | 19:54:56.382 | 2554.48 |
+| Snapshot loop, sampled VulnStore Start/End | 19:12:49.216 | 19:39:21.259 | 1592.04 |
+| Unlabelled post-loop/pre-projection gap | 19:39:21.259 | 19:46:52.074 | 450.81 |
+| Compiled content projection, sampled Start/End | 19:46:52.074 | 19:47:33.718 | 41.64 |
+| Sampled store window, Start/Post-VulnStorePublish | 19:12:49.216 | 19:47:34.585 | 2085.37 |
+
+These are wall-clock sample boundaries, not exclusive method timings. In particular, the approximately seven-minute gap is **not** measured compiled projection time. The current owner performs current-file assembly/validation, history materialization, transaction publication, and projector setup between those labels; the old job cannot distinguish their individual costs. The status sampled peak is 373.0 MiB in normalization, not a verified process high-water or a strict sub-400 MiB acceptance result.
+
+Original archived status SHA-256: `75abcd865615a31dd0faa9a948f98a56cd2fb0c2b7497d5ce8eab3457544daee`. Reference manifest SHA-256: `766cc3e2890b0c3707c3a4e9ccf904b194f11e387b218a2505e57ac8542d45e0`. Both hashes were independently verified against retained local bytes on 2026-09-30: the parent workspace's `.local/review-50k-status-20260929.json` and `.local/large-datasets/review-50k-20260929/synthetic-manifest.json`, respectively. This verifies file identity, not historical source identity. Private evidence in the issue-67 worktree is `.local/original-job/{job.json,streams.json,streams-page-2.json,baseline-scalars.json}`. Raw job responses and datasets must remain ignored.
+
+### Bounded local owner profile
+
+Owning paths at base `3ed6bd7` are `build/azure/runbook-source.ps1` Stage C, `src/powershell/Shared/Stores/VulnerabilitySnapshotImport.ps1` (`Publish-VulnStoreFromBulkSnapshot`), and `src/powershell/Shared/Core/Core.ps1` (`Split-VulnJsonPartition`, `Read-VulnPartitionMapFile`, `New-OpenVulnRecord`, `Publish-VulnContentStoreUnlocked`). The current signature helper is `Get-VulnCanonicalRowSignature`, which uses a nonblank ID; no `Get-VulnCanonicalStateHash` exists in this source. No historical full-state-hash cost is inferred.
+
+Hypothesis: repeated partition-map parsing/property/date/signature work and owner parse/open/serialize operations dominate local fresh import. Cheap check: run the real publisher from an empty store using deterministic synthetic changed-date snapshots, attribute operation calls/time/allocations, and compare every decompressed output file with an unprofiled twin. The test-only `-ProfileFreshImport` flag rewrites functions in memory and restores originals in `finally`; no production callback, per-row timer, or performance behavior changes were added.
+
+Both local samples use procedural seed `20260322`, 50 machines, 5,000 templates, a reference generated for 2026-09-29, a one-day immutable-reference overlay, snapshot dates 2026-09-29/30, ten legacy files, and 128 partitions. Generator safety controls require at least 1 GiB available RAM and 1 GiB disk. Each reference contains 80% current and 20% historical source observations. Expected current IDs come from the authoritative onboarded reference projection, not source observation counts. Both imports start without a canonical store or content sidecars; the procedural initial-import shortcut is absent from the import directories.
+
+| Local synthetic observations | Expected/actual current IDs | Profiled seconds | Unprofiled seconds | Store parity |
+| ---: | ---: | ---: | ---: | --- |
+| 5000 | 3455 / 3455 | 27.90 | 18.87 | All decompressed current/history/content files identical |
+| 10000 | 6889 / 6889 | 45.46 | 33.62 | All decompressed current/history/content files identical |
+
+| Operation | 5k calls | 5k seconds | 10k calls | 10k seconds | 10k allocated MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Read-VulnPartitionMapFile | 512 | 9.13 | 512 | 15.24 | 4373.74 |
+| Split-VulnJsonPartition | 2 | 5.74 | 2 | 9.12 | 2641.18 |
+| New-OpenVulnRecord | 6895 | 4.73 | 13749 | 8.36 | 2596.05 |
+| Json.Parse | 25217 | 3.70 | 50334 | 6.49 | 2168.47 |
+| Test-VulnCurrentFile | 1 | 2.18 | 1 | 3.18 | 922.10 |
+| Get-VulnCanonicalRowSignature | 10335 | 1.42 | 20609 | 2.49 | 438.09 |
+| Json.Serialize | 6903 | 0.92 | 13762 | 1.69 | 483.65 |
+| Content.CompiledProject | 1 | 0.07 | 1 | 0.12 | 78.33 |
+
+Timings and current-thread allocations are **inclusive and nested; do not sum them**. Allocation churn is not resident memory. The profiler adds per-call overhead: profiled/unprofiled totals differ substantially. Order, warm compilation/filesystem caches, local CPU, runtime, and single samples prevent causal optimization claims. The observation supports local repeated-row-work pressure, not an extrapolation to a 2,700-second cloud run or attribution of the original 27-minute loop to a particular method. Full pipeline normalization/dashboard parity and Azure process high-water are not measured here.
+
+Private evidence: `.local/profile-5k/verified-profiled/fresh-import-profile.json` and `.local/profile-10k/profiled/fresh-import-profile.json`, with immutable references, overlays, snapshots and unprofiled twins alongside. Each JSON records source commit/runtime, model controls, manifest/input hashes, authoritative ID counts, all decompressed output hashes, and scalar operation measurements. The earlier `.local/profile-5k/profiled/` capture lacks the strengthened ID/projection checks and is superseded. The existing shared suite covers current/history parity, decimal/Unicode/case/array/null probe fields, scalar attribution, owner restoration, and rejection of completed stores/non-procedural inputs. The older `.local/preflight/full-preflight.txt` is not hash-bound to the final four-file patch and is not acceptance evidence for it. Final validation uses `.local/preflight/hash-bound-provenance.json` and its timestamped full-preflight log: acceptance requires a fresh, unskipped `build/Invoke-RegressionValidation.ps1` exit of zero, the success marker, and identical before/after SHA-256 for `tests/Invoke-LargeImportCoverage.ps1`, `tests/Run-SharedHelperRegression.ps1`, `tests/README.md`, and this document. The record includes UTC start/end, exact command, log SHA-256, and independently checked original-file hashes. Freeze all four files before capture; any subsequent source or documentation edit invalidates that acceptance and requires repeating the gate. Generated fingerprint/encoding-only churn is excluded from the patch. No production helper changed, so a release build was not required.
+
+**Decision:** retain the profile harness and documentation only. There is no measured candidate with enough evidence to justify even a long cloud trial. Issue #67 stays open. The issue-69 controlled Dual 769.42-second completed-store replay is not comparable; its failed 875.39-second/413.8-MiB candidate remains default-off. Any future production candidate needs exact store/history/current-ID/output parity, parent Astra review, separate authorization for a guarded actual fresh-import job, and strict sampled/process-high-water memory below 400 MiB before changing a default. This work made no agents, commits, main-worktree edits, browser changes, process termination, cloud writes, MDE calls, login, or schedule changes.
+
 ## Issue 69 controlled baseline (2026-09-30)
 
 This is a measured **baseline, not an optimization result or a sub-400 MiB acceptance pass**. The lane is retained synthetic existing-export replay, cold normalized-payload cache, `UseExistingExportsOnly=true`, `UseDirectMergeDeviceLookup=false`, source base `8317b76`. It contains 1,187,395 current references and zero references in the five history files; output has 49,476 devices and 5,000 CVEs. It is not a fresh MDE export or Function App measurement. Both Automation workers reported PowerShell 7.4.6, .NET 8.0.28, X64, one processor, and workstation GC.

@@ -70,6 +70,13 @@ param(
     [int]$Seed = 20260322,
 
     [Parameter(Mandatory = $false)]
+    [string]$GenerationDate = (Get-Date).ToString('yyyy-MM-dd'),
+
+    [Parameter(Mandatory = $false)]
+    [ValidateRange(0, 50000000)]
+    [int]$ContentTemplateCount = 0,
+
+    [Parameter(Mandatory = $false)]
     [switch]$AllowLargeDataset,
 
     [Parameter(Mandatory = $false)]
@@ -89,6 +96,9 @@ param(
 
     [Parameter(Mandatory = $false)]
     [switch]$SkipLegacyImportValidation,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ProfileFreshImport,
 
     [Parameter(Mandatory = $false)]
     [switch]$Force
@@ -203,12 +213,201 @@ function Invoke-LegacySnapshotImportValidation {
     }
 }
 
+function Invoke-Issue67ProfileOperation {
+    param([string]$Name, [scriptblock]$Action)
+
+    $started = [System.Diagnostics.Stopwatch]::GetTimestamp()
+    $allocated = [GC]::GetAllocatedBytesForCurrentThread()
+    try { & $Action }
+    finally {
+        if (-not $script:Issue67Profile.ContainsKey($Name)) {
+            $script:Issue67Profile[$Name] = @{ calls = 0L; ticks = 0L; allocatedBytes = 0L }
+        }
+        $entry = $script:Issue67Profile[$Name]
+        $entry.calls++
+        $entry.ticks += [System.Diagnostics.Stopwatch]::GetTimestamp() - $started
+        $entry.allocatedBytes += [GC]::GetAllocatedBytesForCurrentThread() - $allocated
+    }
+}
+
+function Get-Issue67StoreDigest {
+    param([string]$BasePath)
+
+    $digests = [ordered]@{}
+    foreach ($file in @(Get-ChildItem -LiteralPath $BasePath -Filter '*.json.gz' -File | Sort-Object Name)) {
+        $inputStream = [System.IO.File]::OpenRead($file.FullName)
+        $gzip = [System.IO.Compression.GZipStream]::new($inputStream, [System.IO.Compression.CompressionMode]::Decompress)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { $digests[$file.Name] = [Convert]::ToHexString($sha.ComputeHash($gzip)).ToLowerInvariant() }
+        finally { $sha.Dispose(); $gzip.Dispose(); $inputStream.Dispose() }
+    }
+    return $digests
+}
+
+function Invoke-ProfiledFreshImport {
+    param([string]$SnapshotSourcePath, [string]$ValidationPath, [string]$ReferencePath)
+
+    if (Test-Path -LiteralPath $ValidationPath) {
+        throw 'Fresh import profiling requires a new validation directory; existing stores are not replayed or removed.'
+    }
+    $manifestPath = Join-Path $ReferencePath 'synthetic-manifest.json'
+    $legacyManifestPath = Join-Path $SnapshotSourcePath 'synthetic-legacy-manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath) -or -not (Test-Path -LiteralPath $legacyManifestPath)) {
+        throw 'Fresh import profiling requires procedural synthetic and legacy manifests, not live exports.'
+    }
+    $referenceManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -Depth 30
+    if ($referenceManifest.modelVersion -ne 'procedural-v1') {
+        throw 'Fresh import profiling accepts only the procedural synthetic reference lane.'
+    }
+    if (@(Get-ChildItem -LiteralPath $SnapshotSourcePath -Filter 'VulnExport_*.json.gz' -File).Count -eq 0) {
+        throw 'Fresh import profiling requires legacy synthetic snapshot files.'
+    }
+    $script:Issue67Profile = @{}
+    $originals = @{}
+    $names = @(
+        'Publish-VulnStoreFromBulkSnapshot', 'Split-VulnJsonPartition', 'Read-VulnPartitionMapFile',
+        'Get-VulnCanonicalRowSignature', 'New-OpenVulnRecord', 'New-ClosedVulnEntry',
+        'Add-VulnHistoryEntryToAppendStore', 'Write-VulnPartitionMapFile',
+        'Write-VulnCurrentFileFromPartition', 'Test-VulnCurrentFile',
+        'Write-VulnHistoryDocumentFromAppendFile', 'Write-VulnHistoryRowsFileFromAppendFile',
+        'Publish-StoreFilesTransactional', 'Publish-VulnContentStoreUnlocked',
+        'Initialize-CompiledVulnContentProjector'
+    )
+    try {
+        foreach ($name in $names) {
+            $command = Get-Command -Name $name -CommandType Function -ErrorAction Stop
+            $originals[$name] = $command.ScriptBlock
+            $functionAst = $command.ScriptBlock.Ast
+            if ($functionAst -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                $functionAst = $functionAst.Body
+            }
+            $bodyStart = $functionAst.EndBlock.Statements[0].Extent.StartOffset
+            $bodyEnd = $functionAst.EndBlock.Statements[-1].Extent.EndOffset
+            $body = $functionAst.EndBlock.Extent.Text.Substring(
+                $bodyStart - $functionAst.EndBlock.Extent.StartOffset, $bodyEnd - $bodyStart)
+            $instrumentedBody = $body
+            $jsonPipelines = @($functionAst.EndBlock.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.PipelineAst] -and
+                ($node.Extent.Text -match '^\[void\]\[DefenderReporting.Store.VulnContentProjector\]::Project\(' -or
+                @($node.PipelineElements | Where-Object {
+                    $_ -is [System.Management.Automation.Language.CommandAst] -and
+                    $_.GetCommandName() -in @('ConvertFrom-Json', 'ConvertTo-Json')
+                }).Count -gt 0)
+            }, $true) | Sort-Object { $_.Extent.StartOffset } -Descending)
+            foreach ($pipeline in $jsonPipelines) {
+                $operation = if ($pipeline.Extent.Text -match '::Project\(') { 'Content.CompiledProject' }
+                    elseif ($pipeline.Extent.Text -match 'ConvertFrom-Json') { 'Json.Parse' } else { 'Json.Serialize' }
+                $offset = $pipeline.Extent.StartOffset - $bodyStart
+                $replacement = "Invoke-Issue67ProfileOperation -Name '$operation' -Action { " + $pipeline.Extent.Text + ' }'
+                $instrumentedBody = $instrumentedBody.Remove($offset, $pipeline.Extent.Text.Length).Insert($offset, $replacement)
+            }
+            $prefix = $command.ScriptBlock.ToString()
+            $bodyOffset = $prefix.IndexOf($body, [System.StringComparison]::Ordinal)
+            if ($bodyOffset -lt 0) { throw "Cannot identify the body for $name." }
+            $replacementBody = @'
+$issue67Started = [System.Diagnostics.Stopwatch]::GetTimestamp()
+$issue67Allocated = [GC]::GetAllocatedBytesForCurrentThread()
+try {
+'@ + $instrumentedBody + @'
+
+} finally {
+    if (-not $script:Issue67Profile.ContainsKey('__NAME__')) {
+        $script:Issue67Profile['__NAME__'] = @{ calls = 0L; ticks = 0L; allocatedBytes = 0L }
+    }
+    $issue67Entry = $script:Issue67Profile['__NAME__']
+    $issue67Entry.calls++
+    $issue67Entry.ticks += [System.Diagnostics.Stopwatch]::GetTimestamp() - $issue67Started
+    $issue67Entry.allocatedBytes += [GC]::GetAllocatedBytesForCurrentThread() - $issue67Allocated
+}
+'@
+            $replacementBody = $replacementBody.Replace('__NAME__', $name)
+            $wrapped = $prefix.Remove($bodyOffset, $body.Length).Insert($bodyOffset, $replacementBody)
+            Set-Item -LiteralPath ('Function:script:' + $name) -Value ([scriptblock]::Create($wrapped))
+        }
+        $timer = [System.Diagnostics.Stopwatch]::StartNew()
+        $profiled = Invoke-LegacySnapshotImportValidation -SnapshotSourcePath $SnapshotSourcePath -ValidationPath $ValidationPath -ResetValidationPath $false
+        $profiledSeconds = $timer.Elapsed.TotalSeconds
+    }
+    finally {
+        foreach ($name in $originals.Keys) {
+            Set-Item -LiteralPath ('Function:script:' + $name) -Value $originals[$name]
+        }
+    }
+    $baselinePath = $ValidationPath + '-unprofiled'
+    if (Test-Path -LiteralPath $baselinePath) { throw 'The unprofiled twin directory must not already exist.' }
+    $timer.Restart()
+    $baseline = Invoke-LegacySnapshotImportValidation -SnapshotSourcePath $SnapshotSourcePath -ValidationPath $baselinePath -ResetValidationPath $false
+    $baselineSeconds = $timer.Elapsed.TotalSeconds
+    $profiledDigest = Get-Issue67StoreDigest -BasePath $ValidationPath
+    $baselineDigest = Get-Issue67StoreDigest -BasePath $baselinePath
+    $parity = ($profiledDigest | ConvertTo-Json -Compress) -ceq ($baselineDigest | ConvertTo-Json -Compress)
+    if (-not $parity -or $profiled.publishResult.CurrentRows -ne $baseline.publishResult.CurrentRows) {
+        throw 'Profiled/unprofiled fresh import store parity failed.'
+    }
+    $expectedIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Read-VulnNdjsonRecordsFromPath -Path (Get-VulnCurrentPath -BasePath $ReferencePath) | ForEach-Object {
+        if ((Get-VulnPropertyValue -InputObject $_ -Name 'IsOnboarded') -eq $true) {
+            [void]$expectedIds.Add([string](Get-VulnPropertyValue -InputObject $_ -Name 'Id'))
+        }
+    }
+    $actualIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Read-VulnNdjsonRecordsFromPath -Path (Get-VulnCurrentPath -BasePath $ValidationPath) | ForEach-Object {
+        [void]$actualIds.Add([string](Get-VulnPropertyValue -InputObject $_ -Name 'Id'))
+    }
+    if (-not $expectedIds.SetEquals($actualIds) -or $actualIds.Count -ne $profiled.publishResult.CurrentRows) {
+        throw 'Fresh import current IDs differ from the authoritative onboarded reference projection.'
+    }
+    $snapshotInputs = @(Get-ChildItem -LiteralPath $SnapshotSourcePath -Filter 'VulnExport_*.json.gz' -File | Sort-Object Name | ForEach-Object {
+        [ordered]@{ name = $_.Name; bytes = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+    })
+    $evidence = [ordered]@{
+        schemaVersion = 1
+        lane = 'local-synthetic-fresh-import-not-Azure-not-completed-store-replay'
+        sourceCommit = (& git -C $repoRoot rev-parse HEAD)
+        runtime = $PSVersionTable.PSVersion.ToString()
+        profiledSeconds = $profiledSeconds
+        unprofiledSeconds = $baselineSeconds
+        parity = $parity
+        expectedCurrentIds = $expectedIds.Count
+        actualCurrentIds = $actualIds.Count
+        referenceManifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        legacyManifestSha256 = (Get-FileHash -LiteralPath $legacyManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        snapshotInputs = $snapshotInputs
+        controls = [ordered]@{
+            model = $referenceManifest.modelVersion
+            seed = $referenceManifest.seed
+            targetDevices = $referenceManifest.targetDeviceCount
+            targetObservations = $referenceManifest.targetTotalVulnRows
+            contentTemplates = $referenceManifest.contentTemplateCount
+        }
+        storeDigests = $profiledDigest
+        publishResult = $profiled.publishResult
+        attribution = 'Inclusive nested timings and thread allocations; do not sum. Per-call instrumentation overhead is included. No Azure extrapolation.'
+        operations = @($script:Issue67Profile.Keys | Sort-Object | ForEach-Object {
+            $entry = $script:Issue67Profile[$_]
+            [ordered]@{
+                name = $_
+                calls = $entry.calls
+                seconds = $entry.ticks / [double][System.Diagnostics.Stopwatch]::Frequency
+                allocatedBytes = $entry.allocatedBytes
+            }
+        })
+    }
+    $evidence | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $ValidationPath 'fresh-import-profile.json') -Encoding utf8
+    return $profiled
+}
+
 $resolvedSourcePath = [System.IO.Path]::GetFullPath($SourcePath)
 $resolvedRawSyntheticOutputPath = [System.IO.Path]::GetFullPath($RawSyntheticOutputPath)
 $resolvedRawLiveOutputPath = [System.IO.Path]::GetFullPath($RawLiveOutputPath)
 $resolvedLegacySnapshotOutputPath = [System.IO.Path]::GetFullPath($LegacySnapshotOutputPath)
 $resolvedAzureReplayOutputPath = [System.IO.Path]::GetFullPath($AzureReplayOutputPath)
 $resolvedLegacyImportValidationPath = [System.IO.Path]::GetFullPath($LegacyImportValidationPath)
+
+if ($ProfileFreshImport -and $SkipLegacyImportValidation) {
+    throw 'ProfileFreshImport cannot be combined with SkipLegacyImportValidation.'
+}
 
 if (-not (Test-Path -LiteralPath $resolvedSourcePath -PathType Container)) {
     throw "Source path not found: $resolvedSourcePath"
@@ -220,6 +419,8 @@ if (-not $SkipSyntheticGeneration) {
         SourcePath = $resolvedSourcePath
         OutputPath = $resolvedRawSyntheticOutputPath
         Seed = $Seed
+        GenerationDate = $GenerationDate
+        ContentTemplateCount = $ContentTemplateCount
         CleanOutput = $true
         IncludeRawRows = $true
         PlanningSourceMachineLimit = $PlanningSourceMachineLimit
@@ -313,7 +514,12 @@ if (-not $SkipRawValidation) {
 $legacyImportValidationResult = $null
 if (-not $SkipLegacyImportValidation) {
     Write-Host 'Running local legacy vulnerability import validation...' -ForegroundColor Cyan
-    $legacyImportValidationResult = Invoke-LegacySnapshotImportValidation -SnapshotSourcePath $resolvedLegacySnapshotOutputPath -ValidationPath $resolvedLegacyImportValidationPath -ResetValidationPath $Force.IsPresent
+    if ($ProfileFreshImport) {
+        $legacyImportValidationResult = Invoke-ProfiledFreshImport -SnapshotSourcePath $resolvedLegacySnapshotOutputPath -ValidationPath $resolvedLegacyImportValidationPath -ReferencePath $resolvedRawSyntheticOutputPath
+    }
+    else {
+        $legacyImportValidationResult = Invoke-LegacySnapshotImportValidation -SnapshotSourcePath $resolvedLegacySnapshotOutputPath -ValidationPath $resolvedLegacyImportValidationPath -ResetValidationPath $Force.IsPresent
+    }
 }
 
 $legacyManifestPath = Join-Path $resolvedLegacySnapshotOutputPath 'synthetic-legacy-manifest.json'
