@@ -1400,7 +1400,9 @@ function Test-BulkSnapshotFreshImportProfilerParityAndGuards {
     $parseErrors = $null
     $harnessAst = [System.Management.Automation.Language.Parser]::ParseFile($harnessPath, [ref]$tokens, [ref]$parseErrors)
     Assert-True ($parseErrors.Count -eq 0) 'Expected the import profiler harness to parse.'
-    foreach ($name in @('Invoke-LegacySnapshotImportValidation', 'Invoke-Issue67ProfileOperation', 'Get-Issue67StoreDigest', 'Invoke-ProfiledFreshImport')) {
+    foreach ($name in @('Invoke-LegacySnapshotImportValidation', 'Invoke-Issue67ProfileOperation', 'Get-Issue67StoreDigest',
+        'Initialize-Issue67CompiledPartitionReader', 'Test-Issue67CompiledPartitionReaderParity',
+        'Read-Issue67ProfilePartitionLines', 'Invoke-ProfiledFreshImport')) {
         $definition = $harnessAst.Find({
             param($node)
             $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -1412,6 +1414,14 @@ function Test-BulkSnapshotFreshImportProfilerParityAndGuards {
     $reference = Join-Path $tempRoot 'reference'
     [void](New-Item -Path $snapshots, $reference -ItemType Directory -Force)
     $originalOwner = (Get-Command Publish-VulnStoreFromBulkSnapshot).ScriptBlock.ToString()
+    $profiledOriginals = @{}
+    foreach ($name in @('Publish-VulnStoreFromBulkSnapshot', 'Split-VulnJsonPartition', 'Read-VulnPartitionMapFile',
+        'Get-VulnCanonicalRowSignature', 'New-OpenVulnRecord', 'New-ClosedVulnEntry',
+        'Add-VulnHistoryEntryToAppendStore', 'Write-VulnPartitionMapFile', 'Write-VulnCurrentFileFromPartition',
+        'Test-VulnCurrentFile', 'Write-VulnHistoryDocumentFromAppendFile', 'Write-VulnHistoryRowsFileFromAppendFile',
+        'Publish-StoreFilesTransactional', 'Publish-VulnContentStoreUnlocked', 'Initialize-CompiledVulnContentProjector')) {
+        $profiledOriginals[$name] = (Get-Command $name).ScriptBlock.ToString()
+    }
     try {
         $oldRow = Get-TestVulnRow -Id 'synthetic-old' -CveId 'CVE-2026-0001' -SnapshotDate '2026-01-01' -Version '1.0.0'
         $newRow = Get-TestVulnRow -Id 'synthetic-current' -CveId 'CVE-2026-0002' -SnapshotDate '2026-01-02' -Version '1.0.1'
@@ -1443,6 +1453,39 @@ function Test-BulkSnapshotFreshImportProfilerParityAndGuards {
         Assert-True (@($evidence.operations | Where-Object { $_.name -eq 'Json.Parse' -and $_.calls -gt 0 }).Count -eq 1) 'Expected scalar JSON parsing attribution.'
         Assert-True (@($evidence.operations | Where-Object { $_.name -eq 'Content.CompiledProject' -and $_.calls -eq 1 }).Count -eq 1) 'Expected scalar compiled projection attribution.'
         Assert-True ((Get-Command Publish-VulnStoreFromBulkSnapshot).ScriptBlock.ToString() -ceq $originalOwner) 'Expected profiler to restore the production owner after success.'
+        foreach ($name in $profiledOriginals.Keys) {
+            Assert-True ((Get-Command $name).ScriptBlock.ToString() -ceq $profiledOriginals[$name]) "Expected legacy profiler to restore $name."
+        }
+        $lineParity = Test-Issue67CompiledPartitionReaderParity
+        Assert-True ($lineParity.passed -and $lineParity.cases -eq 16) 'Expected exact legacy line and parse parity for all compiled-reader fixtures.'
+        $disposalPath = Join-Path $tempRoot 'disposal.ndjson'
+        [IO.File]::WriteAllLines($disposalPath, @('{"Id":"first"}', '{"Id":"second"}'))
+        foreach ($compiledReader in @($false, $true)) {
+            $script:Issue67UseCompiledReader = $compiledReader
+            $script:Issue67Profile = @{}
+            $firstLine = @(Read-Issue67ProfilePartitionLines -Path $disposalPath | Select-Object -First 1)
+            $exclusive = [IO.File]::Open($disposalPath, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try { Assert-True ($firstLine.Count -eq 1 -and $firstLine[0] -ceq '{"Id":"first"}') "Expected early consumer stop for compiled=$compiledReader." }
+            finally { $exclusive.Dispose() }
+            $consumerFailure = $null
+            try {
+                Read-Issue67ProfilePartitionLines -Path $disposalPath | ForEach-Object { throw 'issue67-consumer-failure' }
+            }
+            catch { $consumerFailure = $_ }
+            $exclusive = [IO.File]::Open($disposalPath, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try { Assert-True ($null -ne $consumerFailure -and $consumerFailure.Exception.Message -ceq 'issue67-consumer-failure') "Expected unchanged consumer error for compiled=$compiledReader." }
+            finally { $exclusive.Dispose() }
+        }
+        $compiledPath = Join-Path $tempRoot 'compiled-profiled'
+        $compiledResult = Invoke-ProfiledFreshImport -SnapshotSourcePath $snapshots -ValidationPath $compiledPath -ReferencePath $reference -CompiledPartitionReader
+        $compiledEvidence = Get-Content -LiteralPath (Join-Path $compiledPath 'fresh-import-profile.json') -Raw | ConvertFrom-Json -Depth 20
+        Assert-True ($compiledEvidence.compiledPartitionReader -and $compiledEvidence.parity -and $compiledResult.publishResult.CurrentRows -eq 1) 'Expected opt-in compiled import parity.'
+        Assert-True (@($compiledEvidence.operations | Where-Object { $_.name -eq 'Partition.Reader.Compiled' -and $_.calls -gt 0 }).Count -eq 1) 'Expected actual compiled partition reads, not fallback-only evidence.'
+        Assert-True (($evidence.storeDigests | ConvertTo-Json -Compress) -ceq ($compiledEvidence.storeDigests | ConvertTo-Json -Compress)) 'Expected baseline/compiled exact decompressed store parity.'
+        Assert-True ((Get-Command Publish-VulnStoreFromBulkSnapshot).ScriptBlock.ToString() -ceq $originalOwner) 'Expected compiled profiler to restore the owner after success.'
+        foreach ($name in $profiledOriginals.Keys) {
+            Assert-True ((Get-Command $name).ScriptBlock.ToString() -ceq $profiledOriginals[$name]) "Expected compiled profiler to restore $name."
+        }
         $failure = $null
         try { Invoke-ProfiledFreshImport -SnapshotSourcePath $snapshots -ValidationPath $validationPath -ReferencePath $reference }
         catch { $failure = $_ }
