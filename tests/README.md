@@ -208,6 +208,28 @@ Useful switches:
 - `-SnapshotCount <n>` or `-SnapshotDates <yyyy-MM-dd,...>` to control which synthetic legacy snapshot dates are emitted
 - `-AllowLargeDataset` for unattended large captures beyond the default safety limits
 
+### Bounded Fresh-Import Profiling
+
+`Invoke-LargeImportCoverage.ps1 -ProfileFreshImport` adds test-only scalar operation timing and current-thread allocation attribution to the real snapshot publisher. It requires procedural synthetic/reference manifests and a new import directory, creates an unprofiled twin, compares every decompressed store output, and checks current IDs against the authoritative onboarded reference projection. Functions are instrumented only in memory and restored in `finally`; production defaults are unchanged. Profiling overhead is included, nested measurements must not be summed, and this is not a cloud memory/performance acceptance run.
+
+Example with neutral test input and bounded pinned generation controls:
+
+```powershell
+$root = Join-Path $PWD '.local/issue67-profile'
+& ./tests/Invoke-LargeImportCoverage.ps1 `
+  -SourcePath ./tests -TargetDeviceCount 50 -TargetTotalVulnRows 5000 `
+  -ContentTemplateCount 5000 -Seed 20260322 -GenerationDate 2026-09-29 `
+  -MinimumAvailableMemoryGB 1 -MinimumFreeDiskGB 1 `
+  -TargetLatestDate 2026-09-30 -SnapshotDates @('2026-09-29','2026-09-30') `
+  -RawSyntheticOutputPath (Join-Path $root 'reference') `
+  -RawLiveOutputPath (Join-Path $root 'overlay') `
+  -LegacySnapshotOutputPath (Join-Path $root 'snapshots') `
+  -LegacyImportValidationPath (Join-Path $root 'profiled') `
+  -SkipAzureReplayDatasetBuild -SkipRawValidation -ProfileFreshImport
+```
+
+Use a new output root for each capture. To retain a reference across captures, generate it once with `Generate-SyntheticLargeExports.ps1` and use `-SkipSyntheticGeneration`; reference generation and snapshot materialization are outside the timed import. The measured issue-67 samples explicitly used two procedural reference snapshots, while this composite example preserves the generator's existing default snapshot count. Keep all raw synthetic files and evidence under ignored local paths. See `docs/performance-baselines.md` for the measured baseline, exact controls and limitations.
+
 ### 1. Replay a completed dataset
 
 Use this lane for steady-state normalization, packaging, and dashboard generation against a fully prepared export set.
