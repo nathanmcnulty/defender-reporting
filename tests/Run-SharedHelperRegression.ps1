@@ -1390,6 +1390,74 @@ function Test-BulkSnapshotImportSmoke {
     }
 }
 
+function Test-BulkSnapshotFreshImportProfilerParityAndGuards {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Test function name mirrors the scenario under test.')]
+    [CmdletBinding()]
+    param()
+
+    $harnessPath = Join-Path $PSScriptRoot 'Invoke-LargeImportCoverage.ps1'
+    $tokens = $null
+    $parseErrors = $null
+    $harnessAst = [System.Management.Automation.Language.Parser]::ParseFile($harnessPath, [ref]$tokens, [ref]$parseErrors)
+    Assert-True ($parseErrors.Count -eq 0) 'Expected the import profiler harness to parse.'
+    foreach ($name in @('Invoke-LegacySnapshotImportValidation', 'Invoke-Issue67ProfileOperation', 'Get-Issue67StoreDigest', 'Invoke-ProfiledFreshImport')) {
+        $definition = $harnessAst.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+        }, $true)
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('fresh-import-profile-' + [guid]::NewGuid().ToString('N'))
+    $snapshots = Join-Path $tempRoot 'snapshots'
+    $reference = Join-Path $tempRoot 'reference'
+    [void](New-Item -Path $snapshots, $reference -ItemType Directory -Force)
+    $originalOwner = (Get-Command Publish-VulnStoreFromBulkSnapshot).ScriptBlock.ToString()
+    try {
+        $oldRow = Get-TestVulnRow -Id 'synthetic-old' -CveId 'CVE-2026-0001' -SnapshotDate '2026-01-01' -Version '1.0.0'
+        $newRow = Get-TestVulnRow -Id 'synthetic-current' -CveId 'CVE-2026-0002' -SnapshotDate '2026-01-02' -Version '1.0.1'
+        Add-Member -InputObject $newRow -NotePropertyName ProfileProbe -NotePropertyValue @{
+            amount = [decimal]1.25; text = ('Case' + [char]0x03a9); values = @('UPPER', 'lower', $null); empty = $null
+        }
+        foreach ($fixture in @(
+            @{ path = (Join-Path $snapshots 'VulnExport_1_2026-01-01.json.gz'); row = $oldRow }
+            @{ path = (Join-Path $snapshots 'VulnExport_1_2026-01-02.json.gz'); row = $newRow }
+            @{ path = (Get-VulnCurrentPath -BasePath $reference); row = $newRow }
+        )) {
+            $stream = [System.IO.File]::Create($fixture.path)
+            $gzip = [System.IO.Compression.GZipStream]::new($stream, [System.IO.Compression.CompressionLevel]::Optimal)
+            $writer = [System.IO.StreamWriter]::new($gzip)
+            try { $writer.WriteLine(($fixture.row | ConvertTo-Json -Compress -Depth 20)) }
+            finally { $writer.Dispose(); $gzip.Dispose(); $stream.Dispose() }
+        }
+        @{
+            modelVersion = 'procedural-v1'; seed = 20260322; targetDeviceCount = 1
+            targetTotalVulnRows = 2; contentTemplateCount = 2
+        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $reference 'synthetic-manifest.json') -Encoding utf8
+        @{ snapshotDates = @('2026-01-01', '2026-01-02') } | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $snapshots 'synthetic-legacy-manifest.json') -Encoding utf8
+        $validationPath = Join-Path $tempRoot 'profiled'
+        $result = Invoke-ProfiledFreshImport -SnapshotSourcePath $snapshots -ValidationPath $validationPath -ReferencePath $reference
+        $evidence = Get-Content -LiteralPath (Join-Path $validationPath 'fresh-import-profile.json') -Raw | ConvertFrom-Json -Depth 20
+        Assert-True ($result.publishResult.CurrentRows -eq 1 -and $result.publishResult.HistoryYears -eq 1) 'Expected fresh import current and removed-history rows.'
+        Assert-True ($evidence.parity -and $evidence.expectedCurrentIds -eq 1 -and $evidence.actualCurrentIds -eq 1) 'Expected full decompressed store parity and authoritative current-ID parity.'
+        Assert-True (@($evidence.operations | Where-Object { $_.name -eq 'Json.Parse' -and $_.calls -gt 0 }).Count -eq 1) 'Expected scalar JSON parsing attribution.'
+        Assert-True (@($evidence.operations | Where-Object { $_.name -eq 'Content.CompiledProject' -and $_.calls -eq 1 }).Count -eq 1) 'Expected scalar compiled projection attribution.'
+        Assert-True ((Get-Command Publish-VulnStoreFromBulkSnapshot).ScriptBlock.ToString() -ceq $originalOwner) 'Expected profiler to restore the production owner after success.'
+        $failure = $null
+        try { Invoke-ProfiledFreshImport -SnapshotSourcePath $snapshots -ValidationPath $validationPath -ReferencePath $reference }
+        catch { $failure = $_ }
+        Assert-True ($null -ne $failure -and $failure.Exception.Message -like '*new validation directory*') 'Expected profiler to reject completed-store replay.'
+        $failure = $null
+        try { Invoke-ProfiledFreshImport -SnapshotSourcePath $snapshots -ValidationPath (Join-Path $tempRoot 'rejected') -ReferencePath $snapshots }
+        catch { $failure = $_ }
+        Assert-True ($null -ne $failure -and $failure.Exception.Message -like '*synthetic*manifests*') 'Expected profiler to reject non-procedural sources before import.'
+        Assert-True ((Get-Command Publish-VulnStoreFromBulkSnapshot).ScriptBlock.ToString() -ceq $originalOwner) 'Expected rejected profiling to leave production functions unchanged.'
+    }
+    finally {
+        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-BulkSnapshotImportSingleSnapshot {
     [CmdletBinding()]
     param()
@@ -7496,6 +7564,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload'; SuccessMessage = 'Embedded payload inspection checks passed.' }
     @{ Name = 'Test-VulnContentStoreRoundTrip'; SuccessMessage = 'Vulnerability content store round-trip checks passed.' }
     @{ Name = 'Test-ProceduralSyntheticDatasetGeneration'; SuccessMessage = 'Procedural synthetic generation and immutable overlay checks passed.' }
+    @{ Name = 'Test-BulkSnapshotFreshImportProfilerParityAndGuards'; SuccessMessage = 'Fresh import profiler store parity, attribution, restoration and source guards passed.' }
     @{ Name = 'Test-MeasureStressRunWritesProgressAndFinalReport'; SuccessMessage = 'Measure-StressRun report persistence checks passed.' }
     @{ Name = 'Test-GenerateSyntheticLargeExportsUsesStablePlannerOrdering'; SuccessMessage = 'Synthetic planner ordering checks passed.' }
     @{ Name = 'Test-LargeDatasetValidationSemanticModeForcesFullReplay'; SuccessMessage = 'Large-dataset semantic sign-off checks passed.' }
