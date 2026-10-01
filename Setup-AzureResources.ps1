@@ -697,6 +697,11 @@ function Get-OptionalObjectPropertyValue {
             return $null
         }
 
+        if ($current -is [System.Collections.IDictionary]) {
+            $current = $current[$propertyName]
+            continue
+        }
+
         $property = $current.PSObject.Properties[$propertyName]
         if ($null -eq $property) {
             return $null
@@ -2038,6 +2043,29 @@ try {
             -RequiredAnyScopeSets @('Application.ReadWrite.All', 'Group.Read.All|Group.ReadWrite.All') `
             -FallbackScopes @('Application.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All', 'Group.Read.All')
 
+        $tenantId = Get-GraphApiTenantId -Context $containerGraphContext
+
+        $prevalidatedExplicitApplication = $null
+        if ($EasyAuthAppClientId) {
+            $explicitAppGuid = [guid]::Empty
+            if (-not [guid]::TryParse($EasyAuthAppClientId, [ref]$explicitAppGuid) -or $explicitAppGuid -eq [guid]::Empty) {
+                throw '-EasyAuthAppClientId must be a non-empty application client ID GUID.'
+            }
+            try {
+                $explicitApplications = @(
+                    (Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/applications?`$filter=appId eq '$($explicitAppGuid.ToString('D'))'" -Description 'Validate explicit Easy Auth app registration').value
+                )
+            }
+            catch {
+                throw 'Could not validate -EasyAuthAppClientId in the resolved Graph tenant. Verify Graph application read permissions.'
+            }
+            if ($explicitApplications.Count -ne 1 -or
+                (Get-OptionalObjectPropertyValue -InputObject $explicitApplications[0] -PropertyPath @('appId')) -ne $explicitAppGuid.ToString('D')) {
+                throw 'The app registration supplied with -EasyAuthAppClientId was not found uniquely in the resolved Graph tenant with the matching application client ID.'
+            }
+            $prevalidatedExplicitApplication = $explicitApplications[0]
+        }
+
         $securityGroupId = $null
         $securityGroupName = $null
         $testGuid = [guid]::Empty
@@ -2081,12 +2109,6 @@ try {
             $securityGroupId = $searchResult.value[0].id
             $securityGroupName = $searchResult.value[0].displayName
             Write-Host "  Found group: '$securityGroupName' ($securityGroupId)" -ForegroundColor Green
-        }
-
-        # Get tenant ID for Easy Auth issuer URL
-        $tenantId = (Get-AzContext).Tenant.Id
-        if (-not $tenantId) {
-            throw "Could not determine tenant ID from Azure context."
         }
 
         # -----------------------------------------------------------------
@@ -2349,7 +2371,7 @@ try {
         # deployments that accidentally created same-name registrations.
         $appDisplayName = $EasyAuthAppDisplayName
         Write-Host "  Resolving app registration '$appDisplayName'..." -ForegroundColor Gray
-        $appResult = $null
+        $appResult = $prevalidatedExplicitApplication
         $preferredAppClientId = $EasyAuthAppClientId
         $preferredAppSource = if ($preferredAppClientId) { '-EasyAuthAppClientId' } else { $null }
 
@@ -2363,7 +2385,7 @@ try {
             }
         }
 
-        if ($preferredAppClientId) {
+        if ($preferredAppClientId -and $null -eq $appResult) {
             $preferredApps = @(
                 (Invoke-GraphApi -Context $containerGraphContext -Method GET -Uri "/v1.0/applications?`$filter=appId eq '$preferredAppClientId'" -Description 'Look up preferred Easy Auth app registration').value
             )
@@ -2415,8 +2437,9 @@ try {
             }
         }
 
-        $resolvedAppDisplayName = if ($null -ne $appResult -and $appResult.displayName) { $appResult.displayName } else { $appDisplayName }
-        $existingRedirectUris = if ($null -ne $appResult) { @($appResult.web.redirectUris) } else { @() }
+        $existingAppDisplayName = Get-OptionalObjectPropertyValue -InputObject $appResult -PropertyPath @('displayName')
+        $resolvedAppDisplayName = if ($existingAppDisplayName) { $existingAppDisplayName } else { $appDisplayName }
+        $existingRedirectUris = @(Get-OptionalObjectPropertyValue -InputObject $appResult -PropertyPath @('web', 'redirectUris'))
         $appBody = @{
             displayName    = $resolvedAppDisplayName
             signInAudience = 'AzureADMyOrg'

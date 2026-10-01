@@ -526,6 +526,64 @@ function Get-JwtPayload {
     return $json | ConvertFrom-Json
 }
 
+function Get-GraphApiTenantId {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        $Context
+    )
+
+    $modeProperty = $Context.PSObject.Properties['Mode']
+    if ($null -eq $modeProperty -or $modeProperty.Value -isnot [string]) {
+        throw 'Unsupported Graph API context mode for tenant resolution.'
+    }
+    $tenantValue = $null
+    switch ($modeProperty.Value) {
+        'AzToken' {
+            $tokenProperty = $Context.PSObject.Properties['AccessToken']
+            if ($null -eq $tokenProperty -or $tokenProperty.Value -isnot [string] -or
+                [string]::IsNullOrWhiteSpace($tokenProperty.Value)) {
+                throw 'Graph AzToken context requires a plain-text access token from Get-GraphApiContext.'
+            }
+            try {
+                if ($tokenProperty.Value.Split('.').Count -ne 3) { throw 'Invalid JWT structure.' }
+                $payloadSegment = $tokenProperty.Value.Split('.')[1].Replace('-', '+').Replace('_', '/')
+                switch ($payloadSegment.Length % 4) {
+                    2 { $payloadSegment += '==' }
+                    3 { $payloadSegment += '=' }
+                    0 { }
+                    default { throw 'Invalid JWT payload encoding.' }
+                }
+                $payloadJson = [Text.UTF8Encoding]::new($false, $true).GetString([Convert]::FromBase64String($payloadSegment))
+                $payload = ConvertFrom-Json -InputObject $payloadJson -NoEnumerate -ErrorAction Stop
+                if ($payload -isnot [System.Management.Automation.PSCustomObject]) { throw 'Invalid JWT claims object.' }
+                $tenantProperty = $payload.PSObject.Properties['tid']
+                if ($null -ne $tenantProperty) { $tenantValue = $tenantProperty.Value }
+            }
+            catch {
+                throw 'Could not decode the Graph access token tenant claim.'
+            }
+        }
+        'MgGraph' {
+            $connectedContext = Get-MgContext -ErrorAction Stop
+            if ($null -ne $connectedContext) {
+                $tenantProperty = $connectedContext.PSObject.Properties['TenantId']
+                if ($null -ne $tenantProperty) { $tenantValue = $tenantProperty.Value }
+            }
+        }
+        default { throw 'Unsupported Graph API context mode for tenant resolution.' }
+    }
+
+    $tenantGuid = [guid]::Empty
+    if ($tenantValue -isnot [string] -or
+        -not [guid]::TryParse($tenantValue, [ref]$tenantGuid) -or
+        $tenantGuid -eq [guid]::Empty) {
+        throw 'The active Graph context must provide a non-empty tenant GUID string.'
+    }
+    return $tenantGuid.ToString('D')
+}
+
 function Get-GrantedScopesFromToken {
     <#
     .SYNOPSIS
