@@ -663,3 +663,78 @@ pwsh -NoProfile -File .\tests\Measure-RunbookOnlyAzureBenchmark.ps1 -UseExisting
 ```
 
 Use `-ValidationMode semantic` only for the final local replay when you need the full semantic audit before Azure or merge validation.
+
+## Compiled-backend local gate blocked (2026-10-01)
+
+**Campaign checkpoint, not backlog closure.** Documentation base is `b6526b6d7b20f04c2418b5c4c5d37921e2853e22`, branch `docs/review-campaign-checkpoint`. Parent campaign accounting reports the authorized defect fixes merged through PR73-90; items 3/4 were skipped, not resolved. Issues #67, #69 and #70 remain open, and #68 still needs owner-approved private cleanup. This checkpoint changes documentation only.
+
+The latest private correctness-only gate is `.local/issue-69-backend/.local/compiled-gate-53a7e7265f3e41a2b1ed59b74432dbdf/summary.json`, relative to the parent workspace. Its retained synthetic fixture was generated at `2026-10-01T07:17:39.8986193Z` for `2026-09-30`; that timestamp is fixture provenance, **not the gate start/end time**. Controls declare 50 devices, 5,000 templates, seed 20260322 and 5,000 source observations (4,000 current / 1,000 historical). These manifest counts are not actual normalized dashboard counts. The separately declared reference expectation of 4,306 remains **unverified**; the latest gate explicitly leaves its expected normalized count null.
+
+| Latest summary field | Recorded value | Meaning |
+| --- | ---: | --- |
+| initialAvailableBytes | 4687912960 | Parent preflight, 4.366 GiB |
+| readinessThresholdGiB | 3.5 | Local parent start threshold, not performance acceptance |
+| guard.initialAvailableBytes | 4686401536 | Baseline child launch sample, distinct from parent preflight |
+| guard.minimumAvailableGiB | 2.9820098876953125 | 2.982 GiB; rejected below host floor |
+| guard.floorGiB | 3 | Host free-memory floor, not 4 GiB |
+| guard.childCapGiB | 1 | Local child working-set cap |
+| guard.peakWorkingSetMb | 248.61328125 | Sampled baseline WS, 248.6 MiB |
+| guard.peakPrivateMemoryMb | 147.9453125 | Sampled baseline private memory, 147.9 MiB |
+| guard.durationSeconds | 27.7638788 | Guarded child interval, not completed normalization timing |
+| guard.sampleWaitMilliseconds | 250 | Guard sampling interval, not continuous high-water proof |
+| guard.exitCode | -1 | Failed child; guard reason os-free-memory-floor |
+| invocationCount / normalizationAttempts / retries | 1 / 1 / 0 | One attempt, no retry |
+| nativeMutationCalls / activeOwnedChildren | 0 / 0 | No trim during this gate; no remaining owned children |
+| partialPhases / availableOutputs / comparisons | 2 / 0 / 0 | Profile/template-load records only; no completed outputs or comparison |
+| exactByteGate / payloadComparison | incomplete / null | No completed payload hashes or parity result |
+| sourceSha256 | CDC58523BC239CF1A0B5FEAF73FA16BC2B28C3B51D06AD6B99EB23AD6F53D168 | Recorded dashboard source identity |
+| harnessSha256 | 561CCA48C702EAEA73926814CDE9EFD3A33E31B550A496083E9AED0BF6951E28 | Private local-only small-gate probe |
+
+Memory conversion uses 1 GiB = 1,073,741,824 bytes and 1 MiB = 1,048,576 bytes. Raw table scalars are unchanged; prose rounds GiB to three decimals and MiB to one. The two recorded phases are `LoadContentStoreDeviceProfiles` and `LoadContentStoreTemplates`; they do not establish completed normalization, counts or bit parity. Only `normalize-5000-Baseline` launched; the compiled child **did not launch**. The plan's `SafeToExecute=true` is an estimate, not authority to bypass the measured host guard.
+
+The private AST clone lowers only its experimental compiled threshold to 1,000; production remains at 10,000. Parent-reported parsing/source-parameter integrity and matching planner/normalizer configuration passed, but are **not normalization verification**. Its nine-test/34-output-field contract is expected coverage, not nine completed tests or verified output fields. The captured Core hash prefix `02CF72...` differs from earlier `39038...` worktree bytes because of EOL normalization; parent HEAD-normalization checks reported clean. Current Core raw bytes independently hash to `39038b574116ff64ab8668c2957dd51c09c73608b4a6b186e937b10fd46c146b`; do not conflate current bytes with capture identity or infer a production change. Local runtime was PowerShell 7.6.6 / .NET 10.0.12: no PowerShell 7.4 / .NET 8 wrapper acceptance, performance improvement, exact-byte or expanded-row parity is established. An earlier clone setup exit 1 was separately repaired and checked; it is not a production defect or this guard verdict.
+
+### Remaining campaign gates
+
+- **#67:** PR87/90 retain partial fresh-import profiling and a test-only partition-reader probe. Allocation observations do not establish end-to-end or resident-memory improvement; fresh large-import acceptance remains open.
+- **#69:** PR83 keeps bounded metadata reading opt-in/default-off. The guarded Azure candidate retained exact payload/restoration proof but failed at 413.8 MiB and 875.39 seconds against strict below-400-MiB memory and 846.36-second elapsed gates. The local compiled experiment above supplies no replacement baseline or backend acceptance.
+- **#70:** PR88's small control exited 0; PR89's one guarded large attempt rejected free RAM of 3,210,092,544 bytes against the 3 GiB floor. Large readiness, report parity and reload acceptance were not reached. A separate ignored six-row V8 shape probe found fast properties in both baseline and new-slot rows, contradicting the dictionary-mode hypothesis; 43 ordered keys, nine date-range/search combinations and initial-filter parity retained an initial own-property difference. No benefit or source change was established.
+- **#68:** tracked cleanup and the private workflow's disabled state do not complete owner history/artifact/log/clone/fork purge. Owner approval remains required; raw private files are not public checkpoint material.
+
+The earlier reviewed, authorized non-destructive editor trim is separate evidence: one apply, one eligible process, one successful native call, zero native errors and zero kills. Renderer WS fell about 1,360 to 77 MiB, while available RAM moved about 3.85 to 4.01 GiB immediately and 3.66 GiB at recheck. That temporary working-set reduction is **not 1.28 GiB of durably reclaimed available RAM**, timing acceptance or permission for another trim. Private decision record: `.local/issue-69-backend/.local/editor-trim-apply-5e8dab583b5747c794fa748f53f8ce5c.decision.json`.
+
+Historical independent restoration retains runbook SHA-256 `9c8d25a60ef44b035042ad078a8f702fe4110bfb007552d6b093ff6dfb32b3df` and exact saved manifests for 23 exports / 11 dashboards / 23 templates. Resources remain retained, the daily schedule and private workflow remain disabled, and the protected app's existing Entra configuration is retained according to the parent checkpoint. **No new live Azure audit was performed for this append**; earlier zero-active-job and restoration records are historical, not a fresh current-state attestation. ETags/name counts alone cannot prove byte hashes. No restoration, upload, auth change or cloud job is authorized here.
+
+**Resume only after review and separate authorization:** adequate measured host headroom must maintain the 3 GiB floor and 1 GiB child cap; passing the 3.5 GiB local start threshold alone is insufficient. First obtain actual completed baseline/compiled normalization, authoritative normalized counts, exact payload/expanded-row parity and target-runtime wrapper evidence without changing production thresholds. Any controlled Azure candidate still requires reviewed bytes, strict original performance bounds and independent restoration. No active experiment is retained by this checkpoint; no rerun, trim, browser or experiment child was started. Independent Astra review and PR91/manual CI dispatch against the exact final head remain parent gates, **not performed or passed here**. No agent, commit, push or backlog closure was made.
+
+### Final read-only resource audit (2026-10-01 UTC)
+
+**As-of evidence, overall unresolved; not full restoration or authentication acceptance.** The saved live audit ran from `2026-10-01T07:52:12.4782148Z` to `2026-10-01T07:52:37.5663560Z`. Later local digest-reference analysis is not a later live observation. This section supersedes the preceding no-new-live-audit statement only for the checks below; historical restoration proof remains separate.
+
+| Saved audit check | Sanitized observation |
+| --- | --- |
+| Checkpoint input | Pre-append document hash matched |
+| Cached credentials | Available; explicit subscription matched; CLI tenant matched known Graph tenant, not known Azure tenant |
+| Resource group | Exists; matched |
+| Resource inventory | 5 resources; matched: Container App, managed environment, Automation account, runbook and storage account |
+| Automation account | Exists; matched; system-assigned identity |
+| Container App | Exists; Succeeded provisioning; Running; endpoint matched; system-assigned identity |
+| Easy Auth selected fields | Enabled; issuer exactly matched known Graph tenant, not current ARM tenant; exact known client ID matched |
+| Complete auth digest | Serialized full-envelope digests differ; hashComparable=false for structural proof; equality unresolved |
+| Schedule | Daily schedule disabled; 0 enabled / 1 total |
+| Jobs | 0 active / 10 total; inventory unchanged |
+| Published runbook | Published; raw-byte readback matched; 972146 bytes |
+| Storage account | Exists; matched |
+| Exports inventory | 23 names/lengths matched saved restored manifest; 0 transient-prefix blobs |
+| Dashboards inventory | 11 names/lengths matched saved restored manifest; 0 transient-prefix blobs |
+| Templates inventory | 23 names/lengths matched saved restored manifest; 0 transient-prefix blobs |
+| Backend service principal | Exact known backend app ID and Graph tenant matched; assignment required |
+| Audit operations | 0 cloud mutations; 0 jobs started; no interactive authentication; 0 bulk blob downloads |
+
+Published runbook raw-byte SHA-256: `9c8d25a60ef44b035042ad078a8f702fe4110bfb007552d6b093ff6dfb32b3df`. This matches saved original/restored evidence, not a candidate runbook or an application-content hash. Resource identities, tenant/subscription/app GUIDs, email addresses, actual resource paths and endpoint URLs are omitted; raw evidence and scalar validation remain private and ignored.
+
+**Full authentication comparison is blocked.** Three exact historical digest references were verified (experiment before/after and original-manifest before), but neither the exact historical source JSON nor the current audit's raw auth response was retained. Both capture methods reserialized the full ARM envelope; neither hashed raw response bytes or canonical properties. No structural canonicalization was performed, difference count is unknown, and semanticEquality/unchangedAgainstSavedAuth remain null. Serializer-only differences are **UNPROVEN**; meaningful configuration changes cannot be excluded. Selected-field matches do not establish the entire auth configuration unchanged or benign drift. The audit retains one failure, exact_baseline_auth_source_json_not_retained; local comparison made 0 additional ARM GETs and 0 additional Graph GETs. No correction is authorized or attempted.
+
+**Current blob content equality remains unverified.** These are names/lengths only: current content was not downloaded or rehashed, no ETag baseline exists, and served root/dependency bytes were not verified. Prior independent byte-exact restoration does not prove current byte equality.
+
+This documentation continuation made no cloud calls, manual cloud changes, jobs, sign-in/login or new-token request, browser launch, experiment rerun, trim, agent launch, commit or push. It leaves the negative-control/row-shape NO_EFFECT conclusion, unverified actual normalized counts, 3 GiB host floor, 3.5 GiB start threshold, 4.366 GiB parent baseline, 2.982 GiB rejecting minimum and production 10,000-template threshold unchanged. Issues #67/#69/#70 remain open, #68 remains owner-blocked, and skipped items 3/4 are not resolved. Parent Astra whole-file review, then PR91/manual CI against the exact final head and merge, remain unperformed parent gates. No full preflight or additional resource gate is required for this docs-only append.
