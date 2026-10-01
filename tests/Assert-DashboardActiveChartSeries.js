@@ -1,5 +1,43 @@
 ﻿const assert = require('assert');
-const { loadDashboardHarness } = require('./helpers/dashboard-test-harness');
+const { loadDashboardHarness, createDocumentStub } = require('./helpers/dashboard-test-harness');
+
+function assertReusedChartTooltip() {
+    const document = createDocumentStub();
+    document.getElementById('vulnerabilityChart').getContext = () => ({});
+    let creations = 0;
+    const dashboard = loadDashboardHarness(`
+module.exports = {
+    render(endDate, cutoff) {
+        filterState = { startDate: '2026-01-01', endDate, key: endDate };
+        mostRecentLastSeenDate = cutoff;
+        filteredData = [];
+        renderChart();
+        return chartInstance;
+    }
+};
+`, {
+        document,
+        Chart: function(context, config) {
+            creations++;
+            this.data = config.data;
+            this.options = config.options;
+            this.update = () => {};
+        }
+    });
+    for (const cutoffs of [
+        ['2025-12-31', '2026-02-28'],
+        ['2026-02-28', '2025-12-31']
+    ]) {
+        const chart = dashboard.render('2026-01-02', cutoffs[0]);
+        chart.data.datasets[0].hidden = true;
+        const updated = dashboard.render('2026-02-02', cutoffs[1]);
+        assert.strictEqual(updated, chart, 'Chart instance must be reused.');
+        assert.strictEqual(updated.data.datasets[0].hidden, true, 'User dataset visibility must survive reuse.');
+        const footer = updated.options.plugins.tooltip.callbacks.footer([{ dataIndex: 0 }]);
+        assert.strictEqual(footer.includes('Projected data'), cutoffs[1] === '2025-12-31');
+    }
+    assert.strictEqual(creations, 1);
+}
 
 function createTestRow(overrides = {}) {
     return {
@@ -100,7 +138,8 @@ module.exports = {
     assert.deepStrictEqual(Array.from(series.severityCounts.Medium), [0, 1, 0, 0]);
     assert.deepStrictEqual(Array.from(series.severityCounts.Low), [0, 0, 0, 0]);
 
-    console.log('Active chart series aggregation checks passed.');
+    assertReusedChartTooltip();
+    console.log('Active chart series aggregation and reused tooltip checks passed.');
 }
 
 main();

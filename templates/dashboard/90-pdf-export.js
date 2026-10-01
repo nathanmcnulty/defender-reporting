@@ -96,36 +96,43 @@ function loadPdfLibraries() {
  * @param {string} selectedReport - The report type identifier
  * @returns {boolean} The previous expansion state
  */
-function expandReportForPdf(selectedReport) {
-    const previousState = {
-        wasExpanded: false,
+function getReportExpansionState(selectedReport) {
+    const expansionStates = {
+        'active-vulnerabilities': remediationExpanded,
+        'remediation-activity': remediationDetailsExpanded,
+        'impact-analysis': impactAnalysisExpanded,
+        'devices-by-remediation': devicesByRemediationExpanded,
+        'remediations-by-device': remediationsByDeviceExpanded
+    };
+    return {
+        wasExpanded: Boolean(expansionStates[selectedReport]),
         forceFullDevicesByRemediationRows
     };
+}
+
+function expandReportForPdf(selectedReport) {
+    const previousState = getReportExpansionState(selectedReport);
     
     switch (selectedReport) {
         case 'active-vulnerabilities':
-            previousState.wasExpanded = remediationExpanded;
             if (!remediationExpanded) {
                 remediationExpanded = true;
                 renderRemediationTablePage();
             }
             break;
         case 'remediation-activity':
-            previousState.wasExpanded = remediationDetailsExpanded;
             if (!remediationDetailsExpanded) {
                 remediationDetailsExpanded = true;
                 renderRemediationDetailsTablePage();
             }
             break;
         case 'impact-analysis':
-            previousState.wasExpanded = impactAnalysisExpanded;
             if (!impactAnalysisExpanded) {
                 impactAnalysisExpanded = true;
                 renderImpactAnalysisTablePage();
             }
             break;
         case 'devices-by-remediation':
-            previousState.wasExpanded = devicesByRemediationExpanded;
             forceFullDevicesByRemediationRows = true;
             if (!devicesByRemediationExpanded) {
                 devicesByRemediationExpanded = true;
@@ -133,7 +140,6 @@ function expandReportForPdf(selectedReport) {
             renderDevicesByRemediationTablePage();
             break;
         case 'remediations-by-device':
-            previousState.wasExpanded = remediationsByDeviceExpanded;
             if (!remediationsByDeviceExpanded) {
                 remediationsByDeviceExpanded = true;
                 renderRemediationsByDeviceTablePage();
@@ -793,15 +799,27 @@ function ensurePdfReportDataReady(selectedReport) {
     }
 }
 
+async function downloadPdfDocument(pdfDoc, fileName) {
+    let timeoutId;
+    try {
+        await new Promise((resolve, reject) => {
+            timeoutId = setTimeout(() => reject(new Error('PDF download did not complete within 5 minutes.')), 300000);
+            const result = pdfDoc.download(fileName, resolve);
+            if (result && typeof result.then === 'function') result.then(resolve, reject);
+        });
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 async function exportToPDF() {
     const button = document.querySelector('.export-pdf-btn');
-    button.disabled = true;
-
-    // Create progress bar
-    const progressDiv = document.createElement('div');
-    progressDiv.className = 'pdf-export-progress';
-    progressDiv.innerHTML = '<div class="pdf-progress-container"><div class="pdf-progress-fill" style="width: 0%"></div></div><div class="pdf-progress-text">Loading libraries... 0%</div>';
-    document.body.appendChild(progressDiv);
+    if (!button || button.disabled) return;
+    const originalButtonText = button.textContent;
+    let progressDiv;
+    let selectedReport;
+    let previousState;
+    let expansionStarted = false;
 
     const updateProgress = (percent, text) => {
         const fill = progressDiv.querySelector('.pdf-progress-fill');
@@ -810,50 +828,40 @@ async function exportToPDF() {
         if (label) label.textContent = text + ' ' + Math.round(percent) + '%';
     };
 
-    updateProgress(5, 'Loading libraries...');
-    button.textContent = '📄 Loading libraries...';
-    setDashboardStatus('Preparing PDF export...');
-    
     try {
+        button.disabled = true;
+        progressDiv = document.createElement('div');
+        progressDiv.className = 'pdf-export-progress';
+        progressDiv.innerHTML = '<div class="pdf-progress-container"><div class="pdf-progress-fill" style="width: 0%"></div></div><div class="pdf-progress-text">Loading libraries... 0%</div>';
+        document.body.appendChild(progressDiv);
+        updateProgress(5, 'Loading libraries...');
+        button.textContent = '📄 Loading libraries...';
+        setDashboardStatus('Preparing PDF export...');
         await loadPdfLibraries();
-    } catch (error) {
-        console.error('Failed to load PDF libraries:', error);
-        setDashboardStatus('Failed to load PDF export libraries. Please try again from a hosted dashboard or retry the export.', 'error');
-        button.disabled = false;
-        button.textContent = '📄 Export to PDF';
-        progressDiv.remove();
-        return;
-    }
-    
-    updateProgress(20, 'Libraries loaded.');
+        updateProgress(20, 'Libraries loaded.');
 
-    const selector = document.getElementById('reportSelector');
-    const selectedReport = selector.value;
-    const reportName = selector.options[selector.selectedIndex].text;
+        const selector = document.getElementById('reportSelector');
+        selectedReport = selector.value;
+        const reportName = selector.options[selector.selectedIndex].text;
+        previousState = getReportExpansionState(selectedReport);
     
-    updateProgress(25, 'Checking export size...');
-    button.textContent = '📄 Checking size...';
-    ensurePdfReportDataReady(selectedReport);
-    const shouldContinuePreflight = await maybeConfirmLargePdfExport(selectedReport, reportName);
-    if (!shouldContinuePreflight) {
-        setDashboardStatus('PDF export canceled.', 'info');
-        button.disabled = false;
-        button.textContent = '📄 Export to PDF';
-        progressDiv.remove();
-        return;
-    }
+        updateProgress(25, 'Checking export size...');
+        button.textContent = '📄 Checking size...';
+        ensurePdfReportDataReady(selectedReport);
+        const shouldContinuePreflight = await maybeConfirmLargePdfExport(selectedReport, reportName);
+        if (!shouldContinuePreflight) {
+            setDashboardStatus('PDF export canceled.', 'info');
+            return;
+        }
 
-    updateProgress(30, 'Expanding data...');
-    button.textContent = '📄 Expanding data...';
-    
-    const wasExpanded = expandReportForPdf(selectedReport);
-    await new Promise(resolve => setTimeout(resolve, 100));
-    
-    updateProgress(35, 'Generating PDF...');
-    button.textContent = '📄 Generating PDF...';
-    document.body.classList.add('pdf-export-active');
-    
-    try {
+        updateProgress(30, 'Expanding data...');
+        button.textContent = '📄 Expanding data...';
+        expansionStarted = true;
+        expandReportForPdf(selectedReport);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        updateProgress(35, 'Generating PDF...');
+        button.textContent = '📄 Generating PDF...';
+        document.body.classList.add('pdf-export-active');
         const fileName = `Vulnerability_Dashboard_${reportName.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`;
         
         // Choose export strategy based on report type
@@ -957,18 +965,23 @@ async function exportToPDF() {
         const pdfDoc = pdfMake.createPdf(docDefinition);
 
         updateProgress(90, 'Downloading PDF...');
-        pdfDoc.download(fileName);
+        await downloadPdfDocument(pdfDoc, fileName);
         updateProgress(100, 'Complete!');
         clearDashboardStatus();
-        setTimeout(() => { if (progressDiv.parentNode) progressDiv.remove(); }, 1500);
     } catch (err) {
         console.error('PDF generation failed:', err);
         setDashboardStatus('Failed to generate PDF: ' + err.message, 'error');
     } finally {
-        document.body.classList.remove('pdf-export-active');
-        restoreReportState(selectedReport, wasExpanded);
-        button.disabled = false;
-        button.textContent = '📄 Export to PDF';
-        setTimeout(() => { if (progressDiv.parentNode) progressDiv.remove(); }, 3000);
+        try {
+            if (expansionStarted) restoreReportState(selectedReport, previousState);
+        } catch (error) {
+            console.error('PDF report restoration failed:', error);
+            setDashboardStatus('Failed to restore report after PDF export: ' + error.message, 'error');
+        } finally {
+            document.body.classList.remove('pdf-export-active');
+            button.disabled = false;
+            button.textContent = originalButtonText;
+            if (progressDiv) progressDiv.remove();
+        }
     }
 }

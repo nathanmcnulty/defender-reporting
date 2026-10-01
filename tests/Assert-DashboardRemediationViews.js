@@ -25,7 +25,75 @@ function createTestRow(overrides = {}) {
     };
 }
 
-function main() {
+async function assertLazyAggregateParity() {
+    const dashboard = loadDashboardHarness(`
+async function measureAggregate(eager) {
+    const rowCount = 6000;
+    lookups = {
+        devices: [
+            { id: 'new', n: 'New', g: 0, o: 0, ov: '10.0.26100.1', t: [], m: { ls: '2026-03-26' } },
+            { id: 'old', n: 'Old', g: 0, o: 0, ov: '10.0.22631.1', t: [], m: { ls: '2026-03-26' } }
+        ],
+        cves: [{ id: 'CVE-2026-0001', sc: 7.5, sv: 0, ex: -1, u: 'https://example.com/cve', bt: 0, pd: '2026-03-01', desc: 'Evidence description', as: [0] }],
+        software: [{ v: 0, n: 'windows_11', r: 'va-_-microsoft-_-windows_11' }],
+        groups: ['Engineering'], platforms: ['Windows11'], tags: [], versions: ['1'],
+        dates: ['2026-03-01', '2026-03-26'], updates: [{ n: 'March Update', id: '123', url: 'https://example.com/KB123' }],
+        vendors: ['microsoft'], severities: ['High'], exploitLevels: [], batchTitles: ['Microsoft March 2026 Updates'],
+        affSoftware: ['microsoft:windows_11'], inventory: [], diskPaths: ['C:/Windows/file'], regPaths: ['HKLM/Software/Test']
+    };
+    rawVulns = Array.from({ length: rowCount }, (_, index) => [index % 2, 0, 0, 0, 0, 1, 1, 0, [0], [0], -1]);
+    await denormalizeAllVulns();
+    filterState = createEmptyFilterState();
+    filterState.startDate = '2026-03-01';
+    filterState.endDate = '2026-03-26';
+    filteredData = vulnerabilityData;
+    invalidateAggregateCache();
+    remediationDescriptorCache.clear();
+    const started = performance.now();
+    if (eager) vulnerabilityData.forEach(materializeRow);
+    const table = getRemediationTableData();
+    const impact = getImpactAnalysisData();
+    const elapsed = performance.now() - started;
+    const materialized = vulnerabilityData.filter(row => row._mat).length;
+    const evidenceArrays = vulnerabilityData.reduce((count, row) => count + Number(Array.isArray(row.DiskPaths)) + Number(Array.isArray(row.RegistryPaths)), 0);
+    const described = vulnerabilityData.filter(row => 'VulnerabilityDescription' in row).length;
+    const summary = JSON.stringify({
+        table: table.map(row => ({ software: row.software, title: row.remediation, modalTitle: row.modalTitle, url: row.updateUrl, updates: row.updateHtml, devices: Array.from(row.devices), cves: Array.from(row.vulnerabilities), details: row.details.length })),
+        impact: impact.top25.map(row => ({ name: row.name, updates: row.updateHtml }))
+    });
+    const detailFields = ['DiskPaths', 'RegistryPaths', 'VulnerabilityDescription', 'AffectedSoftware', 'CveBatchTitle', 'CveBatchUrl', 'RecommendedSecurityUpdateId', 'RecommendedSecurityUpdateUrl', 'OSVersion', 'SecurityUpdateAvailable', 'RecommendationReference'];
+    const sections = buildRemediationDetailsModalSections(table[0]);
+    const modalHtml = sections.parts.join('') + Object.values(sections.vtRowData).map(config => config.items.length
+        ? config.rowBuilder(config.items[0]) + config.rowBuilder(config.items[config.items.length - 1]) : '').join('');
+    vulnerabilityData.forEach(materializeRow);
+    const detail = JSON.stringify(detailFields.map(field => vulnerabilityData[0][field]));
+    return { summary, detail, sections: modalHtml, materialized, evidenceArrays, described, elapsed, groups: table.length };
+}
+module.exports = { measureAggregate };
+`, { performance: require('perf_hooks').performance });
+    const lazyTimes = [];
+    const eagerTimes = [];
+    for (let iteration = 0; iteration < 3; iteration++) {
+        const lazy = await dashboard.measureAggregate(false);
+        const eager = await dashboard.measureAggregate(true);
+        assert.strictEqual(lazy.summary, eager.summary, 'Lazy aggregates must preserve titles, URLs, grouping, and counts.');
+        assert.strictEqual(lazy.detail, eager.detail, 'Eventual detail/PDF properties must match expanded rows.');
+        const normalizeTooltipIds = html => html.replace(/data-tooltip-id="modal-cve-\d+"/g, 'data-tooltip-id="modal-cve"');
+        assert.strictEqual(normalizeTooltipIds(lazy.sections), normalizeTooltipIds(eager.sections), 'Modal content must match expanded rows.');
+        assert.strictEqual(lazy.groups, 2, 'Lazy metadata must preserve OS-version grouping.');
+        assert.strictEqual(lazy.materialized, 0);
+        assert.strictEqual(lazy.evidenceArrays, 0);
+        assert.strictEqual(lazy.described, 0);
+        assert.strictEqual(eager.materialized, 6000);
+        assert.strictEqual(eager.evidenceArrays, 12000);
+        lazyTimes.push(lazy.elapsed);
+        eagerTimes.push(eager.elapsed);
+    }
+    const median = values => values.sort((left, right) => left - right)[1].toFixed(1);
+    console.log('Aggregate probe (6000 rows, 3 runs): detail rows 6000 -> 0; evidence arrays 12000 -> 0; median eager/lazy ms ' + median(eagerTimes) + '/' + median(lazyTimes));
+}
+
+async function main() {
     const dashboard = loadDashboardHarness(`
 module.exports = {
     createEmptyFilterState,
@@ -871,7 +939,11 @@ module.exports = {
         'Expected scoped numeric remediation labels to render as product patch references.'
     );
 
+    await assertLazyAggregateParity();
     console.log('Remediation report mode and density helpers passed.');
 }
 
-main();
+main().catch(error => {
+    console.error(error);
+    process.exit(1);
+});

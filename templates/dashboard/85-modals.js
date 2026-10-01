@@ -800,7 +800,15 @@ function buildRemediationDetailsModalSections(remediationData) {
         : buildGroupedRemediationDetailsModalSections(remediationData, modalCache);
 }
 
+let modalRenderGeneration = 0;
+
+function beginModalContentRender() {
+    modalRenderGeneration++;
+    destroyManagedVirtualTables(activeVirtualTables);
+}
+
 function deferModalContentRender(modal, renderContent) {
+    const generation = modalRenderGeneration;
     const scheduleFrame = (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function')
         ? window.requestAnimationFrame.bind(window)
         : (typeof requestAnimationFrame === 'function'
@@ -808,8 +816,9 @@ function deferModalContentRender(modal, renderContent) {
             : callback => window.setTimeout(callback, 0));
 
     scheduleFrame(() => {
+        if (generation !== modalRenderGeneration) return;
         scheduleFrame(() => {
-            if (!modal || !modal.classList || !modal.classList.contains('active')) {
+            if (generation !== modalRenderGeneration || !modal || !modal.classList || !modal.classList.contains('active')) {
                 return;
             }
 
@@ -848,6 +857,7 @@ function showDetails(remediationData) {
         || [remediationData.vendor, remediationData.software].filter(Boolean).join(' ')
         || 'Remediation Details';
 
+    beginModalContentRender();
     modalTitle.textContent = remediation;
     modalBody.innerHTML = '<p class="loading">Loading details...</p>';
     lastFocusedElementBeforeModal = (typeof HTMLElement !== 'undefined' && document.activeElement instanceof HTMLElement) ? document.activeElement : null;
@@ -877,6 +887,7 @@ function showRemediationDetails(data) {
     const modalTitle = document.getElementById('modalTitle');
     const modalBody = document.getElementById('modalBody');
     
+    beginModalContentRender();
     modalTitle.textContent = `Remediation on ${data.date}: ${data.remediation}`;
     modalBody.innerHTML = '<p class="loading">Loading details...</p>';
     lastFocusedElementBeforeModal = (typeof HTMLElement !== 'undefined' && document.activeElement instanceof HTMLElement) ? document.activeElement : null;
@@ -920,11 +931,53 @@ function showRemediationDetails(data) {
  * Show impact analysis details modal
  * @param {Object} item - The impact analysis item
  */
+function attachImpactDevicePagination(modalBody, devices) {
+    const generation = modalRenderGeneration;
+    const pageSize = 50;
+    const pageCount = Math.max(1, Math.ceil(devices.length / pageSize));
+    const tbody = modalBody.querySelector('tbody[data-impact-device-rows]');
+    const status = modalBody.querySelector('[data-impact-page-status]');
+    const input = modalBody.querySelector('[data-impact-page-input]');
+    const first = modalBody.querySelector('[data-impact-first]');
+    const previous = modalBody.querySelector('[data-impact-previous]');
+    const next = modalBody.querySelector('[data-impact-next]');
+    const last = modalBody.querySelector('[data-impact-last]');
+    let page = 1;
+
+    const renderPage = requestedPage => {
+        if (generation !== modalRenderGeneration) return;
+        page = Math.max(1, Math.min(pageCount, Number.isFinite(requestedPage) ? Math.trunc(requestedPage) : page));
+        const start = (page - 1) * pageSize;
+        tbody.innerHTML = devices.slice(start, start + pageSize).map(device => {
+            const cveList = Array.from(device.cves).sort().join(', ');
+            const deviceIdShort = device.id ? device.id.substring(0, 12) + '...' : '-';
+            return `<tr>
+                <td>${escapeHtml(device.name)}</td>
+                <td title="${escapeHtml(device.id || '')}">${escapeHtml(deviceIdShort)}</td>
+                <td>${device.cves.size}</td>
+                <td class="modal-cve-list-cell">${escapeHtml(cveList)}</td>
+            </tr>`;
+        }).join('');
+        input.value = String(page);
+        status.textContent = `${devices.length ? start + 1 : 0}-${Math.min(start + pageSize, devices.length)} of ${devices.length} devices; ${pageCount} pages`;
+        first.disabled = previous.disabled = page === 1;
+        next.disabled = last.disabled = page === pageCount;
+    };
+
+    first.addEventListener('click', () => renderPage(1));
+    previous.addEventListener('click', () => renderPage(page - 1));
+    next.addEventListener('click', () => renderPage(page + 1));
+    last.addEventListener('click', () => renderPage(pageCount));
+    input.addEventListener('change', () => renderPage(input.value.trim() ? Number(input.value) : page));
+    renderPage(1);
+}
+
 function showImpactAnalysisDetails(item) {
     const modal = document.getElementById('detailModal');
     const modalTitle = document.getElementById('modalTitle');
     const modalBody = document.getElementById('modalBody');
     
+    beginModalContentRender();
     modalTitle.textContent = `Remediation Details: ${item.name}`;
     modalBody.innerHTML = '<p class="loading">Loading details...</p>';
     lastFocusedElementBeforeModal = (typeof HTMLElement !== 'undefined' && document.activeElement instanceof HTMLElement) ? document.activeElement : null;
@@ -939,7 +992,7 @@ function showImpactAnalysisDetails(item) {
 
     deferModalContentRender(modal, () => {
         // Group vulnerabilities by device (using DeviceId as key)
-        const deviceMap = {};
+        const deviceMap = Object.create(null);
         item.vulnerabilities.forEach(v => {
             const deviceKey = getDeviceIdentityKey(v);
             if (!deviceMap[deviceKey]) {
@@ -964,26 +1017,23 @@ function showImpactAnalysisDetails(item) {
         }
         html += '<div class="modal-table-container"><table class="detail-table"><thead><tr>';
         html += '<th>Device Name</th><th>Device ID</th><th>CVE Count</th><th>CVE IDs</th>';
-        html += '</tr></thead><tbody>';
+        html += '</tr></thead><tbody data-impact-device-rows></tbody></table></div>';
 
         // Sort devices by CVE count descending
         const sortedDevices = Object.values(deviceMap).sort((a, b) => b.cves.size - a.cves.size);
 
-        sortedDevices.forEach(device => {
-            const cveList = Array.from(device.cves).sort().join(', ');
-            const deviceIdShort = device.id ? device.id.substring(0, 12) + '...' : '-';
-
-            html += `<tr>
-            <td>${escapeHtml(device.name)}</td>
-            <td title="${escapeHtml(device.id || '')}">${escapeHtml(deviceIdShort)}</td>
-            <td>${device.cves.size}</td>
-            <td class="modal-cve-list-cell">${escapeHtml(cveList)}</td>
-        </tr>`;
-        });
-
-        html += '</tbody></table></div>';
+        const pageCount = Math.max(1, Math.ceil(sortedDevices.length / 50));
+        html += `<div class="modal-page-controls">
+            <button type="button" data-impact-first title="First page" aria-label="First page">&laquo;</button>
+            <button type="button" data-impact-previous title="Previous page" aria-label="Previous page">&lsaquo;</button>
+            <input type="number" data-impact-page-input min="1" max="${pageCount}" value="1" aria-label="Device page" style="width:5em">
+            <button type="button" data-impact-next title="Next page" aria-label="Next page">&rsaquo;</button>
+            <button type="button" data-impact-last title="Last page" aria-label="Last page">&raquo;</button>
+            <span data-impact-page-status role="status" aria-live="polite"></span>
+        </div>`;
 
         modalBody.innerHTML = html;
+        attachImpactDevicePagination(modalBody, sortedDevices);
     });
 }
 
@@ -991,7 +1041,7 @@ function showImpactAnalysisDetails(item) {
  * Close the modal and clean up virtual tables
  */
 function closeModal() {
-    destroyManagedVirtualTables(activeVirtualTables);
+    beginModalContentRender();
     hideGlobalTooltip();
     const modal = document.getElementById('detailModal');
     modal.classList.remove('active');

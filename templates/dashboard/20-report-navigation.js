@@ -191,9 +191,8 @@ function handleFilterChipClick(event) {
 }
 
 function handleClearAllFilters() {
-    closeActiveFilterPopover();
+    closeActiveFilterPopover(false);
     filterState = finalizeFilterState(assignDatePreset(createEmptyFilterState(), '1w'));
-    renderFilterPills(filterState);
     scheduleApplyFilters(true);
 }
 
@@ -231,9 +230,42 @@ function getFilterOptionSearchText(filterKey, value) {
     return `${label} ${value}`.trim().toLowerCase();
 }
 
+function withScopedFilterOptionsCache(readOptions) {
+    const previousCache = scopedFilterOptionsCache;
+    scopedFilterOptionsCache = {
+        rows: vulnerabilityData,
+        catalog: deviceFilterCatalog,
+        labels: deviceFilterLabelByKey,
+        entries: new Map()
+    };
+    try {
+        return readOptions();
+    } finally {
+        scopedFilterOptionsCache = previousCache;
+        if (previousCache) previousCache.entries.clear();
+    }
+}
+
 function getScopedFilterOptions(filterKey, state = filterState) {
-    const scopedState = cloneFilterState(state);
-    resetFilterInState(scopedState, filterKey);
+    const scopedState = finalizeFilterState(resetFilterInState(cloneFilterState(state), filterKey));
+    const cache = scopedFilterOptionsCache;
+    if (!cache) return computeScopedFilterOptions(filterKey, scopedState);
+    const cacheKey = JSON.stringify([filterKey, buildUrlViewStatePayload(scopedState).filters]);
+    if (cache) {
+        if (cache.rows !== vulnerabilityData || cache.catalog !== deviceFilterCatalog || cache.labels !== deviceFilterLabelByKey) {
+            cache.entries.clear();
+            cache.rows = vulnerabilityData;
+            cache.catalog = deviceFilterCatalog;
+            cache.labels = deviceFilterLabelByKey;
+        }
+        if (cache.entries.has(cacheKey)) return cache.entries.get(cacheKey);
+    }
+    const options = computeScopedFilterOptions(filterKey, scopedState);
+    if (cache && cache.entries.size < FILTER_MULTISELECT_KEYS.length) cache.entries.set(cacheKey, options);
+    return options;
+}
+
+function computeScopedFilterOptions(filterKey, scopedState) {
 
     if (filterKey === 'filterDeviceName') {
         const devicesByKey = new Map();
@@ -763,7 +795,7 @@ function positionFilterPopover(anchorButton) {
     popover.style.left = `${offset}px`;
 }
 
-function closeActiveFilterPopover() {
+function closeActiveFilterPopover(refreshPills = true) {
     const popover = document.getElementById('filterPopover');
     const subtitle = document.getElementById('filterPopoverSubtitle');
     const body = document.getElementById('filterPopoverBody');
@@ -784,7 +816,7 @@ function closeActiveFilterPopover() {
     activeFilterPopoverKey = null;
     filterPopoverDraftState = null;
     resetActiveFilterPopoverState();
-    renderFilterPills(filterState);
+    if (refreshPills) renderFilterPills(filterState);
 }
 
 function openFilterPopover(filterKey, anchorButton) {
@@ -797,7 +829,10 @@ function openFilterPopover(filterKey, anchorButton) {
     activeFilterPopoverKey = filterKey;
     filterPopoverDraftState = cloneFilterState(filterState);
     activeFilterPopoverSearchTerm = '';
-    renderActiveFilterPopover();
+    withScopedFilterOptionsCache(() => {
+        renderActiveFilterPopover();
+        renderFilterPills(filterState);
+    });
 
     const popover = document.getElementById('filterPopover');
     if (popover) {
@@ -806,7 +841,6 @@ function openFilterPopover(filterKey, anchorButton) {
     }
 
     positionFilterPopover(anchorButton);
-    renderFilterPills(filterState);
 
     const autofocusTarget = document.getElementById('filterPopoverSearchInput')
         || document.querySelector('#filterPopoverBody .date-range-option.selected')
@@ -836,8 +870,7 @@ function handleFilterPopoverClick(event) {
             return;
         }
         filterState = finalizeFilterState(filterPopoverDraftState);
-        closeActiveFilterPopover();
-        renderFilterPills(filterState);
+        closeActiveFilterPopover(false);
         scheduleApplyFilters(true);
         return;
     }

@@ -46,25 +46,35 @@ async function init() {
     setupInfiniteScroll();
     updateViewShareButtonVisibility();
     updateRemediationReportModeUi(activeReportId);
+    initialReportStart = initStart;
+    initialPaintOpportunityStart = initStart;
     scheduleApplyFilters(true);
-    clearDashboardStatus();
-    console.timeEnd('[perf] init total');
-    recordDashboardPhaseTiming('initTotalMs', performance.now() - initStart);
-    markDashboardReady();
+}
+
+function assertReportChartRendered(canvasId, instance) {
+    if (!filterState.startDate || !filterState.endDate || typeof Chart === 'undefined'
+        || typeof Chart.getChart !== 'function') return;
+    const canvas = document.getElementById(canvasId);
+    if (canvas && (!instance || !instance.ctx || Chart.getChart(canvas) !== instance)) {
+        throw new Error(`Chart rendering did not complete: ${canvasId}`);
+    }
 }
 
 function renderActiveVulnerabilitiesReport() {
     renderChart();
+    assertReportChartRendered('vulnerabilityChart', chartInstance);
     renderTable();
 }
 
 function renderRemediationActivityReport() {
     renderRemediationChart();
+    assertReportChartRendered('remediationChart', remediationChartInstance);
     renderRemediationDetailsTable();
 }
 
 function renderImpactAnalysisReport() {
     renderImpactChart();
+    assertReportChartRendered('impactChart', impactChartInstance);
     renderImpactAnalysisTable();
 }
 
@@ -108,6 +118,50 @@ function renderReport(reportId, force = false) {
     initializedReports.add(reportId);
     dirtyReports.delete(reportId);
     recordDashboardRenderTiming(reportId, performance.now() - renderStart);
+    completeCurrentFilterRender(reportId);
+}
+
+function isCurrentFilterRender(request, reportId) {
+    return request && request.generation === filterRenderGeneration
+        && request.state === filterState && request.filterKey === filterState.key
+        && reportId === activeReportId && reportId === getCurrentReportId();
+}
+
+function completeCurrentFilterRender(reportId) {
+    const request = currentFilterRenderRequest;
+    if (!isCurrentFilterRender(request, reportId) || request.completed) return;
+    request.completed = true;
+    recordDashboardPhaseTiming('filterRenderCompletionMs', performance.now() - request.startedAt);
+    if (initialReportStart != null) {
+        recordDashboardPhaseTiming('initTotalMs', performance.now() - initialReportStart);
+        initialReportStart = null;
+        clearDashboardStatus();
+        console.timeEnd('[perf] init total');
+        markDashboardReady();
+    }
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (!isCurrentFilterRender(request, reportId)) return;
+        recordDashboardPhaseTiming('filterPaintOpportunityMs', performance.now() - request.startedAt);
+        if (initialPaintOpportunityStart != null) {
+            recordDashboardPhaseTiming('initialPaintOpportunityMs', performance.now() - initialPaintOpportunityStart);
+            initialPaintOpportunityStart = null;
+        }
+    }));
+}
+
+function renderCurrentFilteredReport(request) {
+    if (!isCurrentFilterRender(request, activeReportId) || request.completed) return;
+    try {
+        renderActiveReport(true);
+        if (!isCurrentFilterRender(request, activeReportId)) return;
+        scheduleReportDataWarmup();
+        publishDashboardDiagnostics();
+    } catch (error) {
+        console.error('Failed to render dashboard report:', error);
+        if (isCurrentFilterRender(request, activeReportId)) {
+            setDashboardStatus('Failed to render dashboard report. Please try again.', 'error');
+        }
+    }
 }
 
 function renderActiveReport(force = false) {
