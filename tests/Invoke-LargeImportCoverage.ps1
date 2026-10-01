@@ -101,6 +101,12 @@ param(
     [switch]$ProfileFreshImport,
 
     [Parameter(Mandatory = $false)]
+    [switch]$ProfileCompiledPartitionReader,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$TestCompiledPartitionReaderParity,
+
+    [Parameter(Mandatory = $false)]
     [switch]$Force
 )
 
@@ -244,8 +250,132 @@ function Get-Issue67StoreDigest {
     return $digests
 }
 
+function Initialize-Issue67CompiledPartitionReader {
+    if ('DefenderReporting.Tests.Issue67PartitionReader' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+
+namespace DefenderReporting.Tests {
+    public static class Issue67PartitionReader {
+        public static IEnumerable<string> Read(string path) {
+            using (var input = File.OpenRead(path))
+            using (var carry = new MemoryStream()) {
+                var buffer = new byte[65536];
+                int bytesRead;
+                while ((bytesRead = input.Read(buffer, 0, buffer.Length)) > 0) {
+                    int segmentStart = 0;
+                    for (int index = 0; index < bytesRead; index++) {
+                        if (buffer[index] != 0x0A) continue;
+                        int segmentLength = index - segmentStart;
+                        if (segmentLength > 0 && buffer[index - 1] == 0x0D) segmentLength--;
+                        string line = null;
+                        if (carry.Length > 0) {
+                            if (segmentLength > 0) carry.Write(buffer, segmentStart, segmentLength);
+                            line = Encoding.UTF8.GetString(carry.ToArray());
+                            carry.SetLength(0);
+                        } else if (segmentLength > 0) {
+                            line = Encoding.UTF8.GetString(buffer, segmentStart, segmentLength);
+                        }
+                        if (!String.IsNullOrWhiteSpace(line)) yield return line;
+                        segmentStart = index + 1;
+                    }
+                    int remainingLength = bytesRead - segmentStart;
+                    if (remainingLength > 0) carry.Write(buffer, segmentStart, remainingLength);
+                }
+                if (carry.Length > 0) {
+                    var lineBytes = carry.ToArray();
+                    int lineLength = lineBytes.Length;
+                    if (lineLength > 0 && lineBytes[lineLength - 1] == 0x0D) lineLength--;
+                    if (lineLength > 0) {
+                        string line = Encoding.UTF8.GetString(lineBytes, 0, lineLength);
+                        if (!String.IsNullOrWhiteSpace(line)) yield return line;
+                    }
+                }
+            }
+        }
+    }
+}
+'@
+}
+
+function Test-Issue67CompiledPartitionReaderParity {
+    Initialize-Issue67CompiledPartitionReader
+    $unicode = [char]0x03A9
+    $cases = [ordered]@{
+        empty = ''
+        lf = "{`"Id`":`"fixture`"}`n"
+        crlf = "{`"Id`":`"fixture`"}`r`n"
+        noFinalLf = '{"Id":"fixture"}'
+        trailingCr = "{`"Id`":`"fixture`"}`r"
+        blanks = "`n `r`n`t`n{`"Id`":`"fixture`"}`n`n"
+        bareCr = "{`"Id`":`"first`"}`r{`"Id`":`"second`"}`n"
+        inlineCr = "{`"Id`":`"fi`rxture`"}`n"
+        escapesUnicode = "{`"Id`":`"fixture`",`"Value`":`"\n\r\u03a9$unicode`"}`n"
+        malformedRawLf = "{`"Id`":`"fi`nxture`"}`n"
+        boundaryLf = (' ' * 65535) + "`n{`"Id`":`"fixture`"}`n"
+        boundaryCrCarry = (' ' * 65534) + "x`r`n{`"Id`":`"fixture`"}`n"
+        boundaryCrLf = (' ' * 65533) + "x`r`n{`"Id`":`"fixture`"}`n"
+        multiBuffer = '{"Id":"fixture","Value":"' + ('x' * 131072) + '"}'
+        bom = [byte[]](0xEF, 0xBB, 0xBF) + [Text.Encoding]::UTF8.GetBytes("{`"Id`":`"fixture`"}`n")
+        invalidUtf8 = [Text.Encoding]::UTF8.GetBytes('{"Id":"fixture","Value":"') + [byte[]](0xC3, 0x28, 0xFF) + [Text.Encoding]::UTF8.GetBytes("`"}`n")
+    }
+    $path = Join-Path ([IO.Path]::GetTempPath()) ('issue67-reader-' + [guid]::NewGuid().ToString('N') + '.json')
+    try {
+        foreach ($caseName in $cases.Keys) {
+            $value = $cases[$caseName]
+            if ($value -is [string]) { $bytes = [Text.Encoding]::UTF8.GetBytes($value) }
+            else { $bytes = [byte[]]$value }
+            [IO.File]::WriteAllBytes($path, $bytes)
+            $original = @(Read-VulnNdjsonLinesFromPath -Path $path)
+            $candidate = @([DefenderReporting.Tests.Issue67PartitionReader]::Read($path))
+            if ($original.Count -ne $candidate.Count) { throw "Reader line count parity failed: $caseName" }
+            for ($lineIndex = 0; $lineIndex -lt $original.Count; $lineIndex++) {
+                if ($original[$lineIndex] -cne $candidate[$lineIndex]) { throw "Reader exact line parity failed: $caseName" }
+                $outcomes = foreach ($line in @($original[$lineIndex], $candidate[$lineIndex])) {
+                    try { $null = $line | ConvertFrom-Json -Depth 20; 'parsed' }
+                    catch { $_.FullyQualifiedErrorId }
+                }
+                if ($outcomes[0] -cne $outcomes[1]) { throw "Reader parse outcome parity failed: $caseName" }
+            }
+        }
+        [pscustomobject]@{ passed = $true; cases = $cases.Count; runtime = [Environment]::Version.ToString() }
+    }
+    finally {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+    }
+}
+
+function Read-Issue67ProfilePartitionLines {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '')]
+    param([string]$Path)
+
+    $useCompiled = $script:Issue67UseCompiledReader -and (
+        $Path.EndsWith('.ndjson', [StringComparison]::OrdinalIgnoreCase) -or
+        $Path.EndsWith('.json', [StringComparison]::OrdinalIgnoreCase))
+    $operation = if ($useCompiled) { 'Partition.Reader.Compiled' } else { 'Partition.Reader.Legacy' }
+    Invoke-Issue67ProfileOperation -Name $operation -Action {
+        if ($useCompiled) {
+            $enumerator = ([System.Collections.IEnumerable][DefenderReporting.Tests.Issue67PartitionReader]::Read($Path)).GetEnumerator()
+            try {
+                while ($enumerator.MoveNext()) {
+                    $enumerator.Current
+                }
+            }
+            finally {
+                if ($enumerator -is [IDisposable]) { $enumerator.Dispose() }
+            }
+        }
+        else {
+            Read-VulnNdjsonLinesFromPath -Path $Path
+        }
+    }
+}
+
 function Invoke-ProfiledFreshImport {
-    param([string]$SnapshotSourcePath, [string]$ValidationPath, [string]$ReferencePath)
+    param([string]$SnapshotSourcePath, [string]$ValidationPath, [string]$ReferencePath, [switch]$CompiledPartitionReader)
 
     if (Test-Path -LiteralPath $ValidationPath) {
         throw 'Fresh import profiling requires a new validation directory; existing stores are not replayed or removed.'
@@ -262,6 +392,8 @@ function Invoke-ProfiledFreshImport {
     if (@(Get-ChildItem -LiteralPath $SnapshotSourcePath -Filter 'VulnExport_*.json.gz' -File).Count -eq 0) {
         throw 'Fresh import profiling requires legacy synthetic snapshot files.'
     }
+    if ($CompiledPartitionReader) { Initialize-Issue67CompiledPartitionReader }
+    $script:Issue67UseCompiledReader = [bool]$CompiledPartitionReader
     $script:Issue67Profile = @{}
     $originals = @{}
     $names = @(
@@ -302,6 +434,11 @@ function Invoke-ProfiledFreshImport {
                 $replacement = "Invoke-Issue67ProfileOperation -Name '$operation' -Action { " + $pipeline.Extent.Text + ' }'
                 $instrumentedBody = $instrumentedBody.Remove($offset, $pipeline.Extent.Text.Length).Insert($offset, $replacement)
             }
+            if ($name -eq 'Read-VulnPartitionMapFile') {
+                $readerCall = 'Read-VulnNdjsonLinesFromPath -Path $Path'
+                if (-not $instrumentedBody.Contains($readerCall)) { throw 'Partition reader probe anchor changed.' }
+                $instrumentedBody = $instrumentedBody.Replace($readerCall, 'Read-Issue67ProfilePartitionLines -Path $Path')
+            }
             $prefix = $command.ScriptBlock.ToString()
             $bodyOffset = $prefix.IndexOf($body, [System.StringComparison]::Ordinal)
             if ($bodyOffset -lt 0) { throw "Cannot identify the body for $name." }
@@ -333,6 +470,10 @@ try {
         foreach ($name in $originals.Keys) {
             Set-Item -LiteralPath ('Function:script:' + $name) -Value $originals[$name]
         }
+        $script:Issue67UseCompiledReader = $false
+    }
+    if ($CompiledPartitionReader -and -not $script:Issue67Profile.ContainsKey('Partition.Reader.Compiled')) {
+        throw 'Compiled partition probe did not execute; do not accept fallback-only measurements.'
     }
     $baselinePath = $ValidationPath + '-unprofiled'
     if (Test-Path -LiteralPath $baselinePath) { throw 'The unprofiled twin directory must not already exist.' }
@@ -366,6 +507,12 @@ try {
         lane = 'local-synthetic-fresh-import-not-Azure-not-completed-store-replay'
         sourceCommit = (& git -C $repoRoot rev-parse HEAD)
         runtime = $PSVersionTable.PSVersion.ToString()
+        dotnetRuntime = [Environment]::Version.ToString()
+        compiledPartitionReader = [bool]$CompiledPartitionReader
+        readerScope = 'Test-only plaintext .ndjson/.json partition maps; production/default reader and gzip paths unchanged.'
+        sourceHashes = @('tests/Invoke-LargeImportCoverage.ps1', 'src/powershell/Shared/Core/Core.ps1', 'build/generated/shared-helpers.ps1') | ForEach-Object {
+            [ordered]@{ path = $_; sha256 = (Get-FileHash -LiteralPath (Join-Path $repoRoot $_) -Algorithm SHA256).Hash.ToLowerInvariant() }
+        }
         profiledSeconds = $profiledSeconds
         unprofiledSeconds = $baselineSeconds
         parity = $parity
@@ -398,6 +545,11 @@ try {
     return $profiled
 }
 
+if ($TestCompiledPartitionReaderParity) {
+    Test-Issue67CompiledPartitionReaderParity
+    return
+}
+
 $resolvedSourcePath = [System.IO.Path]::GetFullPath($SourcePath)
 $resolvedRawSyntheticOutputPath = [System.IO.Path]::GetFullPath($RawSyntheticOutputPath)
 $resolvedRawLiveOutputPath = [System.IO.Path]::GetFullPath($RawLiveOutputPath)
@@ -407,6 +559,9 @@ $resolvedLegacyImportValidationPath = [System.IO.Path]::GetFullPath($LegacyImpor
 
 if ($ProfileFreshImport -and $SkipLegacyImportValidation) {
     throw 'ProfileFreshImport cannot be combined with SkipLegacyImportValidation.'
+}
+if ($ProfileCompiledPartitionReader -and -not $ProfileFreshImport) {
+    throw 'ProfileCompiledPartitionReader requires ProfileFreshImport; this is not a production runtime flag.'
 }
 
 if (-not (Test-Path -LiteralPath $resolvedSourcePath -PathType Container)) {
@@ -515,7 +670,7 @@ $legacyImportValidationResult = $null
 if (-not $SkipLegacyImportValidation) {
     Write-Host 'Running local legacy vulnerability import validation...' -ForegroundColor Cyan
     if ($ProfileFreshImport) {
-        $legacyImportValidationResult = Invoke-ProfiledFreshImport -SnapshotSourcePath $resolvedLegacySnapshotOutputPath -ValidationPath $resolvedLegacyImportValidationPath -ReferencePath $resolvedRawSyntheticOutputPath
+        $legacyImportValidationResult = Invoke-ProfiledFreshImport -SnapshotSourcePath $resolvedLegacySnapshotOutputPath -ValidationPath $resolvedLegacyImportValidationPath -ReferencePath $resolvedRawSyntheticOutputPath -CompiledPartitionReader:$ProfileCompiledPartitionReader
     }
     else {
         $legacyImportValidationResult = Invoke-LegacySnapshotImportValidation -SnapshotSourcePath $resolvedLegacySnapshotOutputPath -ValidationPath $resolvedLegacyImportValidationPath -ResetValidationPath $Force.IsPresent
@@ -565,7 +720,9 @@ $workflowManifestPath = Join-Path $resolvedAzureReplayOutputPath 'large-import-c
 if ($SkipAzureReplayDatasetBuild) {
     $workflowManifestPath = Join-Path $resolvedLegacySnapshotOutputPath 'large-import-coverage-manifest.json'
 }
-$workflowManifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $workflowManifestPath -Encoding utf8
+if (-not $ProfileFreshImport) {
+    $workflowManifest | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $workflowManifestPath -Encoding utf8
+}
 
 Write-Host ''
 Write-Host ('Large import coverage workflow completed.') -ForegroundColor Green
