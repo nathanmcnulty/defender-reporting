@@ -15,11 +15,15 @@ function safeInventoryDiagnostic(value = {}) {
     const categories = ['timeout', 'aborted', 'execution', 'response', 'InvalidOperation', 'InvalidArgument', 'InvalidData', 'OperationStopped', 'WriteError', 'ObjectNotFound', 'PermissionDenied', 'SecurityError', 'ResourceUnavailable', 'NotSpecified'];
     const types = ['RuntimeException', 'CimException', 'MethodInvocationException', 'PSInvalidOperationException', 'SessionStateUnauthorizedAccessException', 'UnauthorizedAccessException', 'InvalidOperationException', 'ArgumentException', 'Win32Exception'];
     const phases = ['execute', 'compile', 'cim', 'selection', 'memory', 'termination', 'response'];
+    const steps = ['fresh-cim', 'fresh-identity', 'fresh-process-identity', 'fresh-root-identity', 'get-process', 'start-identity', 'kill', 'kill-exit-check', 'wait-exit'];
     return {
         category: categories.includes(value.category) ? value.category : 'execution',
         exceptionType: types.includes(value.exceptionType) ? value.exceptionType : 'unclassified',
         exitCode: Number.isInteger(value.exitCode) && value.exitCode >= 0 && value.exitCode <= 255 ? value.exitCode : null,
-        phase: phases.includes(value.phase) ? value.phase : 'execute'
+        phase: phases.includes(value.phase) ? value.phase : 'execute',
+        ...(steps.includes(value.step) ? { step: value.step } : {}),
+        ...(types.includes(value.innerExceptionType) ? { innerExceptionType: value.innerExceptionType } : {}),
+        ...(Number.isInteger(value.nativeErrorCode) && value.nativeErrorCode >= 0 && value.nativeErrorCode <= 65535 ? { nativeErrorCode: value.nativeErrorCode } : {})
     };
 }
 
@@ -148,7 +152,7 @@ async function bounded(operation, label, timeout = 5000) {
 
 function powershell(script, environment, timeout = 5000, signal) {
     return new Promise((resolve, reject) => {
-        const wrapped = `& { $issue70Phase = 'execute'; try {\n${script}\n} catch { @{ issue70Failure = @{ category = $_.CategoryInfo.Category.ToString(); exceptionType = $_.Exception.GetType().Name; phase = $issue70Phase } } | ConvertTo-Json -Compress; exit 1 } }`;
+        const wrapped = `& { $issue70Phase = 'execute'; $issue70Step = $null; try {\n${script}\n} catch { $inner = $_.Exception.GetBaseException(); @{ issue70Failure = @{ category = $_.CategoryInfo.Category.ToString(); exceptionType = $_.Exception.GetType().Name; phase = $issue70Phase; step = $issue70Step; innerExceptionType = $inner.GetType().Name; nativeErrorCode = if ($inner -is [ComponentModel.Win32Exception]) { $inner.NativeErrorCode } else { $null } } } | ConvertTo-Json -Compress; exit 1 } }`;
         execFile('pwsh', ['-NoProfile', '-Command', wrapped], {
             env: { ...process.env, ...environment }, encoding: 'utf8', timeout, signal, windowsHide: true, maxBuffer: 1024 * 1024
         }, (error, stdout) => {
@@ -304,23 +308,30 @@ foreach ($item in $owned) {
         await execute(selection + `
     $issue70Phase = 'termination'
 $processes = @()
-foreach ($item in $owned) {
+$terminationOrder = @($owned | Sort-Object { $_.ProcessId -eq $provenance[[int]$_.ProcessId].rootPid })
+foreach ($item in $terminationOrder) {
+    $issue70Step = 'fresh-cim'
     $fresh = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($item.ProcessId) OR ProcessId=$($provenance[[int]$item.ProcessId].rootPid)" -ErrorAction Stop)
+    $issue70Step = 'fresh-identity'
     $current = @($fresh | Where-Object { $_.ProcessId -eq $item.ProcessId -and $_.CreationDate -eq $item.CreationDate })
     $source = $provenance[[int]$item.ProcessId]
     $root = @($fresh | Where-Object { $_.ProcessId -eq $source.rootPid })
     $candidate = @($fresh | Where-Object { $_.ProcessId -eq $item.ProcessId })
-    if ($candidate.Count -gt 0 -and $null -eq $candidate[0].CreationDate) { throw 'Unknown fresh process identity.' }
-    if ($root.Count -gt 0 -and (-not $root[0].CommandLine -or $null -eq $root[0].CreationDate)) { throw 'Unknown fresh root identity.' }
+    if ($candidate.Count -gt 0 -and $null -eq $candidate[0].CreationDate) { $issue70Step = 'fresh-process-identity'; throw 'Unknown fresh process identity.' }
+    if ($root.Count -gt 0 -and (-not $root[0].CommandLine -or $null -eq $root[0].CreationDate)) { $issue70Step = 'fresh-root-identity'; throw 'Unknown fresh root identity.' }
     if ($current.Count -ne 1 -or ($root.Count -gt 0 -and ($root[0].CreationDate.ToUniversalTime().Ticks.ToString() -ne $source.rootCreated -or -not (Test-OwnedRoot $root[0])))) { continue }
+    $issue70Step = 'get-process'
     $process = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
+    $issue70Step = 'start-identity'
     if ($process -and [Math]::Abs($process.StartTime.ToUniversalTime().Ticks - $item.CreationDate.ToUniversalTime().Ticks) -lt 10000) {
-        try { $process.Kill() } catch { if (-not $process.HasExited) { throw } }
+        $issue70Step = 'kill'
+        try { $process.Kill() } catch { $issue70Step = 'kill-exit-check'; if (-not $process.HasExited) { throw } }
         $processes += $process
     }
 }
 $deadline = [DateTime]::UtcNow.AddSeconds(5)
 foreach ($process in $processes) {
+    $issue70Step = 'wait-exit'
     $remaining = [Math]::Max(0, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
     if (-not $process.WaitForExit($remaining)) { throw 'Owned Edge did not exit.' }
 }
@@ -831,6 +842,7 @@ function Get-CimInstance {
     $script:calls++
     if ($env:ISSUE70_REUSE -eq 'gone' -and $script:calls -gt 1) { return }
     if ($env:ISSUE70_REUSE -eq 'unknown' -and $script:calls -gt 1) { $script:items[0].CommandLine = $null }
+    if ($env:ISSUE70_REUSE -eq 'root-shutdown' -and 101 -in $script:killed) { $script:items[0].CommandLine = $null }
     if ($env:ISSUE70_REUSE -eq 'fresh' -and $script:calls -gt 1) {
         $script:items[0].CreationDate = $script:items[0].CreationDate.AddMinutes(1)
         $script:items[0].CommandLine = 'msedge.exe --user-data-dir=C:/neighbor'
@@ -842,7 +854,7 @@ function Get-Process {
     $item = $script:items | Where-Object { $_.ProcessId -eq $Id }
     if (-not $item) { return }
     $process = [pscustomobject]@{ Id=$Id; StartTime=$item.CreationDate; PrivateMemorySize64=1; HasExited=$false }
-    $process | Add-Member ScriptMethod Kill { $script:killed += $this.Id; $this.HasExited=$true }
+    $process | Add-Member ScriptMethod Kill { if ($env:ISSUE70_REUSE -eq 'kill-failure') { throw [ComponentModel.Win32Exception]::new(87) }; $script:killed += $this.Id; $this.HasExited=$true }
     $process | Add-Member ScriptMethod WaitForExit { param($remaining); return $true }
     $process
 }
@@ -859,7 +871,7 @@ function Get-Process {
         let reuse = '';
         let last;
         const execute = async (script, environment, timeout) => {
-            const response = await powershell(fixture + '\n$result = & {\n' + script + '\n}\n@{ result = ($result | ConvertFrom-Json); killed = @($script:killed); survivors = @($script:items | Where-Object { $_.ProcessId -notin $script:killed } | ForEach-Object { [int]$_.ProcessId }) } | ConvertTo-Json -Compress -Depth 6', { ...environment, ISSUE70_FIXTURE: JSON.stringify(items), ISSUE70_REUSE: reuse }, timeout || 12000);
+            const response = await powershell(fixture + '\n$result = . {\n' + script + '\n}\n@{ result = ($result | ConvertFrom-Json); killed = @($script:killed); survivors = @($script:items | Where-Object { $_.ProcessId -notin $script:killed } | ForEach-Object { [int]$_.ProcessId }) } | ConvertTo-Json -Compress -Depth 6', { ...environment, ISSUE70_FIXTURE: JSON.stringify(items), ISSUE70_REUSE: reuse }, timeout || 12000);
             last = response;
             return response.result;
         };
@@ -867,6 +879,10 @@ function Get-Process {
         assert.deepStrictEqual((await owned.inventory()).pids.sort(), [101, 102]);
         await owned.terminate();
         assert.deepStrictEqual(last.killed.sort(), [101, 102]);
+        assert.deepStrictEqual(last.survivors.sort((left, right) => left - right), [0, 201, 202, 301, 302, 401]);
+        reuse = 'root-shutdown';
+        await owned.terminate();
+        assert.deepStrictEqual(last.killed, [102, 101], 'Root shutdown must not invalidate the fresh ownership proof needed by descendants.');
         assert.deepStrictEqual(last.survivors.sort((left, right) => left - right), [0, 201, 202, 301, 302, 401]);
         reuse = 'fresh';
         await owned.terminate();
@@ -876,6 +892,8 @@ function Get-Process {
         assert.deepStrictEqual(last.killed, []);
         reuse = 'unknown';
         await assert.rejects(owned.terminate(), error => error.inventoryDiagnostic?.category === 'OperationStopped' && error.inventoryDiagnostic?.exceptionType === 'RuntimeException' && error.inventoryDiagnostic?.exitCode === 1);
+        reuse = 'kill-failure';
+        await assert.rejects(owned.terminate(), error => error.inventoryDiagnostic?.step === 'kill-exit-check' && error.inventoryDiagnostic?.innerExceptionType === 'Win32Exception' && error.inventoryDiagnostic?.nativeErrorCode === 87);
         reuse = '';
         items[0] = make(101, 0, command, 2);
         assert.deepStrictEqual((await owned.inventory()).pids, [], 'Same-profile root PID reuse must exclude prior descendants.');
@@ -890,7 +908,7 @@ function Get-Process {
         items[0].CommandLine = null;
         await assert.rejects(protectedRoot.inventory(), error => error.inventoryDiagnostic?.exceptionType === 'RuntimeException');
     }
-    console.log('PASS actual PowerShell argv/profile selection, literal/duplicate/prefix exclusion, independent snapshots, exact simulated kills, same-profile/fresh root PID reuse, nullable unrelated/PID-zero exclusion, unknown owned root fail-closed.');
+    console.log('PASS actual PowerShell argv/profile selection, literal/duplicate/prefix exclusion, independent snapshots, descendants-before-root shutdown race, unexpected native kill rejection, same-profile/fresh root PID reuse, nullable unrelated/PID-zero exclusion, unknown owned root fail-closed.');
 }
 
 async function inventoryProbes() {
@@ -956,6 +974,7 @@ async function privacyProbes() {
         invoke([root, path.join(html, sentinel), '1', '2']);
         const error = Object.assign(new Error(`C:/${sentinel} https://private.invalid/?key=${sentinel}`), { name: sentinel, code: sentinel });
         assert.deepStrictEqual(safeFailure(error, sentinel), { phase: 'unknown', reason: 'operation-failed', code: 'unclassified' });
+        assert.deepStrictEqual(safeInventoryDiagnostic({ step: sentinel, innerExceptionType: sentinel, nativeErrorCode: sentinel }), { category: 'execution', exceptionType: 'unclassified', exitCode: null, phase: 'execute' });
         const callbacks = {};
         let sample;
         const metrics = { phases: { workerParseMs: 1, [sentinel]: 9 } };
