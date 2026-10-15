@@ -38,7 +38,7 @@
 
 .NOTES
     Author: Nathan McNulty
-    Runtime: PowerShell 7.4 (Azure Automation - custom runtime environment)
+    Runtime: PowerShell 7.6 (Azure Automation - custom runtime environment)
 
     Prerequisites:
     - System-assigned Managed Identity with:

@@ -25,13 +25,13 @@ This page covers the Azure-specific parts of the project: permissions, authentic
 - An Azure Automation account with system-assigned managed identity
 - A storage account with `exports`, `templates`, and `dashboards` containers
 - RBAC for the Automation managed identity
-- A PowerShell 7.4 runtime environment
+- A PowerShell 7.6 runtime environment
 - The dashboard runbook and daily schedule
 - An optional Azure Container App protected by Entra ID Easy Auth
 
 **Function App (Flex Consumption)**:
 - A resource group
-- An Azure Function App on a Flex Consumption plan (Linux, PowerShell 7.4)
+- An Azure Function App on a Flex Consumption plan (Linux, PowerShell 7.6)
 - A storage account with `exports`, `templates`, `dashboards`, and `app-package` containers
 - RBAC for the Function App managed identity (Blob Data Owner, Queue/Table Data Contributor)
 - Timer-triggered function running daily at 2:00 AM UTC
@@ -320,3 +320,27 @@ The Azure runbook status evidence includes the selected normalization mode, inpu
 
 - [GitHub Actions setup](github-actions-setup.md)
 - [Workflow notes](workflows.md)
+
+## PowerShell 7.6 / .NET 10 runtime upgrade
+
+The current setup source selects PowerShell 7.6 for both the existing Function
+Flex plan and `PowerShell-76-AzAccounts` Automation environment. See Microsoft's
+[Functions runtime contract](https://learn.microsoft.com/en-us/azure/azure-functions/functions-reference-powershell#powershell-versions)
+and [Automation support](https://learn.microsoft.com/en-us/azure/automation/automation-runbook-types#powershell-runbooks).
+This changes no hosting plan, permissions or export scope. Historical 7.4/.NET8
+performance records are retained and are not evidence for 7.6 performance.
+
+This source patch does not provide a paused migration procedure. Existing
+`Setup-AzureResources.ps1` can re-enable processing: Function timer state is
+reset from `SkipMdePermissions`, and the Automation schedule is recreated and
+enabled unless that flag is selected. An existing pause is not preserved. Do
+not assume pausing first and then running normal setup prevents exports from
+resuming before validation.
+
+Before live use, require a separately reviewed and explicitly authorized
+paused-migration procedure covering the exact account/app, active jobs, timer
+and schedule state, runtime/package imports and runbook binding, worker
+startup, synthetic validation and a separate resumption decision. That
+procedure is not implemented by this source PR. The new Automation runtime is
+distinct and the old environment is retained. Local source tests do not prove
+live Defender exports, identity, delivery or performance acceptance.
