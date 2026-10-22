@@ -73,13 +73,13 @@ self.onmessage = async function(e) {
     function normalizeDateYMD(value) {
         if (!value) return null;
         var datePart = String(value).split(/[T ]/)[0];
-        if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) return datePart;
+        if (/^\\d{4}-\\d{2}-\\d{2}$/.test(datePart)) return datePart;
         var slash = datePart.split('/');
         if (slash.length === 3) {
             var m = slash[0].padStart(2, '0');
             var d = slash[1].padStart(2, '0');
             var y = slash[2].slice(0, 4);
-            if (/^\d{4}$/.test(y)) return y + '-' + m + '-' + d;
+            if (/^\\d{4}$/.test(y)) return y + '-' + m + '-' + d;
         }
         return datePart;
     }
@@ -217,7 +217,8 @@ self.onmessage = async function(e) {
             _remediationKey: updateName
                 ? vendorName + ' ' + softwareName + ' - ' + updateName
                 : vendorName + ' ' + softwareName,
-            _index: i
+            _index: i,
+            _mat: true
         };
     }
     result.length = resultCount;

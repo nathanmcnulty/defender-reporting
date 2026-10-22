@@ -6960,6 +6960,134 @@ function Test-BenchmarkWorkloadProfilesArePinned {
     }
 }
 
+function Test-VulnPartitionStreamingParity {
+    [CmdletBinding()]
+    param()
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('partition-streaming-' + [guid]::NewGuid().ToString('N'))
+    $originalReader = ${function:Read-VulnNdjsonLinesFromPath}
+    $originalIndex = ${function:Get-VulnPartitionIndex}
+    $originalSignature = ${function:Get-VulnCanonicalRowSignature}
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $first = Get-TestVulnRow -Id 'synthetic-duplicate' -CveId 'CVE-2026-0001' -SnapshotDate '2026-01-01' -Version '1'
+        $last = Get-TestVulnRow -Id 'synthetic-duplicate' -CveId 'CVE-2026-0001' -SnapshotDate '2026-01-02' -Version '2'
+        $last.DeviceName = 'long-unicode-' + [char]0x6D4B + [char]0x8BD5 + ('x' * 70000)
+        $missingId = Get-TestVulnRow -Id ' ' -CveId 'CVE-2026-0002' -SnapshotDate '2026-01-01' -Version '1'
+        $offboarded = Get-TestVulnRow -Id 'synthetic-offboarded' -CveId 'CVE-2026-0003' -SnapshotDate '2026-01-01' -Version '1'
+        $offboarded.IsOnboarded = $false
+        $lines = @($first, $missingId, $offboarded, $last) | ForEach-Object { $_ | ConvertTo-Json -Depth 20 -Compress }
+        foreach ($compressed in @($false, $true)) {
+            $path = Join-Path $tempRoot $(if ($compressed) { 'input.ndjson.gz' } else { 'input.ndjson' })
+            $text = "`r`n  `n" + ($lines -join "`r`n") # Deliberately no final newline.
+            if ($compressed) {
+                $file = [IO.File]::Create($path)
+                $gzip = [IO.Compression.GZipStream]::new($file, [IO.Compression.CompressionLevel]::Optimal)
+                $writer = [IO.StreamWriter]::new($gzip, [Text.UTF8Encoding]::new($false))
+                try { $writer.Write($text) } finally { $writer.Dispose() }
+            }
+            else { [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false)) }
+            $state = @{ Calls = 0; CheckInterleaving = $true }
+            Set-Item Function:Get-VulnPartitionIndex -Value { param($Id, $PartitionCount) $state.Calls++; & $originalIndex -Id $Id -PartitionCount $PartitionCount }
+            Set-Item Function:Get-VulnCanonicalRowSignature -Value { param($Row) $state.Calls++; & $originalSignature -Row $Row }
+            Set-Item Function:Read-VulnNdjsonLinesFromPath -Value {
+                param($Path)
+                $firstLine = $true
+                & $originalReader -Path $Path | ForEach-Object {
+                    $_
+                    if ($firstLine -and $state.CheckInterleaving) {
+                        Assert-True ($state.Calls -gt 0) 'Expected the first record to be processed before reading the next line.'
+                        $firstLine = $false
+                    }
+                }
+            }
+            $outputRoot = Join-Path $tempRoot "parts-$compressed"
+            $indexes = @(Split-VulnJsonPartition -InputPaths @($path) -OutputRoot $outputRoot -Prefix 'test' -PartitionCount 4 -OnboardedOnly)
+            Assert-True ($indexes.Count -eq 1) 'Expected only onboarded rows with an Id in one partition.'
+            $partitionPath = Get-VulnPartitionFilePath -Root $outputRoot -Prefix 'test' -Index $indexes[0]
+            $state.CheckInterleaving = $false
+            $actualLines = @(Read-VulnNdjsonLinesFromPath -Path $partitionPath)
+            Assert-True ($actualLines.Count -eq 2 -and $actualLines[0] -ceq $lines[0] -and $actualLines[1] -ceq $lines[3]) 'Expected exact row text and input ordering.'
+            $state.Calls = 0; $state.CheckInterleaving = $true
+            $map = Read-VulnPartitionMapFile -Path $path
+            Assert-True ($map.Count -eq 2 -and $map['synthetic-duplicate'].Json -ceq $lines[3]) 'Expected duplicate last-wins behavior and offboarded map rows.'
+            Assert-True ($map['synthetic-duplicate'].VersionStartDate -eq '2026-01-02') 'Expected last duplicate version date.'
+            $state.CheckInterleaving = $false
+            $badPath = Join-Path $tempRoot 'malformed.ndjson'
+            [IO.File]::WriteAllText($badPath, $lines[0] + "`n{malformed")
+            $failure = $null
+            try { Split-VulnJsonPartition -InputPaths @($badPath) -OutputRoot (Join-Path $tempRoot 'bad') -Prefix 'bad' -PartitionCount 4 }
+            catch { $failure = $_ }
+            Assert-True ($null -ne $failure) 'Expected malformed JSON to fail.'
+            # Exclusive opens prove the input and partition writer were disposed on failure.
+            foreach ($ownedPath in @($badPath) + @(Get-ChildItem (Join-Path $tempRoot 'bad') -File | Select-Object -ExpandProperty FullName)) {
+                $handle = [IO.File]::Open($ownedPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                $handle.Dispose()
+            }
+        }
+    }
+    finally {
+        Set-Item Function:Read-VulnNdjsonLinesFromPath -Value $originalReader
+        Set-Item Function:Get-VulnPartitionIndex -Value $originalIndex
+        Set-Item Function:Get-VulnCanonicalRowSignature -Value $originalSignature
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+    }
+}
+
+function Test-CompiledContentStringArrayRoundTrip {
+    [CmdletBinding()]
+    param()
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-string-arrays-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $cases = @(
+            @{ Value = ' synthetic scalar '; Expected = @(' synthetic scalar ') }
+            @{ Value = @('first', $null, '', ' ', ('Unicode-' + [char]0x6D4B + [char]0x8BD5), 'first'); Expected = @('first', '', ' ', ('Unicode-' + [char]0x6D4B + [char]0x8BD5), 'first') }
+            @{ Value = @(); Expected = @() }
+            @{ Value = $null; Expected = @() }
+            @{ Value = ''; Expected = @() }
+            @{ Value = '  '; Expected = @() }
+            @{ Missing = $true; Expected = @() }
+        )
+        $rows = for ($i = 0; $i -lt $cases.Count; $i++) {
+            $row = Get-TestVulnRow -Id "string-array-$i" -CveId "CVE-2026-$i" -SnapshotDate '2026-07-10' -Version '1.0'
+            $row.DeviceId = "synthetic-device-$i"
+            foreach ($field in @('MachineTags', 'DiskPaths', 'RegistryPaths')) {
+                if ($cases[$i].ContainsKey('Missing')) { $row.PSObject.Properties.Remove($field) }
+                else { $row.$field = $cases[$i].Value }
+            }
+            $row
+        }
+        $inputPath = Join-Path $tempRoot 'rows.ndjson.gz'
+        $refPath = Join-Path $tempRoot 'refs.ndjson.gz'
+        $dictionaryPath = Join-Path $tempRoot 'dictionary.json.gz'
+        Write-NdjsonRecordsFile -Path $inputPath -Records $rows
+        Initialize-CompiledVulnContentProjector
+        $count = [DefenderReporting.Store.VulnContentProjector]::Project(@($inputPath), @($refPath), $dictionaryPath)
+        $dictionary = Read-VulnContentDictionary -Path $dictionaryPath
+        $expanded = @(Read-VulnContentRefRows -DictionaryPath $dictionaryPath -RefPaths @($refPath))
+        Assert-True ($count -eq $cases.Count -and $expanded.Count -eq $cases.Count) 'Expected every synthetic row to survive projection and expansion.'
+        for ($i = 0; $i -lt $cases.Count; $i++) {
+            foreach ($entry in @(
+                @{ Actual = $dictionary.deviceProfiles[$i].t; Field = 'MachineTags' }
+                @{ Actual = $dictionary.contentTemplates[$i].dp; Field = 'DiskPaths' }
+                @{ Actual = $dictionary.contentTemplates[$i].rp; Field = 'RegistryPaths' }
+            )) {
+                $actual = ConvertTo-Json -InputObject @($entry.Actual) -Compress
+                $expected = ConvertTo-Json -InputObject @($cases[$i].Expected) -Compress
+                Assert-True ($actual -ceq $expected) "Expected dictionary case $i field $($entry.Field) to preserve array contents."
+            }
+            foreach ($field in @('MachineTags', 'DiskPaths', 'RegistryPaths')) {
+                $actual = ConvertTo-Json -InputObject @($expanded[$i].$field) -Compress
+                $expected = ConvertTo-Json -InputObject @($cases[$i].Expected | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -Compress
+                Assert-True ($actual -ceq $expected) "Expected case $i field $field to round-trip: $expected; got $actual."
+            }
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+    }
+}
+
 function Test-CompiledBoundedContentNormalizationExpandedParity {
     [CmdletBinding()]
     param()
@@ -7649,6 +7777,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-AzureDashboardCandidateEvidenceRejectsIncompletePublication'; SuccessMessage = 'Azure candidate artifact evidence checks passed.' }
     @{ Name = 'Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback'; SuccessMessage = 'Cardinality-aware normalization plan and legacy fallback checks passed.' }
     @{ Name = 'Test-BenchmarkWorkloadProfilesArePinned'; SuccessMessage = 'Versioned benchmark workload profile checks passed.' }
+    @{ Name = 'Test-VulnPartitionStreamingParity'; SuccessMessage = 'Partition streaming interleaving, row/error parity and cleanup checks passed.' }
+    @{ Name = 'Test-CompiledContentStringArrayRoundTrip'; SuccessMessage = 'Compiled content scalar and array round-trip checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationExpandedParity'; SuccessMessage = 'Compiled bounded content normalization expanded-parity checks passed.' }
     @{ Name = 'Test-SyntheticUploadManifestSelectsRawReplayArtifact'; SuccessMessage = 'Synthetic raw replay upload-manifest checks passed.' }
     @{ Name = 'Test-AtomicDashboardExecutableDiscovery'; SuccessMessage = 'Atomic executable discovery duplicate PATH, caller mock, and non-Windows fallback checks passed.' }
