@@ -195,15 +195,7 @@ function Get-HostedSmokeOwnedSnapshot {
     foreach ($item in $all) {
         if ($item.Name -eq 'msedge.exe' -and [HostedSmoke.Capture]::OwnsProfile($item.CommandLine, $ProfilePath)) {
             if ($item.CreationDate -isnot [datetime]) { throw 'Unknown owned identity.' }
-            $records[[int]$item.ProcessId] = [pscustomobject]@{ Pid = [int]$item.ProcessId; Created = $item.CreationDate; RootPid = [int]$item.ProcessId; RootCreated = $item.CreationDate }
-        }
-    }
-    # Preserve accountability for known children after their root exits or its PID is reused.
-    foreach ($previous in $Known) {
-        $item = $byId[$previous.Pid]
-        if ($null -ne $item) {
-            if ($item.CreationDate -isnot [datetime]) { throw 'Unknown owned identity.' }
-            if ($item.CreationDate -eq $previous.Created) { $records[$previous.Pid] = $previous }
+            $records[[int]$item.ProcessId] = [pscustomobject]@{ Pid = [int]$item.ProcessId; Created = $item.CreationDate; RootPid = [int]$item.ProcessId; RootCreated = $item.CreationDate; ParentPid = [int]$item.ParentProcessId }
         }
     }
     do {
@@ -213,29 +205,79 @@ function Get-HostedSmokeOwnedSnapshot {
             if ($null -eq $parent -or $records.ContainsKey([int]$item.ProcessId)) { continue }
             if ($item.CreationDate -isnot [datetime]) { throw 'Unknown owned identity.' }
             if ($parent.Created -le $item.CreationDate) {
-                $records[[int]$item.ProcessId] = [pscustomobject]@{ Pid = [int]$item.ProcessId; Created = $item.CreationDate; RootPid = $parent.RootPid; RootCreated = $parent.RootCreated }
+                $records[[int]$item.ProcessId] = [pscustomobject]@{ Pid = [int]$item.ProcessId; Created = $item.CreationDate; RootPid = $parent.RootPid; RootCreated = $parent.RootCreated; ParentPid = [int]$item.ParentProcessId }
                 $added = $true
             }
         }
     } while ($added)
-    return [pscustomobject]@{ Records = @($records.Values); ById = $byId }
+    # Only current exact-profile roots and their current descendants authorize termination.
+    $terminationRecords = @($records.Values)
+    # Ledger matches are accounting only; callers cannot turn saved identities into kill authority.
+    foreach ($previous in $Known) {
+        $item = $byId[$previous.Pid]
+        if ($null -ne $item) {
+            if ($item.CreationDate -isnot [datetime]) { throw 'Unknown owned identity.' }
+            if ($item.CreationDate -eq $previous.Created -and -not $records.ContainsKey($previous.Pid)) { $records[$previous.Pid] = $previous }
+        }
+    }
+    # Historical identities are accounting evidence, never new termination authority.
+    # Once a known root disappears, snapshots alone cannot rule out late-born descendants.
+    $incomplete = $false
+    $unresolvedCount = 0
+    foreach ($previous in $Known) {
+        $current = $byId[$previous.Pid]
+        if ($previous.Pid -eq $previous.RootPid -and ($null -eq $current -or $current.CreationDate -ne $previous.Created)) { $incomplete = $true }
+        foreach ($item in $all) {
+            if ($records.ContainsKey([int]$item.ProcessId) -or [int]$item.ParentProcessId -ne $previous.Pid) { continue }
+            # A live replacement parent proves its later children are not this identity's children.
+            if ($null -ne $current -and $current.CreationDate -is [datetime] -and $current.CreationDate -ne $previous.Created -and $item.CreationDate -is [datetime] -and $item.CreationDate -ge $current.CreationDate) { continue }
+            if ($item.CreationDate -isnot [datetime] -or $item.CreationDate -ge $previous.Created) { $incomplete = $true; $unresolvedCount++ }
+        }
+    }
+    $history = @{}
+    foreach ($entry in @($Known) + @($records.Values)) { $history[('{0}:{1}' -f $entry.Pid, $entry.Created.ToUniversalTime().Ticks)] = $entry }
+    return [pscustomobject]@{ Records = @($records.Values); TerminationRecords = $terminationRecords; History = @($history.Values); AccountingIncomplete = $incomplete; UnresolvedCount = $unresolvedCount; ById = $byId }
+
 }
 
 function Stop-HostedSmokeProfileProcess {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Only stops freshly verified disposable smoke identities.')]
     [CmdletBinding()]
-    param([string]$ProfilePath, [switch]$AccountingIncomplete)
+    param([string]$ProfilePath, [switch]$AccountingIncomplete, [object]$Ledger)
 
     $failures = [Collections.Generic.List[string]]::new()
     $diagnostics = [Collections.Generic.List[string]]::new()
-    if (-not $IsWindows) { return [pscustomobject]@{ Confirmed = $false; Failures = @('process-enumeration-unsupported'; if ($AccountingIncomplete) { 'process-accounting-incomplete' }); Diagnostics = @() } }
+    $state = [pscustomobject]@{ PSTypeName = 'HostedSmoke.CleanupLedger'; Version = 1; Profile = $ProfilePath; Known = @(); AccountingIncomplete = [bool]$AccountingIncomplete }
     try {
         if (-not [IO.Path]::IsPathFullyQualified($ProfilePath)) { throw 'Invalid profile.' }
-        Initialize-HostedSmokeCapture
-        $snapshot = Get-HostedSmokeOwnedSnapshot -ProfilePath $ProfilePath
+        $state.Profile = [IO.Path]::GetFullPath($ProfilePath.Replace('/', '\')).TrimEnd('\')
+        if ($null -ne $Ledger) {
+            $valid = $Ledger.PSObject.TypeNames -contains 'HostedSmoke.CleanupLedger'
+            foreach ($name in @('Version','Profile','Known','AccountingIncomplete')) { $valid = $valid -and $null -ne $Ledger.PSObject.Properties[$name] }
+            if (-not $valid -or $Ledger.Version -ne 1 -or $Ledger.Known -isnot [array] -or $Ledger.AccountingIncomplete -isnot [bool] -or -not [string]::Equals($Ledger.Profile, $state.Profile, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid cleanup ledger.' }
+            foreach ($entry in $Ledger.Known) {
+                foreach ($name in @('Pid','RootPid','Created','RootCreated','ParentPid')) { if ($null -eq $entry.PSObject.Properties[$name]) { throw 'Invalid cleanup ledger.' } }
+                if ($entry.ParentPid -isnot [int] -or $entry.ParentPid -lt 0 -or $entry.Pid -isnot [int] -or $entry.Pid -le 0 -or $entry.RootPid -isnot [int] -or $entry.RootPid -le 0 -or $entry.Created -isnot [datetime] -or $entry.RootCreated -isnot [datetime]) { throw 'Invalid cleanup ledger.' }
+            }
+            foreach ($entry in $Ledger.Known) {
+                $root = @($Ledger.Known | Where-Object { $_.Pid -eq $entry.RootPid -and $_.Created -eq $entry.RootCreated -and $_.Pid -eq $_.RootPid -and $_.Created -eq $_.RootCreated })
+                if ($root.Count -ne 1 -or $entry.Created -lt $entry.RootCreated) { throw 'Invalid cleanup ledger.' }
+                if ($entry.Pid -ne $entry.RootPid -and @($Ledger.Known | Where-Object { $_.Pid -eq $entry.ParentPid -and $_.Created -le $entry.Created -and $_.RootPid -eq $entry.RootPid -and $_.RootCreated -eq $entry.RootCreated }).Count -eq 0) { throw 'Invalid cleanup ledger.' }
+            }
+            $state = $Ledger
+            $state.AccountingIncomplete = $state.AccountingIncomplete -or [bool]$AccountingIncomplete
+        }
     }
-    catch { return [pscustomobject]@{ Confirmed = $false; Failures = @('process-enumeration-failure'; if ($AccountingIncomplete) { 'process-accounting-incomplete' }); Diagnostics = @() } }
-    $known = $snapshot.Records
+    catch { $state.AccountingIncomplete = $true; return [pscustomobject]@{ Confirmed = $false; Failures = @('process-ledger-invalid','process-accounting-incomplete'); Diagnostics = @(); Ledger = $state } }
+    if (-not $IsWindows) { $state.AccountingIncomplete = $true; return [pscustomobject]@{ Confirmed = $false; Failures = @('process-enumeration-unsupported','process-accounting-incomplete'); Diagnostics = @(); Ledger = $state } }
+    try {
+        Initialize-HostedSmokeCapture
+        $snapshot = Get-HostedSmokeOwnedSnapshot -ProfilePath $ProfilePath -Known $state.Known
+        $state.Known = $snapshot.History
+        $state.AccountingIncomplete = $state.AccountingIncomplete -or $snapshot.AccountingIncomplete
+    }
+    catch { $state.AccountingIncomplete = $true; return [pscustomobject]@{ Confirmed = $false; Failures = @('process-enumeration-failure','process-accounting-incomplete'); Diagnostics = @(); Ledger = $state } }
+    $known = $snapshot.TerminationRecords
     $cleanupClock = [Diagnostics.Stopwatch]::StartNew()
     foreach ($entry in @($known | Sort-Object @{ Expression = { $_.Pid -eq $_.RootPid } }, @{ Expression = 'Created'; Descending = $true })) {
         if ($cleanupClock.ElapsedMilliseconds -ge 5000) { $failures.Add('process-termination-timeout'); break }
@@ -257,6 +299,8 @@ function Stop-HostedSmokeProfileProcess {
                 else { $diagnostics.Add('process-exited-before-termination') }
                 continue
             }
+            $handle = $process.SafeHandle
+            if ($null -eq $handle -or $handle.IsInvalid -or $handle.IsClosed) { throw 'Process handle unavailable.' }
             if ([Math]::Abs($process.StartTime.ToUniversalTime().Ticks - $entry.Created.ToUniversalTime().Ticks) -ge 10000) { $failures.Add('process-identity-unverified'); continue }
             # Kill only this verified handle; tree-kill can race or include unverified descendants.
             try { $process.Kill() }
@@ -284,8 +328,11 @@ function Stop-HostedSmokeProfileProcess {
         do {
             if ($finalSnapshotTaken -and $cleanupClock.ElapsedMilliseconds -ge 5000) { break }
             $finalSnapshotTaken = $true
-            $snapshot = Get-HostedSmokeOwnedSnapshot -ProfilePath $ProfilePath -Known $known
+            $snapshot = Get-HostedSmokeOwnedSnapshot -ProfilePath $ProfilePath -Known $state.Known
             $known = $snapshot.Records
+            $state.Known = $snapshot.History
+            $state.AccountingIncomplete = $state.AccountingIncomplete -or $snapshot.AccountingIncomplete
+            if ($snapshot.UnresolvedCount -gt 0) { $diagnostics.Add('process-descendant-unresolved') }
             if ($known.Count -eq 0) { $confirmed = $true; break }
             $remainingMilliseconds = [int][Math]::Max(0, 5000 - $cleanupClock.ElapsedMilliseconds)
             if ($remainingMilliseconds -eq 0) { break }
@@ -294,8 +341,9 @@ function Stop-HostedSmokeProfileProcess {
         if (-not $confirmed) { $failures.Add('owned-process-remains') }
     }
     catch { $failures.Add('process-verification-failure') }
-    if ($AccountingIncomplete) { $confirmed = $false; $failures.Add('process-accounting-incomplete') }
-    return [pscustomobject]@{ Confirmed = $confirmed; Failures = @($failures | Select-Object -Unique); Diagnostics = @($diagnostics | Select-Object -Unique) }
+    $state.AccountingIncomplete = $state.AccountingIncomplete -or $failures.Count -gt 0
+    if ($state.AccountingIncomplete) { $confirmed = $false; $failures.Add('process-accounting-incomplete') }
+    return [pscustomobject]@{ Confirmed = $confirmed; Failures = @($failures | Select-Object -Unique); Diagnostics = @($diagnostics | Select-Object -Unique); Ledger = $state }
 }
 
 function Invoke-HostedSmokeAttempt {

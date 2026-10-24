@@ -15,7 +15,7 @@ function safeInventoryDiagnostic(value = {}) {
     const categories = ['timeout', 'aborted', 'execution', 'response', 'InvalidOperation', 'InvalidArgument', 'InvalidData', 'OperationStopped', 'WriteError', 'ObjectNotFound', 'PermissionDenied', 'SecurityError', 'ResourceUnavailable', 'NotSpecified'];
     const types = ['RuntimeException', 'CimException', 'MethodInvocationException', 'PSInvalidOperationException', 'SessionStateUnauthorizedAccessException', 'UnauthorizedAccessException', 'InvalidOperationException', 'ArgumentException', 'Win32Exception'];
     const phases = ['execute', 'compile', 'cim', 'selection', 'memory', 'termination', 'response'];
-    const steps = ['fresh-cim', 'fresh-identity', 'fresh-process-identity', 'fresh-root-identity', 'get-process', 'start-identity', 'kill', 'kill-exit-check', 'wait-exit'];
+    const steps = ['fresh-cim', 'fresh-identity', 'fresh-process-identity', 'fresh-root-identity', 'get-process', 'start-identity', 'handle-open', 'kill', 'kill-exit-check', 'wait-exit', 'dispose'];
     return {
         category: categories.includes(value.category) ? value.category : 'execution',
         exceptionType: types.includes(value.exceptionType) ? value.exceptionType : 'unclassified',
@@ -333,8 +333,12 @@ $records = @($owned | ForEach-Object {
     @{ pid = [int]$_.ProcessId; created = (Get-Created $_); rootPid = $source.rootPid; rootCreated = $source.rootCreated }
 })
 $processes = @()
+$processObjects = @()
+$terminationFailure = $null
+$disposeFailure = $null
 $skipped = @{ processIdentity = 0; rootCommandLine = 0; rootCreationDate = 0 }
 $terminationOrder = @($owned | Sort-Object { $_.ProcessId -eq $provenance[[int]$_.ProcessId].rootPid })
+try {
 foreach ($item in $terminationOrder) {
     $issue70Step = 'fresh-cim'
     $fresh = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($item.ProcessId) OR ProcessId=$($provenance[[int]$item.ProcessId].rootPid)" -ErrorAction Stop)
@@ -352,6 +356,12 @@ foreach ($item in $terminationOrder) {
     if ($current.Count -ne 1 -or ($root.Count -gt 0 -and ($root[0].CreationDate.ToUniversalTime().Ticks.ToString() -ne $source.rootCreated -or -not (Test-OwnedRoot $root[0])))) { continue }
     $issue70Step = 'get-process'
     $process = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
+    if ($process) {
+        $processObjects += $process
+        $issue70Step = 'handle-open'
+        $handle = $process.SafeHandle
+        if ($null -eq $handle -or $handle.IsInvalid -or $handle.IsClosed) { throw 'Process handle unavailable.' }
+    }
     $issue70Step = 'start-identity'
     if ($process -and [Math]::Abs($process.StartTime.ToUniversalTime().Ticks - $item.CreationDate.ToUniversalTime().Ticks) -lt 10000) {
         $issue70Step = 'kill'
@@ -364,6 +374,13 @@ foreach ($process in $processes) {
     $issue70Step = 'wait-exit'
     $remaining = [Math]::Max(0, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
     if (-not $process.WaitForExit($remaining)) { throw 'Owned Edge did not exit.' }
+}
+} catch { $terminationFailure = $_; throw }
+finally {
+    foreach ($processObject in $processObjects) {
+        try { $processObject.Dispose() } catch { if ($null -eq $disposeFailure) { $disposeFailure = $_ } }
+    }
+    if ($null -ne $disposeFailure -and $null -eq $terminationFailure) { $issue70Step = 'dispose'; throw $disposeFailure }
 }
 @{ stoppedCount = $processes.Count; skippedUnverified = $skipped; records = $records } | ConvertTo-Json -Compress -Depth 4
 `, environment(), 12000);
@@ -929,9 +946,10 @@ function Get-Process {
     if ($env:ISSUE70_REUSE -eq 'memory-open-forbidden') { throw 'Inventory must not reopen processes.' }
     $item = $script:items | Where-Object { $_.ProcessId -eq $Id }
     if (-not $item) { return }
-    $process = [pscustomobject]@{ Id=$Id; StartTime=$item.CreationDate; PrivateMemorySize64=1; HasExited=$false }
+    $process = [pscustomobject]@{ Id=$Id; StartTime=$item.CreationDate; PrivateMemorySize64=1; HasExited=$false; SafeHandle=[pscustomobject]@{IsInvalid=$false;IsClosed=$false} }
     $process | Add-Member ScriptMethod Kill { if ($env:ISSUE70_REUSE -eq 'kill-failure') { throw [ComponentModel.Win32Exception]::new(87) }; $script:killed += $this.Id; $this.HasExited=$true }
     $process | Add-Member ScriptMethod WaitForExit { param($remaining); return $true }
+    $process | Add-Member ScriptMethod Dispose { }
     $process
 }
 `;
@@ -1011,7 +1029,62 @@ function Get-Process {
         items[0].CommandLine = null;
         await assert.rejects(protectedRoot.inventory(), error => error.inventoryDiagnostic?.exceptionType === 'RuntimeException');
     }
+    await handleBindingProbes();
     console.log('PASS actual PowerShell argv/profile selection, literal/duplicate/prefix exclusion, independent snapshots, descendants-before-root shutdown race, unexpected native kill rejection, same-profile/fresh root PID reuse, nullable unrelated/PID-zero exclusion, unknown owned root fail-closed.');
+}
+
+async function handleBindingProbes() {
+    const fixture = `
+$script:operations = @(); $script:disposed = 0; $script:wrongKills = 0
+$script:created = [datetime]'2026-01-01T00:00:00Z'
+$script:items = @([pscustomobject]@{Name='msedge.exe';ProcessId=101;ParentProcessId=0;CreationDate=$script:created;CommandLine=('msedge.exe --user-data-dir="'+$env:ISSUE70_PROFILE+'"');WorkingSetSize=1;PrivatePageCount=1})
+function Get-CimInstance { param($ClassName,$Filter,$Property,$ErrorAction) $script:items }
+function Get-Process {
+ param($Id,$ErrorAction)
+ $p=[pscustomobject]@{Id=$Id;Pinned=$false;BoundCreated=$script:created;HasExited=$false}
+ $p|Add-Member ScriptProperty SafeHandle {
+  $script:operations+='open'
+  if($env:HANDLE_CASE-eq'open-failure'){throw [ComponentModel.Win32Exception]::new(5)}
+  if($env:HANDLE_CASE-eq'reuse-before-open'){$this.BoundCreated=$this.BoundCreated.AddHours(1)}
+  $this.Pinned=$true
+  [pscustomobject]@{IsInvalid=($env:HANDLE_CASE-eq'invalid');IsClosed=($env:HANDLE_CASE-eq'closed')}
+ }
+ $p|Add-Member ScriptProperty StartTime {
+  $script:operations+='start'
+  if($env:HANDLE_CASE-eq'reuse-after-start'){$script:items=@([pscustomobject]@{Name='unrelated.exe';ProcessId=101;ParentProcessId=0;CreationDate=$script:created.AddHours(1);CommandLine='unrelated';WorkingSetSize=1;PrivatePageCount=1});$this.HasExited=$true}
+  $this.BoundCreated
+ }
+ $p|Add-Member ScriptMethod Kill {
+  $script:operations+='kill'
+  if(-not $this.Pinned){$script:wrongKills++}
+  if($env:HANDLE_CASE-eq'kill-failure'){throw [ComponentModel.Win32Exception]::new(87)}
+  $this.HasExited=$true
+ }
+ $p|Add-Member ScriptMethod WaitForExit {param($remaining) $script:operations+='wait';$env:HANDLE_CASE-ne'wait-failure'}
+ $p|Add-Member ScriptMethod Dispose {$script:operations+='dispose';$script:disposed++;if($env:HANDLE_CASE-eq'dispose-failure'){throw 'Synthetic disposal failure'}}
+ $p
+}
+`;
+    for (const mode of ['success', 'reuse-after-start', 'reuse-before-open', 'open-failure', 'invalid', 'closed', 'kill-failure', 'wait-failure', 'dispose-failure']) {
+        let last;
+        const execute = async (script, environment, timeout) => {
+            last = await powershell(fixture + '\n$failed=$false; $value=$null; try { $text=. {\n' + script + '\n}; $value=$text|ConvertFrom-Json } catch {$failed=$true}\n@{failed=$failed;value=$value;operations=@($script:operations);disposed=$script:disposed;wrongKills=$script:wrongKills;step=$issue70Step}|ConvertTo-Json -Compress -Depth 8', {...environment,HANDLE_CASE:mode}, timeout || 12000);
+            if (last.failed) { const error = new Error('Owned process inventory/termination failed.'); error.inventoryDiagnostic=safeInventoryDiagnostic({phase:'termination',step:last.step}); throw error; }
+            return last.value;
+        };
+        const owned=ownedProcesses('C:/issue70-handle-owned',execute);
+        const fails=['open-failure','invalid','closed','kill-failure','wait-failure','dispose-failure'].includes(mode);
+        if(fails)await assert.rejects(owned.terminate());else await owned.terminate();
+        assert.strictEqual(last.disposed,1,`Process disposal count: ${mode}`);
+        assert.strictEqual(last.wrongKills,0,`Unpinned replacement kill: ${mode}`);
+        const ops=last.operations;
+        assert.strictEqual(ops[0],'open');
+        if(['open-failure','invalid','closed'].includes(mode))assert.deepStrictEqual(ops,['open','dispose']);
+        if(mode==='reuse-after-start')assert(ops.indexOf('open')<ops.indexOf('start')&&ops.indexOf('start')<ops.indexOf('kill'));
+        if(mode==='reuse-before-open')assert(!ops.includes('kill')&&!ops.includes('wait'));
+        if(fails)await assert.rejects(owned.inventory(),/accounting is incomplete/);
+    }
+    console.log('PASS retained-handle binding before StartTime, post-validation PID reuse, handle failures and exact-once disposal');
 }
 
 async function cleanupAccountingProbes() {
@@ -1037,9 +1110,10 @@ function Get-Process {
     $script:handles += $Id
     $item = $script:items | Where-Object ProcessId -eq $Id
     if (-not $item) { return }
-    $process = [pscustomobject]@{ Id=$Id; StartTime=$item.CreationDate; PrivateMemorySize64=1; HasExited=$false }
+    $process = [pscustomobject]@{ Id=$Id; StartTime=$item.CreationDate; PrivateMemorySize64=1; HasExited=$false; SafeHandle=[pscustomobject]@{IsInvalid=$false;IsClosed=$false} }
     $process | Add-Member ScriptMethod Kill { $script:killed += $this.Id; $this.HasExited=$true }
     $process | Add-Member ScriptMethod WaitForExit { param($remaining); return $true }
+    $process | Add-Member ScriptMethod Dispose { }
     $process
 }
 `;
