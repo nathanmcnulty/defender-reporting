@@ -1,4 +1,4 @@
-﻿#Requires -Version 7.0
+#Requires -Version 7.0
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Cleanup cmdlet mocks preserve the actual production parameter bindings.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Cleanup mocks only record calls and throw synthetic failures; they do not mutate external state.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Variables are consumed by the actual AST-extracted finally and post-cleanup check.')]
@@ -66,15 +66,18 @@ Opening in existing browser session.
     $mainTry = $smokeAst.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] } | Select-Object -Last 1
     $finallyText = $mainTry.Finally.Extent.Text
     $postCleanupCheck = ($smokeAst.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.IfStatementAst] -and $_.Extent.StartOffset -gt $mainTry.Extent.EndOffset } | Select-Object -First 1).Extent.Text
-    $processCases = if ($IsWindows) { @('cim', 'termination') } else { @('unsupported') }
+    $processCases = if ($IsWindows) { @('cim', 'termination', 'retained-profile') } else { @('unsupported') }
     foreach ($case in @('helper-throw', 'server-profile', 'provider', 'provider-primary', 'unrelated') + $processCases) {
         & {
             $profilePath = Join-Path $tempRoot 'PRIVATE_PROFILE_SECRET'
             $smokeRoot = Join-Path $tempRoot 'PRIVATE_SITE_SECRET'
             $diagnosticRunPath = Join-Path $tempRoot 'PRIVATE_DIAGNOSTICS_SECRET\missing'
             $serverJob = 'synthetic-job'
-            $primaryFailure = $case -in @('helper-throw', 'unsupported', 'cim', 'termination', 'server-profile', 'provider-primary')
+            $primaryFailure = $case -in @('helper-throw', 'unsupported', 'cim', 'termination', 'server-profile', 'provider-primary', 'retained-profile')
             $priorCleanupFailures = @()
+            $priorCleanupDiagnostics = @()
+            $canaryResult = $null
+            $dashboardResult = $null
             $outcome = if ($primaryFailure) { 'dashboard-probe-failure' } else { 'passed' }
             $setupPhase = 'dashboard-capture'
             $failureClass = if ($primaryFailure) { 'runtime' } else { $null }
@@ -86,15 +89,15 @@ Opening in existing browser session.
             $retained = [Collections.Generic.List[object]]::new()
             if ($case -eq 'helper-throw') {
                 function Stop-HostedSmokeProfileProcess {
-                    [CmdletBinding()] param($ProfilePath)
+                    [CmdletBinding()] param($ProfilePath, [switch]$AccountingIncomplete)
                     throw 'PRIVATE_HELPER_SECRET C:\PRIVATE_PATH_SECRET'
                 }
             }
             function Get-CimInstance {
                 [CmdletBinding()] param($ClassName, $Filter)
                 $calls.Add('process-enumeration')
-                if ($case -eq 'cim') { throw 'PRIVATE_CIM_SECRET C:\PRIVATE_PATH_SECRET' }
-                if ($case -eq 'termination') { [pscustomobject]@{ CommandLine = $profilePath; ProcessId = -1 } }
+                if ($case -in @('cim','retained-profile')) { throw 'PRIVATE_CIM_SECRET C:\PRIVATE_PATH_SECRET' }
+                if ($case -eq 'termination') { [pscustomobject]@{ Name = 'msedge.exe'; CommandLine = ('msedge.exe --user-data-dir="' + $profilePath + '"'); ProcessId = 2147483000; ParentProcessId = 0; CreationDate = [datetime]'2026-01-01T00:00:00Z' } }
             }
             function Stop-Job {
                 [CmdletBinding()] param($Job)
@@ -106,7 +109,7 @@ Opening in existing browser session.
             function Test-Path {
                 [CmdletBinding()] param($LiteralPath)
                 $calls.Add($LiteralPath)
-                return $case -eq 'server-profile' -and $LiteralPath -eq $profilePath
+                return $case -in @('server-profile','retained-profile') -and $LiteralPath -eq $profilePath
             }
             function Remove-Item {
                 [CmdletBinding()] param($LiteralPath, [switch]$Recurse, [switch]$Force)
@@ -147,11 +150,13 @@ Opening in existing browser session.
             }
             else {
                 Assert-SmokeDiagnostic ($retained.Count -eq 1 -and $retained[0].outcome -eq 'cleanup-failure' -and $retained[0].originalOutcome -eq 'dashboard-probe-failure') 'Cleanup result/original outcome missing.'
-                if ($case -in @('helper-throw', 'unsupported', 'cim', 'termination')) { Assert-SmokeDiagnostic (-not $retained[0].processCleanupConfirmed) 'Unknown/remaining owned processes falsely confirmed clean.' }
+                Assert-SmokeDiagnostic (@($retained[0].cleanupFailures | Where-Object { [string]::IsNullOrEmpty($_) }).Count -eq 0) 'Cleanup failure codes must be nonempty fixed strings.'
+                if ($case -in @('helper-throw', 'unsupported', 'cim', 'termination', 'retained-profile')) { Assert-SmokeDiagnostic (-not $retained[0].processCleanupConfirmed) 'Unknown/remaining owned processes falsely confirmed clean.' }
                 if ($case -eq 'unsupported') { Assert-SmokeDiagnostic (-not $calls.Contains('process-enumeration')) 'Unsupported platform must not enumerate Windows processes.' }
-                if ($case -in @('cim', 'termination')) { Assert-SmokeDiagnostic ($calls.Contains('process-enumeration')) 'Windows cleanup must exercise actual helper enumeration.' }
-                $expectedCode = switch ($case) { 'helper-throw' { 'process-cleanup-failure' } 'unsupported' { 'process-enumeration-unsupported' } 'cim' { 'process-enumeration-failure' } 'termination' { 'process-termination-failure' } 'server-profile' { 'profile-removal-failure' } }
-                Assert-SmokeDiagnostic ($retained[0].cleanupFailures -contains $expectedCode) 'Fixed cleanup failure code missing.'
+                if ($case -in @('cim', 'termination', 'retained-profile')) { Assert-SmokeDiagnostic ($calls.Contains('process-enumeration')) 'Windows cleanup must exercise actual helper enumeration.' }
+                if ($case -eq 'retained-profile') { Assert-SmokeDiagnostic (-not $calls.Contains('profile-remove') -and -not $retained[0].profileRemoved -and $retained[0].cleanupFailures -contains 'profile-retained-unconfirmed-cleanup') 'Unconfirmed cleanup deleted the profile.' }
+                $expectedCode = switch ($case) { 'retained-profile' { 'process-enumeration-failure' } 'helper-throw' { 'process-cleanup-failure' } 'unsupported' { 'process-enumeration-unsupported' } 'cim' { 'process-enumeration-failure' } 'termination' { 'process-identity-unverified' } 'server-profile' { 'profile-removal-failure' } }
+                Assert-SmokeDiagnostic ($retained[0].cleanupFailures -contains $expectedCode) "Fixed cleanup failure code missing: $case expected $expectedCode."
             }
         }
     }
@@ -181,6 +186,7 @@ Opening in existing browser session.
         }
     }
 
+    & (Join-Path $PSScriptRoot 'Invoke-HostedSmokeOwnershipRegression.ps1')
     Initialize-HostedSmokeCapture
     $pwshPath = (Get-Process -Id $PID).Path
     $capture = [HostedSmoke.Capture]::Run($pwshPath, @('-NoProfile', '-File', $PSCommandPath, '-CaptureChild', '-EchoArgument', $tempRoot), 10000)

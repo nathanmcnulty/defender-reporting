@@ -222,6 +222,7 @@ $setupPhase = 'temporary-directories'
 $failureClass = $null
 $failureLine = $null
 $priorCleanupFailures = @()
+$priorCleanupDiagnostics = @()
 $inputDashboardPath = $DashboardPath
 
 try {
@@ -578,7 +579,8 @@ try {
     $canaryArguments = @($edgeArguments[0..($edgeArguments.Count - 2)]) + @("http://127.0.0.1:$Port/canary.html")
     $setupPhase = 'canary-capture'
     $canaryResult = Invoke-HostedSmokeAttempt -Executable $edgeExecutablePath -Arguments $canaryArguments -WaitMilliseconds $waitMilliseconds -Kind canary -RunPath $diagnosticRunPath
-    $canaryCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath
+    $canaryCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath -AccountingIncomplete:([bool]$canaryResult.drainIncomplete)
+    $priorCleanupDiagnostics = @($canaryCleanup.Diagnostics)
     if (-not $canaryCleanup.Confirmed -or $canaryCleanup.Failures.Count -gt 0) {
         $priorCleanupFailures = @($canaryCleanup.Failures)
         $outcome = 'cleanup-failure'
@@ -607,10 +609,14 @@ finally {
     $originalOutcome = $outcome
     $cleanupFailures = [Collections.Generic.List[string]]::new()
     foreach ($code in $priorCleanupFailures) { $cleanupFailures.Add($code) }
+    $cleanupDiagnostics = [Collections.Generic.List[string]]::new()
+    foreach ($code in $priorCleanupDiagnostics) { $cleanupDiagnostics.Add($code) }
     $processCleanupConfirmed = $false
     try {
-        $processCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath
+        $accountingIncomplete = ($null -ne $canaryResult -and $canaryResult.drainIncomplete) -or ($null -ne $dashboardResult -and $dashboardResult.drainIncomplete)
+        $processCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath -AccountingIncomplete:$accountingIncomplete
         $processCleanupConfirmed = $processCleanup.Confirmed
+        foreach ($code in $processCleanup.Diagnostics) { $cleanupDiagnostics.Add($code) }
         foreach ($code in $processCleanup.Failures) { $cleanupFailures.Add($code) }
     }
     catch { $cleanupFailures.Add('process-cleanup-failure') }
@@ -622,9 +628,9 @@ finally {
     }
     $profileRemoved = $false
     try {
-        if (Test-Path -LiteralPath $profilePath -ErrorAction Stop) { Remove-Item -LiteralPath $profilePath -Recurse -Force -ErrorAction Stop }
+        if ($processCleanupConfirmed -and (Test-Path -LiteralPath $profilePath -ErrorAction Stop)) { Remove-Item -LiteralPath $profilePath -Recurse -Force -ErrorAction Stop }
         $profileRemoved = -not (Test-Path -LiteralPath $profilePath -ErrorAction Stop)
-        if (-not $profileRemoved) { $cleanupFailures.Add('profile-remains') }
+        if (-not $profileRemoved) { $cleanupFailures.Add($(if ($processCleanupConfirmed) { 'profile-remains' } else { 'profile-retained-unconfirmed-cleanup' })) }
     }
     catch { $cleanupFailures.Add('profile-removal-failure') }
     $temporarySiteRemoved = $false
@@ -647,7 +653,8 @@ finally {
             processCleanupConfirmed = $processCleanupConfirmed
             profileRemoved = $profileRemoved
             temporarySiteRemoved = $temporarySiteRemoved
-            cleanupFailures = $cleanupFailures.ToArray()
+            cleanupFailures = @($cleanupFailures | Select-Object -Unique)
+            cleanupDiagnostics = @($cleanupDiagnostics | Select-Object -Unique)
         } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $diagnosticRunPath 'run.json') -Encoding utf8 -ErrorAction Stop
     }
     catch {
