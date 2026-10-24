@@ -305,9 +305,10 @@ foreach ($item in $owned) {
         return result;
     };
     const terminate = async () => {
-        await execute(selection + `
+        return execute(selection + `
     $issue70Phase = 'termination'
 $processes = @()
+$skipped = @{ processIdentity = 0; rootCommandLine = 0; rootCreationDate = 0 }
 $terminationOrder = @($owned | Sort-Object { $_.ProcessId -eq $provenance[[int]$_.ProcessId].rootPid })
 foreach ($item in $terminationOrder) {
     $issue70Step = 'fresh-cim'
@@ -317,8 +318,12 @@ foreach ($item in $terminationOrder) {
     $source = $provenance[[int]$item.ProcessId]
     $root = @($fresh | Where-Object { $_.ProcessId -eq $source.rootPid })
     $candidate = @($fresh | Where-Object { $_.ProcessId -eq $item.ProcessId })
-    if ($candidate.Count -gt 0 -and $null -eq $candidate[0].CreationDate) { $issue70Step = 'fresh-process-identity'; throw 'Unknown fresh process identity.' }
-    if ($root.Count -gt 0 -and (-not $root[0].CommandLine -or $null -eq $root[0].CreationDate)) { $issue70Step = 'fresh-root-identity'; throw 'Unknown fresh root identity.' }
+    if ($candidate.Count -gt 0 -and $null -eq $candidate[0].CreationDate) { $skipped.processIdentity++; continue }
+    if ($root.Count -gt 0 -and (-not $root[0].CommandLine -or $null -eq $root[0].CreationDate)) {
+        if (-not $root[0].CommandLine) { $skipped.rootCommandLine++ }
+        if ($null -eq $root[0].CreationDate) { $skipped.rootCreationDate++ }
+        continue
+    }
     if ($current.Count -ne 1 -or ($root.Count -gt 0 -and ($root[0].CreationDate.ToUniversalTime().Ticks.ToString() -ne $source.rootCreated -or -not (Test-OwnedRoot $root[0])))) { continue }
     $issue70Step = 'get-process'
     $process = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
@@ -335,7 +340,7 @@ foreach ($process in $processes) {
     $remaining = [Math]::Max(0, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
     if (-not $process.WaitForExit($remaining)) { throw 'Owned Edge did not exit.' }
 }
-@{ stoppedCount = $processes.Count } | ConvertTo-Json -Compress
+@{ stoppedCount = $processes.Count; skippedUnverified = $skipped } | ConvertTo-Json -Compress
 `, environment(), 12000);
     };
     return { inventory, terminate, setLauncher(pid) { assert(Number.isSafeInteger(pid) && pid > 0); launcherPid = pid; } };
@@ -366,7 +371,18 @@ async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit,
         }
     };
     await attempt('Guard stop', () => guard?.stop(), 15000);
-    await attempt('Owned family termination', () => owned?.terminate(), 15000);
+    await attempt('Owned family termination', async () => {
+        const termination = await owned?.terminate();
+        if (termination) {
+            assert(Number.isSafeInteger(termination.stoppedCount) && termination.stoppedCount >= 0, 'Invalid stopped count.');
+            result.termination = { stoppedCount: termination.stoppedCount, skippedUnverified: {} };
+            for (const key of ['processIdentity', 'rootCommandLine', 'rootCreationDate']) {
+                const count = termination.skippedUnverified?.[key];
+                assert(Number.isSafeInteger(count) && count >= 0, 'Invalid skipped identity count.');
+                result.termination.skippedUnverified[key] = count;
+            }
+        }
+    }, 15000);
     await attempt('Spawned family termination', () => (overrides.terminateSpawned || terminateSpawned)(launcher, launcherExit));
     await attempt('Launcher exit', async () => {
         if (launcherExit) await launcherExit;
@@ -855,15 +871,20 @@ $script:items = @($env:ISSUE70_FIXTURE | ConvertFrom-Json | ForEach-Object {
     $_
 })
 function Get-CimInstance {
+    param($ClassName, $Filter, $ErrorAction)
     $script:calls++
     if ($env:ISSUE70_REUSE -eq 'gone' -and $script:calls -gt 1) { return }
-    if ($env:ISSUE70_REUSE -eq 'unknown' -and $script:calls -gt 1) { $script:items[0].CommandLine = $null }
+    if ($env:ISSUE70_REUSE -eq 'unknown') { $script:items[0].CommandLine = $null }
     if ($env:ISSUE70_REUSE -eq 'root-shutdown' -and 101 -in $script:killed) { $script:items[0].CommandLine = $null }
     if ($env:ISSUE70_REUSE -eq 'fresh' -and $script:calls -gt 1) {
         $script:items[0].CreationDate = $script:items[0].CreationDate.AddMinutes(1)
         $script:items[0].CommandLine = 'msedge.exe --user-data-dir=C:/neighbor'
     }
-    $script:items | Select-Object *
+    $copy = @($script:items | Select-Object *)
+    if ($Filter -and $env:ISSUE70_REUSE -eq 'fresh-root-command') { $copy[0].CommandLine = $null }
+    if ($Filter -and $env:ISSUE70_REUSE -eq 'fresh-root-created') { $copy[0].CreationDate = $null }
+    if ($Filter -and $env:ISSUE70_REUSE -eq 'fresh-child-created') { $copy[1].CreationDate = $null }
+    $copy
 }
 function Get-Process {
     param($Id, $ErrorAction)
@@ -906,6 +927,14 @@ function Get-Process {
         reuse = 'gone';
         await owned.terminate();
         assert.deepStrictEqual(last.killed, []);
+        for (const [mode, category] of [['fresh-root-command', 'rootCommandLine'], ['fresh-root-created', 'rootCreationDate'], ['fresh-child-created', 'processIdentity']]) {
+            reuse = mode;
+            const receipt = await owned.terminate();
+            assert(receipt.skippedUnverified[category] > 0, mode);
+            assert(!last.killed.includes(102), 'A child with unverified fresh identity must never be killed.');
+            if (mode !== 'fresh-child-created') assert.deepStrictEqual(last.killed, [], 'No kill without fresh root identity.');
+            assert(!JSON.stringify(receipt).includes(profile), 'Termination receipt must contain counters only.');
+        }
         reuse = 'unknown';
         await assert.rejects(owned.terminate(), error => error.inventoryDiagnostic?.category === 'OperationStopped' && error.inventoryDiagnostic?.exceptionType === 'RuntimeException' && error.inventoryDiagnostic?.exitCode === 1);
         reuse = 'kill-failure';
@@ -1153,6 +1182,18 @@ async function mockProbes() {
     assert.strictEqual(independent.remainingOwned, 1);
     assert.deepStrictEqual(familyActions, ['kill', 'spawned-kill', 'browser', 'reinventory']);
     assert(independent.errors.includes('Final owned inventory'));
+    const skipReceipt = { stoppedCount: 0, skippedUnverified: { processIdentity: 0, rootCommandLine: 2, rootCreationDate: 0 } };
+    for (const survivors of [[123], []]) {
+        const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'issue70-skip-'));
+        try {
+            const cleanup = await cleanupOwned({ profile, owned: { terminate: async () => skipReceipt, inventory: async () => ({ pids: survivors }) } });
+            assert.deepStrictEqual(cleanup.termination, skipReceipt);
+            assert.strictEqual(cleanup.remainingOwned, survivors.length);
+            assert.strictEqual(cleanup.profileExists, survivors.length > 0);
+            if (survivors.length) assert(cleanup.errors.includes('Final owned inventory'));
+            else assert.deepStrictEqual(cleanup.errors, []);
+        } finally { fs.rmSync(profile, { recursive: true, force: true }); }
+    }
     const uncached = { ...valid, snapshot: { ...valid.snapshot, rows: 500000, rawRows: 500000 }, cachePolicy: { ...valid.cachePolicy, eligible: false }, cacheEntries: { count: 0, matchingRows: 0 } };
     assertRun(uncached, 500000);
     assert.strictEqual(uncached.cachedEligible, false);
