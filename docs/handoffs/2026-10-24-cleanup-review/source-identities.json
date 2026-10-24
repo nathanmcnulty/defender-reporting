@@ -1,0 +1,53 @@
+{
+  "repository": "nathanmcnulty/defender-reporting",
+  "reviewed_branch": "fix/issue-70-reviewed-cleanup-20261023",
+  "revisions": {
+    "baseline": "f341fdd2cf634451a909b69da5ee636dba02fb9f",
+    "parent": "63bf26ad27a274cd84aefc47f1f0779b4d397956",
+    "head": "5fdd5de9a2b0a048dea1235313472d4e5041c7b2"
+  },
+  "files": [
+    {
+      "ref": "f341fdd2cf634451a909b69da5ee636dba02fb9f",
+      "path": "tests/Measure-DashboardWorkerTransfer.js",
+      "git_blob": "fe92445d8bfb46fde700cb7574167a70928fe042",
+      "sha256": "ea5ee1eba7f77dd23fcbaafc632ddad5042685147f8f4d239fc63fe841d4fdc0",
+      "bytes": 74425
+    },
+    {
+      "ref": "f341fdd2cf634451a909b69da5ee636dba02fb9f",
+      "path": "tests/README.md",
+      "git_blob": "f42b71303063174bdb93569e87aa26419010fdc8",
+      "sha256": "c7d099ba66304d90c2db1c990c2b94a9a42cd679255e2619f010e0cee7f80efe",
+      "bytes": 41677
+    },
+    {
+      "ref": "63bf26ad27a274cd84aefc47f1f0779b4d397956",
+      "path": "tests/Measure-DashboardWorkerTransfer.js",
+      "git_blob": "39736064c0af726063eb22f1a6be9c2133b4dd29",
+      "sha256": "53943bd0b2afc877670ed3d057365e2bee56291f8ffca8798e1cc638d120f6e6",
+      "bytes": 77784
+    },
+    {
+      "ref": "63bf26ad27a274cd84aefc47f1f0779b4d397956",
+      "path": "tests/README.md",
+      "git_blob": "6ee7f95e60d0c9b625641ad797836f8a1bc6c336",
+      "sha256": "951663cce85d9e83429f070a795389ece13e53dfd06ad5791bc317e82044bfbd",
+      "bytes": 41805
+    },
+    {
+      "ref": "5fdd5de9a2b0a048dea1235313472d4e5041c7b2",
+      "path": "tests/Measure-DashboardWorkerTransfer.js",
+      "git_blob": "4f84acfe1b2df36f4719c449233175746596aa9b",
+      "sha256": "1a82b09fa1a902ab5859ec19711d676e9e7cab471dc81f268c442c79580e01c9",
+      "bytes": 80503
+    },
+    {
+      "ref": "5fdd5de9a2b0a048dea1235313472d4e5041c7b2",
+      "path": "tests/README.md",
+      "git_blob": "646e2fcfa0d4c779aefb1b95e90d5c0ab48d56e3",
+      "sha256": "7ac35d063a0241831fe26fa9c0ce9a5dffe321ff9dfeaf4f61d77624a28f8621",
+      "bytes": 41739
+    }
+  ]
+}

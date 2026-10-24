@@ -1,0 +1,370 @@
+{
+  "scope": "Offline synthetic review diagnostic on Linux PowerShell 7.6.6 and Node 24.19.0; native process APIs/root matching mocked. Exit zero confirms defect reproduction, not cleanup acceptance.",
+  "results": [
+    {
+      "revision": "parent",
+      "mode": "new-child-orphan",
+      "cleanup": {
+        "remainingOwned": 2,
+        "profileExists": true,
+        "errors": [
+          "Owned family termination",
+          "Final owned inventory",
+          "Profile removal"
+        ],
+        "diagnostics": [
+          {
+            "label": "Owned family termination",
+            "elapsedMs": 652,
+            "code": "unclassified"
+          },
+          {
+            "label": "Final owned inventory",
+            "elapsedMs": 635,
+            "code": "unclassified"
+          },
+          {
+            "label": "Profile removal",
+            "elapsedMs": 0,
+            "code": "unclassified"
+          }
+        ]
+      },
+      "liveSyntheticPids": [
+        101,
+        102
+      ],
+      "trace": [
+        {
+          "phase": "inventory",
+          "result": {
+            "pids": [
+              101
+            ],
+            "privateBytes": 1,
+            "records": [
+              {
+                "rootPid": 101,
+                "created": "639283968000000000",
+                "rootCreated": "639283968000000000",
+                "pid": 101
+              }
+            ],
+            "bytes": 1
+          },
+          "killed": [],
+          "liveSyntheticPids": [
+            101
+          ]
+        },
+        {
+          "phase": "termination",
+          "failure": "Unknown fresh process identity.",
+          "killed": [],
+          "liveSyntheticPids": [
+            101,
+            102
+          ]
+        },
+        {
+          "phase": "inventory",
+          "result": {
+            "records": [
+              {
+                "created": "639283968000000000",
+                "rootCreated": "639283968000000000",
+                "rootPid": 101,
+                "pid": 101
+              },
+              {
+                "created": "639283968600000000",
+                "rootCreated": "639283968000000000",
+                "rootPid": 101,
+                "pid": 102
+              }
+            ],
+            "pids": [
+              101,
+              102
+            ],
+            "bytes": 2,
+            "privateBytes": 2
+          },
+          "killed": [],
+          "liveSyntheticPids": [
+            101,
+            102
+          ]
+        }
+      ],
+      "sourceCommit": "63bf26ad27a274cd84aefc47f1f0779b4d397956"
+    },
+    {
+      "revision": "head",
+      "mode": "new-child-orphan",
+      "cleanup": {
+        "remainingOwned": 0,
+        "profileExists": false,
+        "errors": [],
+        "termination": {
+          "stoppedCount": 1,
+          "skippedUnverified": {
+            "processIdentity": 1,
+            "rootCommandLine": 0,
+            "rootCreationDate": 0
+          }
+        }
+      },
+      "liveSyntheticPids": [
+        102
+      ],
+      "trace": [
+        {
+          "phase": "inventory",
+          "result": {
+            "privateBytes": 1,
+            "records": [
+              {
+                "rootCreated": "639283968000000000",
+                "rootPid": 101,
+                "pid": 101,
+                "created": "639283968000000000"
+              }
+            ],
+            "bytes": 1,
+            "pids": [
+              101
+            ]
+          },
+          "killed": [],
+          "liveSyntheticPids": [
+            101
+          ]
+        },
+        {
+          "phase": "termination",
+          "result": {
+            "stoppedCount": 1,
+            "skippedUnverified": {
+              "rootCommandLine": 0,
+              "processIdentity": 1,
+              "rootCreationDate": 0
+            }
+          },
+          "killed": [
+            101
+          ],
+          "liveSyntheticPids": [
+            102
+          ]
+        },
+        {
+          "phase": "inventory",
+          "result": {
+            "bytes": 0,
+            "privateBytes": 0,
+            "pids": [],
+            "records": []
+          },
+          "killed": [],
+          "liveSyntheticPids": [
+            102
+          ]
+        }
+      ],
+      "sourceCommit": "5fdd5de9a2b0a048dea1235313472d4e5041c7b2"
+    },
+    {
+      "revision": "parent",
+      "mode": "known-child-root-reuse",
+      "cleanup": {
+        "remainingOwned": 2,
+        "profileExists": true,
+        "errors": [
+          "Owned family termination",
+          "Final owned inventory",
+          "Profile removal"
+        ],
+        "diagnostics": [
+          {
+            "label": "Owned family termination",
+            "elapsedMs": 695,
+            "code": "unclassified"
+          },
+          {
+            "label": "Final owned inventory",
+            "elapsedMs": 694,
+            "code": "unclassified"
+          },
+          {
+            "label": "Profile removal",
+            "elapsedMs": 0,
+            "code": "unclassified"
+          }
+        ]
+      },
+      "liveSyntheticPids": [
+        101,
+        102
+      ],
+      "trace": [
+        {
+          "phase": "inventory",
+          "result": {
+            "privateBytes": 2,
+            "pids": [
+              101,
+              102
+            ],
+            "records": [
+              {
+                "rootPid": 101,
+                "created": "639283968000000000",
+                "pid": 101,
+                "rootCreated": "639283968000000000"
+              },
+              {
+                "rootPid": 101,
+                "created": "639283968600000000",
+                "pid": 102,
+                "rootCreated": "639283968000000000"
+              }
+            ],
+            "bytes": 2
+          },
+          "killed": [],
+          "liveSyntheticPids": [
+            101,
+            102
+          ]
+        },
+        {
+          "phase": "termination",
+          "failure": "Unknown fresh process identity.",
+          "killed": [],
+          "liveSyntheticPids": [
+            101,
+            102
+          ]
+        },
+        {
+          "phase": "inventory",
+          "result": {
+            "bytes": 2,
+            "records": [
+              {
+                "pid": 101,
+                "rootPid": 101,
+                "created": "639283968000000000",
+                "rootCreated": "639283968000000000"
+              },
+              {
+                "pid": 102,
+                "rootPid": 101,
+                "created": "639283968600000000",
+                "rootCreated": "639283968000000000"
+              }
+            ],
+            "privateBytes": 2,
+            "pids": [
+              101,
+              102
+            ]
+          },
+          "killed": [],
+          "liveSyntheticPids": [
+            101,
+            102
+          ]
+        }
+      ],
+      "sourceCommit": "63bf26ad27a274cd84aefc47f1f0779b4d397956"
+    },
+    {
+      "revision": "head",
+      "mode": "known-child-root-reuse",
+      "cleanup": {
+        "remainingOwned": 0,
+        "profileExists": false,
+        "errors": [],
+        "termination": {
+          "stoppedCount": 1,
+          "skippedUnverified": {
+            "processIdentity": 1,
+            "rootCommandLine": 0,
+            "rootCreationDate": 0
+          }
+        }
+      },
+      "liveSyntheticPids": [
+        102,
+        101
+      ],
+      "trace": [
+        {
+          "phase": "inventory",
+          "result": {
+            "privateBytes": 2,
+            "records": [
+              {
+                "rootCreated": "639283968000000000",
+                "pid": 101,
+                "created": "639283968000000000",
+                "rootPid": 101
+              },
+              {
+                "rootCreated": "639283968000000000",
+                "pid": 102,
+                "created": "639283968600000000",
+                "rootPid": 101
+              }
+            ],
+            "pids": [
+              101,
+              102
+            ],
+            "bytes": 2
+          },
+          "killed": [],
+          "liveSyntheticPids": [
+            101,
+            102
+          ]
+        },
+        {
+          "phase": "termination",
+          "result": {
+            "skippedUnverified": {
+              "rootCreationDate": 0,
+              "processIdentity": 1,
+              "rootCommandLine": 0
+            },
+            "stoppedCount": 1
+          },
+          "killed": [
+            101
+          ],
+          "liveSyntheticPids": [
+            102,
+            101
+          ]
+        },
+        {
+          "phase": "inventory",
+          "result": {
+            "records": [],
+            "pids": [],
+            "privateBytes": 0,
+            "bytes": 0
+          },
+          "killed": [],
+          "liveSyntheticPids": [
+            102,
+            101
+          ]
+        }
+      ],
+      "sourceCommit": "5fdd5de9a2b0a048dea1235313472d4e5041c7b2"
+    }
+  ]
+}
