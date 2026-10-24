@@ -1,0 +1,68 @@
+{
+  "repository": "nathanmcnulty/defender-reporting",
+  "owningBranch": "fix/issue-70-reviewed-cleanup-20261023",
+  "reviewedHead": "e4da5bdfa9487eac7f18c193c12245716edd1c38",
+  "inventoryCommit": "03ae6da3310fa3ccb3b564e2df1baa567bdcba1b",
+  "cleanupCommit": "1cd49af7d4b2515f9598229c0faf664e5dcddefa",
+  "baseline": "94bd81e889ae62ffa88dd3559116ab3c39f4c23d",
+  "handoffParent": "815917468ba72e5f321d0965417820ad5c2fe78d",
+  "originalReviewSHA256": "21e668504380c85527b38e50e26bc8d14268a516a4a1180db4d43a1dabf160ab",
+  "originalReproductionSHA256": "b178791b6047caaac0253d53df4bf0e8f00244b6e5bc81ca6e5f8f34c9ed14d1",
+  "sourceFiles": {
+    "reviewedHead": {
+      "ref": "e4da5bdfa9487eac7f18c193c12245716edd1c38",
+      "files": {
+        "tests/Invoke-HostedDashboardRuntimeSmoke.ps1": {
+          "git_blob": "68b37ba192f4cefa5cfc7c2d5ccf183d3c86da73",
+          "sha256": "86449cfe90049ebf301f03ddc8c7003b19cb4f50bdf1538afc998a93c25d6128",
+          "bytes": 28954
+        },
+        "tests/Invoke-HostedSmokeDiagnosticsRegression.ps1": {
+          "git_blob": "4d753db3194ddebe8245de399b9fe698d8b31a20",
+          "sha256": "17e732d7580c381ab9bc8588dcd0ebb71561aca9cd886df3fe20c4815abea21b",
+          "bytes": 17303
+        },
+        "tests/Invoke-HostedSmokeOwnershipRegression.ps1": {
+          "git_blob": "c47c6e8f4ab90ac027b205882601ecb0d3faac6b",
+          "sha256": "c7a540eb54fb80967e82ccb4eabea4976c686d77ecd95565bd25f42b8a0e50fb",
+          "bytes": 6425
+        },
+        "tests/helpers/HostedSmokeDiagnostics.ps1": {
+          "git_blob": "b5f99ca8eca3d36e24b4b5a826f6bd0cca4a070b",
+          "sha256": "830f566cdd7bb0f08224d37331e54fbf40662939e76f37d8bb725215d4823ea8",
+          "bytes": 18700
+        },
+        "tests/Measure-DashboardWorkerTransfer.js": {
+          "git_blob": "a64003c69f98485990eaac640b719758cc494b8d",
+          "sha256": "aecef4a72374f95b723cf46a640f454ad1e375b9c3cbb51ad9a9e38c18f5e931",
+          "bytes": 89758
+        },
+        "docs/handoffs/2026-10-24-monitor-fix-review/README.md": {
+          "git_blob": "65701fb99547bac68a714bc7786534feb0278cbd",
+          "sha256": "63aeeccb012daf1510082d989265d9495934eb5daab9917729d4534a4aea24d3",
+          "bytes": 9646
+        }
+      }
+    },
+    "baseline": {
+      "ref": "94bd81e889ae62ffa88dd3559116ab3c39f4c23d",
+      "files": {
+        "tests/helpers/HostedSmokeDiagnostics.ps1": {
+          "git_blob": "7f2d5c41660e830d9f7a32acd13a78f16859de83",
+          "sha256": "6cca18268edd27a837c73871a1471f450b40d75256b39ab10ee2f0f4c4776c2d",
+          "bytes": 11959
+        },
+        "tests/Invoke-HostedDashboardRuntimeSmoke.ps1": {
+          "git_blob": "89ffe24379c0659e782f49ade44b5b301a2326bb",
+          "sha256": "ebbe91cb35fbf3da61f56ee6455106a3c49e920e7e9f938e92a89d50abcf6a20",
+          "bytes": 28139
+        },
+        "tests/Invoke-HostedSmokeDiagnosticsRegression.ps1": {
+          "git_blob": "fe2358c429b3498362436523a61e8c5cac73f65e",
+          "sha256": "76c2d7f0195a9128f57e2489839a1578679cd01a55a14992631817cc94558817",
+          "bytes": 16268
+        }
+      }
+    }
+  }
+}

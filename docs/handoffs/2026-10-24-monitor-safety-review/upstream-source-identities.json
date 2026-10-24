@@ -1,0 +1,31 @@
+{
+  "dotnet": {
+    "tag": "v10.0.12",
+    "commit": "4271d88e0aebf3d04f188f1334c2220d80555ef6",
+    "files": [
+      {
+        "path": "src/libraries/System.Diagnostics.Process/src/System/Diagnostics/Process.Windows.cs",
+        "blob": "dc05e138a5aec616d986eef253b1bc74d754f4e6"
+      },
+      {
+        "path": "src/libraries/System.Diagnostics.Process/src/System/Diagnostics/Process.cs",
+        "blob": "4218596c12964482207447d271c794d08e397072"
+      }
+    ]
+  },
+  "powershell": {
+    "tag": "v7.6.6",
+    "commit": "f260eb9c31ec72c5282f98e5ea24d9be4f8d7536",
+    "files": [
+      {
+        "path": "src/Microsoft.PowerShell.Commands.Management/commands/management/Process.cs",
+        "blob": "2e07a945a008cdcbf26a16abde38afea8c38b60c"
+      }
+    ]
+  },
+  "observedLinuxRunner": {
+    "powershell": "7.6.6",
+    "dotnet": "10.0.12"
+  },
+  "scope": "Primary upstream source read; no inspection or execution of native Windows binary behavior."
+}
