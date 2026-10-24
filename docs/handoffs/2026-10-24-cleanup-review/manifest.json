@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "purpose": "Sanitized text-only review handoff; no implementation change",
+  "source_parent": "5fdd5de9a2b0a048dea1235313472d4e5041c7b2",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 5808,
+      "sha256": "417210c75abfcbb6912c36ce5d93f464edc16e674c30da482b18b16308a2f7f4",
+      "git_blob": "e1c9466c7a2928a8f043fb516a4b209477989cef"
+    },
+    {
+      "path": "finish-goal.md",
+      "bytes": 2004,
+      "sha256": "e2138fd150bfc5f0cde1b746478612f659fa55e126b4d03a0260a1c1cf988fce",
+      "git_blob": "25500c9b7a4fd22a7bf4a36978566e407525aa53"
+    },
+    {
+      "path": "reproduce-cleanup.js",
+      "bytes": 7536,
+      "sha256": "3686e88a1356dd7e37c4a29305d4f208f8be7423631bbbdd05fd475ecf180495",
+      "git_blob": "4f604c72ae8f5b651555531ecb4e160e7503f34e"
+    },
+    {
+      "path": "review.md",
+      "bytes": 21280,
+      "sha256": "6a7c13d8868dd7d6193a394da830a50a3deb42ff9610cfd12923e579eb3f2e2a",
+      "git_blob": "f027685562db7545849abb58844ad3a613b4e190"
+    },
+    {
+      "path": "source-identities.json",
+      "bytes": 2025,
+      "sha256": "518d65a0ba5cc61a931399000d92cd2d20c901754bd42442a6d0ce0522421852",
+      "git_blob": "c11a4d56302be1e731007783e176e5da6fa195f4"
+    },
+    {
+      "path": "synthetic-results.json",
+      "bytes": 8893,
+      "sha256": "c35e3a8e27f611602448ef7cf00a7f02d45e318ff162864bf783ee5c6429f98c",
+      "git_blob": "f8695995c73f54c7a40daa4eec1fd9800f804ecb"
+    }
+  ],
+  "self_hash": "manifest.json is excluded from its own hash list; verify its Git blob through the containing commit."
+}
