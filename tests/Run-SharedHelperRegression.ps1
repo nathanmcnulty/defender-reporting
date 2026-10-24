@@ -4006,6 +4006,40 @@ function Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap {
     }
 }
 
+function Test-NormalizedPayloadPreservesSingletonLookupArray {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('singleton-lookup-arrays-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -Path $tempRoot -ItemType Directory)
+    try {
+        foreach ($values in @(@(), @(0), @(0, 1))) {
+            foreach ($record in @(@{ t = $values }, [PSCustomObject]@{ t = $values })) {
+                $actual = Get-NormalizedLookupPropertyValue -Value $record -Name 't'
+                Assert-True ($actual -is [array]) 'Lookup property access must retain empty, singleton and multiple index arrays.'
+                Assert-True (($actual | ConvertTo-Json -AsArray -Compress) -ceq ($values | ConvertTo-Json -AsArray -Compress)) 'Lookup property access must preserve index contents.'
+            }
+        }
+
+        Copy-Item -Path (Join-Path $PSScriptRoot 'fixtures/legacy-migration/*') -Destination $tempRoot -Recurse
+        $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+        $dashboardScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'Generate-VulnerabilityDashboard.ps1'
+        & $dashboardScript -DirectoryPath $tempRoot -ExportMachineData:$false -NormalizeOnly -NormalizedPayloadOutputPath $payloadPath | Out-Null
+        $payload = Read-GzipTextFile -Path $payloadPath | ConvertFrom-Json -Depth 100 -AsHashtable
+        $device = $payload.lookups.devices[0]
+        Assert-True ($device.t -is [array] -and $device.t.Count -eq 1) 'Serialized singleton device tag indices must remain an array.'
+        Assert-True ($payload.lookups.tags[$device.t[0]] -ceq 'Prod') 'Serialized device tag must retain its source content.'
+        foreach ($cve in $payload.lookups.cves) {
+            Assert-True ($cve.as -is [array] -and $cve.as.Count -eq 1) 'Serialized singleton affected-software indices must remain an array.'
+            Assert-True ($payload.lookups.affSoftware[$cve.as[0]] -ceq 'Contoso: Legacy Agent') 'Serialized affected software must retain its source content.'
+        }
+        Assert-True ((Get-DashboardPayloadCacheVersion) -eq 'dashboard-payload-cache-v8') 'Invalidate normalized payloads with collapsed lookup arrays.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+    }
+}
+
 function Test-WriteCombinedPayloadGzipPreservesColumnPayload {
     [CmdletBinding()]
     param()
@@ -6206,7 +6240,7 @@ function Test-NormalizedPayloadCacheVersionPreservesSourceData {
 
         $expectedVersion = Get-DashboardPayloadCacheVersion
         $expectedFingerprint = Get-FileSetFingerprint -Version $expectedVersion -Files @(Get-VulnerabilityPayloadFingerprintSourceFileSet -BasePath $tempRoot) -MetadataLines @('SkipObservedWindowMerge=False')
-        Assert-True ($expectedVersion -eq 'dashboard-payload-cache-v7') 'Expected the normalization semantics change to advance the payload cache version.'
+        Assert-True ($expectedVersion -eq 'dashboard-payload-cache-v8') 'Expected the normalization semantics change to advance the payload cache version.'
         Assert-True ($cacheEntry.Manifest.Version -eq $expectedVersion) 'Expected the payload manifest and cache fingerprint to share one version source.'
         Assert-True ($cacheEntry.Fingerprint -eq $expectedFingerprint) 'Expected the payload cache fingerprint to incorporate the current cache version.'
         Assert-True ((Test-Path -LiteralPath $currentPath -PathType Leaf) -and ((Get-FileSha256Hex -Path $currentPath) -eq $sourceSha256Before)) 'Expected replacing a stale payload cache to preserve source export bytes.'
@@ -7720,6 +7754,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-ConvertToNormalizedDataDeduplicatesRepeatedCveLookup'; SuccessMessage = 'Repeated CVE lookup deduplication checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataReportsZeroOnboardedContentStoreDiagnostic'; SuccessMessage = 'Zero-onboarded content-store diagnostics checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataIncludesAdvancedHuntingDeviceUserMap'; SuccessMessage = 'Advanced Hunting device-user normalization checks passed.' }
+    @{ Name = 'Test-NormalizedPayloadPreservesSingletonLookupArray'; SuccessMessage = 'Normalized payload lookup-array contents and cardinality checks passed.' }
     @{ Name = 'Test-WriteCombinedPayloadGzipPreservesColumnPayload'; SuccessMessage = 'Combined payload writer column-path checks passed.' }
     @{ Name = 'Test-NormalizedVulnColumnCacheRebuildsPayloadWithFreshLookups'; SuccessMessage = 'Normalized vuln column cache reuse checks passed.' }
     @{ Name = 'Test-NormalizedVulnColumnCacheRefreshesInventoryColumn'; SuccessMessage = 'Inventory-backed normalized vuln column cache reuse checks passed.' }

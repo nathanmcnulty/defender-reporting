@@ -12699,12 +12699,12 @@ function Get-NormalizedLookupPropertyValue {
     }
 
     if ($Value -is [System.Collections.IDictionary]) {
-        return $Value[$Name]
+        return ,$Value[$Name]
     }
 
     $property = $Value.PSObject.Properties[$Name]
     if ($null -ne $property) {
-        return $property.Value
+        return ,$property.Value
     }
 
     return $null
@@ -14432,7 +14432,8 @@ function Update-NormalizedAffectedSoftwareLookup {
             }
         }
 
-        $cve.as = if ($filteredIndices.Count -gt 0) { $filteredIndices } else { $null }
+        $cve.as = $null
+        if ($filteredIndices.Count -gt 0) { $cve.as = $filteredIndices }
     }
 }
 
@@ -17394,7 +17395,7 @@ function Get-DashboardPayloadCacheVersion {
     [OutputType([string])]
     param()
 
-    return 'dashboard-payload-cache-v7'
+    return 'dashboard-payload-cache-v8'
 }
 
 function Get-DashboardPayloadCacheFingerprint {
@@ -21755,7 +21756,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 432edfbbd2c83cc9923ca554651b3b162bfbbb03c685147d2dda6fc55663ba76
+# ArtifactFingerprint: f6810f40bcbffeaff7f31bbaa22e66fb5b6f4fe5bc09787bf081fc0e62385cd4
 
 
 
