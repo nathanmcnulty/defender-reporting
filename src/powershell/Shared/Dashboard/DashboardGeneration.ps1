@@ -746,12 +746,12 @@ function Get-NormalizedLookupPropertyValue {
     }
 
     if ($Value -is [System.Collections.IDictionary]) {
-        return $Value[$Name]
+        return ,$Value[$Name]
     }
 
     $property = $Value.PSObject.Properties[$Name]
     if ($null -ne $property) {
-        return $property.Value
+        return ,$property.Value
     }
 
     return $null
@@ -2479,7 +2479,8 @@ function Update-NormalizedAffectedSoftwareLookup {
             }
         }
 
-        $cve.as = if ($filteredIndices.Count -gt 0) { $filteredIndices } else { $null }
+        $cve.as = $null
+        if ($filteredIndices.Count -gt 0) { $cve.as = $filteredIndices }
     }
 }
 
@@ -5441,7 +5442,7 @@ function Get-DashboardPayloadCacheVersion {
     [OutputType([string])]
     param()
 
-    return 'dashboard-payload-cache-v7'
+    return 'dashboard-payload-cache-v8'
 }
 
 function Get-DashboardPayloadCacheFingerprint {
