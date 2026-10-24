@@ -227,7 +227,7 @@ function Get-Created($item) {
     return $item.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
 }
 $issue70Phase = 'cim'
-$all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+$all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CommandLine,CreationDate,WorkingSetSize,PrivatePageCount -ErrorAction Stop)
 $issue70Phase = 'selection'
 $byId = @{}
 foreach ($item in $all) { $byId[[int]$item.ProcessId] = $item }
@@ -309,9 +309,14 @@ $records = @()
 foreach ($item in $owned) {
     $source = $provenance[[int]$item.ProcessId]
     $records += @{ pid = [int]$item.ProcessId; created = (Get-Created $item); rootPid = $source.rootPid; rootCreated = $source.rootCreated }
-    $bytes += [long]$item.WorkingSetSize
-    $process = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
-    if ($process) { $privateBytes += $process.PrivateMemorySize64 }
+    $workingSet = [long]0
+    $privateCount = [long]0
+    if (-not [long]::TryParse([string]$item.WorkingSetSize, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$workingSet) -or
+        -not [long]::TryParse([string]$item.PrivatePageCount, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$privateCount)) { throw 'Invalid owned process memory.' }
+    # Use both byte counters from the same identity-bound CIM snapshot.
+    # A separate process open can disappear or fail and silently undercount private memory.
+    $bytes += $workingSet
+    $privateBytes += $privateCount
 }
 @{ bytes = $bytes; privateBytes = $privateBytes; pids = @($ids); records = $records } | ConvertTo-Json -Compress -Depth 4
 `, { ...environment(), ISSUE70_ACCOUNTING: '1' });
@@ -904,7 +909,7 @@ $script:items = @($env:ISSUE70_FIXTURE | ConvertFrom-Json | ForEach-Object {
     $_
 })
 function Get-CimInstance {
-    param($ClassName, $Filter, $ErrorAction)
+    param($ClassName, $Filter, $Property, $ErrorAction)
     $script:calls++
     if ($env:ISSUE70_REUSE -eq 'gone' -and $script:calls -gt 1) { return }
     if ($env:ISSUE70_REUSE -eq 'unknown') { $script:items[0].CommandLine = $null }
@@ -921,6 +926,7 @@ function Get-CimInstance {
 }
 function Get-Process {
     param($Id, $ErrorAction)
+    if ($env:ISSUE70_REUSE -eq 'memory-open-forbidden') { throw 'Inventory must not reopen processes.' }
     $item = $script:items | Where-Object { $_.ProcessId -eq $Id }
     if (-not $item) { return }
     $process = [pscustomobject]@{ Id=$Id; StartTime=$item.CreationDate; PrivateMemorySize64=1; HasExited=$false }
@@ -929,7 +935,8 @@ function Get-Process {
     $process
 }
 `;
-    const make = (pid, parent, command, minute = 0) => ({ ProcessId: pid, ParentProcessId: parent, Name: 'msedge.exe', CommandLine: command, CreationDate: `2026-09-30T00:0${minute}:00Z`, WorkingSetSize: 1 });
+    const make = (pid, parent, command, minute = 0) => ({ ProcessId: pid, ParentProcessId: parent, Name: 'msedge.exe', CommandLine: command, CreationDate: `2026-09-30T00:0${minute}:00Z`, WorkingSetSize: 1, PrivatePageCount: 1 });
+    let memoryValidationChecked = false;
     for (const command of [
         'msedge.exe --user-data-dir="C:/Profile Owned"',
         'msedge.exe --user-data-dir "c:\\profile owned"',
@@ -947,6 +954,21 @@ function Get-Process {
         };
         const owned = ownedProcesses(profile, execute);
         assert.deepStrictEqual((await owned.inventory()).pids.sort(), [101, 102]);
+        reuse = 'memory-open-forbidden';
+        const memorySnapshot = await owned.inventory();
+        assert.strictEqual(memorySnapshot.bytes, 2, 'Working set must use the identity-bound CIM snapshot.');
+        assert.strictEqual(memorySnapshot.privateBytes, 2, 'Private memory must use the same CIM snapshot without process opens.');
+        reuse = '';
+        if (!memoryValidationChecked) {
+            for (const field of ['WorkingSetSize', 'PrivatePageCount']) {
+                for (const value of [null, '-1', 'invalid', '9223372036854775808']) {
+                    items[1][field] = value;
+                    await assert.rejects(owned.inventory(), error => error.inventoryDiagnostic?.phase === 'memory', 'Invalid owned memory must fail closed.');
+                }
+                items[1][field] = 1;
+            }
+            memoryValidationChecked = true;
+        }
         await owned.terminate();
         assert.deepStrictEqual(last.killed.sort(), [101, 102]);
         assert.deepStrictEqual(last.survivors.sort((left, right) => left - right), [0, 201, 202, 301, 302, 401]);
@@ -1003,7 +1025,7 @@ $script:items = @($env:ISSUE70_FIXTURE | ConvertFrom-Json | ForEach-Object {
     $_
 })
 function Get-CimInstance {
-    param($ClassName, $Filter, $ErrorAction)
+    param($ClassName, $Filter, $Property, $ErrorAction)
     $copy = @($script:items | Select-Object *)
     if ($Filter -and $Filter.StartsWith('ProcessId=102 ')) {
         ($copy | Where-Object ProcessId -eq 102).CreationDate = $null
@@ -1021,7 +1043,7 @@ function Get-Process {
     $process
 }
 `;
-    const make = (pid, parent, command, minute = 0) => ({ ProcessId: pid, ParentProcessId: parent, Name: 'msedge.exe', CommandLine: command, CreationDate: `2026-10-24T00:0${minute}:00Z`, WorkingSetSize: 1 });
+    const make = (pid, parent, command, minute = 0) => ({ ProcessId: pid, ParentProcessId: parent, Name: 'msedge.exe', CommandLine: command, CreationDate: `2026-10-24T00:0${minute}:00Z`, WorkingSetSize: 1, PrivatePageCount: 1 });
     for (const mode of ['new-child-orphan', 'known-child-root-reuse', 'child-disappeared', 'child-pid-reused', 'child-identity-unknown', 'orphan-descendant', 'termination-failure']) {
         const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'issue70-accounting-'));
         const rootCommand = `msedge.exe --user-data-dir="${profile}"`;
