@@ -9,7 +9,7 @@ const { Writable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { execFile, spawn, spawnSync } = require('child_process');
 const { performance } = require('perf_hooks');
-const { loadDashboardSource } = require('./helpers/dashboard-test-harness');
+const { loadDashboardSource, loadDashboardHarness } = require('./helpers/dashboard-test-harness');
 
 function safeInventoryDiagnostic(value = {}) {
     const categories = ['timeout', 'aborted', 'execution', 'response', 'InvalidOperation', 'InvalidArgument', 'InvalidData', 'OperationStopped', 'WriteError', 'ObjectNotFound', 'PermissionDenied', 'SecurityError', 'ResourceUnavailable', 'NotSpecified'];
@@ -446,9 +446,9 @@ function assertRun(run, expectedRows, first) {
         assert.strictEqual(expectedRows, 2, 'Positive control requires the two-row synthetic fixture.');
         assert.strictEqual(run.snapshot.rawRows, 2, 'Positive control requires exactly two raw rows.');
         assert.strictEqual(run.controlObservation.filteredSourceRows, 2, 'Positive control must select both source rows.');
-        assert.strictEqual(run.controlObservation.selectedRows, 1, 'Positive control requires one active table row.');
-        assert.strictEqual(run.controlObservation.impactRows, 1, 'Positive control requires one impact row.');
-        assert.strictEqual(run.controlObservation.cardTotal, 1, 'Positive control requires one severity-card total.');
+        assert.strictEqual(run.controlObservation.selectedRows, 2, 'Positive control requires two active table rows.');
+        assert.strictEqual(run.controlObservation.impactRows, 2, 'Positive control requires two impact rows.');
+        assert.strictEqual(run.controlObservation.cardTotal, 2, 'Positive control requires a severity-card total of two.');
         assert.strictEqual(run.controlObservation.dateRange, '2026-01-01/2026-01-02');
         if (first) assert.deepStrictEqual(run.controlObservation, first.controlObservation, 'Cold/reload positive-control counts differ.');
     }
@@ -466,7 +466,9 @@ function assertRun(run, expectedRows, first) {
     } else {
         assert(!run.snapshot.counts.compressedCacheHits, 'Ineligible reload cannot be labelled cached.');
     }
+    requireCapturedFingerprint([run.compressedFingerprint]);
     if (first) {
+        assert.strictEqual(run.compressedFingerprint, first.compressedFingerprint, 'Cold/reload compressed fingerprint differs.');
         for (const key of ['rows', 'rawRows', 'activeRows']) assert.strictEqual(run.snapshot[key], first.snapshot[key], `Cold/reload ${key} differs.`);
         assert.strictEqual(run.impactRows, first.impactRows, 'Cold/reload impact count differs.');
         assert.deepStrictEqual(run.reportIds, first.reportIds, 'Cold/reload reports differ.');
@@ -491,11 +493,24 @@ async function completeRun(run, guard, validate) {
     }
 }
 
+function requireCapturedFingerprint(values) {
+    assert(Array.isArray(values) && values.length === 1 && typeof values[0] === 'string' && /^[A-Za-z0-9_]{1,256}$/.test(values[0]), 'Expected exactly one valid runtime compressed fingerprint.');
+    return values[0];
+}
+
 function installInstrumentation() {
     const phaseNames = ['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs'];
     const functionNames = ['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded'];
-    window.__issue70 = { phases: [], workerMessages: [], initialization: [] };
+    window.__issue70 = { phases: [], workerMessages: [], initialization: [], compressedFingerprints: [] };
     window.addEventListener('DOMContentLoaded', () => {
+        const originalFingerprint = window.computeCompressedFingerprint;
+        if (typeof originalFingerprint === 'function') {
+            window.computeCompressedFingerprint = async function(...args) {
+                const fingerprint = await originalFingerprint.apply(this, args);
+                window.__issue70.compressedFingerprints.push(fingerprint);
+                return fingerprint;
+            };
+        }
         for (const name of ['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded']) {
             const original = window[name];
             if (typeof original !== 'function') continue;
@@ -585,7 +600,7 @@ async function finishHeapSample(run, sample, timeout = 5000) {
     catch { run.incompleteHeapSample = true; }
 }
 
-async function measureIteration({ chromium, edge, origin, evidence, expectedRows, fingerprint, iteration, positiveControl }) {
+async function measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl }) {
     const state = {};
     let measurementError;
     try {
@@ -700,10 +715,11 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
                 run.summaryCardsSha256 = digest(JSON.stringify(run.snapshot.summaryCards));
                 run.stage = 'cache';
                 state.guard.stage = `${load}:cache`;
+                run.compressedFingerprint = requireCapturedFingerprint(await state.guard.wait(state.page.evaluate(() => window.__issue70.compressedFingerprints)));
                 if (run.cachePolicy.available) {
                     const deadline = performance.now() + 5000;
                     do {
-                        run.cacheEntries = await state.guard.wait(bounded(inspectCache(state.page, fingerprint), 'Cache inspection'));
+                        run.cacheEntries = await state.guard.wait(bounded(inspectCache(state.page, run.compressedFingerprint), 'Cache inspection'));
                         if (!run.cachePolicy.eligible || run.cacheEntries.matchingRows === expectedRows) break;
                         await state.guard.wait(new Promise(resolve => setTimeout(resolve, 100)));
                     } while (performance.now() < deadline);
@@ -807,7 +823,7 @@ async function main() {
             const edge = candidates.find(candidate => fs.existsSync(candidate));
             assert(edge, 'Microsoft Edge is required.');
             const { chromium } = require(process.env.PLAYWRIGHT_MODULE);
-            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, evidence, expectedRows, fingerprint: `cfp_${payloadIdentity.payloadBytes}_${payloadIdentity.payloadSha256}`, iteration, positiveControl });
+            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl });
         });
         evidence.status = 'completed';
     } catch (error) {
@@ -999,6 +1015,34 @@ async function privacyProbes() {
 }
 
 async function mockProbes() {
+    const runtime = loadDashboardHarness('module.exports = { computeCompressedFingerprint };');
+    const bytes = new Uint8Array([1, 2, 3]);
+    const actualKey = await runtime.computeCompressedFingerprint(bytes);
+    const callbacks = {};
+    let calls = 0;
+    const context = { performance, setInterval() {}, window: {
+        Worker: class {}, addEventListener(name, callback) { callbacks[name] = callback; },
+        async computeCompressedFingerprint(input) {
+            assert.strictEqual(this, context.window);
+            assert.strictEqual(input, bytes);
+            calls++;
+            return actualKey;
+        }
+    } };
+    require('vm').runInNewContext(`(${installInstrumentation.toString()})()`, context);
+    callbacks.DOMContentLoaded();
+    assert.strictEqual(await context.window.computeCompressedFingerprint(bytes), actualKey);
+    assert.strictEqual(calls, 1);
+    assert.strictEqual(requireCapturedFingerprint(context.window.__issue70.compressedFingerprints), actualKey);
+    for (const values of [undefined, [], [''], ['a', 'b'], ['private/path'], [null]]) assert.throws(() => requireCapturedFingerprint(values));
+    const rejection = new Error('fixture');
+    const rejectedCallbacks = {};
+    const rejected = { performance, setInterval() {}, window: { Worker: class {}, addEventListener(name, callback) { rejectedCallbacks[name] = callback; }, async computeCompressedFingerprint() { throw rejection; } } };
+    require('vm').runInNewContext(`(${installInstrumentation.toString()})()`, rejected);
+    rejectedCallbacks.DOMContentLoaded();
+    await assert.rejects(rejected.window.computeCompressedFingerprint(bytes), error => error === rejection);
+    assert.strictEqual(rejected.window.__issue70.compressedFingerprints.length, 0);
+    console.log('PASS actual runtime fingerprint capture, invocation identity, rejection, and missing/ambiguous key guards.');
     await privacyProbes();
     if (process.platform === 'win32') await ownershipProbes();
     await inventoryProbes();
@@ -1058,11 +1102,15 @@ async function mockProbes() {
     }
     await assert.rejects(bounded(new Promise(() => {}), 'Termination probe', 5), /Termination probe exceeded 5 ms/);
     console.log('PASS cleanup diagnostics retain timeout/cancellation/shutdown failure despite final zero; private messages excluded; unresolved promise remains bounded.');
-    const valid = { snapshot: { rows: 2, rawRows: 2, activeRows: 2, counts: {}, summaryCards: { high: '2' } }, reportIds: [...REPORTS].sort(), impactRows: 2, readinessCacheDigest: 'fixture', cachePolicy: { eligible: true, available: true, maxRowsExclusive: 500000, maxEntries: 4 }, cacheEntries: { matchingRows: 2, count: 2 }, externalRequests: 0, pageErrors: 0 };
+    const valid = { compressedFingerprint: 'runtime_fixture', snapshot: { rows: 2, rawRows: 2, activeRows: 2, counts: {}, summaryCards: { high: '2' } }, reportIds: [...REPORTS].sort(), impactRows: 2, readinessCacheDigest: 'fixture', cachePolicy: { eligible: true, available: true, maxRowsExclusive: 500000, maxEntries: 4 }, cacheEntries: { matchingRows: 2, count: 2 }, externalRequests: 0, pageErrors: 0 };
     assertRun(valid, 2);
-    const positive = { ...valid, positiveControl: true, controlObservation: { filteredSourceRows: 2, selectedRows: 1, impactRows: 1, cardTotal: 1, dateRange: '2026-01-01/2026-01-02' } };
+    const positive = { ...valid, positiveControl: true, controlObservation: { filteredSourceRows: 2, selectedRows: 2, impactRows: 2, cardTotal: 2, dateRange: '2026-01-01/2026-01-02' } };
     assertRun(positive, 2);
-    for (const key of ['selectedRows', 'impactRows', 'cardTotal']) assert.throws(() => assertRun({ ...positive, controlObservation: { ...positive.controlObservation, [key]: 0 } }, 2));
+    for (const key of ['filteredSourceRows', 'selectedRows', 'impactRows', 'cardTotal']) {
+        for (const value of [0, 1, 3]) assert.throws(() => assertRun({ ...positive, controlObservation: { ...positive.controlObservation, [key]: value } }, 2));
+    }
+    assert.throws(() => assertRun({ ...positive, controlObservation: { ...positive.controlObservation, dateRange: '2026-01-01/2026-01-03' } }, 2));
+    assert.throws(() => assertRun({ ...valid, compressedFingerprint: 'different', snapshot: { ...valid.snapshot, counts: { compressedCacheHits: 1 } } }, 2, valid), /fingerprint differs/);
     assert.throws(() => assertRun({ ...valid, snapshot: { ...valid.snapshot, rows: 0 } }, 2), /row count/);
     assert.throws(() => assertRun({ ...valid, snapshot: { ...valid.snapshot, counts: {} } }, 2, valid), /must hit cache/);
     assertRun({ ...valid, snapshot: { ...valid.snapshot, counts: { compressedCacheHits: 1 } } }, 2, valid);
