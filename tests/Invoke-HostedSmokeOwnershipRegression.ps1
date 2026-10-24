@@ -52,7 +52,7 @@ foreach ($case in @('exit-before-get', 'pid-reuse', 'child-exits', 'kill-failure
             [CmdletBinding()] param($Id)
             if ($case -eq 'exit-before-get') { $script:items = @(); return }
             $item = @($script:items | Where-Object ProcessId -eq $Id)[0]
-            $process = [pscustomobject]@{ Id = $Id; StartTime = $item.CreationDate; HasExited = $false }
+            $process = [pscustomobject]@{ Id = $Id; StartTime = $item.CreationDate; HasExited = $false; SafeHandle = [pscustomobject]@{ IsInvalid = $false; IsClosed = $false } }
             $process | Add-Member ScriptMethod Kill {
                 if ($case -eq 'kill-exit-race') { $this.HasExited = $true; $script:items = @(); throw [ComponentModel.Win32Exception]::new(87) }
                 if ($case -eq 'kill-failure') { throw [ComponentModel.Win32Exception]::new(5) }
@@ -66,10 +66,7 @@ foreach ($case in @('exit-before-get', 'pid-reuse', 'child-exits', 'kill-failure
             return $process
         }
         $result = Stop-HostedSmokeProfileProcess -ProfilePath $ownedProfilePath -AccountingIncomplete:($case -in @('first-orphan','enumeration-incomplete'))
-        if ($case -in @('exit-before-get', 'pid-reuse', 'child-exits', 'kill-exit-race')) {
-            Assert-OwnedSmoke ($result.Confirmed -and $result.Failures.Count -eq 0) "Verified absence falsely failed: $case."
-        }
-        else { Assert-OwnedSmoke ($result.Failures.Count -gt 0) "Uncertain/live cleanup passed: $case." }
+        Assert-OwnedSmoke (-not $result.Confirmed -and $result.Failures.Count -gt 0) "Observed root lifetime/ownership uncertainty passed: $case."
         if ($case -in @('pid-reuse', 'root-reuse-child')) { Assert-OwnedSmoke ($script:killed.Count -eq 0) 'Reused or unverified identity was killed.' }
         if ($case -eq 'child-exits') { Assert-OwnedSmoke ($script:killed.Count -eq 1 -and $script:killed[0] -eq 1002) 'Child-first termination/race handling failed.' }
         if ($case -eq 'kill-failure') { Assert-OwnedSmoke ($result.Failures -contains 'process-access-denied') 'Live kill failure disappeared.' }

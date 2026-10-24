@@ -223,6 +223,8 @@ $failureClass = $null
 $failureLine = $null
 $priorCleanupFailures = @()
 $priorCleanupDiagnostics = @()
+$cleanupLedger = $null
+$priorCleanupUnconfirmed = $false
 $inputDashboardPath = $DashboardPath
 
 try {
@@ -579,7 +581,10 @@ try {
     $canaryArguments = @($edgeArguments[0..($edgeArguments.Count - 2)]) + @("http://127.0.0.1:$Port/canary.html")
     $setupPhase = 'canary-capture'
     $canaryResult = Invoke-HostedSmokeAttempt -Executable $edgeExecutablePath -Arguments $canaryArguments -WaitMilliseconds $waitMilliseconds -Kind canary -RunPath $diagnosticRunPath
-    $canaryCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath -AccountingIncomplete:([bool]$canaryResult.drainIncomplete)
+    $priorCleanupUnconfirmed = $true
+    $canaryCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath -AccountingIncomplete:([bool]$canaryResult.drainIncomplete) -Ledger $cleanupLedger
+    $cleanupLedger = $canaryCleanup.Ledger
+    $priorCleanupUnconfirmed = -not $canaryCleanup.Confirmed -or $canaryCleanup.Failures.Count -gt 0
     $priorCleanupDiagnostics = @($canaryCleanup.Diagnostics)
     if (-not $canaryCleanup.Confirmed -or $canaryCleanup.Failures.Count -gt 0) {
         $priorCleanupFailures = @($canaryCleanup.Failures)
@@ -613,9 +618,10 @@ finally {
     foreach ($code in $priorCleanupDiagnostics) { $cleanupDiagnostics.Add($code) }
     $processCleanupConfirmed = $false
     try {
-        $accountingIncomplete = ($null -ne $canaryResult -and $canaryResult.drainIncomplete) -or ($null -ne $dashboardResult -and $dashboardResult.drainIncomplete)
-        $processCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath -AccountingIncomplete:$accountingIncomplete
-        $processCleanupConfirmed = $processCleanup.Confirmed
+        $accountingIncomplete = $priorCleanupUnconfirmed -or ($null -ne $canaryResult -and $canaryResult.drainIncomplete) -or ($null -ne $dashboardResult -and $dashboardResult.drainIncomplete)
+        $processCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath -AccountingIncomplete:$accountingIncomplete -Ledger $cleanupLedger
+        $cleanupLedger = $processCleanup.Ledger
+        $processCleanupConfirmed = $processCleanup.Confirmed -and -not $priorCleanupUnconfirmed
         foreach ($code in $processCleanup.Diagnostics) { $cleanupDiagnostics.Add($code) }
         foreach ($code in $processCleanup.Failures) { $cleanupFailures.Add($code) }
     }

@@ -76,6 +76,8 @@ Opening in existing browser session.
             $primaryFailure = $case -in @('helper-throw', 'unsupported', 'cim', 'termination', 'server-profile', 'provider-primary', 'retained-profile')
             $priorCleanupFailures = @()
             $priorCleanupDiagnostics = @()
+            $cleanupLedger = $null
+            $priorCleanupUnconfirmed = $false
             $canaryResult = $null
             $dashboardResult = $null
             $outcome = if ($primaryFailure) { 'dashboard-probe-failure' } else { 'passed' }
@@ -89,7 +91,7 @@ Opening in existing browser session.
             $retained = [Collections.Generic.List[object]]::new()
             if ($case -eq 'helper-throw') {
                 function Stop-HostedSmokeProfileProcess {
-                    [CmdletBinding()] param($ProfilePath, [switch]$AccountingIncomplete)
+                    [CmdletBinding()] param($ProfilePath, [switch]$AccountingIncomplete, $Ledger)
                     throw 'PRIVATE_HELPER_SECRET C:\PRIVATE_PATH_SECRET'
                 }
             }
@@ -187,6 +189,7 @@ Opening in existing browser session.
     }
 
     & (Join-Path $PSScriptRoot 'Invoke-HostedSmokeOwnershipRegression.ps1')
+    & (Join-Path $PSScriptRoot 'Invoke-HostedSmokeSafetyRegression.ps1')
     Initialize-HostedSmokeCapture
     $pwshPath = (Get-Process -Id $PID).Path
     $capture = [HostedSmoke.Capture]::Run($pwshPath, @('-NoProfile', '-File', $PSCommandPath, '-CaptureChild', '-EchoArgument', $tempRoot), 10000)
