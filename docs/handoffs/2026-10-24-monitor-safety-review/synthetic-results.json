@@ -1,0 +1,86 @@
+{
+  "kind": "offline synthetic counterexamples; not native qualification",
+  "reviewedCommit": "e4da5bdfa9487eac7f18c193c12245716edd1c38",
+  "runner": {
+    "platform": "Linux",
+    "PowerShell": "7.6.6",
+    ".NET": "10.0.12"
+  },
+  "result": "reproduction assertions passed, exit 0",
+  "elapsedSeconds": 5.543,
+  "sanitization": "Only random temporary-directory paths were replaced. All process identities and actions were synthetic; actual filesystem deletion affected only fixture-created temporary directories.",
+  "originalResultSHA256": "3c6fa4553dc7245b416a64adf349863ce93477854e5f6259e865b30b5b8b4b91",
+  "cases": [
+    {
+      "Scenario": "late-born-child",
+      "Confirmed": true,
+      "Failures": [],
+      "KilledPids": [
+        1001
+      ],
+      "RemainingPids": [
+        1002
+      ],
+      "InventoryCalls": 3
+    },
+    {
+      "Scenario": "pid-reuse-after-starttime",
+      "Result": {
+        "Confirmed": true,
+        "Failures": [],
+        "Diagnostics": []
+      },
+      "TerminatedMockIdentities": [
+        {
+          "Name": "unrelated.exe",
+          "CommandLine": "unrelated",
+          "ProcessId": 1001,
+          "ParentProcessId": 0,
+          "CreationDate": "2025-12-31T16:00:00-09:00"
+        }
+      ],
+      "InventoryCalls": 3,
+      "Model": "Primary-source-supported Windows handle-lifetime model, not native PID-reuse evidence"
+    },
+    {
+      "Scenario": "failed-child-two-passes",
+      "FirstPass": {
+        "Confirmed": false,
+        "Failures": [
+          "process-access-denied",
+          "owned-process-remains"
+        ],
+        "Diagnostics": []
+      },
+      "FinalPassRecord": {
+        "outcome": "cleanup-failure",
+        "originalOutcome": "cleanup-failure",
+        "phase": "canary-capture",
+        "failureClass": "runtime",
+        "failureLine": 587,
+        "controlFixture": false,
+        "extensionSessionCount": 0,
+        "processCleanupConfirmed": true,
+        "profileRemoved": true,
+        "temporarySiteRemoved": true,
+        "cleanupFailures": [
+          "process-access-denied",
+          "owned-process-remains"
+        ],
+        "cleanupDiagnostics": []
+      },
+      "KilledPids": [
+        1001
+      ],
+      "RemainingPids": [
+        1002
+      ],
+      "RemovedPaths": [
+        "synthetic:temporary-profile",
+        "synthetic:temporary-site"
+      ],
+      "ActualTemporaryProfileDeletion": true,
+      "InventoryCalls": 55
+    }
+  ]
+}
