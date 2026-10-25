@@ -36,6 +36,7 @@ function safeFailure(error, phase = 'unknown') {
         ['Owned process inventory/termination failed.', 'process-inventory'],
         ['Invalid process inventory response.', 'process-inventory'],
         ['Owned cleanup failed.', 'cleanup'],
+        ['Owned process accounting is incomplete.', 'process-accounting'],
         ['Microsoft Edge is required.', 'edge-unavailable']
     ]);
     return {
@@ -84,13 +85,16 @@ class ResourceGuard {
         this.inflight = (async () => {
             try {
                 this.check();
+                const inventoryStartedAtHostMs = performance.now();
                 const inventory = await this.inventory();
+                const inventoryCompletedAtHostMs = performance.now();
                 const freeBytes = this.freeMemory();
                 assert(Number.isFinite(inventory.bytes) && inventory.bytes >= 0 && Array.isArray(inventory.pids), 'Invalid process inventory.');
                 assert(Number.isFinite(freeBytes) && freeBytes >= 0, 'Invalid free memory inventory.');
                 this.peakBytes = Math.max(this.peakBytes, inventory.bytes);
                 this.minimumFreeBytes = Math.min(this.minimumFreeBytes, freeBytes);
-                this.trace.push({ stage, startedAtHostMs: startedAt, sampledAtHostMs: performance.now(), sampledAtEpochMs: Date.now(), browserFamilyBytes: inventory.bytes, browserFamilyPrivateBytes: inventory.privateBytes ?? null, freeMemoryBytes: freeBytes, ownedProcessCount: inventory.pids.length });
+                const validatedAtHostMs = performance.now();
+                this.trace.push({ stage, startedAtHostMs: startedAt, inventoryStartedAtHostMs, inventoryCompletedAtHostMs, validatedAtHostMs, sampledAtHostMs: performance.now(), sampledAtEpochMs: Date.now(), browserFamilyBytes: inventory.bytes, browserFamilyPrivateBytes: inventory.privateBytes ?? null, freeMemoryBytes: freeBytes, ownedProcessCount: inventory.pids.length });
                 assert(inventory.bytes <= this.limits.browserFamilyBytes, 'Browser family memory cap exceeded.');
                 assert(freeBytes >= this.limits.freeMemoryBytes, 'Safety memory floor prevents launch or continuation.');
                 this.check();
@@ -175,6 +179,7 @@ function powershell(script, environment, timeout = 5000, signal) {
 function ownedProcesses(profile, execute = powershell) {
     assert.strictEqual(process.platform, 'win32', 'Windows process inventory is required.');
     let known = [];
+    const observedRoots = new Set();
     let accountingComplete = true;
     let launcherPid = 0;
     let launcherCreated = '';
@@ -297,10 +302,14 @@ $owned = @($all | Where-Object { $ids.Contains([int]$_.ProcessId) })
         for (const record of records) {
             assert(Number.isSafeInteger(record.pid) && Number.isSafeInteger(record.rootPid) && typeof record.created === 'string' && /^\d{18}$/.test(record.created) && typeof record.rootCreated === 'string' && /^\d{18}$/.test(record.rootCreated), 'Invalid owned process identities.');
         }
+        for (const record of records) {
+            if (record.pid === record.rootPid && record.created === record.rootCreated) observedRoots.add(`${record.pid}:${record.created}`);
+        }
         return records;
     };
     const inventory = async () => {
-        assert(accountingComplete, 'Owned process accounting is incomplete after termination failure.');
+        assert(accountingComplete, 'Owned process accounting is incomplete.');
+        try {
         const result = await execute(selection + `
     $issue70Phase = 'memory'
 $bytes = [long]0
@@ -320,10 +329,21 @@ foreach ($item in $owned) {
 }
 @{ bytes = $bytes; privateBytes = $privateBytes; pids = @($ids); records = $records } | ConvertTo-Json -Compress -Depth 4
 `, { ...environment(), ISSUE70_ACCOUNTING: '1' });
-        known = remember(result.records);
+        const current = remember(result.records);
+        const present = new Set(current.map(record => `${record.pid}:${record.created}`));
+        // Root lifetime history is accounting-only and never enters PowerShell selection.
+        // Once an observed root is gone/reused, snapshots cannot exclude an unseen late child.
+        if ([...observedRoots].some(identity => !present.has(identity))) accountingComplete = false;
+        assert(accountingComplete, 'Owned process accounting is incomplete.');
+        known = current;
         const launcherRecord = known.find(record => record.pid === launcherPid);
         if (launcherRecord) launcherCreated ||= launcherRecord.created;
         return result;
+        } catch (error) {
+            // An incomplete snapshot cannot later establish lifetime absence either.
+            accountingComplete = false;
+            throw error;
+        }
     };
     const terminateSelected = async () => {
         const result = await execute(selection + `
@@ -385,7 +405,7 @@ finally {
 @{ stoppedCount = $processes.Count; skippedUnverified = $skipped; records = $records } | ConvertTo-Json -Compress -Depth 4
 `, environment(), 12000);
         // Retain every selected identity, including children first seen at termination.
-        // Final inventory proves absence; fresh kill eligibility never proves exit.
+        // Final inventory also checks root lifetime uncertainty; kill eligibility never proves exit.
         const selected = remember(result.records);
         known = [...new Map([...known, ...selected].map(record => [`${record.pid}:${record.created}`, record])).values()];
         return { stoppedCount: result.stoppedCount, skippedUnverified: result.skippedUnverified };
@@ -981,7 +1001,7 @@ function Get-Process {
             for (const field of ['WorkingSetSize', 'PrivatePageCount']) {
                 for (const value of [null, '-1', 'invalid', '9223372036854775808']) {
                     items[1][field] = value;
-                    await assert.rejects(owned.inventory(), error => error.inventoryDiagnostic?.phase === 'memory', 'Invalid owned memory must fail closed.');
+                    await assert.rejects(ownedProcesses(profile, execute).inventory(), error => error.inventoryDiagnostic?.phase === 'memory', 'Invalid owned memory must fail closed.');
                 }
                 items[1][field] = 1;
             }
@@ -1017,9 +1037,9 @@ function Get-Process {
         const retained = ownedProcesses(profile, execute);
         await retained.inventory();
         items[0] = make(101, 0, command, 2);
-        assert.deepStrictEqual((await retained.inventory()).pids, [102], 'Root PID reuse must retain surviving child accountability.');
+        await assert.rejects(retained.inventory(), /accounting is incomplete/, 'Root PID reuse cannot prove descendant absence.');
         items[0] = make(101, 0, 'msedge.exe --user-data-dir=C:/neighbor', 2);
-        assert.deepStrictEqual((await retained.inventory()).pids, [102]);
+        await assert.rejects(retained.inventory(), /accounting is incomplete/);
         const unknown = ownedProcesses(profile, execute);
         unknown.setLauncher(401);
         await assert.rejects(unknown.inventory(), error => error.inventoryDiagnostic?.exceptionType === 'RuntimeException');
@@ -1155,17 +1175,12 @@ function Get-Process {
             assert(items.some(row => row.ProcessId === 201), 'Neighbor must survive.');
             if (mode === 'termination-failure') assert(cleanup.errors.includes('Owned family termination'));
             else assert.strictEqual(cleanup.termination.skippedUnverified.processIdentity, 1);
-            const positive = ['child-disappeared', 'child-pid-reused'].includes(mode);
-            assert.strictEqual(cleanup.profileExists, !positive, mode);
-            assert.strictEqual(fs.existsSync(profile), !positive, mode);
-            if (positive) {
-                assert.strictEqual(cleanup.remainingOwned, 0, mode);
-                assert.deepStrictEqual(cleanup.errors, [], mode);
-            } else {
-                assert.strictEqual(cleanup.remainingOwned, ['child-identity-unknown', 'termination-failure'].includes(mode) ? null : mode === 'orphan-descendant' ? 2 : 1, mode);
-                assert(cleanup.errors.includes('Final owned inventory'), mode);
-                assert(items.some(row => row.ProcessId === 102), mode);
-            }
+            assert.strictEqual(cleanup.profileExists, true, mode);
+            assert.strictEqual(fs.existsSync(profile), true, mode);
+            assert.strictEqual(cleanup.remainingOwned, null, mode);
+            assert(cleanup.errors.includes('Final owned inventory'), mode);
+            // Even actual disappearance/PID reuse cannot prove no unseen child was born.
+            if (!['child-disappeared', 'child-pid-reused'].includes(mode)) assert(items.some(row => row.ProcessId === 102), mode);
         } finally { fs.rmSync(profile, { recursive: true, force: true }); }
     }
     console.log('PASS integrated cleanup accounting: newly discovered orphan, known child/root reuse, actual disappearance, own-PID reuse, uncertain final identity; unverified handles/kills excluded and neighbor preserved.');
@@ -1364,6 +1379,17 @@ async function mockProbes() {
     await assert.rejects(completeRun(failedRun, failedFinal, () => {}), /final inventory failed/);
     await failedFinal.stop();
     assert.strictEqual(failedRun.status, 'failed');
+    let sampleClock = 0;
+    const TimedGuard = require('vm').runInNewContext(`(${ResourceGuard.toString()})`, { performance: { now: () => sampleClock }, assert });
+    const timed = new TimedGuard({
+        inventory: async () => { sampleClock = 11; return { bytes: 1, pids: [] }; },
+        freeMemory: () => { sampleClock = 31; return 3; }, terminate: async () => {}, limits: { browserFamilyBytes: 2, freeMemoryBytes: 2 }
+    });
+    await timed.sample('timing-boundaries');
+    assert.strictEqual(timed.trace[0].inventoryStartedAtHostMs, 0);
+    assert.strictEqual(timed.trace[0].inventoryCompletedAtHostMs, 11);
+    assert.strictEqual(timed.trace[0].validatedAtHostMs, 31);
+    assert.strictEqual(timed.trace[0].sampledAtHostMs, 31);
     const floor = new ResourceGuard({ inventory: async () => ({ bytes: 1, pids: [] }), terminate: async () => { kills++; }, freeMemory: () => 1, limits: { browserFamilyBytes: 2, freeMemoryBytes: 2 } });
     await assert.rejects(floor.finish(), /memory floor/);
     await floor.stop();
