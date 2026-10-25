@@ -1,0 +1,273 @@
+{
+  "kind": "offline synthetic counterexample; not native process/browser qualification",
+  "reviewedHead": "f0dd25699f310647c763c29c92aeb250493f5c39",
+  "sourceCommit": "c0cedf5902e47d1386620ee30479e55fc1ace17a",
+  "baseline": "e4da5bdfa9487eac7f18c193c12245716edd1c38",
+  "runner": {
+    "platform": "Linux",
+    "PowerShell": "7.6.6",
+    ".NET": "10.0.12"
+  },
+  "sanitization": "Only the two synthetic fixture-profile paths in root command lines were replaced. All process identities/actions were mocked; actual deletion affected only newly created diagnostic fixture directories.",
+  "originalResultSHA256": "8648284b538319eda846cc2f6643625d79af2658fb385ef26c612b257351b6bc",
+  "cases": [
+    {
+      "label": "current",
+      "mode": "late-birth",
+      "cleanup": {
+        "remainingOwned": 0,
+        "profileExists": false,
+        "errors": [],
+        "termination": {
+          "stoppedCount": 1,
+          "skippedUnverified": {
+            "processIdentity": 0,
+            "rootCommandLine": 0,
+            "rootCreationDate": 0
+          }
+        }
+      },
+      "removed": true,
+      "remainingFixture": [
+        {
+          "ProcessId": 102,
+          "ParentProcessId": 101,
+          "Name": "child.exe",
+          "CommandLine": "child",
+          "CreationDate": "2026-01-01T00:00:01Z",
+          "WorkingSetSize": 1,
+          "PrivatePageCount": 1
+        }
+      ],
+      "responses": [
+        {
+          "failed": false,
+          "wrongKills": 0,
+          "step": null,
+          "items": [
+            {
+              "ProcessId": 101,
+              "ParentProcessId": 0,
+              "Name": "msedge.exe",
+              "CommandLine": "msedge.exe --user-data-dir=\"<synthetic-profile>\"",
+              "CreationDate": "2026-01-01T00:00:00Z",
+              "WorkingSetSize": 11,
+              "PrivatePageCount": 17
+            }
+          ],
+          "operations": [],
+          "value": {
+            "records": [
+              {
+                "rootCreated": "639028224000000000",
+                "pid": 101,
+                "created": "639028224000000000",
+                "rootPid": 101
+              }
+            ],
+            "pids": [
+              101
+            ],
+            "bytes": 11,
+            "privateBytes": 17
+          },
+          "disposals": []
+        },
+        {
+          "operations": [
+            "open",
+            "start",
+            "kill",
+            "wait",
+            "dispose"
+          ],
+          "value": {
+            "stoppedCount": 1,
+            "skippedUnverified": {
+              "processIdentity": 0,
+              "rootCreationDate": 0,
+              "rootCommandLine": 0
+            },
+            "records": [
+              {
+                "rootCreated": "639028224000000000",
+                "created": "639028224000000000",
+                "rootPid": 101,
+                "pid": 101
+              }
+            ]
+          },
+          "items": [
+            {
+              "ProcessId": 102,
+              "ParentProcessId": 101,
+              "Name": "child.exe",
+              "CommandLine": "child",
+              "CreationDate": "2026-01-01T00:00:01Z",
+              "WorkingSetSize": 1,
+              "PrivatePageCount": 1
+            }
+          ],
+          "disposals": [
+            1
+          ],
+          "failed": false,
+          "wrongKills": 0,
+          "step": "wait-exit"
+        },
+        {
+          "failed": false,
+          "items": [
+            {
+              "ProcessId": 102,
+              "ParentProcessId": 101,
+              "Name": "child.exe",
+              "CommandLine": "child",
+              "CreationDate": "2026-01-01T00:00:01Z",
+              "WorkingSetSize": 1,
+              "PrivatePageCount": 1
+            }
+          ],
+          "wrongKills": 0,
+          "step": null,
+          "disposals": [],
+          "value": {
+            "privateBytes": 0,
+            "bytes": 0,
+            "records": [],
+            "pids": []
+          },
+          "operations": []
+        }
+      ]
+    },
+    {
+      "label": "baseline",
+      "mode": "late-birth",
+      "cleanup": {
+        "remainingOwned": 0,
+        "profileExists": false,
+        "errors": [],
+        "termination": {
+          "stoppedCount": 1,
+          "skippedUnverified": {
+            "processIdentity": 0,
+            "rootCommandLine": 0,
+            "rootCreationDate": 0
+          }
+        }
+      },
+      "removed": true,
+      "remainingFixture": [
+        {
+          "ProcessId": 102,
+          "ParentProcessId": 101,
+          "Name": "child.exe",
+          "CommandLine": "child",
+          "CreationDate": "2026-01-01T00:00:01Z",
+          "WorkingSetSize": 1,
+          "PrivatePageCount": 1
+        }
+      ],
+      "responses": [
+        {
+          "operations": [],
+          "wrongKills": 0,
+          "value": {
+            "bytes": 11,
+            "privateBytes": 17,
+            "pids": [
+              101
+            ],
+            "records": [
+              {
+                "pid": 101,
+                "created": "639028224000000000",
+                "rootCreated": "639028224000000000",
+                "rootPid": 101
+              }
+            ]
+          },
+          "step": null,
+          "failed": false,
+          "disposals": [],
+          "items": [
+            {
+              "ProcessId": 101,
+              "ParentProcessId": 0,
+              "Name": "msedge.exe",
+              "CommandLine": "msedge.exe --user-data-dir=\"<synthetic-profile>\"",
+              "CreationDate": "2026-01-01T00:00:00Z",
+              "WorkingSetSize": 11,
+              "PrivatePageCount": 17
+            }
+          ]
+        },
+        {
+          "disposals": [
+            0
+          ],
+          "value": {
+            "skippedUnverified": {
+              "processIdentity": 0,
+              "rootCreationDate": 0,
+              "rootCommandLine": 0
+            },
+            "stoppedCount": 1,
+            "records": [
+              {
+                "rootCreated": "639028224000000000",
+                "created": "639028224000000000",
+                "pid": 101,
+                "rootPid": 101
+              }
+            ]
+          },
+          "wrongKills": 0,
+          "step": "wait-exit",
+          "items": [
+            {
+              "ProcessId": 102,
+              "ParentProcessId": 101,
+              "Name": "child.exe",
+              "CommandLine": "child",
+              "CreationDate": "2026-01-01T00:00:01Z",
+              "WorkingSetSize": 1,
+              "PrivatePageCount": 1
+            }
+          ],
+          "operations": [
+            "start",
+            "kill",
+            "wait"
+          ],
+          "failed": false
+        },
+        {
+          "wrongKills": 0,
+          "items": [
+            {
+              "ProcessId": 102,
+              "ParentProcessId": 101,
+              "Name": "child.exe",
+              "CommandLine": "child",
+              "CreationDate": "2026-01-01T00:00:01Z",
+              "WorkingSetSize": 1,
+              "PrivatePageCount": 1
+            }
+          ],
+          "value": {
+            "bytes": 0,
+            "records": [],
+            "pids": [],
+            "privateBytes": 0
+          },
+          "disposals": [],
+          "step": null,
+          "failed": false,
+          "operations": []
+        }
+      ]
+    }
+  ]
+}

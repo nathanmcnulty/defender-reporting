@@ -1,0 +1,49 @@
+{
+  "repository": "nathanmcnulty/defender-reporting",
+  "owningBranch": "fix/issue-70-reviewed-cleanup-20261023",
+  "reviewedHead": "f0dd25699f310647c763c29c92aeb250493f5c39",
+  "sourceCommit": "c0cedf5902e47d1386620ee30479e55fc1ace17a",
+  "baseline": "e4da5bdfa9487eac7f18c193c12245716edd1c38",
+  "unchangedApplicationSource": "9c240298b2feb9c2d5698fcd179296b37d30d78c",
+  "handoffParent": "8dea7861fd138a10f4ebea3fd772b997c5e45510",
+  "sourceFiles": {
+    "tests/Invoke-HostedDashboardRuntimeSmoke.ps1": {
+      "blob": "5ceed1a87174b35316d132136de630bab34be78a",
+      "sha256": "8116c98ddb0e4fe14b19775845d19b5a6a0310145eb7f58b1edaf073af418662",
+      "bytes": 29350
+    },
+    "tests/Invoke-HostedSmokeDiagnosticsRegression.ps1": {
+      "blob": "e1cb0423b31bfecb4df83a1c8ae5367757516d41",
+      "sha256": "6b834afc3c61596bb75a95f4150e389622ce94f7efbedbcf009cf2b40095ac58",
+      "bytes": 17466
+    },
+    "tests/Invoke-HostedSmokeOwnershipRegression.ps1": {
+      "blob": "23ad0dd8c53a7b57320ada06a0b25b37efd7af2d",
+      "sha256": "770d0eb0462c0f78832d8aac9ee857b223c702cfde879d33065c790a6a609f30",
+      "bytes": 6311
+    },
+    "tests/Invoke-HostedSmokeSafetyRegression.ps1": {
+      "blob": "840f1f79c71fcfb28fdc249a2dab9bdeb64cfaa1",
+      "sha256": "e1daad81622e50e413ee4b2a61b67f17ab49914922250fbf0bd4520245b37d52",
+      "bytes": 11862
+    },
+    "tests/Measure-DashboardWorkerTransfer.js": {
+      "blob": "29355d5bab4f3dfede2273c138fc896b963cd31b",
+      "sha256": "ddeb7aa6b453afc3b1ace747019be1ff9b8ce15af1d6ddc4f009e9e54bafcda2",
+      "bytes": 94586
+    },
+    "tests/helpers/HostedSmokeDiagnostics.ps1": {
+      "blob": "df38256902234c741339b9437c763e11b888519f",
+      "sha256": "726b5ef6de5cb412b42c37a8043042118bf4908e73bf7d8eb07c70f6cf1f9a38",
+      "bytes": 23497
+    }
+  },
+  "baselineReproductionSource": {
+    "path": "tests/Measure-DashboardWorkerTransfer.js",
+    "blob": "a64003c69f98485990eaac640b719758cc494b8d",
+    "sha256": "aecef4a72374f95b723cf46a640f454ad1e375b9c3cbb51ad9a9e38c18f5e931"
+  },
+  "originalReviewSHA256": "aaec3bd73bd44d6fe32696469a6a8ed8cbfbf5c5aecc2860cb09e7adf2e36b9d",
+  "originalReproductionSHA256": "2331133a3ec24d4cce61e3c49ff52cd2e075be65018611bb4f19ee27cd049a6f",
+  "originalResultSHA256": "8648284b538319eda846cc2f6643625d79af2658fb385ef26c612b257351b6bc"
+}
