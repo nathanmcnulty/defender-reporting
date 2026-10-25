@@ -9,6 +9,7 @@ const { Writable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { execFile, spawn, spawnSync } = require('child_process');
 const { performance } = require('perf_hooks');
+const { LaunchBoundClient } = require('./helpers/launch-bound-owner');
 const { loadDashboardSource, loadDashboardHarness } = require('./helpers/dashboard-test-harness');
 
 function safeInventoryDiagnostic(value = {}) {
@@ -37,6 +38,7 @@ function safeFailure(error, phase = 'unknown') {
         ['Invalid process inventory response.', 'process-inventory'],
         ['Owned cleanup failed.', 'cleanup'],
         ['Owned process accounting is incomplete.', 'process-accounting'],
+        ['Launch-bound owner state unknown.', 'launch-owner'],
         ['Microsoft Edge is required.', 'edge-unavailable']
     ]);
     return {
@@ -427,6 +429,7 @@ async function terminateSpawned(launcher, launcherExit, execute = execFile, exit
 }
 
 async function terminateFamily(state) {
+    if (state.authority) { await state.authority.terminate(); return; }
     const outcomes = await Promise.allSettled([
         terminateSpawned(state.launcher, state.launcherExit),
         state.owned.terminate()
@@ -434,8 +437,13 @@ async function terminateFamily(state) {
     for (const outcome of outcomes) if (outcome.status === 'rejected') throw outcome.reason;
 }
 
-async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit, owned, profile }, overrides = {}) {
+function launchOwnerGuard(state, limits) {
+    return new ResourceGuard({ inventory: () => state.authority.inventory(), terminate: () => terminateFamily(state), limits });
+}
+
+async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit, owned, profile, authority, profileFinalizers, launchBoundMode }, overrides = {}) {
     const result = { remainingOwned: null, profileExists: profile ? true : false, errors: [] };
+    const authoritative = Boolean(authority || launchBoundMode);
     const attempt = async (label, operation, timeout = 5000) => {
         const started = performance.now();
         try { await bounded(Promise.resolve().then(operation), label, timeout); } catch (error) {
@@ -447,6 +455,7 @@ async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit,
     };
     await attempt('Guard stop', () => guard?.stop(), 15000);
     await attempt('Owned family termination', async () => {
+        if (authoritative) { assert(authority, 'Launch-bound owner state unknown.'); await authority.terminate(); return; }
         const termination = await owned?.terminate();
         if (termination) {
             assert(Number.isSafeInteger(termination.stoppedCount) && termination.stoppedCount >= 0, 'Invalid stopped count.');
@@ -466,19 +475,39 @@ async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit,
     await attempt('Page close', () => page && !page.isClosed() ? page.close({ runBeforeUnload: false }) : undefined);
     await attempt('Browser disconnect', () => browser?.close());
     await attempt('Final owned inventory', async () => {
+        if (authoritative) {
+            assert(authority, 'Launch-bound owner state unknown.');
+            const proof = await authority.finish();
+            authority.validate(proof, true);
+            result.ownerCompletion = { confirmed: true, activeProcesses: 0, forced: proof.Forced, streamsComplete: true, assignedBeforeResume: proof.Created && proof.Assigned && proof.Resumed && proof.Sealed };
+            result.remainingOwned = 0;
+            return;
+        }
         const actual = owned ? await owned.inventory() : { pids: [] };
         result.remainingOwned = actual.pids.length;
         assert.strictEqual(result.remainingOwned, 0, 'Owned processes remain.');
     });
-    await attempt('Profile removal', async () => {
+    if (authoritative) result.ownerSetup = authority?.setup || null;
+    const removeProfile = async serverClosed => {
+        if (authoritative && (!serverClosed || result.errors.length || result.remainingOwned !== 0)) throw new Error('Owned cleanup failed.');
         if (profile && result.remainingOwned === 0) await (overrides.removeProfile || fs.promises.rm)(profile, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 });
         result.profileExists = Boolean(profile && fs.existsSync(profile));
         assert(!result.profileExists, 'Owned profile remains.');
-    });
+    };
+    if (authoritative) {
+        if (result.remainingOwned === null) authority?.abort();
+        if (Array.isArray(profileFinalizers)) {
+            result.profileDeferred = true;
+            profileFinalizers.push(async serverClosed => {
+                try { await removeProfile(serverClosed); result.profileDeferred = false; }
+                catch (error) { result.errors.push('Profile removal'); throw error; }
+            });
+        } else result.errors.push('Profile removal requires server closure');
+    } else await attempt('Profile removal', () => removeProfile(true));
     return result;
 }
 
-async function withServer(server, evidence, operation) {
+async function withServer(server, evidence, operation, profileFinalizers = []) {
     let originalError;
     try {
         await bounded(new Promise((resolve, reject) => {
@@ -498,6 +527,10 @@ async function withServer(server, evidence, operation) {
         } catch {
             evidence.serverClosed = false;
             evidence.serverError = 'HTTP server close failed';
+        }
+        for (const finalize of profileFinalizers) {
+            try { await bounded(finalize(evidence.serverClosed), 'Profile removal'); }
+            catch { if (!originalError) originalError = new Error('Owned cleanup failed.'); }
         }
     }
     if (originalError) throw originalError;
@@ -691,21 +724,21 @@ async function finishHeapSample(run, sample, timeout = 5000) {
     catch { run.incompleteHeapSample = true; }
 }
 
-async function measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl }) {
+async function measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl, profileFinalizers }) {
     const state = {};
     let measurementError;
     try {
         state.profile = fs.mkdtempSync(path.join(os.tmpdir(), 'issue70-edge-'));
-        state.owned = ownedProcesses(state.profile);
-        state.guard = new ResourceGuard({ inventory: state.owned.inventory, terminate: () => terminateFamily(state), limits: evidence.limits });
+        state.launchBoundMode = true;
+        state.profileFinalizers = profileFinalizers;
+        state.authority = new LaunchBoundClient(state.profile);
+        await state.authority.ready;
+        state.owned = state.authority;
+        state.profileFinalizers = profileFinalizers;
+        state.guard = launchOwnerGuard(state, evidence.limits);
         await state.guard.sample('prelaunch');
         state.guard.check();
-        state.launcher = spawn(edge, ['--headless=new', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${state.profile}`, '--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: 'ignore', windowsHide: true });
-        if (state.launcher.pid) state.owned.setLauncher(state.launcher.pid);
-        state.launcherExit = new Promise(resolve => {
-            state.launcher.once('exit', resolve);
-            state.launcher.once('error', error => { state.guard.abort(error); resolve(); });
-        });
+        await state.authority.start(edge, ['--headless=new', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${state.profile}`, '--no-first-run', '--no-default-browser-check', 'about:blank']);
         state.guard.start();
         const portFile = path.join(state.profile, 'DevToolsActivePort');
         const port = await readDevToolsPort(portFile, state.guard);
@@ -841,7 +874,8 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
         state.guard?.abort(error);
     } finally {
         const cleanup = await cleanupOwned(state);
-        evidence.cleanups.push({ iteration, ...cleanup });
+        cleanup.iteration = iteration;
+        evidence.cleanups.push(cleanup);
         if (state.guard) {
             evidence.resourceTraces.push({ iteration, samples: state.guard.trace, peakBrowserFamilyBytes: state.guard.peakBytes, minimumFreeMemoryBytes: Number.isFinite(state.guard.minimumFreeBytes) ? state.guard.minimumFreeBytes : null });
             if (state.guard.error) {
@@ -850,7 +884,7 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
                 if (lastRun) lastRun.status = 'failed';
             }
         }
-        if (!measurementError && (cleanup.errors.length || cleanup.remainingOwned !== 0 || cleanup.profileExists)) measurementError = new Error('Owned cleanup failed.');
+        if (!measurementError && (cleanup.errors.length || cleanup.remainingOwned !== 0 || (cleanup.profileExists && !cleanup.profileDeferred))) measurementError = new Error('Owned cleanup failed.');
     }
     if (measurementError) throw measurementError;
 }
@@ -909,13 +943,14 @@ async function main() {
             } catch { response.writeHead(403).end(); }
         });
         phase = 'browser';
+        const profileFinalizers = [];
         await withServer(server, evidence, async origin => {
             const candidates = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA].filter(Boolean).map(base => path.join(base, 'Microsoft/Edge/Application/msedge.exe'));
             const edge = candidates.find(candidate => fs.existsSync(candidate));
             assert(edge, 'Microsoft Edge is required.');
             const { chromium } = require(process.env.PLAYWRIGHT_MODULE);
-            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl });
-        });
+            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl, profileFinalizers });
+        }, profileFinalizers);
         evidence.status = 'completed';
     } catch (error) {
         evidence.status = 'blocked-or-failed';

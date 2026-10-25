@@ -34,6 +34,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'helpers\HostedSmokeDiagnostics.ps1')
+. (Join-Path $PSScriptRoot 'helpers\LaunchBoundOwner.ps1')
 
 function Get-FreeTcpPort {
     [CmdletBinding()]
@@ -224,6 +225,7 @@ $failureLine = $null
 $priorCleanupFailures = @()
 $priorCleanupDiagnostics = @()
 $cleanupLedger = $null
+$launchBoundAttempts = [Collections.Generic.List[object]]::new()
 $priorCleanupUnconfirmed = $false
 $inputDashboardPath = $DashboardPath
 
@@ -580,10 +582,14 @@ try {
     }
     $canaryArguments = @($edgeArguments[0..($edgeArguments.Count - 2)]) + @("http://127.0.0.1:$Port/canary.html")
     $setupPhase = 'canary-capture'
-    $canaryResult = Invoke-HostedSmokeAttempt -Executable $edgeExecutablePath -Arguments $canaryArguments -WaitMilliseconds $waitMilliseconds -Kind canary -RunPath $diagnosticRunPath
+    $canaryOwner = New-LaunchBoundAttempt -ProfilePath $profilePath
+    $launchBoundAttempts.Add($canaryOwner)
+    $canaryResult = Invoke-HostedSmokeAttempt -Executable $edgeExecutablePath -Arguments $canaryArguments -WaitMilliseconds $waitMilliseconds -Kind canary -RunPath $diagnosticRunPath -ProcessRunner {
+        param($App, $Flags, $Wait)
+        Invoke-LaunchBoundCapture -Attempt $canaryOwner -Executable $App -Arguments $Flags -WaitMilliseconds $Wait
+    }
     $priorCleanupUnconfirmed = $true
-    $canaryCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath -AccountingIncomplete:([bool]$canaryResult.drainIncomplete) -Ledger $cleanupLedger
-    $cleanupLedger = $canaryCleanup.Ledger
+    $canaryCleanup = Complete-LaunchBoundAttempt -Attempt $canaryOwner
     $priorCleanupUnconfirmed = -not $canaryCleanup.Confirmed -or $canaryCleanup.Failures.Count -gt 0
     $priorCleanupDiagnostics = @($canaryCleanup.Diagnostics)
     if (-not $canaryCleanup.Confirmed -or $canaryCleanup.Failures.Count -gt 0) {
@@ -592,7 +598,12 @@ try {
         throw 'Canary process cleanup failed.'
     }
     $setupPhase = 'dashboard-capture'
-    $dashboardResult = Invoke-HostedSmokeAttempt -Executable $edgeExecutablePath -Arguments $edgeArguments -WaitMilliseconds $waitMilliseconds -Kind dashboard -RunPath $diagnosticRunPath
+    $dashboardOwner = New-LaunchBoundAttempt -ProfilePath $profilePath
+    $launchBoundAttempts.Add($dashboardOwner)
+    $dashboardResult = Invoke-HostedSmokeAttempt -Executable $edgeExecutablePath -Arguments $edgeArguments -WaitMilliseconds $waitMilliseconds -Kind dashboard -RunPath $diagnosticRunPath -ProcessRunner {
+        param($App, $Flags, $Wait)
+        Invoke-LaunchBoundCapture -Attempt $dashboardOwner -Executable $App -Arguments $Flags -WaitMilliseconds $Wait
+    }
     $outcome = Get-HostedSmokeOutcome -Canary $canaryResult -Dashboard $dashboardResult
     if ($outcome -ne 'passed') {
         throw "Hosted smoke failed: $outcome; canary=$($canaryResult.state); dashboard=$($dashboardResult.state); diagnostics run=$runId."
@@ -619,13 +630,32 @@ finally {
     $processCleanupConfirmed = $false
     try {
         $accountingIncomplete = $priorCleanupUnconfirmed -or ($null -ne $canaryResult -and $canaryResult.drainIncomplete) -or ($null -ne $dashboardResult -and $dashboardResult.drainIncomplete)
-        $processCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath -AccountingIncomplete:$accountingIncomplete -Ledger $cleanupLedger
-        $cleanupLedger = $processCleanup.Ledger
-        $processCleanupConfirmed = $processCleanup.Confirmed -and -not $priorCleanupUnconfirmed
-        foreach ($code in $processCleanup.Diagnostics) { $cleanupDiagnostics.Add($code) }
-        foreach ($code in $processCleanup.Failures) { $cleanupFailures.Add($code) }
+        $attemptsVariable = Get-Variable -Name launchBoundAttempts -ErrorAction SilentlyContinue
+        if ($null -ne $attemptsVariable -and $null -ne $attemptsVariable.Value) {
+            $processCleanupConfirmed = $attemptsVariable.Value.Count -gt 0 -and -not $accountingIncomplete
+            foreach ($attempt in $attemptsVariable.Value) {
+                try {
+                    $completion = Complete-LaunchBoundAttempt -Attempt $attempt
+                    if (-not $completion.Confirmed) { $processCleanupConfirmed = $false }
+                    foreach ($code in $completion.Failures) { $cleanupFailures.Add($code) }
+                    foreach ($code in $completion.Diagnostics) { $cleanupDiagnostics.Add($code) }
+                }
+                catch { $attempt.Failed = $true; $attempt.Confirmed = $false; $processCleanupConfirmed = $false; $cleanupFailures.Add('launch-bound-completion-unknown') }
+                finally {
+                    try { $attempt.Owner.Dispose() }
+                    catch { $attempt.Failed = $true; $attempt.Confirmed = $false; $processCleanupConfirmed = $false; $cleanupFailures.Add('launch-bound-disposal-failure') }
+                }
+            }
+        } else {
+            # Legacy synthetic tests retain their unchanged fail-closed census path.
+            $processCleanup = Stop-HostedSmokeProfileProcess -ProfilePath $profilePath -AccountingIncomplete:$accountingIncomplete -Ledger $cleanupLedger
+            $cleanupLedger = $processCleanup.Ledger
+            $processCleanupConfirmed = $processCleanup.Confirmed -and -not $priorCleanupUnconfirmed
+            foreach ($code in $processCleanup.Diagnostics) { $cleanupDiagnostics.Add($code) }
+            foreach ($code in $processCleanup.Failures) { $cleanupFailures.Add($code) }
+        }
     }
-    catch { $cleanupFailures.Add('process-cleanup-failure') }
+    catch { $processCleanupConfirmed = $false; $cleanupFailures.Add('process-cleanup-failure') }
     if ($serverJob) {
         Write-Verbose 'Removing local hosted dashboard server job.'
         try { Stop-Job -Job $serverJob -ErrorAction Stop } catch { $cleanupFailures.Add('server-stop-failure') }
@@ -634,9 +664,10 @@ finally {
     }
     $profileRemoved = $false
     try {
-        if ($processCleanupConfirmed -and (Test-Path -LiteralPath $profilePath -ErrorAction Stop)) { Remove-Item -LiteralPath $profilePath -Recurse -Force -ErrorAction Stop }
+        $profileRemovalAllowed = $processCleanupConfirmed -and $cleanupFailures.Count -eq 0
+        if ($profileRemovalAllowed -and (Test-Path -LiteralPath $profilePath -ErrorAction Stop)) { Remove-Item -LiteralPath $profilePath -Recurse -Force -ErrorAction Stop }
         $profileRemoved = -not (Test-Path -LiteralPath $profilePath -ErrorAction Stop)
-        if (-not $profileRemoved) { $cleanupFailures.Add($(if ($processCleanupConfirmed) { 'profile-remains' } else { 'profile-retained-unconfirmed-cleanup' })) }
+        if (-not $profileRemoved) { $cleanupFailures.Add($(if (-not $processCleanupConfirmed) { 'profile-retained-unconfirmed-cleanup' } elseif (-not $profileRemovalAllowed) { 'profile-retained-cleanup-failure' } else { 'profile-remains' })) }
     }
     catch { $cleanupFailures.Add('profile-removal-failure') }
     $temporarySiteRemoved = $false
@@ -657,6 +688,7 @@ finally {
             controlFixture = [bool]$ControlFixture
             extensionSessionCount = $extensionSessionCount
             processCleanupConfirmed = $processCleanupConfirmed
+            launchBoundAttempts = @($(if ($null -ne $attemptsVariable -and $null -ne $attemptsVariable.Value) { foreach ($attempt in $attemptsVariable.Value) { Get-LaunchBoundAttemptEvidence -Attempt $attempt } }))
             profileRemoved = $profileRemoved
             temporarySiteRemoved = $temporarySiteRemoved
             cleanupFailures = @($cleanupFailures | Select-Object -Unique)

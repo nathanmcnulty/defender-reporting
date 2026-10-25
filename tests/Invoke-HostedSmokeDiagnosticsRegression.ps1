@@ -157,7 +157,8 @@ Opening in existing browser session.
                 if ($case -eq 'unsupported') { Assert-SmokeDiagnostic (-not $calls.Contains('process-enumeration')) 'Unsupported platform must not enumerate Windows processes.' }
                 if ($case -in @('cim', 'termination', 'retained-profile')) { Assert-SmokeDiagnostic ($calls.Contains('process-enumeration')) 'Windows cleanup must exercise actual helper enumeration.' }
                 if ($case -eq 'retained-profile') { Assert-SmokeDiagnostic (-not $calls.Contains('profile-remove') -and -not $retained[0].profileRemoved -and $retained[0].cleanupFailures -contains 'profile-retained-unconfirmed-cleanup') 'Unconfirmed cleanup deleted the profile.' }
-                $expectedCode = switch ($case) { 'retained-profile' { 'process-enumeration-failure' } 'helper-throw' { 'process-cleanup-failure' } 'unsupported' { 'process-enumeration-unsupported' } 'cim' { 'process-enumeration-failure' } 'termination' { 'process-identity-unverified' } 'server-profile' { 'profile-removal-failure' } }
+                if ($case -eq 'server-profile') { Assert-SmokeDiagnostic (-not $calls.Contains('profile-remove') -and -not $retained[0].profileRemoved) 'Unconfirmed server cleanup must retain the profile.' }
+                $expectedCode = switch ($case) { 'retained-profile' { 'process-enumeration-failure' } 'helper-throw' { 'process-cleanup-failure' } 'unsupported' { 'process-enumeration-unsupported' } 'cim' { 'process-enumeration-failure' } 'termination' { 'process-identity-unverified' } 'server-profile' { 'profile-retained-cleanup-failure' } }
                 Assert-SmokeDiagnostic ($retained[0].cleanupFailures -contains $expectedCode) "Fixed cleanup failure code missing: $case expected $expectedCode."
             }
         }
