@@ -1,0 +1,355 @@
+{
+  "decision": "PARTIAL: native mechanism passed; Node integration failed; dependent lanes stopped. Overall launch-bound/browser/large-data qualification is blocked.",
+  "sourceCommit": "5a8ba29e7393fb9e7addcd122d10c514bad08686",
+  "startingHead": "340898ac0fbb1fb614f95ee4ccd7bf7d47849092",
+  "goal": "706185584c1a45126005381909257761f0d35b1a",
+  "checks": [
+    {
+      "name": "compile-first",
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 2.0160000000032596,
+      "peakWorkingSetBytes": 180330496,
+      "peakPrivateBytes": 83189760,
+      "minimumFreeBytes": 8481284096,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "748f0179d1dbeb753713d9f48328f07540f2742e8f45f0eca7e06f35e0e5fb6e"
+    },
+    {
+      "name": "protocol-first",
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 0.5149999999994179,
+      "peakWorkingSetBytes": 25989120,
+      "peakPrivateBytes": 1335296,
+      "minimumFreeBytes": 8530370560,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "892111a73b1dffeab43def9a9729950f3fad0d9e4ab8c6f1d6d83e85b18b66d3"
+    },
+    {
+      "name": "ps-contract-first",
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 2.0160000000032596,
+      "peakWorkingSetBytes": 120954880,
+      "peakPrivateBytes": 47579136,
+      "minimumFreeBytes": 8440815616,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "02e2f026fc31282a7f90f45ac3b98cb781d026d414d323e696010a4a883dc808"
+    },
+    {
+      "name": "analysis-first",
+      "status": "failed",
+      "exitCode": 1,
+      "elapsedSeconds": 11.030999999995402,
+      "peakWorkingSetBytes": 198307840,
+      "peakPrivateBytes": 103522304,
+      "minimumFreeBytes": 8353865728,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "2782192fcdad2684f61c95aef137235ce52817820109de1b2ece63dc86edf36b"
+    },
+    {
+      "name": "analysis-second",
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 12.531000000002678,
+      "peakWorkingSetBytes": 267702272,
+      "peakPrivateBytes": 145862656,
+      "minimumFreeBytes": 8490131456,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "1826e3676b35ab34328c50bfebf9571cea76d6beec697dd464c5c2cf2fb1257d"
+    },
+    {
+      "name": "protocol-second",
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 2.014999999999418,
+      "peakWorkingSetBytes": 183472128,
+      "peakPrivateBytes": 110268416,
+      "minimumFreeBytes": 8555081728,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "24b3d91fceab776654bc48e5caa0ce5ea97bc71c6b9130f5fdace7a17180fdf3"
+    },
+    {
+      "name": "analysis-third",
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 13.530999999995402,
+      "peakWorkingSetBytes": 265883648,
+      "peakPrivateBytes": 149479424,
+      "minimumFreeBytes": 8443994112,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "61f1025246dbf02f6b67045c24d8405d106a0fe4955cba6ed980481d5b827496"
+    },
+    {
+      "name": "legacy-ps-first",
+      "status": "failed",
+      "exitCode": 1,
+      "elapsedSeconds": 2.514999999999418,
+      "peakWorkingSetBytes": 195506176,
+      "peakPrivateBytes": 93626368,
+      "minimumFreeBytes": 8510201856,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "21931db1815a4c0e108cb1968b911fc16ef50060a716e5e70b844ed96917c2f8"
+    },
+    {
+      "name": "legacy-ps-second",
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 76.125,
+      "peakWorkingSetBytes": 322813952,
+      "peakPrivateBytes": 133210112,
+      "minimumFreeBytes": 8422141952,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "611414d555c29cd35147b845485ba0edf0e1190e24391a5e5327c5b037bc9d58"
+    },
+    {
+      "name": "protocol-third",
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 2.5310000000026776,
+      "peakWorkingSetBytes": 181780480,
+      "peakPrivateBytes": 111292416,
+      "minimumFreeBytes": 8694734848,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "61a5320ce080d3f9a1a8d477eeab4dedeb8eb9102d203856e74c5f48db94f9b2"
+    },
+    {
+      "name": "analysis-final",
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 14.531999999999243,
+      "peakWorkingSetBytes": 406425600,
+      "peakPrivateBytes": 153944064,
+      "minimumFreeBytes": 8348401664,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "bc82134a5d53015ae0041d091752d2e6785bda0e2e8489f13958c76e83872a9a"
+    },
+    {
+      "name": "telemetry-final",
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 146.3440000000046,
+      "peakWorkingSetBytes": 255799296,
+      "peakPrivateBytes": 125444096,
+      "minimumFreeBytes": 8182312960,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "1f7d1f3148922df315bf2947420d34f46afaca48e491cb84a5a3cd3e4f8020d2"
+    },
+    {
+      "name": "accounting-final",
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 35.48399999999674,
+      "peakWorkingSetBytes": 171724800,
+      "peakPrivateBytes": 101326848,
+      "minimumFreeBytes": 8506535936,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 180,
+        "capGiB": 3.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "b9137710bdb13803ccfa820425925a53e54def380a5cb42391eaf41741dadabf"
+    }
+  ],
+  "nativeCells": [
+    {
+      "mode": "mechanism",
+      "passed": true,
+      "outerPassed": true,
+      "innerPassed": true,
+      "admissionGiB": 5.25,
+      "minimumAdmissionBytes": 8665858048,
+      "status": "passed",
+      "exitCode": 0,
+      "elapsedSeconds": 5.51600000000326,
+      "peakWorkingSetBytes": 561442816,
+      "peakPrivateBytes": 431071232,
+      "minimumFreeBytes": 8142848000,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 240,
+        "capGiB": 2.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "7e2f667d046b676e611053e24e1354d0cc45eb5431dd4a6044a43ca8d0d2e749",
+      "mechanism": {
+        "status": "passed",
+        "cases": [
+          "root:contained-descendants-and-zero",
+          "late:contained-descendants-and-zero",
+          "assignment:first-rollback-failed-dispose-retried-no-resume",
+          "fanout:grow-pid-buffer-and-zero",
+          "late-query:unconfirmed",
+          "query-error:unconfirmed",
+          "negative-memory:unconfirmed",
+          "exit:capture-zero",
+          "output:capture-zero",
+          "breakaway:capture-zero"
+        ],
+        "neighborSurvived": true,
+        "neighborCleanupConfirmed": true,
+        "exceptionType": null,
+        "cleanupExceptionType": null,
+        "scope": "native nested-job mechanism controls, not Edge or large-data acceptance"
+      }
+    },
+    {
+      "mode": "node-ipc",
+      "passed": false,
+      "outerPassed": false,
+      "innerPassed": false,
+      "admissionGiB": 5.25,
+      "minimumAdmissionBytes": 8616034304,
+      "status": "failed",
+      "exitCode": 1,
+      "elapsedSeconds": 7.046999999998661,
+      "peakWorkingSetBytes": 268517376,
+      "peakPrivateBytes": 124874752,
+      "minimumFreeBytes": 8252993536,
+      "cleanupVerified": true,
+      "cleanupErrors": [],
+      "remainingAtRootExit": [],
+      "limits": {
+        "seconds": 240,
+        "capGiB": 2.0,
+        "floorGiB": 3.0,
+        "samplingSeconds": 0.5
+      },
+      "receiptSha256": "1f29cd857580db6ccf51220084669274511535661c1f7a9c8efb8712546d6e27",
+      "failure": "Unexpected native fixture member",
+      "failureBefore": "retained-handle observer creation or owner-crash action",
+      "nodeResultJsonEmitted": false,
+      "unclassifiedMemberIdentityRetained": false
+    }
+  ],
+  "notRun": [
+    "Node owner-crash induction and retained-handle exit observation",
+    "Node client-EOF case",
+    "Small real-library Edge cold/reload control",
+    "Standalone canary/dashboard control",
+    "Affected candidate 20k full-field cold/reload confirmation",
+    "Base/larger/performance ladder",
+    "Exact-head hosted CI and live Azure"
+  ],
+  "failedResultsPreserved": [
+    "analysis-first: ShouldProcess analyzer warning before scoped suppression",
+    "legacy-ps-first: old server-failure profile-removal expectation before corrected fail-closed expectation",
+    "native-node-ipc: unclassified additional job member; no unchanged retry"
+  ],
+  "remainingBlockers": [
+    "Additional inner-job member is outside fixture root/child/grandchild marker set; retained evidence lacks identity list, so fixture-model versus implementation cause remains unresolved.",
+    "Node owner-loss/EOF completion contract, actual Edge nested-job/subprocess compatibility, and both consumers remain unqualified.",
+    "Historical readiness/inventory variability, 120k fresh-import caps, monolithic caps, replay hotspot series and large-data performance remain open."
+  ],
+  "historicalCI": {
+    "run": 39735467316,
+    "revision": "f341fdd2cf634451a909b69da5ee636dba02fb9f",
+    "result": "passed deterministic preflight and Azure package smoke after dated receipt; not evidence for this checkpoint"
+  },
+  "priorEvidenceArchiveSha256": "9db2e603968798ebb17f50651a2c2bae62a5a0f13c62209ff8d1ebc81476055b",
+  "operationalEvidence": "Preserved locally; no raw traces, profile paths, process identities, payloads or tenant data published."
+}
