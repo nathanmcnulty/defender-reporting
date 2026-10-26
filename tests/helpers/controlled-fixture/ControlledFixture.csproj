@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <RuntimeFrameworkVersion>10.0.12</RuntimeFrameworkVersion>
+    <RollForward>Disable</RollForward>
+    <SelfContained>false</SelfContained>
+    <UseAppHost>true</UseAppHost>
+    <AssemblyName>LaunchBoundFixture</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <UseSharedCompilation>false</UseSharedCompilation>
+    <Deterministic>true</Deterministic>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <DebugType>none</DebugType>
+    <NuGetAudit>false</NuGetAudit>
+    <RestoreIgnoreFailedSources>false</RestoreIgnoreFailedSources>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="../LaunchBoundJob.cs" Link="LaunchBoundJob.cs" />
+  </ItemGroup>
+</Project>

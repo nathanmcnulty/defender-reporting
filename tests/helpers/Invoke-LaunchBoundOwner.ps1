@@ -1,9 +1,11 @@
 # Sole-client JSONL adapter. Browser bytes never enter protocol stdout.
 # Unexpected input/EOF closes the exclusive job, but produces no clean completion receipt.
 [CmdletBinding()]
-param()
+param([ValidatePattern('^[a-f0-9]{64}\z')][string]$BridgeNonce)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+[Console]::InputEncoding = [Text.UTF8Encoding]::new($false,$true)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false,$true)
 . (Join-Path $PSScriptRoot 'LaunchBoundOwner.ps1')
 . (Join-Path $PSScriptRoot 'HostedSmokeDiagnostics.ps1')
 Initialize-LaunchBoundOwner
@@ -25,12 +27,26 @@ function Read-OwnerRequest {
         if ($document.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) { throw 'Invalid protocol.' }
         $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         foreach ($property in $document.RootElement.EnumerateObject()) { if (-not $names.Add($property.Name)) { throw 'Duplicate key.' } }
+        $actorElement=[Text.Json.JsonElement]::new()
+        if($document.RootElement.TryGetProperty('actor',[ref]$actorElement) -and $actorElement.ValueKind -eq [Text.Json.JsonValueKind]::Object){
+            $actorNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach($property in $actorElement.EnumerateObject()){if(-not $actorNames.Add($property.Name)){throw 'Duplicate actor key.'}}
+        }
     }
     finally { $document.Dispose() }
     return $builder.ToString() | ConvertFrom-Json -AsHashtable -Depth 8
 }
 try {
-    Write-OwnerReply @{ v = 1; nonce = $nonce; ready = $true }
+    if($BridgeNonce){
+        $activation=Read-OwnerRequest
+        if($null -eq $activation){throw 'Bridge activation endpoint lost.'}
+        $activationNames=@('v','bridgeNonce','command','actor')
+        if($activation.Count -ne 4 -or @($activation.Keys|Where-Object {$_ -cnotin $activationNames}).Count -or $activation.command -isnot [string] -or $activation.bridgeNonce -isnot [string] -or $activation.command -cne 'bridge-ready' -or $activation.bridgeNonce -cne $BridgeNonce -or ($activation.v -isnot [int] -and $activation.v -isnot [long]) -or $activation.v -ne 1 -or $activation.actor -isnot [Collections.IDictionary]){throw 'Invalid bridge activation.'}
+        $actor=[LaunchBound.JobOwner]::ReadActorIdentity();$actorKeys=@('Pid','ParentPid','CreationFileTime','ImagePath')
+        if($activation.actor.Count -ne 4 -or @($activation.actor.Keys|Where-Object {$_ -cnotin $actorKeys}).Count -or ($activation.actor.Pid -isnot [int] -and $activation.actor.Pid -isnot [long]) -or ($activation.actor.ParentPid -isnot [int] -and $activation.actor.ParentPid -isnot [long]) -or $activation.actor.CreationFileTime -isnot [string] -or $activation.actor.ImagePath -isnot [string] -or $activation.actor.Pid -ne $actor.Pid -or $activation.actor.ParentPid -ne $actor.ParentPid -or $activation.actor.CreationFileTime -cne $actor.CreationFileTime -or $activation.actor.ImagePath -cne $actor.ImagePath){throw 'Bridge activation actor mismatch.'}
+        Write-OwnerReply @{ v = 1; nonce = $nonce; ready = $true; bridgeNonce = $BridgeNonce; actor = $actor }
+    }
+    else{Write-OwnerReply @{v=1;nonce=$nonce;ready=$true}}
     while ($null -ne ($request = Read-OwnerRequest)) {
         $allowed = @('v','nonce','runId','profile','seq','command')
         if ($request.command -ceq 'start') { $allowed += @('executable','arguments') }
