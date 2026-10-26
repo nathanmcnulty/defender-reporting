@@ -502,3 +502,107 @@ Recommendations:
 - prefer `benchmark-large-50k-v1` plus `New-SyntheticSnapshotDelta.ps1` when you need a reusable large Azure seed with a fresh incoming snapshot date
 - use the staged local copy behavior in `Measure-BranchVsMainBenchmark.ps1` when benchmarking raw datasets without sidecars
 - use `docs/performance-baselines.md` only for accepted durable datasets that should remain merge-tracked as baseline documentation
+
+## Explicit launch-bound native qualification
+
+These Windows-only synthetic controls exercise `helpers/LaunchBoundJob.cs` with a
+GUI-subsystem fixture and a real PowerShell owner. They do not qualify Edge,
+IndexedDB, large datasets, tenant behavior, or arbitrary PowerShell descendant
+provenance. Unexpected job members always fail identity validation. Failed
+profiles and diagnostic artifacts must be retained.
+
+Node launches a fixed PowerShell bootstrap which starts the real owner with
+three restricted inherited pipe duplicates and no breakaway flag. This avoids
+libuv's extra immediate-job policy while retaining the real owner's strict
+supervisor-policy checks. The bootstrap reports the owner identity from its
+original handle before protocol activation; the real owner waits for a private
+client ACK and its readiness must corroborate that identity. Startup pipe EOF
+exits the running owner gate rather than leaving a suspended helper behind.
+No detached PowerShell launch, named outer job, or runtime startup hook is used.
+Bootstrap compilation and owner startup share the existing readiness budget.
+The native Node cases distinguish normal completion, actual real-owner crash,
+bootstrap crash and client EOF. Read-only original handles cover the real owner
+and both fixture descendants. A separate synthetic crash control rejects a
+wrong creation identity before terminating the validated original owner handle.
+An abrupt Node-parent-death experiment remains separate from explicit pipe EOF.
+
+Use already installed PowerShell 7.6+, Node.js, .NET SDK 10.0.401, and the x64
+reference/apphost/Core runtime packs 10.0.12. The fixture disables runtime
+roll-forward. Missing versions are a prerequisite failure; these tests do not
+install or download tools. The build clears package feeds and isolates caches,
+SDK imports and environment variables. Keep generated bindings and raw evidence
+in a private directory outside the tracked source.
+
+Before building, create a private JSON toolchain binding with `schema: 1`,
+`sdkVersion: "10.0.401"`, `runtimeVersion: "10.0.12"`, absolute `dotnetRoot`,
+`dotnet`, `runtimeDirectory`, `dotnetSha256`, and a `groups` array. The groups
+cover the complete installed SDK, reference pack, apphost pack, Core runtime,
+and host/fxr directory. Each group has an `id`, absolute `root`, and every file
+as `{path, bytes, sha256}` using relative forward-slash paths and lowercase
+SHA256. Generate that inventory from the selected installed files, for example:
+
+```powershell
+# Run in PowerShell 7.6+. Select and review the local installation first.
+$dotnetRoot = Join-Path $env:ProgramFiles 'dotnet'
+$roots = [ordered]@{
+    sdk = 'sdk/10.0.401'
+    reference = 'packs/Microsoft.NETCore.App.Ref/10.0.12'
+    apphost = 'packs/Microsoft.NETCore.App.Host.win-x64/10.0.12'
+    runtime = 'shared/Microsoft.NETCore.App/10.0.12'
+    hostfxr = 'host/fxr'
+}
+$groups = @(foreach ($id in $roots.Keys) {
+    $root = Join-Path $dotnetRoot $roots[$id]
+    $files = @(Get-ChildItem -LiteralPath $root -Recurse -Force -File |
+        Sort-Object FullName -CaseSensitive | ForEach-Object {
+            [ordered]@{
+                path = [IO.Path]::GetRelativePath($root, $_.FullName).Replace('\', '/')
+                bytes = $_.Length
+                sha256 = (Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            }
+        })
+    if (-not $files.Count) { throw 'Installed toolchain group is missing.' }
+    [ordered]@{id = $id; root = $root; files = $files}
+})
+$dotnet = Join-Path $dotnetRoot 'dotnet.exe'
+$binding = [ordered]@{
+    schema = 1; sdkVersion = '10.0.401'; runtimeVersion = '10.0.12'
+    dotnetRoot = $dotnetRoot; dotnet = $dotnet
+    dotnetSha256 = (Get-FileHash -LiteralPath $dotnet).Hash.ToLowerInvariant()
+    runtimeDirectory = Join-Path $dotnetRoot $roots.runtime
+    groups = $groups
+}
+# Serialize to a new private path, hash it, and freeze it for the reviewed run.
+# Do not copy another machine's binding or refresh it during an attempted run.
+```
+
+`helpers/controlled-fixture/Build-ControlledFixture.ps1` takes absolute
+`-EvidencePath`, `-ToolchainBindingPath` and its `-ToolchainBindingSha256`.
+It requires an existing outer job with kill-on-close, a 3 GiB job memory cap
+and no UI restrictions; an unsupervised invocation fails. The invoking
+supervisor must also impose 180 seconds, a 3 GiB free-memory floor and
+0.5-second sampling. Inspect the build result, both complete capped build
+streams, copied source hashes, and the four-file product manifest before use.
+
+Under the separately reviewed native supervisor (240 seconds, 2 GiB family
+cap, 3 GiB free floor, 0.5-second sampling), invoke
+`Invoke-LaunchBoundNativeControls.ps1 -EvidencePath <fresh-private-directory>
+-ProductManifest <absolute-fixture.product.json> -ProductManifestSha256 <hash>`.
+`-DiagnosticOnly` limits that invocation to the root-exit diagnostic case.
+The complete invocation also requires the four real PowerShell integration
+cases. Node IPC controls take positional arguments:
+`node tests/Assert-DashboardLaunchBoundNative.js <absolute-pwsh.exe>
+<fresh-private-directory> <absolute-fixture.product.json> <hash>`.
+Before each native cell, require five free-memory samples spaced at least
+500 ms apart, each exceeding 5.25 GiB. Never increase limits to obtain a pass.
+
+The ordered qualification cells are Analyze, FixtureContracts, Protocol,
+PSOwner, LegacyPS, Telemetry, Accounting, Diagnostic, Mechanism and NodeIPC.
+Analyze includes parser/analyzer checks, offline contracts and a fresh bound
+fixture build. Offline cells retain the 180-second/3-GiB limits. A final audit
+must bind one coherent source, runtime and product to all ten inner and outer
+results, commands, admission samples and complete artifact inventories. Check
+every job member and birth identity, exact parent topology, root exclusion,
+fanout buffer growth, terminal zero membership, retained-handle exit, both
+stream EOF/error states, repeated completion, neighbor survival and retained
+unknown-owner profiles. Outer cleanup alone never establishes acceptance.

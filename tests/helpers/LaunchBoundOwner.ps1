@@ -61,7 +61,7 @@ function Complete-LaunchBoundAttempt {
         $proof = $Attempt.Owner.Stop(5000)
         Assert-LaunchBoundProfileContained -Owner $Attempt.Owner -ProfilePath $Attempt.ProfilePath
         if ($clock.ElapsedMilliseconds -ge 5000) { throw 'Late completion proof.' }
-        $valid = -not $Attempt.Failed -and $proof.RunId -ceq $Attempt.RunId -and $proof.ProfileKey -ceq $Attempt.ProfileKey -and $proof.Created -and $proof.Assigned -and $proof.Resumed -and $proof.Sealed -and $proof.Terminal -and $proof.Confirmed -and $proof.StreamsComplete -and $proof.ActiveProcesses -eq 0 -and $proof.Pids.Length -eq 0
+        $valid = -not $Attempt.Failed -and $proof.RunId -ceq $Attempt.RunId -and $proof.ProfileKey -ceq $Attempt.ProfileKey -and $proof.Created -and $proof.Assigned -and $proof.Resumed -and $proof.Sealed -and $proof.RootInOuterBeforeInner -and $proof.OuterPolicyConfirmed -and $proof.OuterJobLimitBytes -in @(2GB,3GB) -and $proof.Terminal -and $proof.Confirmed -and $proof.StreamsComplete -and $proof.ActiveProcesses -eq 0 -and $proof.Pids.Length -eq 0
         if (-not $valid) { throw 'Launch completion unknown.' }
         $Attempt.Receipt = $proof
         $Attempt.Confirmed = $true
@@ -83,6 +83,9 @@ function Get-LaunchBoundAttemptEvidence {
         assigned = $null -ne $setup -and $setup.Assigned
         resumed = $null -ne $setup -and $setup.Resumed
         assignmentSealed = $null -ne $setup -and $setup.Sealed
+        rootInOuterBeforeInner = $null -ne $setup -and $setup.RootInOuterBeforeInner
+        outerPolicyConfirmed = $null -ne $setup -and $setup.OuterPolicyConfirmed
+        outerJobLimitBytes = $(if ($null -ne $setup) { $setup.OuterJobLimitBytes } else { $null })
         confirmed = [bool]$Attempt.Confirmed
         failed = [bool]$Attempt.Failed
         activeProcesses = $(if ($Attempt.Confirmed -and $null -ne $Attempt.Receipt) { $Attempt.Receipt.ActiveProcesses } else { $null })
