@@ -2,6 +2,8 @@
 
 This folder contains lightweight PowerShell regression coverage for the Defender reporting pipeline.
 
+Maintained PowerShell entrypoints require PowerShell 7.6 or later. The bespoke runtime and inventory regressions run in deterministic preflight; they do not require Pester. See [the baseline policy](../docs/powershell-baseline.md).
+
 ## Layout
 
 - `tests/fixtures/` contains committed, minimal synthetic regression datasets, never live exports.
@@ -76,11 +78,11 @@ The harness requires at least 3 GiB free RAM before launch and throughout sampli
 
 Family private memory is also sampled, but the unchanged family cap applies to working set. Observational CDP heap/readiness probes are single-flight and may stall during main-thread work; they do not impose a separate five-second initialization deadline. Final probe drain is bounded to five seconds before cleanup proceeds; a drain timeout sets `incompleteHeapSample` rather than manufacturing a heap measurement or a resource-guard failure. The independent process inventory retains its own timeout and fail-closed guards. Scalar initialization traces fail promptly on a caught initialization error and retain only error class, function names, and source positions, never raw messages, stacks, or payload records. Worker markers are retained at the first valid readiness snapshot even if a later report/guard check fails. A partial readiness snapshot is not a passed run, and its `activeRows` means filtered source rows, not grouped active report rows.
 
-Normalized counts must equal the explicit expectation and agree across cold/reload runs. Required report renders, impact/filtered-source counts, severity-card hashes, and `readinessCacheDigest` must agree; this is readiness/cache consistency, not report-content semantic validation. Equal zero counts alone do not establish report coverage. The explicit two-row `--positive-control` clears both date fields through the existing date popover (unrestricted custom range), requires both source rows selected and bounded positive impact/card totals, and compares those observations across cold/reload. This avoids fixture dates falling outside today's default history window; it does not validate every grouped report field. The harness inspects the matching compressed-fingerprint IndexedDB entry and the runtime's row/entry limits. Eligible reloads must actually hit cache; ineligible reloads are labelled `cachedEligible: false` with an explicit reason, never forced into the cached lane. There is currently no separate byte soft limit or cache feature flag. Production cache writes remain disabled at 500,000 rows and above. A passed mock, small control, or full preflight cannot establish a large-data performance result.
+Normalized counts must equal the explicit expectation and agree across cold/reload runs. Required report renders, impact/filtered-source counts, severity-card hashes, and `readinessCacheDigest` must agree; this is readiness/cache consistency, not report-content semantic validation. Equal zero counts alone do not establish report coverage. The explicit two-row `--positive-control` sets January 1-2, 2026 through the existing date popover, requires both source rows selected and exactly two grouped active rows, impact rows, and severity-card total for the committed fixture, and compares those observations across cold/reload. This avoids fixture dates falling outside today's default history window; it does not validate every grouped report field. The harness captures the runtime's actual compressed fingerprint once per navigation, requires the same key across cold/reload, and inspects its matching IndexedDB entry and the runtime's row/entry limits. Eligible reloads must actually hit cache; ineligible reloads are labelled `cachedEligible: false` with an explicit reason, never forced into the cached lane. There is currently no separate byte soft limit or cache feature flag. Production cache writes remain disabled at 500,000 rows and above. A passed mock, small control, or full preflight cannot establish a large-data performance result.
 
 Profile ownership uses native Windows argument parsing, a single exact profile switch (equals or separate-value form), fully qualified path normalization, slash normalization and ordinal case-insensitive comparison. Prefix neighbors, literals inside other arguments, relative paths and duplicate profile switches are excluded. Descendant closure retains root creation provenance; fresh snapshots and process start identities are checked before each kill. No unchecked `taskkill /T` or launcher-PID kill is used. Windows browser-free probes run the actual PowerShell code against mocked process APIs, including surviving neighbors and root PID reuse; they never kill real processes. All command-entry and evidence-write failures emit fixed labels with allowlisted phase/reason/code fields, never raw messages, exception names, stacks, URLs, query keys, tokens or paths. Instrumentation retains only allowlisted function/phase names and numeric positions. Metric snapshots are copied so later mutations remain observable; absent optional instrumentation is tolerated.
 
-Owned termination orders descendants before their roots. Killing a root first can leave a fresh CIM root record with unavailable identity fields while its children are still being checked, causing a real fail-closed rejection even though the family later exits. A retained two-row diagnostic reproduced this at `fresh-root-identity`, not at the native kill call. The ownership mocks model root identity becoming unavailable after root termination and require exact descendant-before-root kill order; they also require unexpected native kill failures, unknown live identities, and PID reuse to remain failures or exclusions. Termination diagnostics retain only allowlisted steps, exception types, numeric native error codes, and cleanup elapsed times. Final zero processes alone never erases an earlier failure. Actual acceptance requires an uninstrumented cold/reload control with Node exit zero, no cleanup failures, profile removal, server closure, unchanged fixture hashes, and preserved unrelated process identities. A selection-phase inventory rejection in an intermediate repaired control remains failed evidence, even with successful cleanup. These checks establish small-control lifecycle and readiness/cache consistency only, not large-data performance or grouped-report semantic parity.
+Owned termination orders descendants before their roots and requires fresh process/root identity before a kill. An item with incomplete fresh creation-time or root-command-line evidence is skipped without calling `Get-Process` or `Kill`; only sanitized `processIdentity`, `rootCommandLine`, and `rootCreationDate` attempt counters are retained in `termination.skippedUnverified`. Every selected identity, including a child first discovered during termination, remains accountable until its own absence or PID reuse is verified. Final inventory accounts for same-identity children independently of root disappearance or root PID reuse; this accounting can conservatively retain descendants, but it never authorizes a kill. Unknown final owned identity fails closed and retains the profile. The ownership mocks cover both incomplete fields, no unverified kill, integrated orphan/root-reuse survivors failing cleanup, actual disappearance and own-PID reuse passing final inventory, descendant-before-root order, unexpected native kill failures, unknown live identities, and PID reuse. A failed termination leaves accounting incomplete for that owner instance: later inventory cannot claim zero or remove the profile. Final zero processes never erases an earlier operation failure. Actual acceptance requires a non-mock native cold/reload control with Node exit zero, no cleanup failures, profile removal, server closure, unchanged fixture hashes, and preserved unrelated process identities. These checks establish the exercised lifecycle and readiness/cache behavior only; they do not establish historical large-data performance.
 
 ## Hosted smoke diagnostics
 
@@ -502,3 +504,107 @@ Recommendations:
 - prefer `benchmark-large-50k-v1` plus `New-SyntheticSnapshotDelta.ps1` when you need a reusable large Azure seed with a fresh incoming snapshot date
 - use the staged local copy behavior in `Measure-BranchVsMainBenchmark.ps1` when benchmarking raw datasets without sidecars
 - use `docs/performance-baselines.md` only for accepted durable datasets that should remain merge-tracked as baseline documentation
+
+## Explicit launch-bound native qualification
+
+These Windows-only synthetic controls exercise `helpers/LaunchBoundJob.cs` with a
+GUI-subsystem fixture and a real PowerShell owner. They do not qualify Edge,
+IndexedDB, large datasets, tenant behavior, or arbitrary PowerShell descendant
+provenance. Unexpected job members always fail identity validation. Failed
+profiles and diagnostic artifacts must be retained.
+
+Node launches a fixed PowerShell bootstrap which starts the real owner with
+three restricted inherited pipe duplicates and no breakaway flag. This avoids
+libuv's extra immediate-job policy while retaining the real owner's strict
+supervisor-policy checks. The bootstrap reports the owner identity from its
+original handle before protocol activation; the real owner waits for a private
+client ACK and its readiness must corroborate that identity. Startup pipe EOF
+exits the running owner gate rather than leaving a suspended helper behind.
+No detached PowerShell launch, named outer job, or runtime startup hook is used.
+Bootstrap compilation and owner startup share the existing readiness budget.
+The native Node cases distinguish normal completion, actual real-owner crash,
+bootstrap crash and client EOF. Read-only original handles cover the real owner
+and both fixture descendants. A separate synthetic crash control rejects a
+wrong creation identity before terminating the validated original owner handle.
+An abrupt Node-parent-death experiment remains separate from explicit pipe EOF.
+
+Use already installed PowerShell 7.6+, Node.js, .NET SDK 10.0.401, and the x64
+reference/apphost/Core runtime packs 10.0.12. The fixture disables runtime
+roll-forward. Missing versions are a prerequisite failure; these tests do not
+install or download tools. The build clears package feeds and isolates caches,
+SDK imports and environment variables. Keep generated bindings and raw evidence
+in a private directory outside the tracked source.
+
+Before building, create a private JSON toolchain binding with `schema: 1`,
+`sdkVersion: "10.0.401"`, `runtimeVersion: "10.0.12"`, absolute `dotnetRoot`,
+`dotnet`, `runtimeDirectory`, `dotnetSha256`, and a `groups` array. The groups
+cover the complete installed SDK, reference pack, apphost pack, Core runtime,
+and host/fxr directory. Each group has an `id`, absolute `root`, and every file
+as `{path, bytes, sha256}` using relative forward-slash paths and lowercase
+SHA256. Generate that inventory from the selected installed files, for example:
+
+```powershell
+# Run in PowerShell 7.6+. Select and review the local installation first.
+$dotnetRoot = Join-Path $env:ProgramFiles 'dotnet'
+$roots = [ordered]@{
+    sdk = 'sdk/10.0.401'
+    reference = 'packs/Microsoft.NETCore.App.Ref/10.0.12'
+    apphost = 'packs/Microsoft.NETCore.App.Host.win-x64/10.0.12'
+    runtime = 'shared/Microsoft.NETCore.App/10.0.12'
+    hostfxr = 'host/fxr'
+}
+$groups = @(foreach ($id in $roots.Keys) {
+    $root = Join-Path $dotnetRoot $roots[$id]
+    $files = @(Get-ChildItem -LiteralPath $root -Recurse -Force -File |
+        Sort-Object FullName -CaseSensitive | ForEach-Object {
+            [ordered]@{
+                path = [IO.Path]::GetRelativePath($root, $_.FullName).Replace('\', '/')
+                bytes = $_.Length
+                sha256 = (Get-FileHash -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            }
+        })
+    if (-not $files.Count) { throw 'Installed toolchain group is missing.' }
+    [ordered]@{id = $id; root = $root; files = $files}
+})
+$dotnet = Join-Path $dotnetRoot 'dotnet.exe'
+$binding = [ordered]@{
+    schema = 1; kind = 'toolchain'; sdkVersion = '10.0.401'; runtimeVersion = '10.0.12'
+    dotnetRoot = $dotnetRoot; dotnet = $dotnet
+    dotnetSha256 = (Get-FileHash -LiteralPath $dotnet).Hash.ToLowerInvariant()
+    runtimeDirectory = Join-Path $dotnetRoot $roots.runtime
+    groups = $groups
+}
+# Serialize to a new private path, hash it, and freeze it for the reviewed run.
+# Do not copy another machine's binding or refresh it during an attempted run.
+```
+
+`helpers/controlled-fixture/Build-ControlledFixture.ps1` takes absolute
+`-EvidencePath`, `-ToolchainBindingPath` and its `-ToolchainBindingSha256`.
+It requires an existing outer job with kill-on-close, a 3 GiB job memory cap
+and no UI restrictions; an unsupervised invocation fails. The invoking
+supervisor must also impose 180 seconds, a 3 GiB free-memory floor and
+0.5-second sampling. Inspect the build result, both complete capped build
+streams, copied source hashes, and the four-file product manifest before use.
+
+Under the separately reviewed native supervisor (240 seconds, 2 GiB family
+cap, 3 GiB free floor, 0.5-second sampling), invoke
+`Invoke-LaunchBoundNativeControls.ps1 -EvidencePath <fresh-private-directory>
+-ProductManifest <absolute-fixture.product.json> -ProductManifestSha256 <hash>`.
+`-DiagnosticOnly` limits that invocation to the root-exit diagnostic case.
+The complete invocation also requires the four real PowerShell integration
+cases. Node IPC controls take positional arguments:
+`node tests/Assert-DashboardLaunchBoundNative.js <absolute-pwsh.exe>
+<fresh-private-directory> <absolute-fixture.product.json> <hash>`.
+Before each native cell, require five free-memory samples spaced at least
+500 ms apart, each exceeding 5.25 GiB. Never increase limits to obtain a pass.
+
+The ordered qualification cells are Analyze, FixtureContracts, Protocol,
+PSOwner, LegacyPS, Telemetry, Accounting, Diagnostic, Mechanism and NodeIPC.
+Analyze includes parser/analyzer checks, offline contracts and a fresh bound
+fixture build. Offline cells retain the 180-second/3-GiB limits. A final audit
+must bind one coherent source, runtime and product to all ten inner and outer
+results, commands, admission samples and complete artifact inventories. Check
+every job member and birth identity, exact parent topology, root exclusion,
+fanout buffer growth, terminal zero membership, retained-handle exit, both
+stream EOF/error states, repeated completion, neighbor survival and retained
+unknown-owner profiles. Outer cleanup alone never establishes acceptance.

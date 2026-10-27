@@ -1,0 +1,41 @@
+{
+  "repository": "nathanmcnulty/defender-reporting",
+  "branch": "fix/issue-70-reviewed-cleanup-20261023",
+  "sourceCommit": "c0cedf5902e47d1386620ee30479e55fc1ace17a",
+  "parent": "e4da5bdfa9487eac7f18c193c12245716edd1c38",
+  "goalCommit": "8dea7861fd138a10f4ebea3fd772b997c5e45510",
+  "runtimeSource": "9c240298b2feb9c2d5698fcd179296b37d30d78c",
+  "files": {
+    "tests/helpers/HostedSmokeDiagnostics.ps1": {
+      "gitBlob": "df38256902234c741339b9437c763e11b888519f",
+      "gitBlobSha256": "726b5ef6de5cb412b42c37a8043042118bf4908e73bf7d8eb07c70f6cf1f9a38",
+      "reviewedWorkingBytesSha256": "5770665d196fd2e6699dc05e079ee762cce320b686c64b129b962369d9cf800a"
+    },
+    "tests/Invoke-HostedDashboardRuntimeSmoke.ps1": {
+      "gitBlob": "5ceed1a87174b35316d132136de630bab34be78a",
+      "gitBlobSha256": "8116c98ddb0e4fe14b19775845d19b5a6a0310145eb7f58b1edaf073af418662",
+      "reviewedWorkingBytesSha256": "a8873995fdf4fdb4663a976565d60d10cf38d93003502b32b82bfd3d1a5c01a2"
+    },
+    "tests/Invoke-HostedSmokeDiagnosticsRegression.ps1": {
+      "gitBlob": "e1cb0423b31bfecb4df83a1c8ae5367757516d41",
+      "gitBlobSha256": "6b834afc3c61596bb75a95f4150e389622ce94f7efbedbcf009cf2b40095ac58",
+      "reviewedWorkingBytesSha256": "19b6a5c8ad416aee5e3f709890a3f3cd2f1e93d301067b91150e03f7ee7a285e"
+    },
+    "tests/Invoke-HostedSmokeOwnershipRegression.ps1": {
+      "gitBlob": "23ad0dd8c53a7b57320ada06a0b25b37efd7af2d",
+      "gitBlobSha256": "770d0eb0462c0f78832d8aac9ee857b223c702cfde879d33065c790a6a609f30",
+      "reviewedWorkingBytesSha256": "332d8c714d4f11779d6278c0f4dec71e2abdd81877c6c936e0f9dec56497d173"
+    },
+    "tests/Invoke-HostedSmokeSafetyRegression.ps1": {
+      "gitBlob": "840f1f79c71fcfb28fdc249a2dab9bdeb64cfaa1",
+      "gitBlobSha256": "e1daad81622e50e413ee4b2a61b67f17ab49914922250fbf0bd4520245b37d52",
+      "reviewedWorkingBytesSha256": "9afd3d7a9b18523e2f855c53c6736d46e9bd224aad972a91dfec2ed9020c24cf"
+    },
+    "tests/Measure-DashboardWorkerTransfer.js": {
+      "gitBlob": "29355d5bab4f3dfede2273c138fc896b963cd31b",
+      "gitBlobSha256": "ddeb7aa6b453afc3b1ace747019be1ff9b8ce15af1d6ddc4f009e9e54bafcda2",
+      "reviewedWorkingBytesSha256": "7d55dd367c63eb9c17a19359ea3c631862bf81c5fc4f1b6527a621fa7120e61d"
+    }
+  },
+  "note": "Working bytes include platform line endings. Git blob hashes pin published normalized source; each matches reviewed working bytes after CRLF normalization."
+}

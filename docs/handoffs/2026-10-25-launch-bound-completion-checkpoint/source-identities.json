@@ -1,0 +1,100 @@
+{
+  "startingHead": "340898ac0fbb1fb614f95ee4ccd7bf7d47849092",
+  "sourceCommit": "5a8ba29e7393fb9e7addcd122d10c514bad08686",
+  "adoptedGoal": "706185584c1a45126005381909257761f0d35b1a",
+  "files": [
+    {
+      "path": "tests/Invoke-HostedDashboardRuntimeSmoke.ps1",
+      "sha256": "2a9e1a63248d25004244f80781a01ccfcab114c89b2199055330abacca978671",
+      "gitBlob": "15f232aa377e1ef9a69eacfdcca8f1c70530294f",
+      "gitBlobSha256": "310d616268bf01da0da470cbde9d6b4a81b57b96cb40e3701c81f9fa2a84f540"
+    },
+    {
+      "path": "tests/Invoke-HostedSmokeDiagnosticsRegression.ps1",
+      "sha256": "8e64838e51bc862a23006add4cd59e06c457c7caf9c558d6816a2391ac8c5a23",
+      "gitBlob": "7e2200aeca8282f01dee03bd4cf08397ca27e282",
+      "gitBlobSha256": "5e8c72906b3590af3a9e2770eb61080dc74e651639bc9546039a5203b0f0e2b1"
+    },
+    {
+      "path": "tests/Measure-DashboardWorkerTransfer.js",
+      "sha256": "2e7503366c011a49d9105ae78657110d4ce30d08ab549e0d49509a4be226c925",
+      "gitBlob": "6f334de0e8cfce86a747e48507d02f18674fddc3",
+      "gitBlobSha256": "814743c94451ca304c20205950e8525eba768f694a0f1a5b802ee5fc73789563"
+    },
+    {
+      "path": "tests/Assert-DashboardLaunchBoundNative.js",
+      "sha256": "84617eefcb2d857b8bd331526f1db156b478fed9e8845eaaa2df8042a89a94dc",
+      "gitBlob": "7befde2b3c3b624c8c6fcb0e740351266f94bea4",
+      "gitBlobSha256": "84617eefcb2d857b8bd331526f1db156b478fed9e8845eaaa2df8042a89a94dc"
+    },
+    {
+      "path": "tests/Assert-DashboardLaunchBoundOwner.js",
+      "sha256": "ef0fa1088994b5a674ce7cddcc905ce99806652b956adf34ffa2894357b83c4c",
+      "gitBlob": "0e3500fe0f943efda30bb91b0b3354d46baad72a",
+      "gitBlobSha256": "ef0fa1088994b5a674ce7cddcc905ce99806652b956adf34ffa2894357b83c4c"
+    },
+    {
+      "path": "tests/Invoke-LaunchBoundNativeControls.ps1",
+      "sha256": "d20d69b6f21a381cb4db0f88e0b7856c7148ccaedcb61ab5b7994cf5b5846747",
+      "gitBlob": "fce02be445569d65837bcb83987cc35e35f55186",
+      "gitBlobSha256": "d20d69b6f21a381cb4db0f88e0b7856c7148ccaedcb61ab5b7994cf5b5846747"
+    },
+    {
+      "path": "tests/Invoke-LaunchBoundOwnerRegression.ps1",
+      "sha256": "a66a356fea5fb9d4d4c289ab84a0421f26c517c3b0e7e37f11d4cf293561b1f6",
+      "gitBlob": "600e30ffa4e71fac41c2ede3b5190906aff3c56b",
+      "gitBlobSha256": "a66a356fea5fb9d4d4c289ab84a0421f26c517c3b0e7e37f11d4cf293561b1f6"
+    },
+    {
+      "path": "tests/helpers/Invoke-LaunchBoundOwner.ps1",
+      "sha256": "5c87cc5e6817c46466b9d3e264cb9901dae9340e89dcb5b043b702cb9815cb3b",
+      "gitBlob": "e21055119896852753ae78dae1a810af77720966",
+      "gitBlobSha256": "5c87cc5e6817c46466b9d3e264cb9901dae9340e89dcb5b043b702cb9815cb3b"
+    },
+    {
+      "path": "tests/helpers/LaunchBoundExitObserver.cs",
+      "sha256": "8c899f4717c2a6cbd653bfa3c8311488a5a197be5cf8f3d2affc3f876d5cf9a9",
+      "gitBlob": "7fa6a78073b6700ead51a9ab94572848156f9a8c",
+      "gitBlobSha256": "8c899f4717c2a6cbd653bfa3c8311488a5a197be5cf8f3d2affc3f876d5cf9a9"
+    },
+    {
+      "path": "tests/helpers/LaunchBoundJob.cs",
+      "sha256": "ab9e35e56e3f26bad4168637bc1f14f2779064c0e758b32e22332b845f464e1e",
+      "gitBlob": "c61df2d3e0ed3310cf1127e208de2be5e7c2461a",
+      "gitBlobSha256": "ab9e35e56e3f26bad4168637bc1f14f2779064c0e758b32e22332b845f464e1e"
+    },
+    {
+      "path": "tests/helpers/LaunchBoundNativeControls.cs",
+      "sha256": "a5df751fb54a600c2dccfe41dc405bc8ff2c8ae4d394feaa565a871d112d2e05",
+      "gitBlob": "3228171fa21e4df0181f904291312306fd6e6690",
+      "gitBlobSha256": "a5df751fb54a600c2dccfe41dc405bc8ff2c8ae4d394feaa565a871d112d2e05"
+    },
+    {
+      "path": "tests/helpers/LaunchBoundOwner.ps1",
+      "sha256": "54b9804de22de8f0e6a6a384b6cb70d6377502e1f036492824e4488a4a3c16df",
+      "gitBlob": "d1c30a0d528d611c9015636958fb77ced0e8dd16",
+      "gitBlobSha256": "54b9804de22de8f0e6a6a384b6cb70d6377502e1f036492824e4488a4a3c16df"
+    },
+    {
+      "path": "tests/helpers/Wait-LaunchBoundFixtureExit.ps1",
+      "sha256": "5932d845c0732ee2c860354aec516c59c3b9e920f70e7568b8d0106965c8fc3f",
+      "gitBlob": "fbbb30b309cdf28e9f8796a51a8e5ae6a2e3b989",
+      "gitBlobSha256": "5932d845c0732ee2c860354aec516c59c3b9e920f70e7568b8d0106965c8fc3f"
+    },
+    {
+      "path": "tests/helpers/launch-bound-fixture.py",
+      "sha256": "2037646497a83a85b30b4c5259cb27da854427d289ec5407af152219014c7f3c",
+      "gitBlob": "4e17313e978cb4dbd1a7e7802cc458ca1371281f",
+      "gitBlobSha256": "2037646497a83a85b30b4c5259cb27da854427d289ec5407af152219014c7f3c"
+    },
+    {
+      "path": "tests/helpers/launch-bound-owner.js",
+      "sha256": "8b83f831651e45083ed8341dd19af01d9e8c0743b97c019e51df88db4852401a",
+      "gitBlob": "de15d38c2e7d275c69fbb14245dfccf435aea6a8",
+      "gitBlobSha256": "8b83f831651e45083ed8341dd19af01d9e8c0743b97c019e51df88db4852401a"
+    }
+  ],
+  "scope": "Reviewed tests/harness only. Native mechanism passed; Node gate failed. No browser or large-data acceptance.",
+  "sourceReview": "Independent core, adapters/protocol, observer and pre-execution controller reviews approved exact working bytes. Native evidence independently reviewed as blocked; reviewers did not rerun native controls.",
+  "legacySnapshotOwnerUnchangedUtf8Sha256": "7c1d4d9ab0accacbffa1ec9bbdd60471d9a8f6992ac77656c3fbf98affb09e03"
+}

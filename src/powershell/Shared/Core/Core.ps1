@@ -3349,11 +3349,12 @@ function Split-VulnJsonPartition {
         foreach ($inputPath in @($InputPaths)) {
             if ([string]::IsNullOrWhiteSpace($inputPath) -or -not (Test-Path -LiteralPath $inputPath -PathType Leaf)) { continue }
 
-            foreach ($jsonLine in Read-VulnNdjsonLinesFromPath -Path $inputPath) {
+            Read-VulnNdjsonLinesFromPath -Path $inputPath | ForEach-Object {
+                $jsonLine = $_
                 $record = $jsonLine | ConvertFrom-Json -Depth 20
                 $id = [string](Get-VulnPropertyValue -InputObject $record -Name 'Id')
-                if ([string]::IsNullOrWhiteSpace($id)) { continue }
-                if ($OnboardedOnly -and (Get-VulnPropertyValue -InputObject $record -Name 'IsOnboarded') -ne $true) { continue }
+                if ([string]::IsNullOrWhiteSpace($id)) { return }
+                if ($OnboardedOnly -and (Get-VulnPropertyValue -InputObject $record -Name 'IsOnboarded') -ne $true) { return }
 
                 $partitionIndex = Get-VulnPartitionIndex -Id $id -PartitionCount $PartitionCount
                 if (-not $writers.ContainsKey($partitionIndex)) {
@@ -3390,10 +3391,11 @@ function Read-VulnPartitionMapFile {
         return $rows
     }
 
-    foreach ($jsonLine in Read-VulnNdjsonLinesFromPath -Path $Path) {
+    Read-VulnNdjsonLinesFromPath -Path $Path | ForEach-Object {
+        $jsonLine = $_
         $record = $jsonLine | ConvertFrom-Json -Depth 20
         $id = [string](Get-VulnPropertyValue -InputObject $record -Name 'Id')
-        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+        if ([string]::IsNullOrWhiteSpace($id)) { return }
 
         $versionStartDate = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $record -Name 'FirstSeenTimestamp')
         $rows[$id] = [PSCustomObject]@{

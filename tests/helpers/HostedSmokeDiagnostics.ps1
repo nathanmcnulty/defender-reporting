@@ -1,4 +1,4 @@
-﻿function Initialize-HostedSmokeCapture {
+function Initialize-HostedSmokeCapture {
     [CmdletBinding()]
     param()
 
@@ -7,6 +7,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,6 +26,33 @@ namespace HostedSmoke {
         public StreamResult Stderr = new StreamResult { Text = "" };
     }
     public static class Capture {
+        [DllImport("shell32.dll", SetLastError = true)]
+        static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string command, out int count);
+        [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr pointer);
+        static string NormalizeProfile(string profile) {
+            if (String.IsNullOrEmpty(profile) || !Path.IsPathFullyQualified(profile)) return null;
+            return Path.GetFullPath(profile.Replace('/', '\\')).TrimEnd('\\');
+        }
+        public static bool OwnsProfile(string command, string profile) {
+            var expected = NormalizeProfile(profile);
+            if (expected == null || String.IsNullOrEmpty(command)) return false;
+            int count;
+            var pointer = CommandLineToArgvW(command, out count);
+            if (pointer == IntPtr.Zero) throw new InvalidOperationException();
+            try {
+                string value = null;
+                int matches = 0;
+                for (int i = 1; i < count; i++) {
+                    var argument = Marshal.PtrToStringUni(Marshal.ReadIntPtr(pointer, i * IntPtr.Size));
+                    if (argument.StartsWith("--user-data-dir=", StringComparison.Ordinal)) { value = argument.Substring(16); matches++; }
+                    else if (argument == "--user-data-dir") {
+                        if (++i >= count) return false;
+                        value = Marshal.PtrToStringUni(Marshal.ReadIntPtr(pointer, i * IntPtr.Size)); matches++;
+                    }
+                }
+                return matches == 1 && String.Equals(NormalizeProfile(value), expected, StringComparison.OrdinalIgnoreCase);
+            } finally { LocalFree(pointer); }
+        }
         static async Task<StreamResult> Drain(Stream stream, int limit, CancellationToken token) {
             var buffer = new byte[8192];
             using (var retained = new MemoryStream()) {
@@ -158,29 +186,136 @@ function Get-HostedSmokeProbeEvidence {
     return [pscustomobject]@{ State = $state; ErrorClass = $errorClass; Phase = $phase; Reason = $reason }
 }
 
-function Stop-HostedSmokeProfileProcess {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Only stops disposable smoke processes with the unique run-owned profile path.')]
-    [CmdletBinding()]
-    param([string]$ProfilePath)
-
-    $failures = [Collections.Generic.List[string]]::new()
-    if (-not $IsWindows) { return [pscustomobject]@{ Confirmed = $false; Failures = @('process-enumeration-unsupported') } }
-    try {
-        $owned = @(Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" -ErrorAction Stop | Where-Object {
-            $_.CommandLine -and $_.CommandLine.Contains($ProfilePath, [StringComparison]::OrdinalIgnoreCase)
-        })
+function Get-HostedSmokeOwnedSnapshot {
+    param([string]$ProfilePath, [object[]]$Known = @())
+    $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    $byId = @{}
+    foreach ($item in $all) { $byId[[int]$item.ProcessId] = $item }
+    $records = @{}
+    foreach ($item in $all) {
+        if ($item.Name -eq 'msedge.exe' -and [HostedSmoke.Capture]::OwnsProfile($item.CommandLine, $ProfilePath)) {
+            if ($item.CreationDate -isnot [datetime]) { throw 'Unknown owned identity.' }
+            $records[[int]$item.ProcessId] = [pscustomobject]@{ Pid = [int]$item.ProcessId; Created = $item.CreationDate; RootPid = [int]$item.ProcessId; RootCreated = $item.CreationDate; ParentPid = [int]$item.ParentProcessId }
+        }
     }
-    catch { return [pscustomobject]@{ Confirmed = $false; Failures = @('process-enumeration-failure') } }
-    foreach ($entry in $owned) {
-        $process = $null
-        try {
-            $process = Get-Process -Id $entry.ProcessId -ErrorAction Stop
-            if ($null -ne $process) {
-                $process.Kill($true)
-                if (-not $process.WaitForExit(5000)) { $failures.Add('process-termination-timeout') }
+    do {
+        $added = $false
+        foreach ($item in $all) {
+            $parent = $records[[int]$item.ParentProcessId]
+            if ($null -eq $parent -or $records.ContainsKey([int]$item.ProcessId)) { continue }
+            if ($item.CreationDate -isnot [datetime]) { throw 'Unknown owned identity.' }
+            if ($parent.Created -le $item.CreationDate) {
+                $records[[int]$item.ProcessId] = [pscustomobject]@{ Pid = [int]$item.ProcessId; Created = $item.CreationDate; RootPid = $parent.RootPid; RootCreated = $parent.RootCreated; ParentPid = [int]$item.ParentProcessId }
+                $added = $true
             }
         }
-        catch { $failures.Add('process-termination-failure') }
+    } while ($added)
+    # Only current exact-profile roots and their current descendants authorize termination.
+    $terminationRecords = @($records.Values)
+    # Ledger matches are accounting only; callers cannot turn saved identities into kill authority.
+    foreach ($previous in $Known) {
+        $item = $byId[$previous.Pid]
+        if ($null -ne $item) {
+            if ($item.CreationDate -isnot [datetime]) { throw 'Unknown owned identity.' }
+            if ($item.CreationDate -eq $previous.Created -and -not $records.ContainsKey($previous.Pid)) { $records[$previous.Pid] = $previous }
+        }
+    }
+    # Historical identities are accounting evidence, never new termination authority.
+    # Once a known root disappears, snapshots alone cannot rule out late-born descendants.
+    $incomplete = $false
+    $unresolvedCount = 0
+    foreach ($previous in $Known) {
+        $current = $byId[$previous.Pid]
+        if ($previous.Pid -eq $previous.RootPid -and ($null -eq $current -or $current.CreationDate -ne $previous.Created)) { $incomplete = $true }
+        foreach ($item in $all) {
+            if ($records.ContainsKey([int]$item.ProcessId) -or [int]$item.ParentProcessId -ne $previous.Pid) { continue }
+            # A live replacement parent proves its later children are not this identity's children.
+            if ($null -ne $current -and $current.CreationDate -is [datetime] -and $current.CreationDate -ne $previous.Created -and $item.CreationDate -is [datetime] -and $item.CreationDate -ge $current.CreationDate) { continue }
+            if ($item.CreationDate -isnot [datetime] -or $item.CreationDate -ge $previous.Created) { $incomplete = $true; $unresolvedCount++ }
+        }
+    }
+    $history = @{}
+    foreach ($entry in @($Known) + @($records.Values)) { $history[('{0}:{1}' -f $entry.Pid, $entry.Created.ToUniversalTime().Ticks)] = $entry }
+    return [pscustomobject]@{ Records = @($records.Values); TerminationRecords = $terminationRecords; History = @($history.Values); AccountingIncomplete = $incomplete; UnresolvedCount = $unresolvedCount; ById = $byId }
+
+}
+
+function Stop-HostedSmokeProfileProcess {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Only stops freshly verified disposable smoke identities.')]
+    [CmdletBinding()]
+    param([string]$ProfilePath, [switch]$AccountingIncomplete, [object]$Ledger)
+
+    $failures = [Collections.Generic.List[string]]::new()
+    $diagnostics = [Collections.Generic.List[string]]::new()
+    $state = [pscustomobject]@{ PSTypeName = 'HostedSmoke.CleanupLedger'; Version = 1; Profile = $ProfilePath; Known = @(); AccountingIncomplete = [bool]$AccountingIncomplete }
+    try {
+        if (-not [IO.Path]::IsPathFullyQualified($ProfilePath)) { throw 'Invalid profile.' }
+        $state.Profile = [IO.Path]::GetFullPath($ProfilePath.Replace('/', '\')).TrimEnd('\')
+        if ($null -ne $Ledger) {
+            $valid = $Ledger.PSObject.TypeNames -contains 'HostedSmoke.CleanupLedger'
+            foreach ($name in @('Version','Profile','Known','AccountingIncomplete')) { $valid = $valid -and $null -ne $Ledger.PSObject.Properties[$name] }
+            if (-not $valid -or $Ledger.Version -ne 1 -or $Ledger.Known -isnot [array] -or $Ledger.AccountingIncomplete -isnot [bool] -or -not [string]::Equals($Ledger.Profile, $state.Profile, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid cleanup ledger.' }
+            foreach ($entry in $Ledger.Known) {
+                foreach ($name in @('Pid','RootPid','Created','RootCreated','ParentPid')) { if ($null -eq $entry.PSObject.Properties[$name]) { throw 'Invalid cleanup ledger.' } }
+                if ($entry.ParentPid -isnot [int] -or $entry.ParentPid -lt 0 -or $entry.Pid -isnot [int] -or $entry.Pid -le 0 -or $entry.RootPid -isnot [int] -or $entry.RootPid -le 0 -or $entry.Created -isnot [datetime] -or $entry.RootCreated -isnot [datetime]) { throw 'Invalid cleanup ledger.' }
+            }
+            foreach ($entry in $Ledger.Known) {
+                $root = @($Ledger.Known | Where-Object { $_.Pid -eq $entry.RootPid -and $_.Created -eq $entry.RootCreated -and $_.Pid -eq $_.RootPid -and $_.Created -eq $_.RootCreated })
+                if ($root.Count -ne 1 -or $entry.Created -lt $entry.RootCreated) { throw 'Invalid cleanup ledger.' }
+                if ($entry.Pid -ne $entry.RootPid -and @($Ledger.Known | Where-Object { $_.Pid -eq $entry.ParentPid -and $_.Created -le $entry.Created -and $_.RootPid -eq $entry.RootPid -and $_.RootCreated -eq $entry.RootCreated }).Count -eq 0) { throw 'Invalid cleanup ledger.' }
+            }
+            $state = $Ledger
+            $state.AccountingIncomplete = $state.AccountingIncomplete -or [bool]$AccountingIncomplete
+        }
+    }
+    catch { $state.AccountingIncomplete = $true; return [pscustomobject]@{ Confirmed = $false; Failures = @('process-ledger-invalid','process-accounting-incomplete'); Diagnostics = @(); Ledger = $state } }
+    if (-not $IsWindows) { $state.AccountingIncomplete = $true; return [pscustomobject]@{ Confirmed = $false; Failures = @('process-enumeration-unsupported','process-accounting-incomplete'); Diagnostics = @(); Ledger = $state } }
+    try {
+        Initialize-HostedSmokeCapture
+        $snapshot = Get-HostedSmokeOwnedSnapshot -ProfilePath $ProfilePath -Known $state.Known
+        $state.Known = $snapshot.History
+        $state.AccountingIncomplete = $state.AccountingIncomplete -or $snapshot.AccountingIncomplete
+    }
+    catch { $state.AccountingIncomplete = $true; return [pscustomobject]@{ Confirmed = $false; Failures = @('process-enumeration-failure','process-accounting-incomplete'); Diagnostics = @(); Ledger = $state } }
+    $known = $snapshot.TerminationRecords
+    $cleanupClock = [Diagnostics.Stopwatch]::StartNew()
+    foreach ($entry in @($known | Sort-Object @{ Expression = { $_.Pid -eq $_.RootPid } }, @{ Expression = 'Created'; Descending = $true })) {
+        if ($cleanupClock.ElapsedMilliseconds -ge 5000) { $failures.Add('process-termination-timeout'); break }
+        $process = $null
+        try {
+            $fresh = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($entry.Pid) OR ProcessId=$($entry.RootPid)" -ErrorAction Stop)
+            $current = @($fresh | Where-Object { $_.ProcessId -eq $entry.Pid })
+            if ($current.Count -eq 0) { $diagnostics.Add('process-exited-before-termination'); continue }
+            if ($current.Count -ne 1 -or $current[0].CreationDate -isnot [datetime]) { $failures.Add('process-identity-unverified'); continue }
+            if ($current[0].CreationDate -ne $entry.Created) { $diagnostics.Add('process-pid-reused'); continue }
+            $root = @($fresh | Where-Object { $_.ProcessId -eq $entry.RootPid })
+            if ($root.Count -gt 0 -and ($root.Count -ne 1 -or $root[0].CreationDate -ne $entry.RootCreated -or -not [HostedSmoke.Capture]::OwnsProfile($root[0].CommandLine, $ProfilePath))) {
+                $failures.Add('process-identity-unverified'); continue
+            }
+            $process = Get-Process -Id $entry.Pid -ErrorAction SilentlyContinue
+            if ($null -eq $process) {
+                $remaining = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($entry.Pid)" -ErrorAction Stop)
+                if (@($remaining | Where-Object { $_.CreationDate -eq $entry.Created }).Count -gt 0) { $failures.Add('process-identity-unverified') }
+                else { $diagnostics.Add('process-exited-before-termination') }
+                continue
+            }
+            $handle = $process.SafeHandle
+            if ($null -eq $handle -or $handle.IsInvalid -or $handle.IsClosed) { throw 'Process handle unavailable.' }
+            if ([Math]::Abs($process.StartTime.ToUniversalTime().Ticks - $entry.Created.ToUniversalTime().Ticks) -ge 10000) { $failures.Add('process-identity-unverified'); continue }
+            # Kill only this verified handle; tree-kill can race or include unverified descendants.
+            try { $process.Kill() }
+            catch {
+                if (-not $process.HasExited) { throw }
+                $diagnostics.Add('process-exited-during-termination')
+            }
+            $remainingMilliseconds = [int][Math]::Max(0, 5000 - $cleanupClock.ElapsedMilliseconds)
+            if (-not $process.WaitForExit($remainingMilliseconds)) { $failures.Add('process-termination-timeout') }
+        }
+        catch {
+            $cause = $_.Exception.GetBaseException()
+            if ($cause -is [UnauthorizedAccessException] -or ($cause -is [ComponentModel.Win32Exception] -and $cause.NativeErrorCode -eq 5)) { $failures.Add('process-access-denied') }
+            else { $failures.Add('process-termination-failure') }
+        }
         finally {
             if ($null -ne $process) {
                 try { $process.Dispose() } catch { $failures.Add('process-disposal-failure') }
@@ -188,15 +323,27 @@ function Stop-HostedSmokeProfileProcess {
         }
     }
     $confirmed = $false
+    $finalSnapshotTaken = $false
     try {
-        $remaining = @(Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" -ErrorAction Stop | Where-Object {
-            $_.CommandLine -and $_.CommandLine.Contains($ProfilePath, [StringComparison]::OrdinalIgnoreCase)
-        })
-        $confirmed = $remaining.Count -eq 0
+        do {
+            if ($finalSnapshotTaken -and $cleanupClock.ElapsedMilliseconds -ge 5000) { break }
+            $finalSnapshotTaken = $true
+            $snapshot = Get-HostedSmokeOwnedSnapshot -ProfilePath $ProfilePath -Known $state.Known
+            $known = $snapshot.Records
+            $state.Known = $snapshot.History
+            $state.AccountingIncomplete = $state.AccountingIncomplete -or $snapshot.AccountingIncomplete
+            if ($snapshot.UnresolvedCount -gt 0) { $diagnostics.Add('process-descendant-unresolved') }
+            if ($known.Count -eq 0) { $confirmed = $true; break }
+            $remainingMilliseconds = [int][Math]::Max(0, 5000 - $cleanupClock.ElapsedMilliseconds)
+            if ($remainingMilliseconds -eq 0) { break }
+            Start-Sleep -Milliseconds ([Math]::Min(100, $remainingMilliseconds))
+        } while ($true)
         if (-not $confirmed) { $failures.Add('owned-process-remains') }
     }
     catch { $failures.Add('process-verification-failure') }
-    return [pscustomobject]@{ Confirmed = $confirmed; Failures = $failures.ToArray() }
+    $state.AccountingIncomplete = $state.AccountingIncomplete -or $failures.Count -gt 0
+    if ($state.AccountingIncomplete) { $confirmed = $false; $failures.Add('process-accounting-incomplete') }
+    return [pscustomobject]@{ Confirmed = $confirmed; Failures = @($failures | Select-Object -Unique); Diagnostics = @($diagnostics | Select-Object -Unique); Ledger = $state }
 }
 
 function Invoke-HostedSmokeAttempt {

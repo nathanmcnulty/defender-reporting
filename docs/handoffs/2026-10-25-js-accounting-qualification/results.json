@@ -1,0 +1,172 @@
+{
+  "sourceCommit": "dfd2e7d24df71d1e095ea868550610e544c36b26",
+  "decision": "Narrow JS accounting repair approved; native qualification blocked.",
+  "checks": [
+    {
+      "check": "reviewed-counterexample",
+      "status": "passed",
+      "seconds": 6.015999999999622,
+      "peakWorkingSetBytes": 165924864,
+      "peakPrivateBytes": 99848192,
+      "minimumFreeBytes": 8820162560,
+      "cleanupVerified": true,
+      "scope": "Diagnostic PASS means the inherited defect reproduced on f0 and e4; not cleanup acceptance."
+    },
+    {
+      "check": "accounting-first",
+      "status": "passed",
+      "seconds": 32.06200000000172,
+      "peakWorkingSetBytes": 169529344,
+      "peakPrivateBytes": 100827136,
+      "minimumFreeBytes": 8745738240,
+      "cleanupVerified": true,
+      "scope": "All 11 source-driven fixture scenarios; platform/argv/process APIs mocked; actual fixture profile branch."
+    },
+    {
+      "check": "accounting-baseline-discriminator",
+      "status": "failed",
+      "seconds": 3.0159999999996217,
+      "peakWorkingSetBytes": 163811328,
+      "peakPrivateBytes": 64086016,
+      "minimumFreeBytes": 8768630784,
+      "cleanupVerified": true,
+      "scope": "Expected FAIL against exact f0 at the false-zero assertion, not setup failure."
+    },
+    {
+      "check": "telemetry-first",
+      "status": "passed",
+      "seconds": 137.2029999999977,
+      "peakWorkingSetBytes": 257265664,
+      "peakPrivateBytes": 127184896,
+      "minimumFreeBytes": 8616873984,
+      "cleanupVerified": true,
+      "scope": "Full affected telemetry/ownership/cleanup/privacy and timestamp boundary controls."
+    }
+  ],
+  "nativeConfirmation": {
+    "status": "failed-affected-confirmation",
+    "qualificationPassed": false,
+    "admissionMinimumBytes": 8808779776,
+    "limits": {
+      "seconds": 240,
+      "capGiB": 2.0,
+      "floorGiB": 3.0,
+      "samplingSeconds": 0.5
+    },
+    "supervisor": {
+      "status": "failed",
+      "exitCode": 1,
+      "elapsedSeconds": 24.18699999999808,
+      "peakWorkingSetBytes": 1830162432,
+      "peakPrivateBytes": 1105309696,
+      "minimumFreeBytes": 7617462272,
+      "remainingAtRootExit": [],
+      "cleanupVerified": true,
+      "cleanupErrors": []
+    },
+    "failure": {
+      "phase": "browser",
+      "reason": "process-accounting",
+      "code": "unclassified"
+    },
+    "runs": [
+      {
+        "load": "first",
+        "status": "failed",
+        "stage": "cache",
+        "semantic": {
+          "rows": 19677,
+          "fieldValuesChecked": 826434,
+          "orderedSha256": "1e5fe66de3260dc5223651cc8c110c9eab2019dee9a29a6aa814956dc955d5e2"
+        },
+        "cacheState": "cold",
+        "externalRequests": 0,
+        "pageErrors": 0
+      }
+    ],
+    "cleanups": [
+      {
+        "iteration": 1,
+        "remainingOwned": null,
+        "profileExists": true,
+        "errors": [
+          "Final owned inventory",
+          "Profile removal"
+        ],
+        "termination": {
+          "stoppedCount": 0,
+          "skippedUnverified": {
+            "processIdentity": 0,
+            "rootCommandLine": 0,
+            "rootCreationDate": 0
+          }
+        },
+        "diagnostics": [
+          {
+            "label": "Final owned inventory",
+            "elapsedMs": 0,
+            "code": "unclassified"
+          },
+          {
+            "label": "Profile removal",
+            "elapsedMs": 1,
+            "code": "unclassified"
+          }
+        ]
+      }
+    ],
+    "serverClosed": true,
+    "remainingOwned": null,
+    "successfulSampleIntervals": [
+      {
+        "stage": "prelaunch",
+        "hostAwaitedInventoryMs": 1850.5043,
+        "postInventoryToValidatedMs": 0.053800000000137516,
+        "guardSampleHostMs": 1850.6040999999998,
+        "ownedProcessCount": 0
+      },
+      {
+        "stage": "post-spawn",
+        "hostAwaitedInventoryMs": 2123.7097000000003,
+        "postInventoryToValidatedMs": 0.02309999999943102,
+        "guardSampleHostMs": 2123.7527999999998,
+        "ownedProcessCount": 2
+      },
+      {
+        "stage": "startup",
+        "hostAwaitedInventoryMs": 3198.380400000001,
+        "postInventoryToValidatedMs": 0.019699999998920248,
+        "guardSampleHostMs": 3198.4241999999995,
+        "ownedProcessCount": 14
+      },
+      {
+        "stage": "first:reports",
+        "hostAwaitedInventoryMs": 3824.946,
+        "postInventoryToValidatedMs": 0.02269999999953143,
+        "guardSampleHostMs": 3824.9904000000006,
+        "ownedProcessCount": 18
+      }
+    ],
+    "interpretation": "Failed affected confirmation; first-load field oracle passed but run failed at cache stage, reload not reached. Successful sample host-awaited inventory intervals include await/resolution/scheduling and exclude separately measured free-memory/data-validation. No failed-call completion timestamp; do not extrapolate old timeouts. Unknown inner absence, retained profile, outer empty is later cleanup evidence only.",
+    "postInventoryMatchingCount": 0
+  },
+  "notRun": [
+    {
+      "check": "reload",
+      "reason": "Single affected candidate stopped during first-load cache stage on process-accounting."
+    },
+    {
+      "check": "unchanged standalone/base/20k pair",
+      "reason": "Existing traces analyzed first; no causal flag/product fix established, no unchanged repetition."
+    },
+    {
+      "check": "900-second preflight and 120k fresh import",
+      "reason": "Prior capped attempts preserved; unchanged product runtime does not justify another capped lane."
+    },
+    {
+      "check": "120k/cache-ineligible/historical/live/exact-head CI",
+      "reason": "Acceptance gates remain open; no scaling/live operations/workflow enablement authorized."
+    }
+  ],
+  "privacy": "Sanitized numeric producer evidence only; raw traces, profile paths, payloads and operational evidence remain local."
+}

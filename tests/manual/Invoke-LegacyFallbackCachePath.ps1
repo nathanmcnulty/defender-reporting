@@ -1,4 +1,5 @@
-﻿<#
+﻿#Requires -Version 7.6
+<#
 .SYNOPSIS
     Manual smoke test for the legacy fallback cache-build path.
 

@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.6
 [CmdletBinding()]
 param([Parameter(Mandatory = $true)][string]$DatasetPath, [Parameter(Mandatory = $true)][string]$OutputPath)
 $ErrorActionPreference = 'Stop'

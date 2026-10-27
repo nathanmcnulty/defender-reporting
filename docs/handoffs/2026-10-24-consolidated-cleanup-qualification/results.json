@@ -1,0 +1,464 @@
+{
+  "sourceCommit": "c0cedf5902e47d1386620ee30479e55fc1ace17a",
+  "decision": "Narrow cleanup repairs independently approved; partial bounded qualification only. Issues remain open.",
+  "offline": [
+    {
+      "check": "baseline-gaps",
+      "status": "passed",
+      "seconds": 7.514999999999418,
+      "peakWorkingSetBytes": 198569984,
+      "peakPrivateBytes": 97861632,
+      "minimumFreeBytes": 10528821248,
+      "cleanupVerified": true,
+      "note": "PASS means all three reviewed-head defects reproduced synthetically, not cleanup acceptance."
+    },
+    {
+      "check": "safety-regression-first",
+      "status": "passed",
+      "seconds": 48.07800000000134,
+      "peakWorkingSetBytes": 223522816,
+      "peakPrivateBytes": 106954752,
+      "minimumFreeBytes": 10483806208,
+      "cleanupVerified": true,
+      "note": ""
+    },
+    {
+      "check": "ownership-first",
+      "status": "failed",
+      "seconds": 0.01599999999962165,
+      "peakWorkingSetBytes": 0,
+      "peakPrivateBytes": 0,
+      "minimumFreeBytes": null,
+      "cleanupVerified": true,
+      "note": "Launcher setup error: separator passed as executable; no test ran. Retained, corrected in fresh destination."
+    },
+    {
+      "check": "ownership-second",
+      "status": "passed",
+      "seconds": 115.25,
+      "peakWorkingSetBytes": 245202944,
+      "peakPrivateBytes": 113672192,
+      "minimumFreeBytes": 9716699136,
+      "cleanupVerified": true,
+      "note": ""
+    },
+    {
+      "check": "analysis-first",
+      "status": "failed",
+      "seconds": 12.031000000002678,
+      "peakWorkingSetBytes": 180060160,
+      "peakPrivateBytes": 71589888,
+      "minimumFreeBytes": 10038353920,
+      "cleanupVerified": true,
+      "note": "Failed static analysis: test variables consumed by AST were not statically visible; explicit scoped justification plus automatic-profile variable rename followed."
+    },
+    {
+      "check": "diagnostics-second",
+      "status": "passed",
+      "seconds": 75.67199999999866,
+      "peakWorkingSetBytes": 317956096,
+      "peakPrivateBytes": 148770816,
+      "minimumFreeBytes": 9287348224,
+      "cleanupVerified": true,
+      "note": "Includes all 15 scenarios before test-only automatic-variable rename; final safety rerun below uses final bytes."
+    },
+    {
+      "check": "analysis-final",
+      "status": "passed",
+      "seconds": 10.53099999999904,
+      "peakWorkingSetBytes": 153038848,
+      "peakPrivateBytes": 65454080,
+      "minimumFreeBytes": 10202701824,
+      "cleanupVerified": true,
+      "note": ""
+    },
+    {
+      "check": "safety-final",
+      "status": "passed",
+      "seconds": 53.07800000000134,
+      "peakWorkingSetBytes": 223711232,
+      "peakPrivateBytes": 107614208,
+      "minimumFreeBytes": 10176221184,
+      "cleanupVerified": true,
+      "note": ""
+    },
+    {
+      "check": "telemetry-final",
+      "status": "passed",
+      "seconds": 143.86000000000058,
+      "peakWorkingSetBytes": 257634304,
+      "peakPrivateBytes": 157876224,
+      "minimumFreeBytes": 10043027456,
+      "cleanupVerified": true,
+      "note": ""
+    },
+    {
+      "check": "hosted-probe-final",
+      "status": "passed",
+      "seconds": 0.5149999999994179,
+      "peakWorkingSetBytes": 25927680,
+      "peakPrivateBytes": 1335296,
+      "minimumFreeBytes": 10262097920,
+      "cleanupVerified": true,
+      "note": ""
+    }
+  ],
+  "native": {
+    "status": "completed-affected-checks",
+    "cells": [
+      {
+        "mode": "inventory-phases",
+        "guardStatus": "passed",
+        "seconds": 5.015999999999622,
+        "peakWorkingSetBytes": 254824448,
+        "peakPrivateBytes": 122933248,
+        "minimumFreeBytes": 10200203264,
+        "cleanupVerified": true,
+        "minimumAdmissionBytes": 10368131072,
+        "preCount": 0,
+        "postCount": 0,
+        "samples": [
+          {
+            "index": 1,
+            "hostElapsedMs": 1712.8854000000001,
+            "events": [
+              {
+                "phase": "execute",
+                "childElapsedMs": 0,
+                "hostArrivalMs": 456.7708
+              },
+              {
+                "phase": "compile",
+                "childElapsedMs": 5,
+                "hostArrivalMs": 458.8024
+              },
+              {
+                "phase": "cim",
+                "childElapsedMs": 732,
+                "hostArrivalMs": 1183.9765
+              },
+              {
+                "phase": "selection",
+                "childElapsedMs": 945,
+                "hostArrivalMs": 1396.8056000000001
+              },
+              {
+                "phase": "memory",
+                "childElapsedMs": 1008,
+                "hostArrivalMs": 1460.0765000000001
+              },
+              {
+                "phase": "serialize",
+                "childElapsedMs": 1009,
+                "hostArrivalMs": 1460.498
+              },
+              {
+                "phase": "done",
+                "childElapsedMs": 1015,
+                "hostArrivalMs": 1467.1533
+              }
+            ],
+            "kind": "passed",
+            "ownedCount": 0
+          },
+          {
+            "index": 2,
+            "hostElapsedMs": 1365.9729999999997,
+            "events": [
+              {
+                "phase": "execute",
+                "childElapsedMs": 0,
+                "hostArrivalMs": 406.8363999999999
+              },
+              {
+                "phase": "compile",
+                "childElapsedMs": 6,
+                "hostArrivalMs": 409.6442999999997
+              },
+              {
+                "phase": "cim",
+                "childElapsedMs": 428,
+                "hostArrivalMs": 830.1063000000001
+              },
+              {
+                "phase": "selection",
+                "childElapsedMs": 633,
+                "hostArrivalMs": 1035.0826999999997
+              },
+              {
+                "phase": "memory",
+                "childElapsedMs": 698,
+                "hostArrivalMs": 1099.7375999999997
+              },
+              {
+                "phase": "serialize",
+                "childElapsedMs": 698,
+                "hostArrivalMs": 1100.1467
+              },
+              {
+                "phase": "done",
+                "childElapsedMs": 708,
+                "hostArrivalMs": 1110.2169999999999
+              }
+            ],
+            "kind": "passed",
+            "ownedCount": 0
+          },
+          {
+            "index": 3,
+            "hostElapsedMs": 1429.5842000000002,
+            "events": [
+              {
+                "phase": "execute",
+                "childElapsedMs": 0,
+                "hostArrivalMs": 471.43610000000035
+              },
+              {
+                "phase": "compile",
+                "childElapsedMs": 6,
+                "hostArrivalMs": 474.4761000000003
+              },
+              {
+                "phase": "cim",
+                "childElapsedMs": 429,
+                "hostArrivalMs": 895.8011000000001
+              },
+              {
+                "phase": "selection",
+                "childElapsedMs": 634,
+                "hostArrivalMs": 1100.8090000000002
+              },
+              {
+                "phase": "memory",
+                "childElapsedMs": 704,
+                "hostArrivalMs": 1170.6098000000002
+              },
+              {
+                "phase": "serialize",
+                "childElapsedMs": 704,
+                "hostArrivalMs": 1171.0119999999997
+              },
+              {
+                "phase": "done",
+                "childElapsedMs": 715,
+                "hostArrivalMs": 1181.781
+              }
+            ],
+            "kind": "passed",
+            "ownedCount": 0
+          }
+        ]
+      },
+      {
+        "mode": "standalone",
+        "guardStatus": "failed",
+        "seconds": 12.889999999999418,
+        "peakWorkingSetBytes": 894902272,
+        "peakPrivateBytes": 406278144,
+        "minimumFreeBytes": 9844219904,
+        "cleanupVerified": true,
+        "minimumAdmissionBytes": 10370842624,
+        "preCount": 0,
+        "postCount": 0,
+        "run": {
+          "outcome": "dashboard-probe-failure",
+          "originalOutcome": "dashboard-probe-failure",
+          "phase": "dashboard-capture",
+          "failureClass": "runtime",
+          "failureLine": 598,
+          "controlFixture": false,
+          "extensionSessionCount": 0,
+          "processCleanupConfirmed": true,
+          "profileRemoved": true,
+          "temporarySiteRemoved": true,
+          "cleanupFailures": [],
+          "cleanupDiagnostics": []
+        },
+        "canary": {
+          "state": "ready",
+          "drainIncomplete": false
+        },
+        "dashboard": {
+          "state": "probe-not-ready",
+          "drainIncomplete": false,
+          "probeState": "timeout",
+          "probePhase": "wait-ready",
+          "probeReason": "readiness-timeout"
+        }
+      },
+      {
+        "mode": "candidate20k",
+        "guardStatus": "passed",
+        "seconds": 33.43699999999808,
+        "peakWorkingSetBytes": 1636024320,
+        "peakPrivateBytes": 1072082944,
+        "minimumFreeBytes": 9003016192,
+        "cleanupVerified": true,
+        "minimumAdmissionBytes": 10303074304,
+        "preCount": 0,
+        "postCount": 0,
+        "status": "completed",
+        "runs": [
+          {
+            "load": "first",
+            "status": "passed",
+            "ttiBrowserMs": 862.6000000014901,
+            "readinessObservedHostWallMs": 940.8120000000008,
+            "cacheState": "cold",
+            "semantic": {
+              "rows": 19677,
+              "fieldValuesChecked": 826434,
+              "orderedSha256": "1e5fe66de3260dc5223651cc8c110c9eab2019dee9a29a6aa814956dc955d5e2"
+            },
+            "externalRequests": 0,
+            "pageErrors": 0,
+            "workerReturnFormats": [
+              "lookups-raw-columns"
+            ],
+            "peakBrowserFamilyBytes": 1141776384,
+            "peakBrowserFamilyPrivateBytes": 623423488,
+            "minimumFreeMemoryBytes": 9120657408
+          },
+          {
+            "load": "reload",
+            "status": "passed",
+            "ttiBrowserMs": 760.2000000029802,
+            "readinessObservedHostWallMs": 801.8752000000022,
+            "cacheState": "hit",
+            "semantic": {
+              "rows": 19677,
+              "fieldValuesChecked": 826434,
+              "orderedSha256": "1e5fe66de3260dc5223651cc8c110c9eab2019dee9a29a6aa814956dc955d5e2"
+            },
+            "externalRequests": 0,
+            "pageErrors": 0,
+            "workerReturnFormats": [],
+            "peakBrowserFamilyBytes": 1075736576,
+            "peakBrowserFamilyPrivateBytes": 675786752,
+            "minimumFreeMemoryBytes": 9276026880
+          }
+        ],
+        "cleanups": [
+          {
+            "iteration": 1,
+            "remainingOwned": 0,
+            "profileExists": false,
+            "errors": [],
+            "termination": {
+              "stoppedCount": 2,
+              "skippedUnverified": {
+                "processIdentity": 0,
+                "rootCommandLine": 0,
+                "rootCreationDate": 0
+              }
+            }
+          }
+        ],
+        "serverClosed": true,
+        "remainingOwned": 0,
+        "maxResourceGuardSampleHostMs": 4874.966399999999
+      },
+      {
+        "mode": "base20k",
+        "guardStatus": "passed",
+        "seconds": 29.937999999998283,
+        "peakWorkingSetBytes": 1773498368,
+        "peakPrivateBytes": 1161428992,
+        "minimumFreeBytes": 9093197824,
+        "cleanupVerified": true,
+        "minimumAdmissionBytes": 10358444032,
+        "preCount": 0,
+        "postCount": 0,
+        "status": "completed",
+        "runs": [
+          {
+            "load": "first",
+            "status": "passed",
+            "ttiBrowserMs": 936.0999999977648,
+            "readinessObservedHostWallMs": 999.6646999999998,
+            "cacheState": "cold",
+            "semantic": {
+              "rows": 19677,
+              "fieldValuesChecked": 826434,
+              "orderedSha256": "1e5fe66de3260dc5223651cc8c110c9eab2019dee9a29a6aa814956dc955d5e2"
+            },
+            "externalRequests": 0,
+            "pageErrors": 0,
+            "workerReturnFormats": [
+              "lookups-raw-columns"
+            ],
+            "peakBrowserFamilyBytes": 1181949952,
+            "peakBrowserFamilyPrivateBytes": 640659456,
+            "minimumFreeMemoryBytes": 9285107712
+          },
+          {
+            "load": "reload",
+            "status": "passed",
+            "ttiBrowserMs": 774.6000000014901,
+            "readinessObservedHostWallMs": 825.2538999999997,
+            "cacheState": "hit",
+            "semantic": {
+              "rows": 19677,
+              "fieldValuesChecked": 826434,
+              "orderedSha256": "1e5fe66de3260dc5223651cc8c110c9eab2019dee9a29a6aa814956dc955d5e2"
+            },
+            "externalRequests": 0,
+            "pageErrors": 0,
+            "workerReturnFormats": [],
+            "peakBrowserFamilyBytes": 1269649408,
+            "peakBrowserFamilyPrivateBytes": 734408704,
+            "minimumFreeMemoryBytes": 9219784704
+          }
+        ],
+        "cleanups": [
+          {
+            "iteration": 1,
+            "remainingOwned": 0,
+            "profileExists": false,
+            "errors": [],
+            "termination": {
+              "stoppedCount": 2,
+              "skippedUnverified": {
+                "processIdentity": 0,
+                "rootCommandLine": 0,
+                "rootCreationDate": 0
+              }
+            }
+          }
+        ],
+        "serverClosed": true,
+        "remainingOwned": 0,
+        "maxResourceGuardSampleHostMs": 4165.942300000001
+      }
+    ]
+  },
+  "notRun": [
+    {
+      "check": "full deterministic preflight",
+      "status": "not-repeated",
+      "reason": "Two prior unchanged-runtime 900-second caps retained; this harness-only repair does not justify another identical attempt."
+    },
+    {
+      "check": "120k fresh import",
+      "status": "not-repeated",
+      "reason": "Prior base/candidate 180-second caps retained; fresh import remains separate from completed-store replay."
+    },
+    {
+      "check": "120k native, cache-ineligible and historical envelope",
+      "status": "not-run",
+      "reason": "Standalone readiness gate failed and inventory stability remains unproved; no scaling beyond the bounded 20k pair."
+    },
+    {
+      "check": "complete alternating performance series",
+      "status": "not-run",
+      "reason": "One correctness pair only; no pooling with older failed/instrumented runs."
+    },
+    {
+      "check": "exact-head hosted CI/live Azure",
+      "status": "not-run",
+      "reason": "No workflow enablement or live Azure authorized."
+    }
+  ],
+  "privateEvidenceBoundary": "Numeric producer observations and source identities only. Raw logs, process/profile paths, payloads, source oracle and operational evidence remain local.",
+  "resourceSampleScope": "maxResourceGuardSampleHostMs includes inventory plus subsequent free-memory/validation/scheduling, not an isolated inventory-call duration or proved timeout margin."
+}

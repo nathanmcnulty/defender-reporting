@@ -1,4 +1,5 @@
 ﻿#!/usr/bin/env pwsh
+#Requires -Version 7.6
 <#
 .SYNOPSIS
     Creates an Entra service principal with federated credentials for GitHub Actions.

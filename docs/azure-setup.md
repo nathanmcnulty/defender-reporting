@@ -25,13 +25,13 @@ This page covers the Azure-specific parts of the project: permissions, authentic
 - An Azure Automation account with system-assigned managed identity
 - A storage account with `exports`, `templates`, and `dashboards` containers
 - RBAC for the Automation managed identity
-- A PowerShell 7.4 runtime environment
+- A PowerShell 7.6 runtime environment
 - The dashboard runbook and daily schedule
 - An optional Azure Container App protected by Entra ID Easy Auth
 
 **Function App (Flex Consumption)**:
 - A resource group
-- An Azure Function App on a Flex Consumption plan (Linux, PowerShell 7.4)
+- An Azure Function App on a Flex Consumption plan (Linux, PowerShell 7.6)
 - A storage account with `exports`, `templates`, `dashboards`, and `app-package` containers
 - RBAC for the Function App managed identity (Blob Data Owner, Queue/Table Data Contributor)
 - Timer-triggered function running daily at 2:00 AM UTC
@@ -320,3 +320,10 @@ The Azure runbook status evidence includes the selected normalization mode, inpu
 
 - [GitHub Actions setup](github-actions-setup.md)
 - [Workflow notes](workflows.md)
+
+## Hosted runtime baseline
+
+Setup uses PowerShell 7.6 on .NET 10 LTS for the Function Flex plan and
+`PowerShell-76-AzAccounts` Automation environment. See Microsoft's
+[Functions runtime contract](https://learn.microsoft.com/en-us/azure/azure-functions/functions-reference-powershell#powershell-versions)
+and [Automation support](https://learn.microsoft.com/en-us/azure/automation/automation-runbook-types#powershell-runbooks).

@@ -9,13 +9,14 @@ const { Writable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { execFile, spawn, spawnSync } = require('child_process');
 const { performance } = require('perf_hooks');
-const { loadDashboardSource } = require('./helpers/dashboard-test-harness');
+const { LaunchBoundClient } = require('./helpers/launch-bound-owner');
+const { loadDashboardSource, loadDashboardHarness } = require('./helpers/dashboard-test-harness');
 
 function safeInventoryDiagnostic(value = {}) {
     const categories = ['timeout', 'aborted', 'execution', 'response', 'InvalidOperation', 'InvalidArgument', 'InvalidData', 'OperationStopped', 'WriteError', 'ObjectNotFound', 'PermissionDenied', 'SecurityError', 'ResourceUnavailable', 'NotSpecified'];
     const types = ['RuntimeException', 'CimException', 'MethodInvocationException', 'PSInvalidOperationException', 'SessionStateUnauthorizedAccessException', 'UnauthorizedAccessException', 'InvalidOperationException', 'ArgumentException', 'Win32Exception'];
     const phases = ['execute', 'compile', 'cim', 'selection', 'memory', 'termination', 'response'];
-    const steps = ['fresh-cim', 'fresh-identity', 'fresh-process-identity', 'fresh-root-identity', 'get-process', 'start-identity', 'kill', 'kill-exit-check', 'wait-exit'];
+    const steps = ['fresh-cim', 'fresh-identity', 'fresh-process-identity', 'fresh-root-identity', 'get-process', 'start-identity', 'handle-open', 'kill', 'kill-exit-check', 'wait-exit', 'dispose'];
     return {
         category: categories.includes(value.category) ? value.category : 'execution',
         exceptionType: types.includes(value.exceptionType) ? value.exceptionType : 'unclassified',
@@ -36,6 +37,8 @@ function safeFailure(error, phase = 'unknown') {
         ['Owned process inventory/termination failed.', 'process-inventory'],
         ['Invalid process inventory response.', 'process-inventory'],
         ['Owned cleanup failed.', 'cleanup'],
+        ['Owned process accounting is incomplete.', 'process-accounting'],
+        ['Launch-bound owner state unknown.', 'launch-owner'],
         ['Microsoft Edge is required.', 'edge-unavailable']
     ]);
     return {
@@ -84,13 +87,16 @@ class ResourceGuard {
         this.inflight = (async () => {
             try {
                 this.check();
+                const inventoryStartedAtHostMs = performance.now();
                 const inventory = await this.inventory();
+                const inventoryCompletedAtHostMs = performance.now();
                 const freeBytes = this.freeMemory();
                 assert(Number.isFinite(inventory.bytes) && inventory.bytes >= 0 && Array.isArray(inventory.pids), 'Invalid process inventory.');
                 assert(Number.isFinite(freeBytes) && freeBytes >= 0, 'Invalid free memory inventory.');
                 this.peakBytes = Math.max(this.peakBytes, inventory.bytes);
                 this.minimumFreeBytes = Math.min(this.minimumFreeBytes, freeBytes);
-                this.trace.push({ stage, startedAtHostMs: startedAt, sampledAtHostMs: performance.now(), sampledAtEpochMs: Date.now(), browserFamilyBytes: inventory.bytes, browserFamilyPrivateBytes: inventory.privateBytes ?? null, freeMemoryBytes: freeBytes, ownedProcessCount: inventory.pids.length });
+                const validatedAtHostMs = performance.now();
+                this.trace.push({ stage, startedAtHostMs: startedAt, inventoryStartedAtHostMs, inventoryCompletedAtHostMs, validatedAtHostMs, sampledAtHostMs: performance.now(), sampledAtEpochMs: Date.now(), browserFamilyBytes: inventory.bytes, browserFamilyPrivateBytes: inventory.privateBytes ?? null, freeMemoryBytes: freeBytes, ownedProcessCount: inventory.pids.length });
                 assert(inventory.bytes <= this.limits.browserFamilyBytes, 'Browser family memory cap exceeded.');
                 assert(freeBytes >= this.limits.freeMemoryBytes, 'Safety memory floor prevents launch or continuation.');
                 this.check();
@@ -175,6 +181,8 @@ function powershell(script, environment, timeout = 5000, signal) {
 function ownedProcesses(profile, execute = powershell) {
     assert.strictEqual(process.platform, 'win32', 'Windows process inventory is required.');
     let known = [];
+    const observedRoots = new Set();
+    let accountingComplete = true;
     let launcherPid = 0;
     let launcherCreated = '';
     const selection = `
@@ -226,7 +234,7 @@ function Get-Created($item) {
     return $item.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
 }
 $issue70Phase = 'cim'
-$all = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+$all = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,CommandLine,CreationDate,WorkingSetSize,PrivatePageCount -ErrorAction Stop)
 $issue70Phase = 'selection'
 $byId = @{}
 foreach ($item in $all) { $byId[[int]$item.ProcessId] = $item }
@@ -265,6 +273,17 @@ foreach ($item in $all) {
         $provenance[[int]$item.ProcessId] = @{ rootPid = $previous.rootPid; rootCreated = $previous.rootCreated }
     }
 }
+# Inventory-only accountability must not broaden termination authorization.
+# Retained children also seed accounting for their later descendants.
+if ($env:ISSUE70_ACCOUNTING -eq '1') {
+    foreach ($previous in $known) {
+        $item = $byId[[int]$previous.pid]
+        if ($null -ne $item -and (Get-Created $item) -ceq $previous.created -and $ids.Add([int]$item.ProcessId)) {
+            $provenance[[int]$item.ProcessId] = @{ rootPid = $previous.rootPid; rootCreated = $previous.rootCreated }
+        }
+    }
+}
+
 do {
     $added = $false
     foreach ($item in $all) {
@@ -279,8 +298,20 @@ do {
 } while ($added)
 $owned = @($all | Where-Object { $ids.Contains([int]$_.ProcessId) })
 `;
-    const environment = () => ({ ISSUE70_PROFILE: profile, ISSUE70_KNOWN: JSON.stringify(known), ISSUE70_LAUNCHER_PID: String(launcherPid), ISSUE70_LAUNCHER_CREATED: launcherCreated });
+    const environment = () => ({ ISSUE70_PROFILE: profile, ISSUE70_ACCOUNTING: '0', ISSUE70_KNOWN: JSON.stringify(known), ISSUE70_LAUNCHER_PID: String(launcherPid), ISSUE70_LAUNCHER_CREATED: launcherCreated });
+    const remember = records => {
+        assert(Array.isArray(records), 'Invalid owned process identities.');
+        for (const record of records) {
+            assert(Number.isSafeInteger(record.pid) && Number.isSafeInteger(record.rootPid) && typeof record.created === 'string' && /^\d{18}$/.test(record.created) && typeof record.rootCreated === 'string' && /^\d{18}$/.test(record.rootCreated), 'Invalid owned process identities.');
+        }
+        for (const record of records) {
+            if (record.pid === record.rootPid && record.created === record.rootCreated) observedRoots.add(`${record.pid}:${record.created}`);
+        }
+        return records;
+    };
     const inventory = async () => {
+        assert(accountingComplete, 'Owned process accounting is incomplete.');
+        try {
         const result = await execute(selection + `
     $issue70Phase = 'memory'
 $bytes = [long]0
@@ -289,26 +320,47 @@ $records = @()
 foreach ($item in $owned) {
     $source = $provenance[[int]$item.ProcessId]
     $records += @{ pid = [int]$item.ProcessId; created = (Get-Created $item); rootPid = $source.rootPid; rootCreated = $source.rootCreated }
-    $bytes += [long]$item.WorkingSetSize
-    $process = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
-    if ($process) { $privateBytes += $process.PrivateMemorySize64 }
+    $workingSet = [long]0
+    $privateCount = [long]0
+    if (-not [long]::TryParse([string]$item.WorkingSetSize, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$workingSet) -or
+        -not [long]::TryParse([string]$item.PrivatePageCount, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$privateCount)) { throw 'Invalid owned process memory.' }
+    # Use both byte counters from the same identity-bound CIM snapshot.
+    # A separate process open can disappear or fail and silently undercount private memory.
+    $bytes += $workingSet
+    $privateBytes += $privateCount
 }
 @{ bytes = $bytes; privateBytes = $privateBytes; pids = @($ids); records = $records } | ConvertTo-Json -Compress -Depth 4
-`, environment());
-        assert(Array.isArray(result.records), 'Invalid owned process identities.');
-        for (const record of result.records) {
-            assert(Number.isSafeInteger(record.pid) && Number.isSafeInteger(record.rootPid) && typeof record.created === 'string' && /^\d{18}$/.test(record.created) && typeof record.rootCreated === 'string' && /^\d{18}$/.test(record.rootCreated), 'Invalid owned process identities.');
-        }
-        known = result.records;
+`, { ...environment(), ISSUE70_ACCOUNTING: '1' });
+        const current = remember(result.records);
+        const present = new Set(current.map(record => `${record.pid}:${record.created}`));
+        // Root lifetime history is accounting-only and never enters PowerShell selection.
+        // Once an observed root is gone/reused, snapshots cannot exclude an unseen late child.
+        if ([...observedRoots].some(identity => !present.has(identity))) accountingComplete = false;
+        assert(accountingComplete, 'Owned process accounting is incomplete.');
+        known = current;
         const launcherRecord = known.find(record => record.pid === launcherPid);
         if (launcherRecord) launcherCreated ||= launcherRecord.created;
         return result;
+        } catch (error) {
+            // An incomplete snapshot cannot later establish lifetime absence either.
+            accountingComplete = false;
+            throw error;
+        }
     };
-    const terminate = async () => {
-        await execute(selection + `
+    const terminateSelected = async () => {
+        const result = await execute(selection + `
     $issue70Phase = 'termination'
+$records = @($owned | ForEach-Object {
+    $source = $provenance[[int]$_.ProcessId]
+    @{ pid = [int]$_.ProcessId; created = (Get-Created $_); rootPid = $source.rootPid; rootCreated = $source.rootCreated }
+})
 $processes = @()
+$processObjects = @()
+$terminationFailure = $null
+$disposeFailure = $null
+$skipped = @{ processIdentity = 0; rootCommandLine = 0; rootCreationDate = 0 }
 $terminationOrder = @($owned | Sort-Object { $_.ProcessId -eq $provenance[[int]$_.ProcessId].rootPid })
+try {
 foreach ($item in $terminationOrder) {
     $issue70Step = 'fresh-cim'
     $fresh = @(Get-CimInstance Win32_Process -Filter "ProcessId=$($item.ProcessId) OR ProcessId=$($provenance[[int]$item.ProcessId].rootPid)" -ErrorAction Stop)
@@ -317,11 +369,21 @@ foreach ($item in $terminationOrder) {
     $source = $provenance[[int]$item.ProcessId]
     $root = @($fresh | Where-Object { $_.ProcessId -eq $source.rootPid })
     $candidate = @($fresh | Where-Object { $_.ProcessId -eq $item.ProcessId })
-    if ($candidate.Count -gt 0 -and $null -eq $candidate[0].CreationDate) { $issue70Step = 'fresh-process-identity'; throw 'Unknown fresh process identity.' }
-    if ($root.Count -gt 0 -and (-not $root[0].CommandLine -or $null -eq $root[0].CreationDate)) { $issue70Step = 'fresh-root-identity'; throw 'Unknown fresh root identity.' }
+    if ($candidate.Count -gt 0 -and $null -eq $candidate[0].CreationDate) { $skipped.processIdentity++; continue }
+    if ($root.Count -gt 0 -and (-not $root[0].CommandLine -or $null -eq $root[0].CreationDate)) {
+        if (-not $root[0].CommandLine) { $skipped.rootCommandLine++ }
+        if ($null -eq $root[0].CreationDate) { $skipped.rootCreationDate++ }
+        continue
+    }
     if ($current.Count -ne 1 -or ($root.Count -gt 0 -and ($root[0].CreationDate.ToUniversalTime().Ticks.ToString() -ne $source.rootCreated -or -not (Test-OwnedRoot $root[0])))) { continue }
     $issue70Step = 'get-process'
     $process = Get-Process -Id $item.ProcessId -ErrorAction SilentlyContinue
+    if ($process) {
+        $processObjects += $process
+        $issue70Step = 'handle-open'
+        $handle = $process.SafeHandle
+        if ($null -eq $handle -or $handle.IsInvalid -or $handle.IsClosed) { throw 'Process handle unavailable.' }
+    }
     $issue70Step = 'start-identity'
     if ($process -and [Math]::Abs($process.StartTime.ToUniversalTime().Ticks - $item.CreationDate.ToUniversalTime().Ticks) -lt 10000) {
         $issue70Step = 'kill'
@@ -335,8 +397,28 @@ foreach ($process in $processes) {
     $remaining = [Math]::Max(0, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
     if (-not $process.WaitForExit($remaining)) { throw 'Owned Edge did not exit.' }
 }
-@{ stoppedCount = $processes.Count } | ConvertTo-Json -Compress
+} catch { $terminationFailure = $_; throw }
+finally {
+    foreach ($processObject in $processObjects) {
+        try { $processObject.Dispose() } catch { if ($null -eq $disposeFailure) { $disposeFailure = $_ } }
+    }
+    if ($null -ne $disposeFailure -and $null -eq $terminationFailure) { $issue70Step = 'dispose'; throw $disposeFailure }
+}
+@{ stoppedCount = $processes.Count; skippedUnverified = $skipped; records = $records } | ConvertTo-Json -Compress -Depth 4
 `, environment(), 12000);
+        // Retain every selected identity, including children first seen at termination.
+        // Final inventory also checks root lifetime uncertainty; kill eligibility never proves exit.
+        const selected = remember(result.records);
+        known = [...new Map([...known, ...selected].map(record => [`${record.pid}:${record.created}`, record])).values()];
+        return { stoppedCount: result.stoppedCount, skippedUnverified: result.skippedUnverified };
+    };
+    const terminate = async () => {
+        try { return await terminateSelected(); } catch (error) {
+            // A partial termination may discover identities that never reach JavaScript.
+            // No later empty inventory can prove their absence on this owner instance.
+            accountingComplete = false;
+            throw error;
+        }
     };
     return { inventory, terminate, setLauncher(pid) { assert(Number.isSafeInteger(pid) && pid > 0); launcherPid = pid; } };
 }
@@ -347,6 +429,7 @@ async function terminateSpawned(launcher, launcherExit, execute = execFile, exit
 }
 
 async function terminateFamily(state) {
+    if (state.authority) { await state.authority.terminate(); return; }
     const outcomes = await Promise.allSettled([
         terminateSpawned(state.launcher, state.launcherExit),
         state.owned.terminate()
@@ -354,8 +437,13 @@ async function terminateFamily(state) {
     for (const outcome of outcomes) if (outcome.status === 'rejected') throw outcome.reason;
 }
 
-async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit, owned, profile }, overrides = {}) {
+function launchOwnerGuard(state, limits) {
+    return new ResourceGuard({ inventory: () => state.authority.inventory(), terminate: () => terminateFamily(state), limits });
+}
+
+async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit, owned, profile, authority, profileFinalizers, launchBoundMode }, overrides = {}) {
     const result = { remainingOwned: null, profileExists: profile ? true : false, errors: [] };
+    const authoritative = Boolean(authority || launchBoundMode);
     const attempt = async (label, operation, timeout = 5000) => {
         const started = performance.now();
         try { await bounded(Promise.resolve().then(operation), label, timeout); } catch (error) {
@@ -366,7 +454,19 @@ async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit,
         }
     };
     await attempt('Guard stop', () => guard?.stop(), 15000);
-    await attempt('Owned family termination', () => owned?.terminate(), 15000);
+    await attempt('Owned family termination', async () => {
+        if (authoritative) { assert(authority, 'Launch-bound owner state unknown.'); await authority.terminate(); return; }
+        const termination = await owned?.terminate();
+        if (termination) {
+            assert(Number.isSafeInteger(termination.stoppedCount) && termination.stoppedCount >= 0, 'Invalid stopped count.');
+            result.termination = { stoppedCount: termination.stoppedCount, skippedUnverified: {} };
+            for (const key of ['processIdentity', 'rootCommandLine', 'rootCreationDate']) {
+                const count = termination.skippedUnverified?.[key];
+                assert(Number.isSafeInteger(count) && count >= 0, 'Invalid skipped identity count.');
+                result.termination.skippedUnverified[key] = count;
+            }
+        }
+    }, 15000);
     await attempt('Spawned family termination', () => (overrides.terminateSpawned || terminateSpawned)(launcher, launcherExit));
     await attempt('Launcher exit', async () => {
         if (launcherExit) await launcherExit;
@@ -375,19 +475,39 @@ async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit,
     await attempt('Page close', () => page && !page.isClosed() ? page.close({ runBeforeUnload: false }) : undefined);
     await attempt('Browser disconnect', () => browser?.close());
     await attempt('Final owned inventory', async () => {
+        if (authoritative) {
+            assert(authority, 'Launch-bound owner state unknown.');
+            const proof = await authority.finish();
+            authority.validate(proof, true);
+            result.ownerCompletion = { confirmed: true, activeProcesses: 0, forced: proof.Forced, streamsComplete: true, assignedBeforeResume: proof.Created && proof.Assigned && proof.Resumed && proof.Sealed };
+            result.remainingOwned = 0;
+            return;
+        }
         const actual = owned ? await owned.inventory() : { pids: [] };
         result.remainingOwned = actual.pids.length;
         assert.strictEqual(result.remainingOwned, 0, 'Owned processes remain.');
     });
-    await attempt('Profile removal', async () => {
+    if (authoritative) result.ownerSetup = authority?.setup || null;
+    const removeProfile = async serverClosed => {
+        if (authoritative && (!serverClosed || result.errors.length || result.remainingOwned !== 0)) throw new Error('Owned cleanup failed.');
         if (profile && result.remainingOwned === 0) await (overrides.removeProfile || fs.promises.rm)(profile, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 });
         result.profileExists = Boolean(profile && fs.existsSync(profile));
         assert(!result.profileExists, 'Owned profile remains.');
-    });
+    };
+    if (authoritative) {
+        if (result.remainingOwned === null) authority?.abort();
+        if (Array.isArray(profileFinalizers)) {
+            result.profileDeferred = true;
+            profileFinalizers.push(async serverClosed => {
+                try { await removeProfile(serverClosed); result.profileDeferred = false; }
+                catch (error) { result.errors.push('Profile removal'); throw error; }
+            });
+        } else result.errors.push('Profile removal requires server closure');
+    } else await attempt('Profile removal', () => removeProfile(true));
     return result;
 }
 
-async function withServer(server, evidence, operation) {
+async function withServer(server, evidence, operation, profileFinalizers = []) {
     let originalError;
     try {
         await bounded(new Promise((resolve, reject) => {
@@ -407,6 +527,10 @@ async function withServer(server, evidence, operation) {
         } catch {
             evidence.serverClosed = false;
             evidence.serverError = 'HTTP server close failed';
+        }
+        for (const finalize of profileFinalizers) {
+            try { await bounded(finalize(evidence.serverClosed), 'Profile removal'); }
+            catch { if (!originalError) originalError = new Error('Owned cleanup failed.'); }
         }
     }
     if (originalError) throw originalError;
@@ -446,9 +570,9 @@ function assertRun(run, expectedRows, first) {
         assert.strictEqual(expectedRows, 2, 'Positive control requires the two-row synthetic fixture.');
         assert.strictEqual(run.snapshot.rawRows, 2, 'Positive control requires exactly two raw rows.');
         assert.strictEqual(run.controlObservation.filteredSourceRows, 2, 'Positive control must select both source rows.');
-        assert.strictEqual(run.controlObservation.selectedRows, 1, 'Positive control requires one active table row.');
-        assert.strictEqual(run.controlObservation.impactRows, 1, 'Positive control requires one impact row.');
-        assert.strictEqual(run.controlObservation.cardTotal, 1, 'Positive control requires one severity-card total.');
+        assert.strictEqual(run.controlObservation.selectedRows, 2, 'Positive control requires two active table rows.');
+        assert.strictEqual(run.controlObservation.impactRows, 2, 'Positive control requires two impact rows.');
+        assert.strictEqual(run.controlObservation.cardTotal, 2, 'Positive control requires a severity-card total of two.');
         assert.strictEqual(run.controlObservation.dateRange, '2026-01-01/2026-01-02');
         if (first) assert.deepStrictEqual(run.controlObservation, first.controlObservation, 'Cold/reload positive-control counts differ.');
     }
@@ -466,7 +590,9 @@ function assertRun(run, expectedRows, first) {
     } else {
         assert(!run.snapshot.counts.compressedCacheHits, 'Ineligible reload cannot be labelled cached.');
     }
+    requireCapturedFingerprint([run.compressedFingerprint]);
     if (first) {
+        assert.strictEqual(run.compressedFingerprint, first.compressedFingerprint, 'Cold/reload compressed fingerprint differs.');
         for (const key of ['rows', 'rawRows', 'activeRows']) assert.strictEqual(run.snapshot[key], first.snapshot[key], `Cold/reload ${key} differs.`);
         assert.strictEqual(run.impactRows, first.impactRows, 'Cold/reload impact count differs.');
         assert.deepStrictEqual(run.reportIds, first.reportIds, 'Cold/reload reports differ.');
@@ -491,11 +617,24 @@ async function completeRun(run, guard, validate) {
     }
 }
 
+function requireCapturedFingerprint(values) {
+    assert(Array.isArray(values) && values.length === 1 && typeof values[0] === 'string' && /^[A-Za-z0-9_]{1,256}$/.test(values[0]), 'Expected exactly one valid runtime compressed fingerprint.');
+    return values[0];
+}
+
 function installInstrumentation() {
     const phaseNames = ['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs'];
     const functionNames = ['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded'];
-    window.__issue70 = { phases: [], workerMessages: [], initialization: [] };
+    window.__issue70 = { phases: [], workerMessages: [], initialization: [], compressedFingerprints: [] };
     window.addEventListener('DOMContentLoaded', () => {
+        const originalFingerprint = window.computeCompressedFingerprint;
+        if (typeof originalFingerprint === 'function') {
+            window.computeCompressedFingerprint = async function(...args) {
+                const fingerprint = await originalFingerprint.apply(this, args);
+                window.__issue70.compressedFingerprints.push(fingerprint);
+                return fingerprint;
+            };
+        }
         for (const name of ['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded']) {
             const original = window[name];
             if (typeof original !== 'function') continue;
@@ -585,21 +724,21 @@ async function finishHeapSample(run, sample, timeout = 5000) {
     catch { run.incompleteHeapSample = true; }
 }
 
-async function measureIteration({ chromium, edge, origin, evidence, expectedRows, fingerprint, iteration, positiveControl }) {
+async function measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl, profileFinalizers }) {
     const state = {};
     let measurementError;
     try {
         state.profile = fs.mkdtempSync(path.join(os.tmpdir(), 'issue70-edge-'));
-        state.owned = ownedProcesses(state.profile);
-        state.guard = new ResourceGuard({ inventory: state.owned.inventory, terminate: () => terminateFamily(state), limits: evidence.limits });
+        state.launchBoundMode = true;
+        state.profileFinalizers = profileFinalizers;
+        state.authority = new LaunchBoundClient(state.profile);
+        await state.authority.ready;
+        state.owned = state.authority;
+        state.profileFinalizers = profileFinalizers;
+        state.guard = launchOwnerGuard(state, evidence.limits);
         await state.guard.sample('prelaunch');
         state.guard.check();
-        state.launcher = spawn(edge, ['--headless=new', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${state.profile}`, '--no-first-run', '--no-default-browser-check', 'about:blank'], { stdio: 'ignore', windowsHide: true });
-        if (state.launcher.pid) state.owned.setLauncher(state.launcher.pid);
-        state.launcherExit = new Promise(resolve => {
-            state.launcher.once('exit', resolve);
-            state.launcher.once('error', error => { state.guard.abort(error); resolve(); });
-        });
+        await state.authority.start(edge, ['--headless=new', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', `--user-data-dir=${state.profile}`, '--no-first-run', '--no-default-browser-check', 'about:blank']);
         state.guard.start();
         const portFile = path.join(state.profile, 'DevToolsActivePort');
         const port = await readDevToolsPort(portFile, state.guard);
@@ -700,10 +839,11 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
                 run.summaryCardsSha256 = digest(JSON.stringify(run.snapshot.summaryCards));
                 run.stage = 'cache';
                 state.guard.stage = `${load}:cache`;
+                run.compressedFingerprint = requireCapturedFingerprint(await state.guard.wait(state.page.evaluate(() => window.__issue70.compressedFingerprints)));
                 if (run.cachePolicy.available) {
                     const deadline = performance.now() + 5000;
                     do {
-                        run.cacheEntries = await state.guard.wait(bounded(inspectCache(state.page, fingerprint), 'Cache inspection'));
+                        run.cacheEntries = await state.guard.wait(bounded(inspectCache(state.page, run.compressedFingerprint), 'Cache inspection'));
                         if (!run.cachePolicy.eligible || run.cacheEntries.matchingRows === expectedRows) break;
                         await state.guard.wait(new Promise(resolve => setTimeout(resolve, 100)));
                     } while (performance.now() < deadline);
@@ -734,7 +874,8 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
         state.guard?.abort(error);
     } finally {
         const cleanup = await cleanupOwned(state);
-        evidence.cleanups.push({ iteration, ...cleanup });
+        cleanup.iteration = iteration;
+        evidence.cleanups.push(cleanup);
         if (state.guard) {
             evidence.resourceTraces.push({ iteration, samples: state.guard.trace, peakBrowserFamilyBytes: state.guard.peakBytes, minimumFreeMemoryBytes: Number.isFinite(state.guard.minimumFreeBytes) ? state.guard.minimumFreeBytes : null });
             if (state.guard.error) {
@@ -743,7 +884,7 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
                 if (lastRun) lastRun.status = 'failed';
             }
         }
-        if (!measurementError && (cleanup.errors.length || cleanup.remainingOwned !== 0 || cleanup.profileExists)) measurementError = new Error('Owned cleanup failed.');
+        if (!measurementError && (cleanup.errors.length || cleanup.remainingOwned !== 0 || (cleanup.profileExists && !cleanup.profileDeferred))) measurementError = new Error('Owned cleanup failed.');
     }
     if (measurementError) throw measurementError;
 }
@@ -802,13 +943,14 @@ async function main() {
             } catch { response.writeHead(403).end(); }
         });
         phase = 'browser';
+        const profileFinalizers = [];
         await withServer(server, evidence, async origin => {
             const candidates = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA].filter(Boolean).map(base => path.join(base, 'Microsoft/Edge/Application/msedge.exe'));
             const edge = candidates.find(candidate => fs.existsSync(candidate));
             assert(edge, 'Microsoft Edge is required.');
             const { chromium } = require(process.env.PLAYWRIGHT_MODULE);
-            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, evidence, expectedRows, fingerprint: `cfp_${payloadIdentity.payloadBytes}_${payloadIdentity.payloadSha256}`, iteration, positiveControl });
-        });
+            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl, profileFinalizers });
+        }, profileFinalizers);
         evidence.status = 'completed';
     } catch (error) {
         evidence.status = 'blocked-or-failed';
@@ -839,27 +981,35 @@ $script:items = @($env:ISSUE70_FIXTURE | ConvertFrom-Json | ForEach-Object {
     $_
 })
 function Get-CimInstance {
+    param($ClassName, $Filter, $Property, $ErrorAction)
     $script:calls++
     if ($env:ISSUE70_REUSE -eq 'gone' -and $script:calls -gt 1) { return }
-    if ($env:ISSUE70_REUSE -eq 'unknown' -and $script:calls -gt 1) { $script:items[0].CommandLine = $null }
+    if ($env:ISSUE70_REUSE -eq 'unknown') { $script:items[0].CommandLine = $null }
     if ($env:ISSUE70_REUSE -eq 'root-shutdown' -and 101 -in $script:killed) { $script:items[0].CommandLine = $null }
     if ($env:ISSUE70_REUSE -eq 'fresh' -and $script:calls -gt 1) {
         $script:items[0].CreationDate = $script:items[0].CreationDate.AddMinutes(1)
         $script:items[0].CommandLine = 'msedge.exe --user-data-dir=C:/neighbor'
     }
-    $script:items | Select-Object *
+    $copy = @($script:items | Select-Object *)
+    if ($Filter -and $env:ISSUE70_REUSE -eq 'fresh-root-command') { $copy[0].CommandLine = $null }
+    if ($Filter -and $env:ISSUE70_REUSE -eq 'fresh-root-created') { $copy[0].CreationDate = $null }
+    if ($Filter -and $env:ISSUE70_REUSE -eq 'fresh-child-created') { $copy[1].CreationDate = $null }
+    $copy
 }
 function Get-Process {
     param($Id, $ErrorAction)
+    if ($env:ISSUE70_REUSE -eq 'memory-open-forbidden') { throw 'Inventory must not reopen processes.' }
     $item = $script:items | Where-Object { $_.ProcessId -eq $Id }
     if (-not $item) { return }
-    $process = [pscustomobject]@{ Id=$Id; StartTime=$item.CreationDate; PrivateMemorySize64=1; HasExited=$false }
+    $process = [pscustomobject]@{ Id=$Id; StartTime=$item.CreationDate; PrivateMemorySize64=1; HasExited=$false; SafeHandle=[pscustomobject]@{IsInvalid=$false;IsClosed=$false} }
     $process | Add-Member ScriptMethod Kill { if ($env:ISSUE70_REUSE -eq 'kill-failure') { throw [ComponentModel.Win32Exception]::new(87) }; $script:killed += $this.Id; $this.HasExited=$true }
     $process | Add-Member ScriptMethod WaitForExit { param($remaining); return $true }
+    $process | Add-Member ScriptMethod Dispose { }
     $process
 }
 `;
-    const make = (pid, parent, command, minute = 0) => ({ ProcessId: pid, ParentProcessId: parent, Name: 'msedge.exe', CommandLine: command, CreationDate: `2026-09-30T00:0${minute}:00Z`, WorkingSetSize: 1 });
+    const make = (pid, parent, command, minute = 0) => ({ ProcessId: pid, ParentProcessId: parent, Name: 'msedge.exe', CommandLine: command, CreationDate: `2026-09-30T00:0${minute}:00Z`, WorkingSetSize: 1, PrivatePageCount: 1 });
+    let memoryValidationChecked = false;
     for (const command of [
         'msedge.exe --user-data-dir="C:/Profile Owned"',
         'msedge.exe --user-data-dir "c:\\profile owned"',
@@ -877,6 +1027,21 @@ function Get-Process {
         };
         const owned = ownedProcesses(profile, execute);
         assert.deepStrictEqual((await owned.inventory()).pids.sort(), [101, 102]);
+        reuse = 'memory-open-forbidden';
+        const memorySnapshot = await owned.inventory();
+        assert.strictEqual(memorySnapshot.bytes, 2, 'Working set must use the identity-bound CIM snapshot.');
+        assert.strictEqual(memorySnapshot.privateBytes, 2, 'Private memory must use the same CIM snapshot without process opens.');
+        reuse = '';
+        if (!memoryValidationChecked) {
+            for (const field of ['WorkingSetSize', 'PrivatePageCount']) {
+                for (const value of [null, '-1', 'invalid', '9223372036854775808']) {
+                    items[1][field] = value;
+                    await assert.rejects(ownedProcesses(profile, execute).inventory(), error => error.inventoryDiagnostic?.phase === 'memory', 'Invalid owned memory must fail closed.');
+                }
+                items[1][field] = 1;
+            }
+            memoryValidationChecked = true;
+        }
         await owned.terminate();
         assert.deepStrictEqual(last.killed.sort(), [101, 102]);
         assert.deepStrictEqual(last.survivors.sort((left, right) => left - right), [0, 201, 202, 301, 302, 401]);
@@ -890,15 +1055,26 @@ function Get-Process {
         reuse = 'gone';
         await owned.terminate();
         assert.deepStrictEqual(last.killed, []);
+        for (const [mode, category] of [['fresh-root-command', 'rootCommandLine'], ['fresh-root-created', 'rootCreationDate'], ['fresh-child-created', 'processIdentity']]) {
+            reuse = mode;
+            const receipt = await owned.terminate();
+            assert(receipt.skippedUnverified[category] > 0, mode);
+            assert(!last.killed.includes(102), 'A child with unverified fresh identity must never be killed.');
+            if (mode !== 'fresh-child-created') assert.deepStrictEqual(last.killed, [], 'No kill without fresh root identity.');
+            assert(!JSON.stringify(receipt).includes(profile), 'Termination receipt must contain counters only.');
+        }
         reuse = 'unknown';
         await assert.rejects(owned.terminate(), error => error.inventoryDiagnostic?.category === 'OperationStopped' && error.inventoryDiagnostic?.exceptionType === 'RuntimeException' && error.inventoryDiagnostic?.exitCode === 1);
         reuse = 'kill-failure';
         await assert.rejects(owned.terminate(), error => error.inventoryDiagnostic?.step === 'kill-exit-check' && error.inventoryDiagnostic?.innerExceptionType === 'Win32Exception' && error.inventoryDiagnostic?.nativeErrorCode === 87);
         reuse = '';
+        await assert.rejects(owned.inventory(), /accounting is incomplete/);
+        const retained = ownedProcesses(profile, execute);
+        await retained.inventory();
         items[0] = make(101, 0, command, 2);
-        assert.deepStrictEqual((await owned.inventory()).pids, [], 'Same-profile root PID reuse must exclude prior descendants.');
+        await assert.rejects(retained.inventory(), /accounting is incomplete/, 'Root PID reuse cannot prove descendant absence.');
         items[0] = make(101, 0, 'msedge.exe --user-data-dir=C:/neighbor', 2);
-        assert.deepStrictEqual((await owned.inventory()).pids, []);
+        await assert.rejects(retained.inventory(), /accounting is incomplete/);
         const unknown = ownedProcesses(profile, execute);
         unknown.setLauncher(401);
         await assert.rejects(unknown.inventory(), error => error.inventoryDiagnostic?.exceptionType === 'RuntimeException');
@@ -908,8 +1084,143 @@ function Get-Process {
         items[0].CommandLine = null;
         await assert.rejects(protectedRoot.inventory(), error => error.inventoryDiagnostic?.exceptionType === 'RuntimeException');
     }
+    await handleBindingProbes();
     console.log('PASS actual PowerShell argv/profile selection, literal/duplicate/prefix exclusion, independent snapshots, descendants-before-root shutdown race, unexpected native kill rejection, same-profile/fresh root PID reuse, nullable unrelated/PID-zero exclusion, unknown owned root fail-closed.');
 }
+
+async function handleBindingProbes() {
+    const fixture = `
+$script:operations = @(); $script:disposed = 0; $script:wrongKills = 0
+$script:created = [datetime]'2026-01-01T00:00:00Z'
+$script:items = @([pscustomobject]@{Name='msedge.exe';ProcessId=101;ParentProcessId=0;CreationDate=$script:created;CommandLine=('msedge.exe --user-data-dir="'+$env:ISSUE70_PROFILE+'"');WorkingSetSize=1;PrivatePageCount=1})
+function Get-CimInstance { param($ClassName,$Filter,$Property,$ErrorAction) $script:items }
+function Get-Process {
+ param($Id,$ErrorAction)
+ $p=[pscustomobject]@{Id=$Id;Pinned=$false;BoundCreated=$script:created;HasExited=$false}
+ $p|Add-Member ScriptProperty SafeHandle {
+  $script:operations+='open'
+  if($env:HANDLE_CASE-eq'open-failure'){throw [ComponentModel.Win32Exception]::new(5)}
+  if($env:HANDLE_CASE-eq'reuse-before-open'){$this.BoundCreated=$this.BoundCreated.AddHours(1)}
+  $this.Pinned=$true
+  [pscustomobject]@{IsInvalid=($env:HANDLE_CASE-eq'invalid');IsClosed=($env:HANDLE_CASE-eq'closed')}
+ }
+ $p|Add-Member ScriptProperty StartTime {
+  $script:operations+='start'
+  if($env:HANDLE_CASE-eq'reuse-after-start'){$script:items=@([pscustomobject]@{Name='unrelated.exe';ProcessId=101;ParentProcessId=0;CreationDate=$script:created.AddHours(1);CommandLine='unrelated';WorkingSetSize=1;PrivatePageCount=1});$this.HasExited=$true}
+  $this.BoundCreated
+ }
+ $p|Add-Member ScriptMethod Kill {
+  $script:operations+='kill'
+  if(-not $this.Pinned){$script:wrongKills++}
+  if($env:HANDLE_CASE-eq'kill-failure'){throw [ComponentModel.Win32Exception]::new(87)}
+  $this.HasExited=$true
+ }
+ $p|Add-Member ScriptMethod WaitForExit {param($remaining) $script:operations+='wait';$env:HANDLE_CASE-ne'wait-failure'}
+ $p|Add-Member ScriptMethod Dispose {$script:operations+='dispose';$script:disposed++;if($env:HANDLE_CASE-eq'dispose-failure'){throw 'Synthetic disposal failure'}}
+ $p
+}
+`;
+    for (const mode of ['success', 'reuse-after-start', 'reuse-before-open', 'open-failure', 'invalid', 'closed', 'kill-failure', 'wait-failure', 'dispose-failure']) {
+        let last;
+        const execute = async (script, environment, timeout) => {
+            last = await powershell(fixture + '\n$failed=$false; $value=$null; try { $text=. {\n' + script + '\n}; $value=$text|ConvertFrom-Json } catch {$failed=$true}\n@{failed=$failed;value=$value;operations=@($script:operations);disposed=$script:disposed;wrongKills=$script:wrongKills;step=$issue70Step}|ConvertTo-Json -Compress -Depth 8', {...environment,HANDLE_CASE:mode}, timeout || 12000);
+            if (last.failed) { const error = new Error('Owned process inventory/termination failed.'); error.inventoryDiagnostic=safeInventoryDiagnostic({phase:'termination',step:last.step}); throw error; }
+            return last.value;
+        };
+        const owned=ownedProcesses('C:/issue70-handle-owned',execute);
+        const fails=['open-failure','invalid','closed','kill-failure','wait-failure','dispose-failure'].includes(mode);
+        if(fails)await assert.rejects(owned.terminate());else await owned.terminate();
+        assert.strictEqual(last.disposed,1,`Process disposal count: ${mode}`);
+        assert.strictEqual(last.wrongKills,0,`Unpinned replacement kill: ${mode}`);
+        const ops=last.operations;
+        assert.strictEqual(ops[0],'open');
+        if(['open-failure','invalid','closed'].includes(mode))assert.deepStrictEqual(ops,['open','dispose']);
+        if(mode==='reuse-after-start')assert(ops.indexOf('open')<ops.indexOf('start')&&ops.indexOf('start')<ops.indexOf('kill'));
+        if(mode==='reuse-before-open')assert(!ops.includes('kill')&&!ops.includes('wait'));
+        if(fails)await assert.rejects(owned.inventory(),/accounting is incomplete/);
+    }
+    console.log('PASS retained-handle binding before StartTime, post-validation PID reuse, handle failures and exact-once disposal');
+}
+
+async function cleanupAccountingProbes() {
+    // Exercise actual selection, termination and final inventory across snapshots.
+    // Only process APIs are mocked; profile deletion uses an owned temporary folder.
+    const fixture = `
+$script:killed = @()
+$script:handles = @()
+$script:items = @($env:ISSUE70_FIXTURE | ConvertFrom-Json | ForEach-Object {
+    if ($null -ne $_.CreationDate) { $_.CreationDate = [datetime]$_.CreationDate }
+    $_
+})
+function Get-CimInstance {
+    param($ClassName, $Filter, $Property, $ErrorAction)
+    $copy = @($script:items | Select-Object *)
+    if ($Filter -and $Filter.StartsWith('ProcessId=102 ')) {
+        ($copy | Where-Object ProcessId -eq 102).CreationDate = $null
+    }
+    $copy
+}
+function Get-Process {
+    param($Id, $ErrorAction)
+    $script:handles += $Id
+    $item = $script:items | Where-Object ProcessId -eq $Id
+    if (-not $item) { return }
+    $process = [pscustomobject]@{ Id=$Id; StartTime=$item.CreationDate; PrivateMemorySize64=1; HasExited=$false; SafeHandle=[pscustomobject]@{IsInvalid=$false;IsClosed=$false} }
+    $process | Add-Member ScriptMethod Kill { $script:killed += $this.Id; $this.HasExited=$true }
+    $process | Add-Member ScriptMethod WaitForExit { param($remaining); return $true }
+    $process | Add-Member ScriptMethod Dispose { }
+    $process
+}
+`;
+    const make = (pid, parent, command, minute = 0) => ({ ProcessId: pid, ParentProcessId: parent, Name: 'msedge.exe', CommandLine: command, CreationDate: `2026-10-24T00:0${minute}:00Z`, WorkingSetSize: 1, PrivatePageCount: 1 });
+    for (const mode of ['new-child-orphan', 'known-child-root-reuse', 'child-disappeared', 'child-pid-reused', 'child-identity-unknown', 'orphan-descendant', 'termination-failure']) {
+        const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'issue70-accounting-'));
+        const rootCommand = `msedge.exe --user-data-dir="${profile}"`;
+        let items = [make(101, 0, rootCommand), make(201, 0, 'msedge.exe --user-data-dir=C:/neighbor')];
+        if (!['new-child-orphan', 'termination-failure'].includes(mode)) items.push(make(102, 101, 'msedge.exe --type=renderer', 1));
+        const killed = [];
+        const terminationHandles = [];
+        let started = false;
+        const execute = async (script, environment, timeout) => {
+            const terminating = script.includes("$issue70Phase = 'termination'");
+            if (terminating && !started) {
+                started = true;
+                if (['new-child-orphan', 'termination-failure'].includes(mode)) items.push(make(102, 101, 'msedge.exe --type=renderer', 1));
+            }
+            const response = await powershell(fixture + '\n$result = . {\n' + script + '\n}\n@{ result=($result | ConvertFrom-Json); killed=@($script:killed); handles=@($script:handles) } | ConvertTo-Json -Depth 8 -Compress', { ...environment, ISSUE70_FIXTURE: JSON.stringify(items) }, timeout || 12000);
+            killed.push(...response.killed);
+            items = items.filter(row => !response.killed.includes(row.ProcessId));
+            if (terminating) {
+                terminationHandles.push(...response.handles);
+                if (mode !== 'new-child-orphan') items.push(make(101, 0, 'msedge.exe --user-data-dir=C:/neighbor', 2));
+                if (mode === 'child-disappeared') items = items.filter(row => row.ProcessId !== 102);
+                if (mode === 'child-pid-reused') items = items.map(row => row.ProcessId === 102 ? make(102, 0, 'unrelated replacement child', 3) : row);
+                if (mode === 'orphan-descendant') items.push(make(103, 102, 'msedge.exe --type=renderer', 2));
+                if (mode === 'termination-failure') throw new Error('Synthetic failure after partial termination.');
+                if (mode === 'child-identity-unknown') items.find(row => row.ProcessId === 102).CreationDate = null;
+            }
+            return response.result;
+        };
+        try {
+            const owned = ownedProcesses(profile, execute);
+            await owned.inventory();
+            const cleanup = await cleanupOwned({ profile, owned });
+            assert.deepStrictEqual(killed, [101], `${mode}: never kill skipped child or unrelated/reused root`);
+            assert.deepStrictEqual(terminationHandles, [101], `${mode}: no unverified process handle`);
+            assert(items.some(row => row.ProcessId === 201), 'Neighbor must survive.');
+            if (mode === 'termination-failure') assert(cleanup.errors.includes('Owned family termination'));
+            else assert.strictEqual(cleanup.termination.skippedUnverified.processIdentity, 1);
+            assert.strictEqual(cleanup.profileExists, true, mode);
+            assert.strictEqual(fs.existsSync(profile), true, mode);
+            assert.strictEqual(cleanup.remainingOwned, null, mode);
+            assert(cleanup.errors.includes('Final owned inventory'), mode);
+            // Even actual disappearance/PID reuse cannot prove no unseen child was born.
+            if (!['child-disappeared', 'child-pid-reused'].includes(mode)) assert(items.some(row => row.ProcessId === 102), mode);
+        } finally { fs.rmSync(profile, { recursive: true, force: true }); }
+    }
+    console.log('PASS integrated cleanup accounting: newly discovered orphan, known child/root reuse, actual disappearance, own-PID reuse, uncertain final identity; unverified handles/kills excluded and neighbor preserved.');
+}
+
 
 async function inventoryProbes() {
     if (process.platform !== 'win32') return;
@@ -999,8 +1310,36 @@ async function privacyProbes() {
 }
 
 async function mockProbes() {
+    const runtime = loadDashboardHarness('module.exports = { computeCompressedFingerprint };');
+    const bytes = new Uint8Array([1, 2, 3]);
+    const actualKey = await runtime.computeCompressedFingerprint(bytes);
+    const callbacks = {};
+    let calls = 0;
+    const context = { performance, setInterval() {}, window: {
+        Worker: class {}, addEventListener(name, callback) { callbacks[name] = callback; },
+        async computeCompressedFingerprint(input) {
+            assert.strictEqual(this, context.window);
+            assert.strictEqual(input, bytes);
+            calls++;
+            return actualKey;
+        }
+    } };
+    require('vm').runInNewContext(`(${installInstrumentation.toString()})()`, context);
+    callbacks.DOMContentLoaded();
+    assert.strictEqual(await context.window.computeCompressedFingerprint(bytes), actualKey);
+    assert.strictEqual(calls, 1);
+    assert.strictEqual(requireCapturedFingerprint(context.window.__issue70.compressedFingerprints), actualKey);
+    for (const values of [undefined, [], [''], ['a', 'b'], ['private/path'], [null]]) assert.throws(() => requireCapturedFingerprint(values));
+    const rejection = new Error('fixture');
+    const rejectedCallbacks = {};
+    const rejected = { performance, setInterval() {}, window: { Worker: class {}, addEventListener(name, callback) { rejectedCallbacks[name] = callback; }, async computeCompressedFingerprint() { throw rejection; } } };
+    require('vm').runInNewContext(`(${installInstrumentation.toString()})()`, rejected);
+    rejectedCallbacks.DOMContentLoaded();
+    await assert.rejects(rejected.window.computeCompressedFingerprint(bytes), error => error === rejection);
+    assert.strictEqual(rejected.window.__issue70.compressedFingerprints.length, 0);
+    console.log('PASS actual runtime fingerprint capture, invocation identity, rejection, and missing/ambiguous key guards.');
     await privacyProbes();
-    if (process.platform === 'win32') await ownershipProbes();
+    if (process.platform === 'win32') { await ownershipProbes(); await cleanupAccountingProbes(); }
     await inventoryProbes();
     const incompleteProbe = {};
     await finishHeapSample(incompleteProbe, new Promise(() => {}), 5);
@@ -1058,11 +1397,15 @@ async function mockProbes() {
     }
     await assert.rejects(bounded(new Promise(() => {}), 'Termination probe', 5), /Termination probe exceeded 5 ms/);
     console.log('PASS cleanup diagnostics retain timeout/cancellation/shutdown failure despite final zero; private messages excluded; unresolved promise remains bounded.');
-    const valid = { snapshot: { rows: 2, rawRows: 2, activeRows: 2, counts: {}, summaryCards: { high: '2' } }, reportIds: [...REPORTS].sort(), impactRows: 2, readinessCacheDigest: 'fixture', cachePolicy: { eligible: true, available: true, maxRowsExclusive: 500000, maxEntries: 4 }, cacheEntries: { matchingRows: 2, count: 2 }, externalRequests: 0, pageErrors: 0 };
+    const valid = { compressedFingerprint: 'runtime_fixture', snapshot: { rows: 2, rawRows: 2, activeRows: 2, counts: {}, summaryCards: { high: '2' } }, reportIds: [...REPORTS].sort(), impactRows: 2, readinessCacheDigest: 'fixture', cachePolicy: { eligible: true, available: true, maxRowsExclusive: 500000, maxEntries: 4 }, cacheEntries: { matchingRows: 2, count: 2 }, externalRequests: 0, pageErrors: 0 };
     assertRun(valid, 2);
-    const positive = { ...valid, positiveControl: true, controlObservation: { filteredSourceRows: 2, selectedRows: 1, impactRows: 1, cardTotal: 1, dateRange: '2026-01-01/2026-01-02' } };
+    const positive = { ...valid, positiveControl: true, controlObservation: { filteredSourceRows: 2, selectedRows: 2, impactRows: 2, cardTotal: 2, dateRange: '2026-01-01/2026-01-02' } };
     assertRun(positive, 2);
-    for (const key of ['selectedRows', 'impactRows', 'cardTotal']) assert.throws(() => assertRun({ ...positive, controlObservation: { ...positive.controlObservation, [key]: 0 } }, 2));
+    for (const key of ['filteredSourceRows', 'selectedRows', 'impactRows', 'cardTotal']) {
+        for (const value of [0, 1, 3]) assert.throws(() => assertRun({ ...positive, controlObservation: { ...positive.controlObservation, [key]: value } }, 2));
+    }
+    assert.throws(() => assertRun({ ...positive, controlObservation: { ...positive.controlObservation, dateRange: '2026-01-01/2026-01-03' } }, 2));
+    assert.throws(() => assertRun({ ...valid, compressedFingerprint: 'different', snapshot: { ...valid.snapshot, counts: { compressedCacheHits: 1 } } }, 2, valid), /fingerprint differs/);
     assert.throws(() => assertRun({ ...valid, snapshot: { ...valid.snapshot, rows: 0 } }, 2), /row count/);
     assert.throws(() => assertRun({ ...valid, snapshot: { ...valid.snapshot, counts: {} } }, 2, valid), /must hit cache/);
     assertRun({ ...valid, snapshot: { ...valid.snapshot, counts: { compressedCacheHits: 1 } } }, 2, valid);
@@ -1071,6 +1414,17 @@ async function mockProbes() {
     await assert.rejects(completeRun(failedRun, failedFinal, () => {}), /final inventory failed/);
     await failedFinal.stop();
     assert.strictEqual(failedRun.status, 'failed');
+    let sampleClock = 0;
+    const TimedGuard = require('vm').runInNewContext(`(${ResourceGuard.toString()})`, { performance: { now: () => sampleClock }, assert });
+    const timed = new TimedGuard({
+        inventory: async () => { sampleClock = 11; return { bytes: 1, pids: [] }; },
+        freeMemory: () => { sampleClock = 31; return 3; }, terminate: async () => {}, limits: { browserFamilyBytes: 2, freeMemoryBytes: 2 }
+    });
+    await timed.sample('timing-boundaries');
+    assert.strictEqual(timed.trace[0].inventoryStartedAtHostMs, 0);
+    assert.strictEqual(timed.trace[0].inventoryCompletedAtHostMs, 11);
+    assert.strictEqual(timed.trace[0].validatedAtHostMs, 31);
+    assert.strictEqual(timed.trace[0].sampledAtHostMs, 31);
     const floor = new ResourceGuard({ inventory: async () => ({ bytes: 1, pids: [] }), terminate: async () => { kills++; }, freeMemory: () => 1, limits: { browserFamilyBytes: 2, freeMemoryBytes: 2 } });
     await assert.rejects(floor.finish(), /memory floor/);
     await floor.stop();
@@ -1105,6 +1459,18 @@ async function mockProbes() {
     assert.strictEqual(independent.remainingOwned, 1);
     assert.deepStrictEqual(familyActions, ['kill', 'spawned-kill', 'browser', 'reinventory']);
     assert(independent.errors.includes('Final owned inventory'));
+    const skipReceipt = { stoppedCount: 0, skippedUnverified: { processIdentity: 0, rootCommandLine: 2, rootCreationDate: 0 } };
+    for (const survivors of [[123], []]) {
+        const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'issue70-skip-'));
+        try {
+            const cleanup = await cleanupOwned({ profile, owned: { terminate: async () => skipReceipt, inventory: async () => ({ pids: survivors }) } });
+            assert.deepStrictEqual(cleanup.termination, skipReceipt);
+            assert.strictEqual(cleanup.remainingOwned, survivors.length);
+            assert.strictEqual(cleanup.profileExists, survivors.length > 0);
+            if (survivors.length) assert(cleanup.errors.includes('Final owned inventory'));
+            else assert.deepStrictEqual(cleanup.errors, []);
+        } finally { fs.rmSync(profile, { recursive: true, force: true }); }
+    }
     const uncached = { ...valid, snapshot: { ...valid.snapshot, rows: 500000, rawRows: 500000 }, cachePolicy: { ...valid.cachePolicy, eligible: false }, cacheEntries: { count: 0, matchingRows: 0 } };
     assertRun(uncached, 500000);
     assert.strictEqual(uncached.cachedEligible, false);
