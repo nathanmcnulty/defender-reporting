@@ -1,4 +1,5 @@
-﻿[CmdletBinding()]
+﻿#Requires -Version 7.6
+[CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
     [string]$HtmlPath = (Join-Path (Split-Path -Path $PSScriptRoot -Parent) 'VulnerabilityDashboard.html'),

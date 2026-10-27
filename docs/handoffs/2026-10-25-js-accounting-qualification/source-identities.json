@@ -1,0 +1,27 @@
+{
+  "repository": "nathanmcnulty/defender-reporting",
+  "branch": "fix/issue-70-reviewed-cleanup-20261023",
+  "goalCommit": "f609acf24b8ce0cb8528f72fbe5bd30d2d3d0e54",
+  "startingHead": "f0dd25699f310647c763c29c92aeb250493f5c39",
+  "sourceCommit": "dfd2e7d24df71d1e095ea868550610e544c36b26",
+  "runtimeSource": "9c240298b2feb9c2d5698fcd179296b37d30d78c",
+  "files": {
+    "tests/Measure-DashboardWorkerTransfer.js": {
+      "gitBlob": "bdaba6dd1110c780c9a2d17a408b5ac6c9a1a848",
+      "gitBlobSha256": "4fd767d42979ef45d394fcf28e1487564afbdb7f64fe70ff6383b17a172dcbf3",
+      "reviewedWorkingBytesSha256": "b37b1a022b7e1a6008abb7266ae6bc54702936a30b4710ab273ae3072ba50f0a"
+    },
+    "tests/Assert-DashboardCleanupAccounting.js": {
+      "gitBlob": "fa396e9e60ba1101500ed84d8818158068946e14",
+      "gitBlobSha256": "3e113ddc1c4c2c6bfe505f1ebb2ea6ed972757389c4ccaeb8ed8bf504290560e",
+      "reviewedWorkingBytesSha256": "1ed0151a5222e3da3297ce2658b742659b58c2c49e284a52ef18493076c76742"
+    }
+  },
+  "unchangedEmbeddedPowerShellSha256": {
+    "selection": "d79d3a3b19a4815ddb16c3646c92e5d592f0a7fb4c0ab258e31ed6ac5a716705",
+    "memory": "ac7069709518f6f7382e38b4ca5ef7035dc694e9eb0742901ea08c7dd6ed1f7d",
+    "termination": "d0ce39287434e78179a848eef660938a71e3c1a8dfd9b788e68128b09231da13"
+  },
+  "nonTestDocumentPathsUnchangedFromRuntime": true,
+  "note": "Published Git blob bytes equal independently reviewed working bytes after CRLF normalization."
+}

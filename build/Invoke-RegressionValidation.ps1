@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.6
 
 [CmdletBinding()]
 param(
@@ -246,6 +246,12 @@ Write-Output 'Running shared-helper regression tests...'
 
 Write-Output 'Running hosted smoke diagnostics regression tests (no Edge required)...'
 & (Join-Path $repoRoot 'tests\Invoke-HostedSmokeDiagnosticsRegression.ps1')
+
+Write-Output 'Running Setup runtime regression tests...'
+& (Join-Path $repoRoot 'tests\Invoke-SetupRuntimeRegression.ps1')
+
+Write-Output 'Running installed inventory regression tests (temporary files only)...'
+& (Join-Path $repoRoot 'tests\Invoke-InstalledInventoryRegression.ps1')
 
 Write-Output 'Running Setup scheduling regression tests...'
 & (Join-Path $repoRoot 'tests\Invoke-SetupSchedulingRegression.ps1')

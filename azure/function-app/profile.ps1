@@ -1,3 +1,4 @@
+#Requires -Version 7.6
 # Azure Functions profile - loaded on every cold start.
 # Managed dependencies are not supported on Flex Consumption; Az.Accounts is
 # bundled in the Modules/ directory by Build-FunctionApp.ps1.
