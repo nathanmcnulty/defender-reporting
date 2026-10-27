@@ -11,7 +11,7 @@
     .\build\azure\Build-Runbook.ps1
 #>
 
-#Requires -Version 7.0
+#Requires -Version 7.6
 
 [CmdletBinding()]
 param()

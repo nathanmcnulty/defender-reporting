@@ -38,7 +38,7 @@
 
 .NOTES
     Author: Nathan McNulty
-    Runtime: PowerShell 7.4 (Azure Automation - custom runtime environment)
+    Runtime: PowerShell 7.6 (Azure Automation - custom runtime environment)
 
     Prerequisites:
     - System-assigned Managed Identity with:
@@ -47,7 +47,7 @@
     - Templates uploaded to the 'templates' blob container via azure/Upload-Templates.ps1
 #>
 
-#Requires -Version 7.0
+#Requires -Version 7.6
 
 [CmdletBinding()]
 param(
@@ -21756,7 +21756,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: f6810f40bcbffeaff7f31bbaa22e66fb5b6f4fe5bc09787bf081fc0e62385cd4
+# ArtifactFingerprint: 709ef828e18865dbb3d12c62d370666b70c31fb9e438c8d3cf1cca102f0d072b
 
 
 

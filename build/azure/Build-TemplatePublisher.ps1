@@ -8,7 +8,7 @@
     azure/Upload-Templates.ps1 artifact.
 #>
 
-#Requires -Version 7.0
+#Requires -Version 7.6
 
 [CmdletBinding()]
 param()

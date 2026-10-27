@@ -56,7 +56,7 @@ During seeded Function App validation, the script now writes a short-lived contr
 
 ## Validation hierarchy
 
-Deterministic preflight requires PowerShell 7, Node.js, `PSScriptAnalyzer`, `Az.Accounts`, Bash and real jq. The atomic publication regression runs the generated serving shell for SelfContained, Hosted and Dual, including a fresh embedded zero-dependency sync and `tr`/index-rename failures inside the production conditional-loop caller. Sync failure must leave the prior index and every existing dependency byte unchanged while the serving loop continues.
+Deterministic preflight requires PowerShell 7.6+, Node.js, `PSScriptAnalyzer`, `Az.Accounts`, Bash and real jq. The atomic publication regression runs the generated serving shell for SelfContained, Hosted and Dual, including a fresh embedded zero-dependency sync and `tr`/index-rename failures inside the production conditional-loop caller. Sync failure must leave the prior index and every existing dependency byte unchanged while the serving loop continues.
 
 On Ubuntu, install shell dependencies with `sudo apt-get update && sudo apt-get install --yes --no-install-recommends bash jq`; the validation workflow explicitly installs jq and resolves tools from PATH. On Windows, install Git for Windows and jq (for example, `winget install --id jqlang.jq --exact`), then start a new terminal so PATH is refreshed. Git Bash is discovered beside the PATH-resolved Git executable; jq is resolved from PATH, never from an ignored repository-local tools directory. The fixture only uses `cygpath` on Windows.
 

@@ -16,7 +16,7 @@
     .\build\azure\Build-FunctionApp.ps1
 #>
 
-#Requires -Version 7.0
+#Requires -Version 7.6
 
 [CmdletBinding()]
 param(
@@ -74,7 +74,7 @@ $functionAppHeader = @'
         PIPELINE_FILE_TRACE_ENABLED - true to mirror pipeline output into tmp/FunctionsData
 #>
 
-#Requires -Version 7.0
+#Requires -Version 7.6
 
 param($Timer)
 

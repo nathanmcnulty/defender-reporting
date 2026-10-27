@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.6
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Mocks preserve real CIM/process parameter bindings without external queries or waits.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Child-scope mocks exercise exact production cleanup without touching real processes.')]
 [CmdletBinding()]

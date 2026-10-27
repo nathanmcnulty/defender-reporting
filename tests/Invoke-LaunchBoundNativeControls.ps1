@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.6
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$EvidencePath, [Parameter(Mandatory)][string]$ProductManifest, [Parameter(Mandatory)][string]$ProductManifestSha256, [switch]$DiagnosticOnly)
 $ErrorActionPreference = 'Stop'

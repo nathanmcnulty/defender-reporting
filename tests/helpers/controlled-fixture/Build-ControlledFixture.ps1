@@ -8,6 +8,7 @@ param(
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $PSNativeCommandUseErrorActionPreference=$false
+. (Join-Path $PSScriptRoot 'InstalledInventory.ps1')
 function Get-Sha([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Require([bool]$Condition,[string]$Message) { if(-not $Condition){throw $Message} }
 function Write-NewJson([string]$Path,$Value) {
@@ -17,16 +18,7 @@ function Write-NewJson([string]$Path,$Value) {
 function Assert-Toolchain {
     Require ((Get-Sha $ToolchainBindingPath) -ceq $ToolchainBindingSha256) 'Toolchain binding changed.'
     Require ($toolchain.schema -eq 1 -and $toolchain.sdkVersion -ceq '10.0.401' -and $toolchain.runtimeVersion -ceq '10.0.12') 'Unreviewed installed toolchain.'
-    Require ((Get-Sha $toolchain.dotnet) -ceq $toolchain.dotnetSha256) 'Installed dotnet host changed.'
-    foreach($group in $toolchain.groups) {
-        $actual=@(Get-ChildItem -LiteralPath $group.root -Recurse -File -Force|ForEach-Object {[IO.Path]::GetRelativePath($group.root,$_.FullName).Replace('\','/')}|Sort-Object -CaseSensitive)
-        Require ($actual.Count -eq $group.files.Count -and @((Compare-Object -ReferenceObject @($group.files.path|Sort-Object -CaseSensitive) -DifferenceObject $actual -CaseSensitive)).Count -eq 0) 'Installed toolchain file set changed.'
-        foreach($item in $group.files) {
-            Require (-not [IO.Path]::IsPathRooted($item.path) -and -not $item.path.Contains('..')) 'Invalid toolchain relative path.'
-            $path=Join-Path $group.root $item.path
-            Require ((Get-Sha $path) -ceq $item.sha256 -and (Get-Item -LiteralPath $path).Length -eq $item.bytes) 'Installed toolchain bytes changed.'
-        }
-    }
+    Assert-InstalledInventory -Manifest $toolchain -Kind toolchain
 }
 function Invoke-BuildCommand([string]$Name,[string[]]$Arguments) {
     $stdout=Join-Path $EvidencePath ($Name+'.stdout.log');$stderr=Join-Path $EvidencePath ($Name+'.stderr.log')
@@ -53,7 +45,7 @@ function Invoke-BuildCommand([string]$Name,[string[]]$Arguments) {
 Require ($IsWindows -and [IO.Path]::IsPathFullyQualified($EvidencePath) -and [IO.Path]::IsPathFullyQualified($ToolchainBindingPath) -and $ToolchainBindingSha256 -cmatch '^[a-f0-9]{64}\z') 'Invalid build boundary.'
 Require (-not(Test-Path -LiteralPath $EvidencePath)) 'Fresh build evidence required.'
 Require ((Get-Sha $ToolchainBindingPath) -ceq $ToolchainBindingSha256) 'Untrusted toolchain binding.'
-$toolchain=Get-Content -LiteralPath $ToolchainBindingPath -Raw|ConvertFrom-Json -AsHashtable
+$toolchain=Read-InstalledInventory -Path $ToolchainBindingPath -Sha256 $ToolchainBindingSha256
 Assert-Toolchain
 # An explicit outer supervisor must be established by the reviewed invoking controller.
 # This helper additionally proves current job membership; commands never request breakaway.

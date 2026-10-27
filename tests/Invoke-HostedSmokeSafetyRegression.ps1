@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.6
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Synthetic process APIs retain actual production bindings.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Child-scoped mocks never inventory or stop native processes.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Removal mock restricts deletion to freshly created fixture directories.')]
