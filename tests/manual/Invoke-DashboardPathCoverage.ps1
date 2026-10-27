@@ -1,4 +1,5 @@
-﻿<#
+﻿#Requires -Version 7.6
+<#
 .SYNOPSIS
     Manual path-coverage test for dashboard normalization and cache flows.
 

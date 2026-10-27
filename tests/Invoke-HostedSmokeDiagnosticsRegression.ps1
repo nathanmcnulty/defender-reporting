@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 7.6
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Cleanup cmdlet mocks preserve the actual production parameter bindings.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Cleanup mocks only record calls and throw synthetic failures; they do not mutate external state.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Variables are consumed by the actual AST-extracted finally and post-cleanup check.')]
@@ -158,8 +158,11 @@ Opening in existing browser session.
                 if ($case -in @('cim', 'termination', 'retained-profile')) { Assert-SmokeDiagnostic ($calls.Contains('process-enumeration')) 'Windows cleanup must exercise actual helper enumeration.' }
                 if ($case -eq 'retained-profile') { Assert-SmokeDiagnostic (-not $calls.Contains('profile-remove') -and -not $retained[0].profileRemoved -and $retained[0].cleanupFailures -contains 'profile-retained-unconfirmed-cleanup') 'Unconfirmed cleanup deleted the profile.' }
                 if ($case -eq 'server-profile') { Assert-SmokeDiagnostic (-not $calls.Contains('profile-remove') -and -not $retained[0].profileRemoved) 'Unconfirmed server cleanup must retain the profile.' }
-                $expectedCode = switch ($case) { 'retained-profile' { 'process-enumeration-failure' } 'helper-throw' { 'process-cleanup-failure' } 'unsupported' { 'process-enumeration-unsupported' } 'cim' { 'process-enumeration-failure' } 'termination' { 'process-identity-unverified' } 'server-profile' { 'profile-retained-cleanup-failure' } }
+                $expectedCode = switch ($case) { 'retained-profile' { 'process-enumeration-failure' } 'helper-throw' { 'process-cleanup-failure' } 'unsupported' { 'process-enumeration-unsupported' } 'cim' { 'process-enumeration-failure' } 'termination' { 'process-identity-unverified' } 'server-profile' { if ($IsWindows) { 'profile-retained-cleanup-failure' } else { 'profile-retained-unconfirmed-cleanup' } } }
                 Assert-SmokeDiagnostic ($retained[0].cleanupFailures -contains $expectedCode) "Fixed cleanup failure code missing: $case expected $expectedCode."
+                if (-not $IsWindows -and $case -eq 'server-profile') {
+                    Assert-SmokeDiagnostic (-not $retained[0].processCleanupConfirmed -and $retained[0].cleanupFailures -contains 'process-enumeration-unsupported' -and -not $calls.Contains('process-enumeration')) 'Unsupported cleanup must remain unconfirmed without Windows process enumeration.'
+                }
             }
         }
     }

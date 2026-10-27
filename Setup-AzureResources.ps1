@@ -1,4 +1,5 @@
-﻿<#
+﻿#Requires -Version 7.6
+<#
 .SYNOPSIS
     Provisions Azure resources for the Defender vulnerability dashboard pipeline.
 
@@ -11,7 +12,7 @@
     - Blob containers (exports, templates, dashboards)
     - RBAC: Storage Blob Data Contributor (or Owner for Function App) for the
       compute Managed Identity
-    - Custom PowerShell 7.4 runtime environment with latest Az.Accounts
+    - Custom PowerShell 7.6 runtime environment with latest Az.Accounts
       (Automation) or bundled modules (Function App)
     - Runbook and daily recurring schedule (Automation) or timer-triggered
       function (Function App)
@@ -561,7 +562,7 @@ $Script:ArmApiVersions = @{
     WebApp             = '2024-04-01'
 }
 
-$Script:RuntimeEnvName = 'PowerShell-74-AzAccounts'
+$Script:RuntimeEnvName = 'PowerShell-76-AzAccounts'
 
 $Script:StorageBlobDataContributorRoleId = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 $Script:StorageBlobDataOwnerRoleId = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
@@ -1016,7 +1017,7 @@ try {
                     }
                     runtime = @{
                         name    = "powershell"
-                        version = "7.4"
+                        version = "7.6"
                     }
                 }
             }
@@ -1433,7 +1434,7 @@ try {
     if ($ComputeType -eq 'AutomationAccount') {
 
     # -------------------------------------------------------------------------
-    # Step 9: Create custom runtime environment (PowerShell 7.4 + Az.Accounts)
+    # Step 9: Create custom runtime environment (PowerShell 7.6 + Az.Accounts)
     # -------------------------------------------------------------------------
     Write-Host "`nStep 9: Creating custom runtime environment..." -ForegroundColor Cyan
 
@@ -1445,16 +1446,16 @@ try {
         properties = @{
             runtime         = @{
                 language = 'PowerShell'
-                version  = '7.4'
+                version  = '7.6'
             }
             defaultPackages = @{}
-            description     = 'PowerShell 7.4 with Az.Accounts only (no full Az module or Az CLI)'
+            description     = 'PowerShell 7.6 with Az.Accounts only (no full Az module or Az CLI)'
         }
     }) -IsNewResource (-not $runtimeEnvState.Exists) | ConvertTo-Json -Depth 5
 
     if ($PSCmdlet.ShouldProcess($Script:RuntimeEnvName, "Create runtime environment")) {
         Invoke-ArmApi -Path $runtimeEnvPath -Method PUT -Payload $runtimeEnvPayload -Description "Create runtime environment" | Out-Null
-        Write-Host "  Runtime environment '$($Script:RuntimeEnvName)' created (PowerShell 7.4, no default packages)" -ForegroundColor Green
+        Write-Host "  Runtime environment '$($Script:RuntimeEnvName)' created (PowerShell 7.6, no default packages)" -ForegroundColor Green
 
         # Add Az.Accounts package from PSGallery
         Write-Host "  Adding Az.Accounts package..." -ForegroundColor Gray
@@ -1504,7 +1505,7 @@ try {
 
     if ($PSCmdlet.ShouldProcess($runbookName, "Create runbook")) {
         Invoke-ArmApi -Path $runbookPath -Method PUT -Payload $runbookPayload -Description "Create runbook" | Out-Null
-        Write-Host "  Runbook '$runbookName' created (PowerShell 7.4 / $($Script:RuntimeEnvName))" -ForegroundColor Green
+        Write-Host "  Runbook '$runbookName' created (PowerShell 7.6 / $($Script:RuntimeEnvName))" -ForegroundColor Green
 
         # Rebuild the generated runbook artifact before uploading it to Azure Automation.
         $runbookBuildPath = Join-Path -Path $PSScriptRoot -ChildPath 'build\azure\Build-Runbook.ps1'

@@ -28,6 +28,8 @@ flowchart LR
 
 ## Quick start
 
+Use PowerShell 7.6 or later for maintained scripts. See [the baseline policy](docs/powershell-baseline.md) for source ownership and the separate live Azure acceptance gate.
+
 1. Export data from Defender for Endpoint.
 
 ```powershell

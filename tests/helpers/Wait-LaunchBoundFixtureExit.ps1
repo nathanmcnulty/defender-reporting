@@ -1,3 +1,4 @@
+#Requires -Version 7.6
 [CmdletBinding()]
 param([Parameter(Mandatory)][string]$TargetsPath,[Parameter(Mandatory)][string]$RunId)
 $ErrorActionPreference='Stop'

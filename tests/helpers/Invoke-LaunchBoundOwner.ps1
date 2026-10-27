@@ -1,3 +1,4 @@
+#Requires -Version 7.6
 # Sole-client JSONL adapter. Browser bytes never enter protocol stdout.
 # Unexpected input/EOF closes the exclusive job, but produces no clean completion receipt.
 [CmdletBinding()]

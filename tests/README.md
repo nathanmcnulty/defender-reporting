@@ -2,6 +2,8 @@
 
 This folder contains lightweight PowerShell regression coverage for the Defender reporting pipeline.
 
+Maintained PowerShell entrypoints require PowerShell 7.6 or later. The bespoke runtime and inventory regressions run in deterministic preflight; they do not require Pester. See [the baseline policy](../docs/powershell-baseline.md).
+
 ## Layout
 
 - `tests/fixtures/` contains committed, minimal synthetic regression datasets, never live exports.
@@ -566,7 +568,7 @@ $groups = @(foreach ($id in $roots.Keys) {
 })
 $dotnet = Join-Path $dotnetRoot 'dotnet.exe'
 $binding = [ordered]@{
-    schema = 1; sdkVersion = '10.0.401'; runtimeVersion = '10.0.12'
+    schema = 1; kind = 'toolchain'; sdkVersion = '10.0.401'; runtimeVersion = '10.0.12'
     dotnetRoot = $dotnetRoot; dotnet = $dotnet
     dotnetSha256 = (Get-FileHash -LiteralPath $dotnet).Hash.ToLowerInvariant()
     runtimeDirectory = Join-Path $dotnetRoot $roots.runtime
