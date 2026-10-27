@@ -70,7 +70,11 @@ function Assert-InstalledInventory {
         Assert-InventoryCondition ($actual.Count -eq $expected.Count -and @(Compare-Object $expected $actual -CaseSensitive).Count -eq 0) 'Installed inventory file set changed.'
         foreach ($entry in $Files) {
             $path = Join-Path $Root $entry.path
-            Assert-InventoryCondition ((Get-Item -LiteralPath $path -Force -ErrorAction Stop).Length -eq $entry.bytes -and (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() -ceq $entry.sha256) 'Installed inventory file bytes changed.'
+            # Bind length and digest to the same read-only handle, avoiding separate provider lookups.
+            $stream = [IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+            try {
+                Assert-InventoryCondition ($stream.Length -eq $entry.bytes -and [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant() -ceq $entry.sha256) 'Installed inventory file bytes changed.'
+            } finally { $stream.Dispose() }
         }
     }
     $required = if ($Kind -ceq 'toolchain') { @('schema','kind','sdkVersion','runtimeVersion','dotnetRoot','dotnet','dotnetSha256','runtimeDirectory','groups') } else { @('schema','kind','root','executableSha256','version','files') }
