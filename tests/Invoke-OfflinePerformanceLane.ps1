@@ -74,8 +74,16 @@ if ($Lane -eq 'FreshImport') {
     if ($manifest.modelVersion -cne 'procedural-v1') { throw 'FreshImport requires procedural synthetic inputs.' }
 }
 $null = New-Item -ItemType Directory -Path $Destination
-function Invoke-WebRequest { throw 'Network disabled in offline measurement.' }
-function Invoke-RestMethod { throw 'Network disabled in offline measurement.' }
+function Invoke-WebRequest {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Offline measurement shim rejects network access in this script scope.')]
+    param()
+    throw 'Network disabled in offline measurement.'
+}
+function Invoke-RestMethod {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Offline measurement shim rejects network access in this script scope.')]
+    param()
+    throw 'Network disabled in offline measurement.'
+}
 $allocated = [GC]::GetTotalAllocatedBytes($true)
 $collections = @(0..2 | ForEach-Object { [GC]::CollectionCount($_) })
 $clock = [Diagnostics.Stopwatch]::StartNew()
