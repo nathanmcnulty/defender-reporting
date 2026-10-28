@@ -21,7 +21,7 @@ class with identical inputs, runtime, templates, output mode and limits. These a
 the distinct memory and elapsed-time requirements in [#69](https://github.com/nathanmcnulty/defender-reporting/issues/69).
 Local measurements cannot certify either Azure requirement.
 
-**Final merge decision: HOLD.** Independent review accepts the narrow import code
+**Full Azure performance acceptance: HOLD.** Independent review accepts the narrow import code
 and controlled backend evidence. Full offline parity subsequently passed on the
 already-installed, pinned Chrome engine as described below. The separate Edge
 qualification still fails at a real containment boundary, and live Azure acceptance
