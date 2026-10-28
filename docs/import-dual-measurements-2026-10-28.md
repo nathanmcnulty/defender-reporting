@@ -15,14 +15,18 @@ the last row; this behavior and streaming remain covered by regression tests.
 
 There is no measured justification for a new packaging optimization. Current
 main already streams its HTML/base64 output. Automation acceptance still requires
-an authorized Azure run below **400 MB** and within **10% of the controlled Dual
-baseline**, with the same inputs, runtime, templates, output mode and limits.
+an authorized Azure run with peak working set below **400 MB** and generation wall
+time within **10% of the controlled Dual baseline**, on the same Automation worker
+class with identical inputs, runtime, templates, output mode and limits. These are
+the distinct memory and elapsed-time requirements in [#69](https://github.com/nathanmcnulty/defender-reporting/issues/69).
 Local measurements cannot certify either Azure requirement.
 
 **Final merge decision: HOLD.** Independent review accepts the narrow import code
-and controlled backend evidence. Required offline browser acceptance failed at a
-real containment boundary, and live Azure acceptance is unrun. Neither #67 nor #69
-is closed. No production packaging change is justified by these measurements.
+and controlled backend evidence. Full offline parity subsequently passed on the
+already-installed, pinned Chrome engine as described below. The separate Edge
+qualification still fails at a real containment boundary, and live Azure acceptance
+is unrun. Neither #67 nor #69 is closed. No production packaging change is justified
+by these measurements.
 
 ## Controlled lanes
 
@@ -195,8 +199,8 @@ was verified, but inner completion remained unknown and the profile was retained
 These are separate facts: outer cleanup cannot retroactively prove inner
 containment. A later all-image exact-profile census found zero matching processes,
 zero Edge processes and zero identity helpers; no PID-based termination was used.
-Source/input/runtime pins remained unchanged. Full-field browser parity was not
-completed and must not be inferred from five-report readiness or artifact parity.
+Source/input/runtime pins remained unchanged. That Edge case did not complete
+full-field browser parity; it must not be inferred from readiness or artifact parity.
 
 The passive native/CIM observers exist only in the private diagnostic harness.
 Production ownership helpers and the #95 accepted qualification are unchanged.
@@ -205,4 +209,71 @@ was changed to obtain a pass. Further browser acceptance needs an independently
 reviewed way to run the actual browser workload with the required containment;
 repeating the same failed launch or ignoring the live helper is not an acceptance
 strategy. The remaining Azure acceptance additionally requires explicit approval
-for the selected environment and the issue's unchanged memory targets.
+for the selected environment and the issue's unchanged memory and elapsed-time targets.
+
+## Additional offline Chrome acceptance
+
+The current user goal and #69 require offline browser parity without naming an
+engine. Independent review accepted additional full validation on the existing
+Chrome 156.0.8078.48 installation. No browser was installed, no security setting or
+policy changed, and no Edge guard failure was ignored. This is Chrome acceptance;
+it does not repair Edge or complete the older Edge-specific qualification.
+
+The first Chrome cell (`browser-chrome01`) completed cold full-field validation but
+failed reload with one rejected request. Its failed request URL was not captured.
+A focused test then executed the actual production `syncUrlViewState` function and
+reproduced a harness defect: the UI persists filters in a `?view=...` query, while
+the private file-route policy required exact equality to the original query-free
+file URL. This is a static reproduction, not a claim to have captured that earlier
+request. The corrected private policy permits only the exact same canonical file
+with at most one `view` query and a fragment. Other files, hosts, protocols, query
+keys and duplicate `view` parameters remain rejected. Hosted-origin policy is
+unchanged. Routing and request accounting use the same predicate. Positive and
+negative tests cover the production URL writer and those boundaries. Production
+templates, browser runtime and artifacts were not changed.
+
+The corrected matrix (`browser-chrome02/comparison.json`, SHA-256
+`26d4ff7ce55742ef41f1861c447015f048db006b7703647e500a5c7d1dbbca54`)
+passed all four cells, with a cold load and actual IndexedDB cache-hit reload in
+each. Every load checked all 19,677 rows and 826,434 values across 42 oracle fields,
+plus a separate full public-row materialization hash and summary-card comparison.
+All eight loads have the same public-row SHA-256:
+`1a4163b05795992c81dcf06fb9a1ad076d5976d923cb695658bbb67fbc7df889`.
+The oracle's ordered-tuple digest is
+`1e5fe66de3260dc5223651cc8c110c9eab2019dee9a29a6aa814956dc955d5e2`;
+the separately bound historical keyed-object digest is
+`fcd8cb46c39df642f86b05b5d7c94c8c3bb375b35a97ce2cca000983caf8607c`.
+These are distinct serializations, with their relationship proved by
+`evidence/oracle-projection-binding-v2.json`; the original oracle was not rewritten.
+
+| Cell order | Outer elapsed seconds | Sampled family working-set bytes |
+| --- | ---: | ---: |
+| Base SelfContained | 34.125 | 1,964,736,512 |
+| Candidate SelfContained | 33.573 | 1,892,876,288 |
+| Candidate Hosted | 32.154 | 1,928,007,680 |
+| Base Hosted | 32.616 | 1,865,846,784 |
+
+These are functional validation costs including browser, owner and instrumentation,
+not generation/Automation memory measurements or browser performance improvements.
+Every load rendered all five reports and three nonblank chart canvases, with zero
+external requests, page errors, failed resources or failed responses. Each reload
+reported one actual compressed-cache hit; both self-contained reloads exercised the
+persisted single `view` query. Row/card hashes match across source, mode and reload.
+
+Admission remained five fresh samples above 5.25 GiB free and zero existing Edge
+and Chrome processes before every cell. The unchanged per-cell limits were 240
+seconds, 2 GiB family memory and 3 GiB free floor, sampled at 500 ms. All inner and
+outer terminal memberships were empty, streams completed, profiles were removed,
+servers closed, and diagnostic capture had no loss or incomplete tails. Complete
+browser-installation, PowerShell/.NET, Python, Playwright, harness, actual runtime,
+fixture and oracle inventories matched before and after. The #70 chat was verified
+idle before this additional serialized measurement window. Failed Edge/Chrome
+receipts and all earlier source versions remain preserved.
+
+Reproduction uses the private `browser-chrome-harness` and
+`scripts/run-browser-chrome.py`, whose exact bytes are pinned in the matrix receipt.
+The driver is an opt-in offline functional matrix, not a benchmark or an instruction
+to repeat the failed Edge launch. It requires the preexisting pinned engine and
+libraries, fresh output directories, admission and the original native containment.
+The original #95 qualification and the code accepted in `029757d` are unchanged;
+only this report was extended after that commit.
