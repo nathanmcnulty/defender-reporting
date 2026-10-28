@@ -51,6 +51,7 @@ $entrypoints = @(
     'tests/Invoke-LaunchBoundFixtureContracts.ps1'
     'tests/Invoke-LaunchBoundNativeControls.ps1'
     'tests/Invoke-LaunchBoundOwnerRegression.ps1'
+    'tests/Invoke-OfflinePerformanceLane.ps1'
     'tests/Invoke-RoutineSemanticReview.ps1'
     'tests/Invoke-SetupArtifactValidationRegression.ps1'
     'tests/Invoke-SetupRuntimeRegression.ps1'
@@ -71,6 +72,7 @@ $entrypoints = @(
     'tests/New-SyntheticUploadManifest.ps1'
     'tests/Record-BenchmarkHistory.ps1'
     'tests/Run-SharedHelperRegression.ps1'
+    'tests/Test-OfflinePerformanceMeasurements.ps1'
 )
 $inheritedFragments = @(
     'build/Import-SharedHelpers.ps1'
