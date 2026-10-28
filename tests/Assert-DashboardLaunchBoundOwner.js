@@ -180,6 +180,41 @@ async function checks() {
     const file = path.join(__dirname, 'Measure-DashboardWorkerTransfer.js');
     const loaded = new Module(file, module); loaded.filename = file; loaded.paths = Module._nodeModulePaths(__dirname);
     loaded._compile(fs.readFileSync(file, 'utf8') + '\nmodule.exports.ownerCleanup=cleanupOwned; module.exports.ownerServer=withServer; module.exports.ownerGuard=launchOwnerGuard;', file);
+    for (const failure of ['', 'proof-streams', 'proof-terminal', 'proof-confirmed', 'proof-members', 'proof-key', 'proof-reject', 'transport', 'finish']) {
+        const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'owner-detach-fixture-'));
+        try {
+            const owner = fakeOwner(); await owner.start('synthetic.exe', []);
+            const terminate = owner.terminate.bind(owner), finish = owner.finish.bind(owner);
+            if (failure.startsWith('proof-')) owner.terminate = async () => {
+                if (failure === 'proof-reject') throw Error('Synthetic termination uncertainty');
+                const proof = { ...(await terminate()) };
+                if (failure === 'proof-streams') proof.StreamsComplete = false;
+                if (failure === 'proof-terminal') proof.Terminal = false;
+                if (failure === 'proof-confirmed') proof.Confirmed = false;
+                if (failure === 'proof-members') { proof.ActiveProcesses = 1; proof.Pids = [999]; }
+                if (failure === 'proof-key') proof.ProfileKey = '0'.repeat(64);
+                return proof;
+            };
+            let detaches = 0, pageCloses = 0, browserCloses = 0, finishes = 0;
+            owner.finish = async () => { finishes++; if (failure === 'finish') throw Error('Synthetic finish failure'); return finish(); };
+            const finalizers = [];
+            const cleanup = await loaded.exports.ownerCleanup({ profile, authority: owner, profileFinalizers: finalizers,
+                cdp: { detach() { detaches++; if (failure.startsWith('proof-')) return Promise.resolve(); return new Promise(() => {}); } },
+                page: { isClosed: () => false, close: async () => { pageCloses++; } },
+                browser: { isConnected: () => true, close: async () => { browserCloses++; if (failure === 'transport') throw Error('Synthetic transport failure'); } }
+            });
+            assert.strictEqual(detaches, failure.startsWith('proof-') ? 1 : 0, 'Only validated terminal ownership can suppress a dead-target command');
+            assert.strictEqual(pageCloses, 1); assert.strictEqual(browserCloses, 1); assert.strictEqual(finishes, 1);
+            assert(fs.existsSync(profile), 'Profile remains until the server finalizer');
+            if (!failure) {
+                assert.strictEqual(cleanup.remainingOwned, 0); assert.deepStrictEqual(cleanup.errors, []);
+                await finalizers[0](true); assert(!fs.existsSync(profile));
+            } else {
+                assert(cleanup.errors.includes(failure === 'transport' ? 'Browser disconnect' : failure.startsWith('proof-') ? 'Owned family termination' : 'Final owned inventory'));
+                await assert.rejects(finalizers[0](true)); assert(fs.existsSync(profile));
+            }
+        } finally { if (fs.existsSync(profile)) fs.rmdirSync(profile); }
+    }
     for (const mode of ['', 'cap']) {
         const owner = fakeOwner(mode); await owner.start('synthetic.exe', []);
         const guard = loaded.exports.ownerGuard({ authority: owner }, { browserFamilyBytes: 2 * 1024 ** 3, freeMemoryBytes: 0 });

@@ -444,6 +444,7 @@ function launchOwnerGuard(state, limits) {
 async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit, owned, profile, authority, profileFinalizers, launchBoundMode }, overrides = {}) {
     const result = { remainingOwned: null, profileExists: profile ? true : false, errors: [] };
     const authoritative = Boolean(authority || launchBoundMode);
+    let terminalTargetConfirmed = false;
     const attempt = async (label, operation, timeout = 5000) => {
         const started = performance.now();
         try { await bounded(Promise.resolve().then(operation), label, timeout); } catch (error) {
@@ -455,7 +456,13 @@ async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit,
     };
     await attempt('Guard stop', () => guard?.stop(), 15000);
     await attempt('Owned family termination', async () => {
-        if (authoritative) { assert(authority, 'Launch-bound owner state unknown.'); await authority.terminate(); return; }
+        if (authoritative) {
+            assert(authority, 'Launch-bound owner state unknown.');
+            const proof = await authority.terminate();
+            authority.validate(proof, true);
+            terminalTargetConfirmed = true;
+            return;
+        }
         const termination = await owned?.terminate();
         if (termination) {
             assert(Number.isSafeInteger(termination.stoppedCount) && termination.stoppedCount >= 0, 'Invalid stopped count.');
@@ -471,7 +478,9 @@ async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit,
     await attempt('Launcher exit', async () => {
         if (launcherExit) await launcherExit;
     });
-    await attempt('CDP detach', () => cdp && browser?.isConnected() && page && !page.isClosed() ? cdp.detach() : undefined);
+    // The exclusive target is gone after a validated terminal proof. Keep
+    // transport closure below; sending a target command now can wait forever.
+    await attempt('CDP detach', () => !terminalTargetConfirmed && cdp && browser?.isConnected() && page && !page.isClosed() ? cdp.detach() : undefined);
     await attempt('Page close', () => page && !page.isClosed() ? page.close({ runBeforeUnload: false }) : undefined);
     await attempt('Browser disconnect', () => browser?.close());
     await attempt('Final owned inventory', async () => {
@@ -728,7 +737,7 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
     const state = {};
     let measurementError;
     try {
-        state.profile = fs.mkdtempSync(path.join(os.tmpdir(), 'issue70-edge-'));
+        state.profile = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'issue70-edge-')));
         state.launchBoundMode = true;
         state.profileFinalizers = profileFinalizers;
         state.authority = new LaunchBoundClient(state.profile);
