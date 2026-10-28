@@ -7000,7 +7000,7 @@ function Test-VulnPartitionStreamingParity {
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('partition-streaming-' + [guid]::NewGuid().ToString('N'))
     $originalReader = ${function:Read-VulnNdjsonLinesFromPath}
     $originalIndex = ${function:Get-VulnPartitionIndex}
-    $originalSignature = ${function:Get-VulnCanonicalRowSignature}
+    $originalProperty = ${function:Get-VulnPropertyValue}
     try {
         [void](New-Item -Path $tempRoot -ItemType Directory -Force)
         $first = Get-TestVulnRow -Id 'synthetic-duplicate' -CveId 'CVE-2026-0001' -SnapshotDate '2026-01-01' -Version '1'
@@ -7022,7 +7022,7 @@ function Test-VulnPartitionStreamingParity {
             else { [IO.File]::WriteAllText($path, $text, [Text.UTF8Encoding]::new($false)) }
             $state = @{ Calls = 0; CheckInterleaving = $true }
             Set-Item Function:Get-VulnPartitionIndex -Value { param($Id, $PartitionCount) $state.Calls++; & $originalIndex -Id $Id -PartitionCount $PartitionCount }
-            Set-Item Function:Get-VulnCanonicalRowSignature -Value { param($Row) $state.Calls++; & $originalSignature -Row $Row }
+            Set-Item Function:Get-VulnPropertyValue -Value { param($InputObject, $Name) $state.Calls++; & $originalProperty -InputObject $InputObject -Name $Name }
             Set-Item Function:Read-VulnNdjsonLinesFromPath -Value {
                 param($Path)
                 $firstLine = $true
@@ -7045,7 +7045,16 @@ function Test-VulnPartitionStreamingParity {
             $map = Read-VulnPartitionMapFile -Path $path
             Assert-True ($map.Count -eq 2 -and $map['synthetic-duplicate'].Json -ceq $lines[3]) 'Expected duplicate last-wins behavior and offboarded map rows.'
             Assert-True ($map['synthetic-duplicate'].VersionStartDate -eq '2026-01-02') 'Expected last duplicate version date.'
+            foreach ($entry in $map.Values) {
+                $expectedSignature = Get-VulnCanonicalRowSignature -Row ($entry.Json | ConvertFrom-Json)
+                Assert-True ($entry.Signature -ceq $expectedSignature) 'Expected canonical ID signature including the last duplicate casing.'
+            }
             $state.CheckInterleaving = $false
+            $casePath = Join-Path $tempRoot 'case-map.ndjson'
+            $caseJson = $lines[3].Replace('synthetic-duplicate', 'SYNTHETIC-DUPLICATE')
+            [IO.File]::WriteAllText($casePath, $lines[0] + "`n" + $caseJson)
+            $caseMap = Read-VulnPartitionMapFile -Path $casePath
+            Assert-True ($caseMap.Count -eq 1 -and $caseMap['synthetic-duplicate'].Json -ceq $caseJson -and $caseMap['synthetic-duplicate'].Signature -ceq 'SYNTHETIC-DUPLICATE') 'Expected case-insensitive duplicate IDs with exact last-row signature casing.'
             $badPath = Join-Path $tempRoot 'malformed.ndjson'
             [IO.File]::WriteAllText($badPath, $lines[0] + "`n{malformed")
             $failure = $null
@@ -7062,7 +7071,7 @@ function Test-VulnPartitionStreamingParity {
     finally {
         Set-Item Function:Read-VulnNdjsonLinesFromPath -Value $originalReader
         Set-Item Function:Get-VulnPartitionIndex -Value $originalIndex
-        Set-Item Function:Get-VulnCanonicalRowSignature -Value $originalSignature
+        Set-Item Function:Get-VulnPropertyValue -Value $originalProperty
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
     }
 }
