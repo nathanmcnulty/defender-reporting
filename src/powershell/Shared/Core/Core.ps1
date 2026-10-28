@@ -3400,7 +3400,8 @@ function Read-VulnPartitionMapFile {
         $versionStartDate = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $record -Name 'FirstSeenTimestamp')
         $rows[$id] = [PSCustomObject]@{
             Json = $jsonLine
-            Signature = Get-VulnCanonicalRowSignature -Row $record
+            # The nonblank ID above is the canonical signature; avoid rereading it.
+            Signature = $id
             VersionStartDate = $versionStartDate
         }
     }
