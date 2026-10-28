@@ -4465,7 +4465,8 @@ function Read-VulnPartitionMapFile {
         $versionStartDate = Convert-VulnToYmdDate -DateValue (Get-VulnPropertyValue -InputObject $record -Name 'FirstSeenTimestamp')
         $rows[$id] = [PSCustomObject]@{
             Json = $jsonLine
-            Signature = Get-VulnCanonicalRowSignature -Row $record
+            # The nonblank ID above is the canonical signature; avoid rereading it.
+            Signature = $id
             VersionStartDate = $versionStartDate
         }
     }
@@ -21756,7 +21757,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 9a812476f508b8d81ae032bd8e0fb74f990d90181eb76c721360e5989bdfce96
+# ArtifactFingerprint: 31896e2c1c7d8ef07048badb7acc9a07f442bed6f03f3ab62775d40fcffceffe
 
 
 
