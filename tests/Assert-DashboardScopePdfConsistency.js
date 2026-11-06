@@ -103,6 +103,27 @@ async function assertSnapshotAndEmptyPdf() {
         assert.ok(result.content.some(item => item.text === 'No matching results.'));
         definitions.push(result);
     }
+    for (const report of ['devices-by-remediation', 'remediations-by-device']) {
+        const metadata = ['Platform: Windows 11', 'Published: 2025-12-20', 'Patch: KB000001', 'Patch: KB000002',
+            'Update: legacy-reference-1', 'Update: legacy-reference-2'];
+        if (report === 'remediations-by-device') metadata.push('IP: 10.0.0.10', 'Group: Servers', 'Tags: Prod');
+        const badges = metadata.map(text => element(text));
+        const card = element('', {
+            '.remediation-card-header h3': element('Synthetic remediation'),
+            '.cve-details': element('', { '.stat-badge': badges })
+        });
+        document.elements.set(`${report}-section`, element('', {
+            '.remediation-cards-container': element('', { '.remediation-card': [card] })
+        }));
+        const pending = dashboard.exportCardBasedReportToPdf(report, report);
+        badges.forEach(badge => { badge.textContent = 'Patch: asynchronous replacement'; });
+        pendingCapture({ toDataURL: () => png });
+        const result = await pending;
+        const text = result.content.filter(item => typeof item.text === 'string').map(item => item.text).join('\n');
+        for (const badge of metadata) assert.ok(text.includes(badge), `${report} dropped visible card metadata: ${badge}`);
+        assert.ok(!text.includes('asynchronous replacement'), 'Card badges must come from the captured report snapshot.');
+        definitions.push(result);
+    }
     // Pin library hashes in the invocation receipt; CI can supply its existing cache.
     const library = process.env.PDFMAKE_TEST_LIBRARY;
     const fonts = process.env.PDFMAKE_TEST_FONTS;
@@ -118,9 +139,65 @@ async function assertSnapshotAndEmptyPdf() {
             const bytes = await new Promise(resolve => pdfmake.createPdf(definition).getBuffer(resolve));
             assert.ok(Buffer.from(bytes).subarray(0, 5).equals(Buffer.from('%PDF-')));
         }
-        console.log('PASS real pdfmake document generation for all five empty report families.');
+        console.log('PASS real pdfmake document generation for all five empty report families and both card metadata layouts.');
     } else {
         console.log('Real pdfmake generation not run: set PDFMAKE_TEST_LIBRARY and PDFMAKE_TEST_FONTS to pinned cached libraries.');
+    }
+}
+
+async function assertCapturedRemediationMode() {
+    for (const report of ['devices-by-remediation', 'remediations-by-device', 'active-vulnerabilities']) {
+        for (const mode of ['snapshot', 'range']) for (const hasWindow of [true, false]) {
+            const document = createDocumentStub();
+            const button = createStubElement();
+            const main = createStubElement({ removeAttribute() {} });
+            document.querySelector = selector => selector === '.container' ? main : button;
+            Object.assign(document.getElementById('reportSelector'), {
+                value: report, selectedIndex: 0, options: [{ text: 'Original Report' }]
+            });
+            let definition;
+            const dashboard = loadDashboardHarness(`
+activeReportId = ${JSON.stringify(report)};
+remediationReportMode = ${JSON.stringify(mode)};
+mostRecentLastSeenDate = '2026-01-02';
+filterState = finalizeFilterState({ ...createEmptyFilterState(), datePreset: ${hasWindow ? "'custom'" : "'all'"},
+    startDate: ${hasWindow ? "'2026-01-01'" : "''"}, endDate: ${hasWindow ? "'2026-01-02'" : "''"} });
+const originalSummary = getRemediationReportModeSummaryText(filterState);
+loadPdfLibraries = async () => {
+    // Deliberately bypass public UI guards at the earliest async boundary to
+    // prove labels retain their synchronously captured mode and date scope.
+    remediationReportMode = ${JSON.stringify(mode === 'snapshot' ? 'range' : 'snapshot')};
+    filterState.startDate = '2099-01-01'; filterState.endDate = '2099-01-02';
+};
+ensurePdfReportDataReady = expandReportForPdf = restoreReportState = () => {};
+maybeConfirmLargePdfExport = async () => true;
+capturePdfReportSnapshot = () => ({});
+exportCardBasedReportToPdf = exportTableBasedReportToPdf = async () => ({ content: [] });
+getExportFilterText = () => 'All';
+setDashboardStatus = clearDashboardStatus = () => {};
+module.exports = { exportToPDF, originalSummary };
+`, {
+                document,
+                setTimeout(callback, delay) {
+                    if (delay === 100) { queueMicrotask(callback); return 0; }
+                    return setTimeout(callback, delay);
+                },
+                pdfMake: { createPdf(value) { definition = value; return { download(filename, done) { done(); } }; } }
+            });
+            await dashboard.exportToPDF();
+            assert.ok(definition, 'Mode disclosure export must reach document generation.');
+            const modeLine = definition.content.find(item => item.text?.[0]?.text === 'Include resolved vulnerabilities: ');
+            if (report === 'active-vulnerabilities') {
+                assert.strictEqual(modeLine, undefined, 'A device-report mode must not be attached to unrelated reports.');
+                continue;
+            }
+            assert.strictEqual(modeLine.text[1].text, mode === 'range' ? 'Yes' : 'No');
+            assert.ok(definition.content.some(item => item.text === dashboard.originalSummary), 'PDF must reuse the captured UI scope explanation.');
+            assert.ok(!JSON.stringify(definition).includes('2099'), 'Asynchronous mode/date mutation must not change the scope labels.');
+            if (!hasWindow) assert.ok(dashboard.originalSummary.includes('No date range is selected') && dashboard.originalSummary.includes('2026-01-02'));
+            else if (mode === 'snapshot') assert.ok(dashboard.originalSummary.includes('Resolved items from earlier in the range are excluded'));
+            else assert.ok(dashboard.originalSummary.includes('Including vulnerabilities observed from 2026-01-01 through 2026-01-02'));
+        }
     }
 }
 
@@ -249,6 +326,7 @@ module.exports = { handleReportChange, handleExportPdfClick, exportToPDF, lockDa
 (async () => {
     assertHiddenSelections();
     await assertSnapshotAndEmptyPdf();
+    await assertCapturedRemediationMode();
     await assertExportScopeLock();
     await assertPendingNavigationAndChart();
     console.log('Dashboard scoped selection and PDF snapshot/empty assertions passed.');
