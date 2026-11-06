@@ -112,7 +112,13 @@ function assertCardScopeCapture() {
     const badges = values => values.map(innerText => ({ innerText }));
     const card = { querySelector: () => ({ innerText: 'Synthetic remediation' }),
         querySelectorAll: selector => badges(selector === '.cve-details .stat-badge' ? metadata : stats) };
-    const section = { innerText: 'Synthetic expanded report', querySelectorAll: selector => selector === '.remediation-card' ? [card] : [] };
+    const cell = textContent => ({ innerText: '', textContent });
+    const overflowTable = { querySelectorAll: selector => selector === 'thead th' ? [cell('Remediation'), cell('Update Details')]
+        : [{ querySelectorAll: () => [cell('Synthetic overflow advisory'), cell('KB000003')] }] };
+    const exportSection = { querySelectorAll: selector => selector === 'table' ? [overflowTable] : [] };
+    const section = { innerText: 'Synthetic visible report excludes closed overflow', querySelectorAll: selector => selector === '.remediation-card' ? [card] : [] };
+    let snapshots = 0;
+    let snapshotFailure = false;
     const summary = 'Showing only vulnerabilities still open on 2026-01-02. Resolved items from earlier in the range are excluded.';
     let visibleSummary = summary;
     let restorations = 0;
@@ -121,6 +127,7 @@ function assertCardScopeCapture() {
         activeReportId: 'devices-by-remediation', filterState: { startDate: '2026-01-01', endDate: '2026-01-02' }, remediationReportMode: 'snapshot', REMEDIATION_REPORT_MODE_RANGE: 'range',
         document: { getElementById: id => id.endsWith('-section') ? section : id === 'remediationModeSummary' ? { innerText: visibleSummary } : { selectedOptions: [{ text: 'Devices by Remediation' }] } },
         expandReportForPdf: () => { expansions++; return { wasExpanded: false }; }, restoreReportState: () => { restorations++; },
+        capturePdfReportSnapshot: report => { assert.strictEqual(report, 'devices-by-remediation'); snapshots++; if (snapshotFailure) throw new Error('Synthetic snapshot failure'); return { section: exportSection }; },
         remediationAllData: [], impactAnalysisAllData: [], remediationDetailsAllData: [], devicesByRemediationAllData: [{}], remediationsByDeviceAllData: [],
         cloneFilterState: value => ({ ...value }), filteredData: [{}, {}], buildDashboardValidationSnapshot: () => ({ summaryCards: { high: '2' } }),
         getExportFilterText: () => 'All', isRemediationScopeReport: () => true, getRemediationReportModeSummaryText: () => summary
@@ -131,12 +138,19 @@ function assertCardScopeCapture() {
     assert.deepStrictEqual(Array.from(receipt.cardDetails[0].metadata), metadata);
     assert.deepStrictEqual(Array.from(receipt.cardDetails[0].statBadges), stats);
     assert.strictEqual(receipt.modeSummary, summary); assert.strictEqual(receipt.includeResolvedText, 'No');
+    assert.strictEqual(snapshots, 1);
+    assert.strictEqual(receipt.expandedText, section.innerText, 'Visible scope text must remain a real UI receipt.');
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(receipt.tables)), [{ headers: ['Remediation', 'Update Details'], rows: [['Synthetic overflow advisory', 'KB000003']] }],
+        'The export snapshot must retain collapsed overflow table text rather than blank innerText.');
     assert.strictEqual(restorations, 1);
     visibleSummary = 'A different selected scope';
     assert.throws(capture, /Visible mode summary/); assert.strictEqual(restorations, 2);
+    visibleSummary = summary;
+    snapshotFailure = true;
+    assert.throws(capture, /Synthetic snapshot failure/); assert.strictEqual(restorations, 3);
     context.devicesByRemediationAllData = [{}, {}, {}];
     assert.throws(capture, /before PDF expansion/);
-    assert.strictEqual(expansions, 2, 'A broadened report must fail before expanding its DOM.');
+    assert.strictEqual(expansions, 3, 'A broadened report must fail before expanding its DOM.');
 }
 
 async function run() {

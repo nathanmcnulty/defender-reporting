@@ -57,6 +57,8 @@ async function captureRealDownload(page, trigger, filename, wait, reportLabel) {
 
 // Runs in the actual dashboard context. Capture the exact expanded DOM that the
 // PDF exporter will read, then restore its page expansion before starting export.
+// Keep visible UI receipts separately: closed overflow details have blank innerText
+// although their textContent is intentionally included in the structured PDF.
 function captureReportScope() {
     const report = activeReportId;
     const section = document.getElementById(report + '-section');
@@ -72,9 +74,10 @@ function captureReportScope() {
     try {
         const text = section.innerText;
         if (text.length > 500000) throw new Error('Expanded report receipt exceeds its text bound.');
-        const tables = Array.from(section.querySelectorAll('table')).map(table => ({
-            headers: Array.from(table.querySelectorAll('thead th')).map(cell => cell.innerText.trim()),
-            rows: Array.from(table.querySelectorAll('tbody tr')).map(row => Array.from(row.querySelectorAll('td')).map(cell => cell.innerText.trim()))
+        const exportSection = capturePdfReportSnapshot(report).section;
+        const tables = Array.from(exportSection.querySelectorAll('table')).map(table => ({
+            headers: Array.from(table.querySelectorAll('thead th')).map(cell => cell.textContent.trim()),
+            rows: Array.from(table.querySelectorAll('tbody tr')).map(row => Array.from(row.querySelectorAll('td')).map(cell => cell.textContent.trim()))
         }));
         const cardDetails = Array.from(section.querySelectorAll('.remediation-card')).map(card => ({
             title: card.querySelector('.remediation-card-header h3')?.innerText.trim() || '',
