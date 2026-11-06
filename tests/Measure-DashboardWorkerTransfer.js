@@ -595,6 +595,52 @@ function assertRuntimeAsset(source, label) {
     assert(source.length > 1024 && !source.includes('offline regression fixture'), `${label} must be a real runtime library, not a regression placeholder.`);
 }
 
+function measurementWorkflow(args) {
+    const admin = args.includes('--admin-exercise');
+    const saved = args.includes('--saved-artifacts');
+    const scopedAdminFirst = args.includes('--scoped-admin-first');
+    assert(!saved || !admin, 'Saved-artifact acceptance is separate from getBuffer timing.');
+    assert(!scopedAdminFirst || admin || saved, '--scoped-admin-first requires --admin-exercise or --saved-artifacts.');
+    return { scopedAdminFirst, workload: scopedAdminFirst ? 'load-filter-scoped-reports-detail-pdf-restore' : 'load-unfiltered-report-tour-then-optional-scoped-exercise' };
+}
+
+function summarizeScopedExercise(result, savedArtifacts) {
+    if (savedArtifacts) assertArtifactAcceptance(result);
+    else assertAdminExercise(result);
+    const steps = result.reports.map(row => {
+        const state = savedArtifacts ? row.before : row;
+        const cards = savedArtifacts ? state.cards : state.summaryCards;
+        assert(Number.isSafeInteger(state.reportRows) && state.reportRows >= 0, 'Missing or invalid scoped report rows.');
+        assert(cards && Object.keys(cards).length > 0, 'Missing scoped report summary cards.');
+        const summaryCards = Object.fromEntries(Object.keys(cards).sort().map(key => {
+            const value = cards[key];
+            assert((typeof value === 'number' || typeof value === 'string' && value.trim() !== '') && Number.isSafeInteger(Number(value)) && Number(value) >= 0, 'Invalid scoped summary count.');
+            if (row.scope === 'empty') assert.strictEqual(Number(value), 0, 'Empty scoped cards broadened.');
+            return [key, Number(value)];
+        }));
+        if (row.scope === 'empty') assert.strictEqual(state.reportRows, 0, 'Empty scoped report broadened.');
+        return { scope: row.scope, report: row.report, sourceRows: state.sourceRows, reportRows: state.reportRows, summaryCards,
+            ...(savedArtifacts ? { mode: state.mode } : {}) };
+    }).sort((a, b) => `${a.scope}/${a.report}`.localeCompare(`${b.scope}/${b.report}`));
+    return { representativeRows: result.representativeRows, steps };
+}
+
+function recordScopedExercise(run, savedArtifacts) {
+    const summary = summarizeScopedExercise(savedArtifacts ? run.savedArtifacts : run.adminExercise, savedArtifacts);
+    run.scopedWorkloadSummary = summary;
+    run.scopedWorkloadDigest = digest(JSON.stringify(summary));
+    const representative = summary.steps.filter(step => step.scope === 'representative');
+    run.reportIds = representative.map(step => step.report).sort();
+    run.reportRows = Object.fromEntries(representative.map(step => [step.report, step.reportRows]));
+    run.impactRows = run.reportRows['impact-analysis'];
+    run.readinessCacheDigest = null;
+    if (run.positiveControl) {
+        const active = representative.find(step => step.report === 'active-vulnerabilities');
+        run.controlObservation = { filteredSourceRows: active.sourceRows, selectedRows: active.reportRows, impactRows: run.impactRows,
+            cardTotal: Object.values(active.summaryCards).reduce((total, value) => total + value, 0), dateRange: '2026-01-01/2026-01-02' };
+    }
+}
+
 function assertRun(run, expectedRows, first) {
     assert(Number.isSafeInteger(expectedRows) && expectedRows > 0, 'Expected rows must be a positive integer.');
     assert.strictEqual(run.snapshot.rows, expectedRows, 'Normalized row count differs from expected rows.');
@@ -611,6 +657,18 @@ function assertRun(run, expectedRows, first) {
         if (first) assert.deepStrictEqual(run.controlObservation, first.controlObservation, 'Cold/reload positive-control counts differ.');
     }
     for (const report of REPORTS) assert(run.reportIds.includes(report), `Required report missing: ${report}`);
+    if (run.scopedAdminFirst) {
+        assert.strictEqual(run.workload, 'load-filter-scoped-reports-detail-pdf-restore');
+        assert.deepStrictEqual(run.reportSwitches, [], 'Scoped-first evidence must not claim an unfiltered report tour.');
+        assert.strictEqual(run.readinessCacheDigest, null, 'Scoped-first evidence cannot claim full-tour readiness/cache consistency.');
+        const summary = summarizeScopedExercise(run.savedArtifacts || run.adminExercise, Boolean(run.savedArtifacts));
+        assert.deepStrictEqual(run.scopedWorkloadSummary, summary, 'Scoped summary differs from actual helper receipts.');
+        assert.strictEqual(run.scopedWorkloadDigest, digest(JSON.stringify(summary)), 'Scoped receipt digest differs.');
+        const representative = summary.steps.filter(step => step.scope === 'representative');
+        assert.deepStrictEqual(run.reportIds, representative.map(step => step.report).sort());
+        assert.deepStrictEqual(run.reportRows, Object.fromEntries(representative.map(step => [step.report, step.reportRows])));
+        assert.strictEqual(run.impactRows, run.reportRows['impact-analysis']);
+    }
     const policy = run.cachePolicy;
     assert(Number.isSafeInteger(policy.maxRowsExclusive) && policy.maxRowsExclusive > 0, 'Invalid cache row policy.');
     assert.strictEqual(policy.eligible, policy.available && expectedRows < policy.maxRowsExclusive, 'Cache eligibility differs from production policy.');
@@ -632,7 +690,9 @@ function assertRun(run, expectedRows, first) {
         assert.deepStrictEqual(run.reportIds, first.reportIds, 'Cold/reload reports differ.');
         assert.deepStrictEqual(run.cachePolicy, first.cachePolicy, 'Cold/reload cache policy differs.');
         assert.strictEqual(digest(JSON.stringify(run.snapshot.summaryCards)), digest(JSON.stringify(first.snapshot.summaryCards)), 'Cold/reload severity summary differs.');
-        assert.strictEqual(run.readinessCacheDigest, first.readinessCacheDigest, 'Cold/reload readiness/cache digest differs.');
+        assert.strictEqual(Boolean(run.scopedAdminFirst), Boolean(first.scopedAdminFirst), 'Cold/reload workflow differs.');
+        if (run.scopedAdminFirst) assert.strictEqual(run.scopedWorkloadDigest, first.scopedWorkloadDigest, 'Cold/reload scoped source/report/card counts differ.');
+        else assert.strictEqual(run.readinessCacheDigest, first.readinessCacheDigest, 'Cold/reload readiness/cache digest differs.');
     }
     assert.strictEqual(run.externalRequests, 0, 'All assets must be same-origin.');
     assert.strictEqual(run.pageErrors, 0, 'Dashboard page errors.');
@@ -902,28 +962,54 @@ async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot,
                 run.ttiBrowserMs = run.snapshot.ready.browserMs;
                 run.cachePolicy = run.snapshot.cachePolicy;
                 assert(Number.isFinite(run.ttiBrowserMs), 'Missing browser readiness timestamp.');
-                run.stage = 'reports';
-                state.guard.stage = `${load}:reports`;
+                run.scopedAdminFirst = evidence.scopedAdminFirst;
+                run.workload = evidence.workload;
                 run.reportSwitches = [];
-                for (const report of REPORTS.slice(1).concat(REPORTS[0])) {
-                    const switchStarted = performance.now();
-                    await state.guard.wait(state.page.evaluate(reportId => selectReportById(reportId), report));
-                    await state.guard.wait(state.page.waitForFunction(isReportReady, report, { timeout: evidence.limits.readinessWallMs }));
-                    run.reportSwitches.push({ report, completedHostWallMs: performance.now() - switchStarted });
+                const exerciseScoped = async () => {
+                    if (evidence.adminExerciseEnabled) {
+                        run.stage = 'admin-exercise';
+                        state.guard.stage = `${load}:admin-exercise`;
+                        run.adminExercise = await exerciseAdmin(state.page, state.guard, evidence.limits.readinessWallMs);
+                        assertAdminExercise(run.adminExercise);
+                    }
+                    if (evidence.savedArtifactsEnabled) {
+                        run.stage = 'saved-artifacts';
+                        state.guard.stage = `${load}:saved-artifacts`;
+                        run.savedArtifacts = await exerciseSavedArtifacts(state.page, state.guard, evidence.limits.readinessWallMs,
+                            path.join(artifactRoot, `iteration-${iteration}-${load}`));
+                        assertArtifactAcceptance(run.savedArtifacts);
+                    }
+                };
+                if (evidence.scopedAdminFirst) {
+                    await exerciseScoped();
+                    recordScopedExercise(run, evidence.savedArtifactsEnabled);
+                    const observations = await state.guard.wait(state.page.evaluate(() => ({ phases: window.__issue70.phases, workerMessages: window.__issue70.workerMessages })));
+                    run.phaseTrace = observations.phases;
+                    run.workerMessages = observations.workerMessages;
+                    run.workerReturnFormats = [...new Set(observations.workerMessages.filter(message => message.format !== 'phase').map(message => message.format))];
+                } else {
+                    run.stage = 'reports';
+                    state.guard.stage = `${load}:reports`;
+                    for (const report of REPORTS.slice(1).concat(REPORTS[0])) {
+                        const switchStarted = performance.now();
+                        await state.guard.wait(state.page.evaluate(reportId => selectReportById(reportId), report));
+                        await state.guard.wait(state.page.waitForFunction(isReportReady, report, { timeout: evidence.limits.readinessWallMs }));
+                        run.reportSwitches.push({ report, completedHostWallMs: performance.now() - switchStarted });
+                    }
+                    const reports = await state.guard.wait(state.page.evaluate(() => ({
+                        reportIds: Object.keys(getDashboardMetricsSnapshot().reports).sort(), impactRows: impactAnalysisAllData.length,
+                        summaryCards: buildDashboardValidationSnapshot().summaryCards, activeRows: filteredData.length, selectedRows: remediationAllData.length,
+                        reportSections: buildDashboardValidationSnapshot().reportSections,
+                        phases: window.__issue70.phases, workerMessages: window.__issue70.workerMessages
+                    })));
+                    run.reportIds = reports.reportIds.filter(report => REPORTS.includes(report));
+                    run.impactRows = reports.impactRows;
+                    run.phaseTrace = reports.phases;
+                    run.workerMessages = reports.workerMessages;
+                    run.workerReturnFormats = [...new Set(reports.workerMessages.filter(message => message.format !== 'phase').map(message => message.format))];
+                    run.readinessCacheDigest = digest(JSON.stringify({ summaryCards: reports.summaryCards, activeRows: reports.activeRows, impactRows: reports.impactRows, reportIds: run.reportIds, reportSections: reports.reportSections }));
+                    if (positiveControl) run.controlObservation = { filteredSourceRows: reports.activeRows, selectedRows: reports.selectedRows, impactRows: reports.impactRows, cardTotal: Object.values(reports.summaryCards).reduce((total, value) => total + Number(value), 0), dateRange: '2026-01-01/2026-01-02' };
                 }
-                const reports = await state.guard.wait(state.page.evaluate(() => ({
-                    reportIds: Object.keys(getDashboardMetricsSnapshot().reports).sort(), impactRows: impactAnalysisAllData.length,
-                    summaryCards: buildDashboardValidationSnapshot().summaryCards, activeRows: filteredData.length, selectedRows: remediationAllData.length,
-                    reportSections: buildDashboardValidationSnapshot().reportSections,
-                    phases: window.__issue70.phases, workerMessages: window.__issue70.workerMessages
-                })));
-                run.reportIds = reports.reportIds.filter(report => REPORTS.includes(report));
-                run.impactRows = reports.impactRows;
-                run.phaseTrace = reports.phases;
-                run.workerMessages = reports.workerMessages;
-                run.workerReturnFormats = [...new Set(reports.workerMessages.filter(message => message.format !== 'phase').map(message => message.format))];
-                run.readinessCacheDigest = digest(JSON.stringify({ summaryCards: reports.summaryCards, activeRows: reports.activeRows, impactRows: reports.impactRows, reportIds: run.reportIds, reportSections: reports.reportSections }));
-                if (positiveControl) run.controlObservation = { filteredSourceRows: reports.activeRows, selectedRows: reports.selectedRows, impactRows: reports.impactRows, cardTotal: Object.values(reports.summaryCards).reduce((total, value) => total + Number(value), 0), dateRange: '2026-01-01/2026-01-02' };
                 run.summaryCardsSha256 = digest(JSON.stringify(run.snapshot.summaryCards));
                 run.stage = 'cache';
                 state.guard.stage = `${load}:cache`;
@@ -936,17 +1022,7 @@ async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot,
                         await state.guard.wait(new Promise(resolve => setTimeout(resolve, 100)));
                     } while (performance.now() < deadline);
                 } else run.cacheEntries = { count: 0, matchingRows: 0 };
-                if (evidence.adminExerciseEnabled) {
-                    state.guard.stage = `${load}:admin-exercise`;
-                    run.adminExercise = await exerciseAdmin(state.page, state.guard, evidence.limits.readinessWallMs);
-                    assertAdminExercise(run.adminExercise);
-                }
-                if (evidence.savedArtifactsEnabled) {
-                    state.guard.stage = `${load}:saved-artifacts`;
-                    run.savedArtifacts = await exerciseSavedArtifacts(state.page, state.guard, evidence.limits.readinessWallMs,
-                        path.join(artifactRoot, `iteration-${iteration}-${load}`));
-                    assertArtifactAcceptance(run.savedArtifacts);
-                }
+                if (!evidence.scopedAdminFirst) await exerciseScoped();
                 clearInterval(heapTimer);
                 await state.guard.wait(finishHeapSample(run, heapSample));
                 await completeRun(run, state.guard, () => assertRun(run, expectedRows, first));
@@ -997,7 +1073,7 @@ async function main() {
     const positiveControl = process.argv.includes('--positive-control');
     const selfContained = process.argv.includes('--self-contained');
     const savedArtifacts = process.argv.includes('--saved-artifacts');
-    assert(!savedArtifacts || !process.argv.includes('--admin-exercise'), 'Saved-artifact acceptance is separate from getBuffer timing.');
+    const workflow = measurementWorkflow(process.argv);
     assert(!savedArtifacts || process.argv.includes('--generated-runtime'), 'Saved artifacts require the actual generated product runtime.');
     const dateArguments = process.argv.filter(value => value.startsWith('--date-range='));
     assert(dateArguments.length <= 1, 'Only one fixture date range may be supplied.');
@@ -1012,7 +1088,7 @@ async function main() {
     assert(Number.isSafeInteger(repeats) && repeats > 0 && repeats <= 10, 'Repeats must be between 1 and 10.');
     assert(!positiveControl || expectedRows === 2, 'Positive control requires two expected rows.');
     const evidence = {
-        schemaVersion: 3, expectedRows, deliveryMode: selfContained ? 'self-contained-file' : 'hosted-http', savedArtifactsEnabled: savedArtifacts, fixedDateRange, adminExerciseEnabled: process.argv.includes('--admin-exercise'),
+        schemaVersion: 3, expectedRows, ...workflow, deliveryMode: selfContained ? 'self-contained-file' : 'hosted-http', savedArtifactsEnabled: savedArtifacts, fixedDateRange, adminExerciseEnabled: process.argv.includes('--admin-exercise'),
         limits: { browserFamilyBytes: 2 * 1024 ** 3, freeMemoryBytes: 3 * 1024 ** 3, readinessWallMs: 120000, inventoryTimeoutMs: 5000, terminationTimeoutMs: 15000 },
         heapScope: 'CDP JSHeapUsedSize is main-renderer only; sampled family working set and private memory include owned workers and descendants. Observational CDP probes are single-flight and may stall with the renderer; independent resource inventory remains bounded and fail-closed.',
         timingScope: 'ttiBrowserMs is first dashboard-ready performance.now from navigation timeOrigin, not a true interaction latency; readinessObservedHostWallMs includes host polling; snapshotBrowserMs is later.',
@@ -1502,14 +1578,82 @@ async function measurementControlProbes() {
     assert.strictEqual(reportReady('active-vulnerabilities'), false, 'Deferred render must finish before a switch is timed.');
     readiness.busy = false; readiness.active = false;
     assert.strictEqual(reportReady('active-vulnerabilities'), false);
-    const admin = { representativeRows: 2, pdfLibrarySourceRows: 2, reports: ['representative', 'empty'].flatMap(scope => REPORTS.map(report => {
+    const admin = { restored: true, representativeRows: 2, pdfLibrarySourceRows: 2, reports: ['representative', 'empty'].flatMap(scope => REPORTS.map(report => {
         const modal = scope === 'representative' && ['active-vulnerabilities', 'impact-analysis', 'remediation-activity'].includes(report);
-        return { scope, report, sourceRows: scope === 'empty' ? 0 : 2, switchMs: 1,
+        return { scope, report, sourceRows: scope === 'empty' ? 0 : 2, reportRows: scope === 'empty' ? 0 : 2, summaryCards: { high: scope === 'empty' ? '0' : '2' }, switchMs: 1,
             detailKind: scope === 'empty' ? 'empty-scope' : modal ? 'modal' : 'inline-card',
             detailMs: modal ? 1 : null, scopedFilterMs: 1, pdfPreparationMs: 1,
             pdf: { bytes: 101, sha256: 'a'.repeat(64) } };
     })) };
     assertAdminExercise(admin);
+    assert.throws(() => measurementWorkflow(['--scoped-admin-first']), /requires/);
+    assert.throws(() => measurementWorkflow(['--scoped-admin-first', '--admin-exercise', '--saved-artifacts']), /separate/);
+    for (const lane of ['--admin-exercise', '--saved-artifacts']) assert.strictEqual(measurementWorkflow(['--scoped-admin-first', lane]).scopedAdminFirst, true);
+    assert.strictEqual(measurementWorkflow([]).scopedAdminFirst, false);
+    const scopedRun = { scopedAdminFirst: true, workload: measurementWorkflow(['--scoped-admin-first', '--admin-exercise']).workload,
+        reportSwitches: [], adminExercise: admin };
+    recordScopedExercise(scopedRun, false);
+    assert.deepStrictEqual(scopedRun.reportIds, [...REPORTS].sort());
+    assert.strictEqual(scopedRun.impactRows, 2);
+    assert.strictEqual(scopedRun.readinessCacheDigest, null);
+    const reordered = structuredClone(admin); reordered.reports.reverse();
+    assert.deepStrictEqual(summarizeScopedExercise(reordered, false), scopedRun.scopedWorkloadSummary);
+    for (const mutate of [result => result.reports.pop(), result => { result.reports[0].report = 'wrong'; },
+        result => { result.reports[0].sourceRows = 3; }, result => { delete result.reports[0].reportRows; },
+        result => { result.reports[5].reportRows = 1; }, result => { result.reports[5].summaryCards.high = '1'; },
+        result => { result.restored = false; }]) {
+        const invalid = structuredClone(admin); mutate(invalid);
+        assert.throws(() => summarizeScopedExercise(invalid, false));
+    }
+    const changedRows = structuredClone(admin); changedRows.reports[0].reportRows = 1;
+    assert.notDeepStrictEqual(summarizeScopedExercise(changedRows, false), scopedRun.scopedWorkloadSummary);
+    const scopedCold = { ...structuredClone(scopedRun), compressedFingerprint: 'runtime_fixture',
+        snapshot: { rows: 2, rawRows: 2, activeRows: 2, counts: {}, summaryCards: { high: '2' } },
+        cachePolicy: { eligible: true, available: true, maxRowsExclusive: 500000, maxEntries: 4 },
+        cacheEntries: { matchingRows: 2, count: 1 }, externalRequests: 0, pageErrors: 0 };
+    assertRun(scopedCold, 2);
+    const scopedWarm = structuredClone(scopedCold); scopedWarm.snapshot.counts.compressedCacheHits = 1;
+    assertRun(scopedWarm, 2, scopedCold);
+    for (const mutate of [value => { value.reportSwitches.push({ report: REPORTS[0], completedHostWallMs: 1 }); },
+        value => { value.readinessCacheDigest = 'invented-full-tour'; }, value => { value.reportRows[REPORTS[0]]++; },
+        value => { value.impactRows++; }, value => { value.scopedWorkloadSummary.steps[0].sourceRows++; },
+        value => { value.scopedWorkloadDigest = 'invented'; }]) {
+        const invalid = structuredClone(scopedCold); mutate(invalid); assert.throws(() => assertRun(invalid, 2));
+    }
+    for (const key of ['reportRows', 'summaryCards']) {
+        const changed = structuredClone(scopedWarm);
+        if (key === 'reportRows') changed.adminExercise.reports[0].reportRows = 1;
+        else changed.adminExercise.reports[0].summaryCards.high = '1';
+        recordScopedExercise(changed, false);
+        assert.throws(() => assertRun(changed, 2, scopedCold), /scoped source\/report\/card counts differ/);
+    }
+    const saved = { status: 'captured', restored: true, representativeRows: 2, runtimePreloadSourceRows: 2,
+        uiExercise: { status: 'exercised', path: 'locator-facet-click-check-apply', selectedFacet: 'filterSeverity', deselectionRows: 0,
+            hiddenSelection: { status: 'unavailable-fixture-intersection' } },
+        reports: admin.reports.concat(['devices-by-remediation', 'remediations-by-device'].map(report => ({ scope: 'representative-range', report, sourceRows: 2, reportRows: 2, summaryCards: { high: '2' } }))).map(row => {
+            const device = ['devices-by-remediation', 'remediations-by-device'].includes(row.report);
+            const mode = row.scope === 'representative-range' ? 'range' : 'snapshot';
+            const before = { report: row.report, reportLabel: row.report, sourceRows: row.sourceRows, reportRows: row.reportRows,
+                cards: row.summaryCards, expandedText: 'Synthetic exact report text', mode,
+                modeSummary: device ? 'Synthetic mode summary' : null, includeResolvedText: device ? mode === 'range' ? 'Yes' : 'No' : null,
+                cardDetails: device ? Array.from({ length: row.reportRows }, () => ({ title: 'Synthetic card', metadata: ['Patch: KB1'], statBadges: ['Devices: 1'] })) : [] };
+            const file = { bytes: 150, sha256: 'a'.repeat(64) };
+            return { scope: row.scope, report: row.report, before, after: structuredClone(before),
+                modeAction: device ? { mode, path: 'shared-toolbar-button', action: 'clicked' } : null,
+                pdf: { ...file, suggestedFilename: `Vulnerability_Dashboard_${row.report}_2026-11-06.pdf`, exportUtcDayBefore: '2026-11-06', exportUtcDayAfter: '2026-11-06' },
+                screenshot: file, receipt: file };
+        }) };
+    const savedSummary = summarizeScopedExercise(saved, true);
+    assert.strictEqual(savedSummary.steps.length, 12);
+    assert.strictEqual(savedSummary.steps.filter(step => step.scope === 'representative-range' && step.mode === 'range').length, 2);
+    for (const mutate of [value => { value.reports.pop(); }, value => { value.reports[0].before.report = 'wrong'; },
+        value => { value.reports[0].before.sourceRows = value.reports[0].after.sourceRows = 3; },
+        value => { delete value.reports[0].before.cards; delete value.reports[0].after.cards; },
+        value => { value.reports[5].before.reportRows = value.reports[5].after.reportRows = 1; },
+        value => { value.reports[5].before.cards.high = value.reports[5].after.cards.high = '1'; }]) {
+        const invalid = structuredClone(saved); mutate(invalid); assert.throws(() => summarizeScopedExercise(invalid, true));
+    }
+    console.log('PASS scoped-first dependencies, both helper receipt summaries, full-tour claim rejection and cold/reload source/report/card consistency controls');
     // Execute the actual serialized page helper with a modeled page boundary;
     // this proves workflow ordering/restoration, not browser or PDF acceptance.
     for (const fault of [null, 'runtime', 'libraries', 'oversize']) {
@@ -1534,6 +1678,12 @@ async function measurementControlProbes() {
                 context.filteredData = !context.filterState.hasSeverities ? [] : source.filter(row => !context.filterState.deviceNames.length || context.filterState.deviceNames.includes(row.id));
                 events.push('apply:' + context.filteredData.length);
             },
+            get remediationAllData() { return context.filteredData; },
+            get impactAnalysisAllData() { return context.filteredData; },
+            get remediationDetailsAllData() { return context.filteredData; },
+            get devicesByRemediationAllData() { return context.filteredData; },
+            get remediationsByDeviceAllData() { return context.filteredData; },
+            buildDashboardValidationSnapshot: () => ({ summaryCards: { high: String(context.filteredData.length) } }),
             selectReportById: report => { context.activeReportId = report; },
             async ensurePdfExportRuntimeLoaded() {
                 events.push('runtime:' + context.filteredData.length);

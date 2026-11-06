@@ -60,6 +60,14 @@ async function captureRealDownload(page, trigger, filename, wait, reportLabel) {
 function captureReportScope() {
     const report = activeReportId;
     const section = document.getElementById(report + '-section');
+    const counts = {
+        'active-vulnerabilities': remediationAllData.length,
+        'impact-analysis': impactAnalysisAllData.length,
+        'remediation-activity': remediationDetailsAllData.length,
+        'devices-by-remediation': devicesByRemediationAllData.length,
+        'remediations-by-device': remediationsByDeviceAllData.length
+    };
+    if (!Number.isSafeInteger(counts[report]) || counts[report] > filteredData.length) throw new Error('Report rows exceed the selected source scope before PDF expansion.');
     const previous = expandReportForPdf(report);
     try {
         const text = section.innerText;
@@ -68,13 +76,6 @@ function captureReportScope() {
             headers: Array.from(table.querySelectorAll('thead th')).map(cell => cell.innerText.trim()),
             rows: Array.from(table.querySelectorAll('tbody tr')).map(row => Array.from(row.querySelectorAll('td')).map(cell => cell.innerText.trim()))
         }));
-        const counts = {
-            'active-vulnerabilities': remediationAllData.length,
-            'impact-analysis': impactAnalysisAllData.length,
-            'remediation-activity': remediationDetailsAllData.length,
-            'devices-by-remediation': devicesByRemediationAllData.length,
-            'remediations-by-device': remediationsByDeviceAllData.length
-        };
         const cardDetails = Array.from(section.querySelectorAll('.remediation-card')).map(card => ({
             title: card.querySelector('.remediation-card-header h3')?.innerText.trim() || '',
             metadata: Array.from(card.querySelectorAll('.cve-details .stat-badge')).map(badge => badge.innerText.trim()).filter(Boolean),
@@ -111,6 +112,7 @@ function assertArtifactAcceptance(result) {
         assert.deepStrictEqual(row.after, row.before, 'Saved PDF changed report/filter/expanded DOM scope.');
         assert.strictEqual(row.before.sourceRows, row.scope === 'empty' ? 0 : row.scope === 'long-table' ? result.longTable.sourceRows : result.representativeRows);
         assert(row.before.sourceRows <= 250 && row.before.expandedText.length <= 500000);
+        assert(Number.isSafeInteger(row.before.reportRows) && row.before.reportRows >= 0 && row.before.reportRows <= row.before.sourceRows, 'Saved report rows exceed the selected source scope.');
         const deviceReport = ['devices-by-remediation', 'remediations-by-device'].includes(row.report);
         assert(Array.isArray(row.before.cardDetails));
         assert.strictEqual(row.before.cardDetails.length, deviceReport ? row.before.reportRows : 0);
