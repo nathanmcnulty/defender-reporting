@@ -271,6 +271,7 @@ const REMEDIATION_REPORT_MODE_SNAPSHOT = 'snapshot';
 const MAX_VISIBLE_DEVICE_REMEDIATIONS = 10;
 
 let applyFiltersTimer = null;
+let pdfExportInProgress = false;
 let filterRenderGeneration = 0;
 let currentFilterRenderRequest = null;
 let initialReportStart = null;
@@ -799,6 +800,7 @@ function parseUrlViewState() {
 }
 
 function applyUrlViewState() {
+    if (pdfExportInProgress) return false;
     const viewState = parseUrlViewState();
     if (!viewState) {
         return false;
@@ -1242,6 +1244,7 @@ function initializeReportNavigationControls() {
 }
 
 function selectReportById(reportId) {
+    if (pdfExportInProgress) return;
     if (!REPORT_IDS.includes(reportId)) {
         return;
     }
@@ -1336,6 +1339,7 @@ function updateRemediationReportModeUi(reportId = activeReportId) {
 }
 
 function setRemediationReportMode(mode) {
+    if (pdfExportInProgress) return;
     const nextMode = mode === REMEDIATION_REPORT_MODE_SNAPSHOT
         ? REMEDIATION_REPORT_MODE_SNAPSHOT
         : REMEDIATION_REPORT_MODE_RANGE;
@@ -1389,7 +1393,26 @@ function syncFilterStateFromDom() {
     return filterState;
 }
 
+function lockDashboardForPdf() {
+    const main = document.querySelector('.container');
+    const wasInert = main ? main.getAttribute('inert') !== null : false;
+    const events = ['click', 'pointerdown', 'keydown', 'input', 'change', 'submit'];
+    const preventEdit = event => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+    };
+    pdfExportInProgress = true;
+    if (main) main.setAttribute('inert', '');
+    events.forEach(type => document.addEventListener(type, preventEdit, true));
+    return () => {
+        events.forEach(type => document.removeEventListener(type, preventEdit, true));
+        if (main && !wasInert) main.removeAttribute('inert');
+        pdfExportInProgress = false;
+    };
+}
+
 function scheduleApplyFilters(immediate = false) {
+    if (pdfExportInProgress) return;
     filterRenderGeneration++;
     currentFilterRenderRequest = null;
     if (applyFiltersTimer) {
