@@ -844,10 +844,14 @@ async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot,
                 run.readinessObservedHostWallMs = performance.now() - run.navigationStartedAtHostMs;
                 if (evidence.fixedDateRange && !positiveControl) {
                     const [start, end] = evidence.fixedDateRange.split('/');
-                    await state.guard.wait(state.page.locator('#filterPillDate').click());
-                    await state.guard.wait(state.page.locator('#filterPopoverStartDate').fill(start));
-                    await state.guard.wait(state.page.locator('#filterPopoverEndDate').fill(end));
-                    await state.guard.wait(state.page.locator('#filterPopoverApplyButton').click());
+                    const alreadySelected = await state.guard.wait(state.page.evaluate(({ start, end }) => filterState.startDate === start && filterState.endDate === end, { start, end }));
+                    if (!alreadySelected) {
+                        await state.guard.wait(state.page.locator('#filterPillDate').click());
+                        await state.guard.wait(state.page.locator('#filterPopoverStartDate').fill(start));
+                        await state.guard.wait(state.page.locator('#filterPopoverEndDate').fill(end));
+                        await state.guard.wait(state.page.locator('#filterPopoverApplyButton').click());
+                    }
+                    run.fixtureDateRange = { start, end, reusedSelectedRange: alreadySelected };
                     await state.guard.wait(state.page.waitForFunction(({ start, end }) => filterState.startDate === start && filterState.endDate === end
                         && initializedReports.has(activeReportId) && !dirtyReports.has(activeReportId)
                         && document.getElementById(activeReportId + '-section').getAttribute('aria-busy') !== 'true', { start, end }, { timeout: evidence.limits.readinessWallMs }));
