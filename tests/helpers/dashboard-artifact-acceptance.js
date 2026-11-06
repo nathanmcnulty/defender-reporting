@@ -1,0 +1,201 @@
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const REPORTS = ['active-vulnerabilities', 'impact-analysis', 'remediation-activity', 'devices-by-remediation', 'remediations-by-device'];
+const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+
+async function withDeadline(operation, timeoutMs) {
+    assert(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 120000, 'Invalid artifact deadline.');
+    let timer;
+    try {
+        return await Promise.race([operation, new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('Artifact operation exceeded its deadline.')), timeoutMs);
+        })]);
+    } finally { clearTimeout(timer); }
+}
+
+function fileReceipt(filename, kind) {
+    const length = fs.statSync(filename).size;
+    assert(length > 100 && length <= 64 * 1024 ** 2, 'Artifact size is outside its bound.');
+    const bytes = fs.readFileSync(filename);
+    if (kind === 'pdf') assert(bytes.subarray(0, 5).toString() === '%PDF-' && bytes.subarray(-128).includes(Buffer.from('%%EOF')), 'Incomplete PDF download.');
+    else assert(bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), 'Invalid screenshot.');
+    return { file: path.basename(filename), bytes: length, sha256: sha256(bytes) };
+}
+
+function expectedDownloadNames(reportLabel, interval) {
+    assert(typeof reportLabel === 'string' && reportLabel.length > 0 && !/[\\/]/.test(reportLabel), 'Expected report label is required.');
+    const dates = [interval?.utcDayBefore, interval?.utcDayAfter];
+    for (const day of dates) assert(typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day) && new Date(day).toISOString().slice(0, 10) === day, 'Invalid browser export date.');
+    const days = (Date.parse(dates[1]) - Date.parse(dates[0])) / 86400000;
+    assert(days >= 0 && days <= 1, 'Browser export date changed outside its bounded interval.');
+    return dates.map(day => `Vulnerability_Dashboard_${reportLabel.replace(/\s+/g, '_')}_${day}.pdf`);
+}
+
+async function captureRealDownload(page, trigger, filename, wait, reportLabel) {
+    // Register the event before the real exporter can start a download.
+    const pending = page.waitForEvent('download', { timeout: 120000 });
+    const [download, interval] = await wait(Promise.all([pending, Promise.resolve().then(trigger)]));
+    const suggestedFilename = download.suggestedFilename();
+    assert(expectedDownloadNames(reportLabel, interval).includes(suggestedFilename), 'Browser download filename does not match the selected report and export date.');
+    assert.strictEqual(await wait(download.failure()), null, 'Browser download failed.');
+    await wait(download.saveAs(filename));
+    return { ...fileReceipt(filename, 'pdf'), suggestedFilename, exportUtcDayBefore: interval.utcDayBefore, exportUtcDayAfter: interval.utcDayAfter };
+}
+
+// Runs in the actual dashboard context. Capture the exact expanded DOM that the
+// PDF exporter will read, then restore its page expansion before starting export.
+function captureReportScope() {
+    const report = activeReportId;
+    const section = document.getElementById(report + '-section');
+    const previous = expandReportForPdf(report);
+    try {
+        const text = section.innerText;
+        if (text.length > 500000) throw new Error('Expanded report receipt exceeds its text bound.');
+        const tables = Array.from(section.querySelectorAll('table')).map(table => ({
+            headers: Array.from(table.querySelectorAll('thead th')).map(cell => cell.innerText.trim()),
+            rows: Array.from(table.querySelectorAll('tbody tr')).map(row => Array.from(row.querySelectorAll('td')).map(cell => cell.innerText.trim()))
+        }));
+        const counts = {
+            'active-vulnerabilities': remediationAllData.length,
+            'impact-analysis': impactAnalysisAllData.length,
+            'remediation-activity': remediationDetailsAllData.length,
+            'devices-by-remediation': devicesByRemediationAllData.length,
+            'remediations-by-device': remediationsByDeviceAllData.length
+        };
+        return {
+            report, reportLabel: document.getElementById('reportSelector').selectedOptions[0].text,
+            filter: JSON.parse(JSON.stringify(cloneFilterState(filterState))), mode: remediationReportMode,
+            sourceRows: filteredData.length, reportRows: counts[report], cards: buildDashboardValidationSnapshot().summaryCards,
+            appliedFilters: ['filterRbacGroup', 'filterDeviceTags', 'filterDeviceName', 'filterOSPlatform', 'filterSeverity'].map(id => ({ id, text: getExportFilterText(id, 'All') })),
+            expandedText: text, tables,
+            pdfExcludedText: Array.from(section.querySelectorAll('.pdf-exclude')).map(element => element.innerText),
+            expansion: previous
+        };
+    } finally { restoreReportState(report, previous); }
+}
+
+function assertArtifactAcceptance(result) {
+    assert(result && result.restored === true && result.status === 'captured', 'Artifact acceptance did not restore scope.');
+    assert(Number.isSafeInteger(result.representativeRows) && result.representativeRows > 0 && result.representativeRows <= 250);
+    assert(result.reports.length === 10 || result.reports.length === 11);
+    const pairs = new Set();
+    for (const row of result.reports) {
+        assert(REPORTS.includes(row.report) && ['representative', 'empty', 'long-table'].includes(row.scope));
+        assert(!pairs.has(`${row.scope}/${row.report}`)); pairs.add(`${row.scope}/${row.report}`);
+        assert.strictEqual(row.before.report, row.report);
+        assert.deepStrictEqual(row.after, row.before, 'Saved PDF changed report/filter/expanded DOM scope.');
+        assert.strictEqual(row.before.sourceRows, row.scope === 'empty' ? 0 : row.scope === 'representative' ? result.representativeRows : result.longTable.sourceRows);
+        assert(row.before.sourceRows <= 250 && row.before.expandedText.length <= 500000);
+        for (const file of [row.pdf, row.screenshot, row.receipt]) assert(file && file.bytes > 0 && /^[a-f0-9]{64}$/.test(file.sha256));
+        assert(expectedDownloadNames(row.before.reportLabel, { utcDayBefore: row.pdf.exportUtcDayBefore, utcDayAfter: row.pdf.exportUtcDayAfter }).includes(row.pdf.suggestedFilename), 'Saved PDF filename identity differs from its scope receipt.');
+        if (row.scope === 'long-table') assert(row.report === 'active-vulnerabilities' && row.before.reportRows > 100, 'Long-table receipt must exceed the normal page size.');
+    }
+    for (const scope of ['representative', 'empty']) for (const report of REPORTS) assert(pairs.has(`${scope}/${report}`));
+}
+
+async function exerciseSavedArtifacts(page, guard, timeout, directory) {
+    const wait = operation => guard.wait(withDeadline(operation, timeout));
+    fs.mkdirSync(directory);
+    const result = { status: 'capturing', restored: false, representativeRows: 0, reports: [], viewport: { width: 1440, height: 1000 }, longTable: { status: 'unavailable-within-250-source-row-bound' },
+        scope: 'Actual browser download/saveAs and expanded DOM receipts; PDF semantic parsing and rendered-page visual review remain required.' };
+    let started = false;
+    try {
+        await wait(page.setViewportSize({ width: 1440, height: 1000 }));
+        await wait(page.evaluate(async () => {
+            if (window.__savedArtifactSession) throw new Error('Artifact scope is already owned.');
+            await ensurePdfExportRuntimeLoaded(); await loadPdfLibraries();
+            if (!filteredData.length) throw new Error('Set a fixture date range with matching rows before artifact acceptance.');
+            const state = cloneFilterState(filterState);
+            const counts = new Map();
+            for (const row of filteredData) {
+                const id = getDeviceNameFilterValue(row);
+                if (id) counts.set(id, (counts.get(id) || 0) + 1);
+            }
+            const first = Array.from(counts).find(([, count]) => count > 0 && count <= 250);
+            if (!first) throw new Error('No representative device fits the PDF source-row bound.');
+            window.__savedArtifactSession = { state, report: activeReportId, mode: remediationReportMode,
+                hadWarning: Object.prototype.hasOwnProperty.call(window, '__skipPdfExportPageWarning'), warning: window.__skipPdfExportPageWarning,
+                representative: { ...state, deviceNames: [first[0]], hasDeviceNames: true }, deviceCounts: Array.from(counts) };
+            window.__skipPdfExportPageWarning = true;
+        }));
+        started = true;
+        const apply = async (scope, report) => {
+            await wait(page.evaluate(({ scope, report }) => {
+                const session = window.__savedArtifactSession;
+                const state = scope === 'long-table' ? session.longTable : session.representative;
+                filterState = finalizeFilterState(scope === 'empty' ? { ...state, severities: [], hasSeverities: false } : cloneFilterState(state));
+                applyFilters(); selectReportById(report);
+            }, { scope, report }));
+            await wait(page.waitForFunction(report => activeReportId === report && initializedReports.has(report) && !dirtyReports.has(report)
+                && document.getElementById(report + '-section').classList.contains('active')
+                && document.getElementById(report + '-section').getAttribute('aria-busy') !== 'true', report, { timeout }));
+        };
+        const capture = async (scope, report) => {
+            await apply(scope, report);
+            const before = await wait(page.evaluate(captureReportScope));
+            assert(before.sourceRows <= 250 && (scope !== 'empty' || before.sourceRows === 0), 'Artifact scope broadened beyond its bound.');
+            if (scope === 'representative') result.representativeRows ||= before.sourceRows;
+            const stem = `${scope}-${report}`;
+            const imageFile = path.join(directory, stem + '.png');
+            await wait(page.screenshot({ path: imageFile, fullPage: false }));
+            const screenshot = fileReceipt(imageFile, 'png');
+            const pdf = await captureRealDownload(page, () => page.evaluate(async expected => {
+                const selector = document.getElementById('reportSelector');
+                if (activeReportId !== expected.report || selector.selectedOptions[0].text !== expected.reportLabel) throw new Error('Report changed before the actual download trigger.');
+                const utcDayBefore = new Date().toISOString().slice(0, 10);
+                await exportToPDF();
+                return { utcDayBefore, utcDayAfter: new Date().toISOString().slice(0, 10) };
+            }, { report, reportLabel: before.reportLabel }), path.join(directory, stem + '.pdf'), wait, before.reportLabel);
+            await wait(page.waitForFunction(() => !pdfExportInProgress && !document.querySelector('.export-pdf-btn').disabled, null, { timeout }));
+            const after = await wait(page.evaluate(captureReportScope));
+            assert.deepStrictEqual(after, before, 'Real PDF download changed the selected scope.');
+            const receiptFile = path.join(directory, stem + '.json');
+            const receiptBytes = Buffer.from(JSON.stringify({ status: 'captured-pending-run-completion', scope, report, before, after, pdf, screenshot }, null, 2));
+            fs.writeFileSync(receiptFile, receiptBytes, { flag: 'wx' });
+            result.reports.push({ scope, report, before, after, pdf, screenshot, receipt: { file: path.basename(receiptFile), bytes: receiptBytes.length, sha256: sha256(receiptBytes) } });
+        };
+        for (const scope of ['representative', 'empty']) for (const report of REPORTS) await capture(scope, report);
+        // Try one known device subset that fits the same source-row bound and
+        // exceeds TABLE_PAGE_SIZE. No larger dataset or bound is substituted.
+        const longCandidate = await wait(page.evaluate(() => {
+            const session = window.__savedArtifactSession;
+            const devices = []; let rows = 0;
+            for (const [id, count] of session.deviceCounts) { if (count + rows <= 250) { devices.push(id); rows += count; } }
+            session.longTable = { ...session.state, deviceNames: devices, hasDeviceNames: devices.length > 0 };
+            return rows;
+        }));
+        if (longCandidate > 100) {
+            await apply('long-table', 'active-vulnerabilities');
+            const check = await wait(page.evaluate(() => ({ sourceRows: filteredData.length, reportRows: remediationAllData.length })));
+            if (check.sourceRows <= 250 && check.reportRows > 100) {
+                result.longTable = { status: 'captured', ...check };
+                await capture('long-table', 'active-vulnerabilities');
+            } else result.longTable = { status: 'not-enough-distinct-report-rows', ...check };
+        }
+    } finally {
+        if (started) {
+            await wait(page.evaluate(() => {
+                const session = window.__savedArtifactSession;
+                filterState = cloneFilterState(session.state); remediationReportMode = session.mode;
+                if (session.hadWarning) window.__skipPdfExportPageWarning = session.warning; else delete window.__skipPdfExportPageWarning;
+                applyFilters(); selectReportById(session.report); closeModal();
+            }));
+            await wait(page.waitForFunction(() => {
+                const session = window.__savedArtifactSession;
+                return activeReportId === session.report && initializedReports.has(session.report) && !dirtyReports.has(session.report)
+                    && document.getElementById(session.report + '-section').getAttribute('aria-busy') !== 'true'
+                    && JSON.stringify(cloneFilterState(filterState)) === JSON.stringify(cloneFilterState(session.state));
+            }, null, { timeout }));
+            await wait(page.evaluate(() => { delete window.__savedArtifactSession; }));
+            result.restored = true;
+        }
+    }
+    result.status = 'captured';
+    assertArtifactAcceptance(result);
+    return result;
+}
+
+module.exports = { exerciseSavedArtifacts, assertArtifactAcceptance, captureRealDownload, withDeadline, fileReceipt, captureReportScope, expectedDownloadNames };

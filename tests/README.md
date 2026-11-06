@@ -126,6 +126,53 @@ Missing matching rows are labelled explicitly rather than assigned a latency.
 The two device reports show details inline; that cost is included in report
 switching and is not reported again as a separate dialog-opening measurement.
 
+For genuine self-contained acceptance, add `--self-contained --generated-runtime`
+and supply a directory containing `VulnerabilityDashboard.html`. The harness
+navigates to the exact retained `file://` URL, executes its actual inline runtime
+and embedded libraries, and fingerprints its embedded compressed payload. It
+does not substitute the source overlay or serve the page over HTTP. File requests
+are restricted to that exact HTML file, optionally with its single persisted
+`view` parameter; neighboring files, external URLs and arbitrary queries fail.
+Hosted mode keeps its existing same-origin policy. Compare the payload identity
+and DOM scope receipts across delivery modes; the embedded product has no
+separate hosted summary asset.
+
+Use `--date-range=2025-01-01/2026-10-22` for the retained 19,677-row synthetic
+fixture, or `--positive-control` for the two-row January 1-2, 2026 fixture. The
+chosen range is applied through the real date popover and recorded explicitly.
+Do not infer a valid empty input or supported tenant maximum from these fixtures.
+
+`--saved-artifacts` is a separate acceptance lane and cannot be combined with
+`--admin-exercise` getBuffer timing. It retains the real `downloadPdfDocument`,
+observes the browser download event, and saves actual PDFs with `saveAs` for
+all five reports in representative and empty scopes. Each load captures ten
+PDFs plus viewport screenshots and JSON receipts of the exact expanded DOM,
+table cells, report/filter/mode, source/grouped counts, cards and restoration.
+One additional Active Vulnerabilities PDF is captured only when a selected
+subset of at most 250 source rows actually yields more than 100 grouped report
+rows. Unavailable long-table coverage is labelled; no row or resource bound is
+raised. Screenshots use a fixed 1440 by 1000 viewport. Each artifact is capped
+at 64 MiB and each expanded report text receipt at 500,000 characters.
+
+Use a fresh evidence JSON path outside the retained product directory. Artifacts
+are saved beside it under `<evidence-path>.artifacts/iteration-<n>-<first|reload>`.
+Individual files are **pending** until the containing run passes all scope,
+resource, download, restoration and native cleanup checks. Hashes and PDF
+header/EOF validation establish file identity/completeness, not semantic or
+visual acceptance: extract PDF text and compare the selected filters, table
+content and totals with the receipts, then render and inspect the PDF pages.
+Viewport screenshots alone do not establish long-table PDF pagination quality.
+Keep these synthetic artifacts private; do not use the content-capture option
+with live tenant data. Use one pinned common harness for both product revisions
+and identical engine/runtime/input/library bytes for comparisons. The existing
+outer supervisor, admission samples and native ownership gates remain required.
+
+Browser-free controls run as part of the existing measurement/telemetry mock
+lane, and can be run alone with `node tests/Assert-DashboardArtifactAcceptance.js`.
+They exercise exact file URL scope, retained inline identity, operation deadlines,
+download-event ordering/failure, truncated PDF rejection and invalid receipts;
+they do not launch a browser or establish download/visual acceptance.
+
 Run the isolated two-row Hosted dashboard control, generated from synthetic data without root exports, authentication, or cloud writes:
 
 ```powershell
