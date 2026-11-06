@@ -7,7 +7,6 @@ on:
   #   - cron: '0 6 * * 1'
 
 permissions:
-  actions: read
   contents: read
 
 env:
@@ -15,14 +14,16 @@ env:
 
 jobs:
   export-pdfs:
-    if: ${{ github.event.repository.private == true }}
+    if: ${{ github.repository == 'nathanmcnulty/defender-reporting' || github.event.repository.private == true }}
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.ref }}
 
       - name: Check whether PDF export is needed
         id: freshness
@@ -132,3 +133,33 @@ jobs:
       - name: Export reports to PDF
         if: steps.freshness.outputs.should_export == 'true'
         run: node .github/scripts/export-pdf-reports.js
+
+      - name: Stage PDF reports
+        if: steps.freshness.outputs.should_export == 'true'
+        run: node .github/scripts/stage-demo-outputs.js pdf
+
+      - name: Commit PDF reports
+        if: steps.freshness.outputs.should_export == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --staged --quiet; then
+            git commit -m "Update PDF reports"
+            git push origin "HEAD:$GITHUB_REF"
+          fi
+
+      - name: Upload PDF reports
+        if: steps.freshness.outputs.should_export == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vulnerability-reports-${{ github.run_number }}
+          path: |
+            reports/Active_Vulnerabilities_????-??-??.pdf
+            reports/Remediation_Activity_????-??-??.pdf
+            reports/Impact_Analysis_????-??-??.pdf
+            reports/Devices_by_Remediation_????-??-??.pdf
+            reports/Remediations_by_Device_????-??-??.pdf
+          if-no-files-found: error
+          retention-days: 30
