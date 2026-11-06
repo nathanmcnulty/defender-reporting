@@ -100,3 +100,7 @@ function Get-VulnCurrentPath { param($BasePath) return (Join-Path $BasePath 'Vul
 finally {
     if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
 }
+
+# The intentionally failing native child probes set LASTEXITCODE. Publish this
+# test entrypoint's successful outcome for in-process preflight callers too.
+exit 0
