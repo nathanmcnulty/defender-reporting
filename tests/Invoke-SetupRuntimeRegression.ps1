@@ -73,6 +73,7 @@ $entrypoints = @(
     'tests/Record-BenchmarkHistory.ps1'
     'tests/Run-SharedHelperRegression.ps1'
     'tests/Test-OfflinePerformanceMeasurements.ps1'
+    'tests/Test-StoreTransactionRecovery.ps1'
 )
 $inheritedFragments = @(
     'build/Import-SharedHelpers.ps1'

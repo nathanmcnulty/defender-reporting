@@ -956,7 +956,22 @@ function Write-StoreTransactionState {
         [string]$Path
     )
 
-    $State | ConvertTo-Json -Depth 20 | Set-Content -Path $Path -Encoding utf8
+    # Keep the readable Prepared journal until a complete replacement has been
+    # flushed. A short write must never destroy rollback metadata.
+    $temporaryPath = $Path + '.write-' + [guid]::NewGuid().ToString('N')
+    try {
+        $State | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporaryPath -Encoding utf8 -ErrorAction Stop
+        $stream = [System.IO.File]::Open($temporaryPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+        try { $stream.Flush($true) }
+        finally { $stream.Dispose() }
+        if ([System.IO.File]::Exists($Path)) {
+            [System.IO.File]::Replace($temporaryPath, $Path, [NullString]::Value, $true)
+        }
+        else { [System.IO.File]::Move($temporaryPath, $Path) }
+    }
+    finally {
+        if ([System.IO.File]::Exists($temporaryPath)) { [System.IO.File]::Delete($temporaryPath) }
+    }
 }
 
 function Read-StoreTransactionState {
@@ -1074,31 +1089,32 @@ function Publish-StoreFilesTransactional {
     Restore-StoreTransaction -BasePath $BasePath -StoreName $StoreName
 
     $transactionRoot = Join-Path $BasePath ('.' + $StoreName + '-transaction-' + [guid]::NewGuid().ToString('N'))
-    [void](New-Item -Path $transactionRoot -ItemType Directory -Force)
 
     $journalPath = Get-StoreTransactionJournalPath -BasePath $BasePath -StoreName $StoreName
     $targetPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $fileEntries = [System.Collections.Generic.List[object]]::new()
     $removedEntries = [System.Collections.Generic.List[object]]::new()
+    $sourcePaths = [System.Collections.Generic.List[string]]::new()
     $index = 0
 
     foreach ($file in @($Files)) {
         $targetPath = [string]$file.TargetPath
-        [void]$targetPaths.Add($targetPath)
+        [void]$targetPaths.Add((Get-NormalizedAbsolutePath -Path $targetPath))
 
         $fileEntries.Add([PSCustomObject]@{
             TargetPath = $targetPath
-            StagePath = [string]$file.StagePath
+            StagePath = Join-Path $transactionRoot ('stage-' + $index + '-' + [System.IO.Path]::GetFileName($targetPath))
             BackupPath = Join-Path $transactionRoot ('replace-' + $index + '-' + [System.IO.Path]::GetFileName($targetPath) + '.bak')
             TargetExisted = (Test-Path -LiteralPath $targetPath -PathType Leaf)
         })
+        $sourcePaths.Add([string]$file.StagePath)
         $index++
     }
 
     $removeIndex = 0
     foreach ($removePath in @($RemovePaths)) {
         if ([string]::IsNullOrWhiteSpace($removePath)) { continue }
-        if ($targetPaths.Contains($removePath)) { continue }
+        if ($targetPaths.Contains((Get-NormalizedAbsolutePath -Path $removePath))) { continue }
         if (-not (Test-Path -LiteralPath $removePath -PathType Leaf)) { continue }
 
         $removedEntries.Add([PSCustomObject]@{
@@ -1115,7 +1131,36 @@ function Publish-StoreFilesTransactional {
         Files = @($fileEntries)
         RemovedFiles = @($removedEntries)
     }
-    Write-StoreTransactionState -State $state -Path $journalPath
+    # Recovery accepts only transaction-owned stage paths. Adopt the caller's
+    # completed staged files by rename before journaling; do not duplicate their
+    # potentially large contents or relax recovery's path containment boundary.
+    try {
+        Assert-StoreTransactionStateIsValid -State $state -BasePath $BasePath -StoreName $StoreName -JournalPath $journalPath
+        $scheduledTargets = [System.Collections.Generic.HashSet[string]]::new($targetPaths, [System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($removedEntry in $removedEntries) {
+            [void]$scheduledTargets.Add((Get-NormalizedAbsolutePath -Path $removedEntry.TargetPath))
+        }
+        $uniqueSources = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($sourcePath in $sourcePaths) {
+            $normalizedSource = Get-NormalizedAbsolutePath -Path $sourcePath
+            if ([string]::IsNullOrWhiteSpace($normalizedSource) -or
+                -not (Test-Path -LiteralPath $normalizedSource -PathType Leaf) -or
+                $scheduledTargets.Contains($normalizedSource) -or
+                -not $uniqueSources.Add($normalizedSource)) {
+                throw "Invalid or duplicate transaction stage source '$sourcePath'."
+            }
+        }
+        [void](New-Item -Path $transactionRoot -ItemType Directory -Force)
+        for ($stageIndex = 0; $stageIndex -lt $sourcePaths.Count; $stageIndex++) {
+            [System.IO.File]::Move($sourcePaths[$stageIndex], $fileEntries[$stageIndex].StagePath)
+        }
+        Write-StoreTransactionState -State $state -Path $journalPath
+    }
+    catch {
+        # No canonical target has been touched before the prepared journal.
+        Remove-StoreTransactionArtifacts -JournalPath $journalPath -TransactionRoot $transactionRoot
+        throw
+    }
 
     try {
         foreach ($entry in @($fileEntries)) {
