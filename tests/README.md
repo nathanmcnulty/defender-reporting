@@ -162,6 +162,14 @@ header/EOF validation establish file identity/completeness, not semantic or
 visual acceptance: extract PDF text and compare the selected filters, table
 content and totals with the receipts, then render and inspect the PDF pages.
 Viewport screenshots alone do not establish long-table PDF pagination quality.
+The saved-artifact lane also exercises real facet pill/checkbox/Apply events,
+explicit severity selection and individual deselection to None. It checks the
+group/platform hidden-selection intersection using two existing devices with
+distinct groups and platforms when available, or the existing global facets;
+otherwise that case is labelled unavailable. Report changes use the visible
+report popover and PDFs use the actual Export PDF button. Fixture planning and
+final restoration still use read-only inspection and the saved state API; this
+bounded event exercise does not claim coverage of every UI interaction.
 Keep these synthetic artifacts private; do not use the content-capture option
 with live tenant data. Use one pinned common harness for both product revisions
 and identical engine/runtime/input/library bytes for comparisons. The existing
