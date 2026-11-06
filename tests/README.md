@@ -130,6 +130,21 @@ runtime/library loading starts; their separate timings record that selected
 scope. Runtime/library failures still restore the original filter, report, mode
 and warning state without assuming a download hook was loaded.
 
+By default, both exercise lanes first tour all five reports at the original,
+unfiltered scope. Add `--scoped-admin-first` with either `--admin-exercise` or
+`--saved-artifacts` to run load → filter → scoped reports/detail/PDF → restore
+immediately after the readiness snapshot, omitting that unfiltered tour. The
+option cannot run alone. The workload label distinguishes the two sequences;
+scoped-first runs retain `reportSwitches: []` and `readinessCacheDigest: null`,
+and do not qualify unfiltered report switching. Their `reportIds`, `reportRows`
+and representative `impactRows` come from the actual helper receipts. A separate
+`scopedWorkloadSummary`/`scopedWorkloadDigest` compares source rows, grouped rows
+and severity cards for every captured scope/report across cold/reload; it also
+includes saved-artifact range modes and any admitted long-table scope. Existing
+all-five representative/empty coverage, scope restoration, cache, native owner,
+resource and cleanup checks remain required. This is a bounded scoped workflow,
+not evidence that the unfiltered-tour stress workload passes.
+
 For genuine self-contained acceptance, add `--self-contained --generated-runtime`
 and supply a directory containing `VulnerabilityDashboard.html`. The harness
 navigates to the exact retained `file://` URL, executes its actual inline runtime

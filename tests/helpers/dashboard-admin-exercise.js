@@ -80,6 +80,14 @@ async function exerciseAdmin(page, guard, timeout) {
                     let detailMs = null;
                     let detailKind = scope === 'empty' ? 'empty-scope' : 'no-matching-data';
                     const section = document.getElementById(report + '-section');
+                    const reportRows = {
+                        'active-vulnerabilities': remediationAllData.length,
+                        'impact-analysis': impactAnalysisAllData.length,
+                        'remediation-activity': remediationDetailsAllData.length,
+                        'devices-by-remediation': devicesByRemediationAllData.length,
+                        'remediations-by-device': remediationsByDeviceAllData.length
+                    }[report];
+                    need(Number.isSafeInteger(reportRows) && reportRows >= 0 && reportRows <= filteredData.length, 'Report rows exceed the selected source scope before PDF preparation.');
                     const usesModal = ['active-vulnerabilities', 'remediation-activity', 'impact-analysis'].includes(report);
                     const detailRow = usesModal ? section.querySelector('tbody tr[data-row-index]') : null;
                     if (scope === 'representative' && detailRow) {
@@ -114,11 +122,12 @@ async function exerciseAdmin(page, guard, timeout) {
                     await exportToPDF();
                     need(pdf && !pdfExportInProgress, 'Real PDF export failed or did not restore controls.');
                     need(before === JSON.stringify(cloneFilterState(filterState)) && activeReportId === report, 'PDF changed selected scope.');
-                    results.push({ scope, report, sourceRows: filteredData.length, switchMs, detailMs, detailKind,
+                    const summaryCards = JSON.parse(JSON.stringify(buildDashboardValidationSnapshot().summaryCards));
+                    results.push({ scope, report, sourceRows: filteredData.length, reportRows, summaryCards, switchMs, detailMs, detailKind,
                         scopedFilterMs, pdfPreparationMs: performance.now() - pdfStart, pdf });
                 }
             }
-            return { representativeRows, pdfLibrarySourceRows: representativeRows, filterMs, pdfRuntimeLoadMs, pdfLibrariesLoadMs, pdfPageWarningSuppressed: true, reports: results, detailScope: 'All three modal report families when matching data exists; device-report inline detail cost is included in report switching. Missing detail data is labelled explicitly.', pdfScope: 'Real PDF bytes/layout; final user download replaced by getBuffer; no visual/readability or semantic-content proof.' };
+            return { restored: true, representativeRows, pdfLibrarySourceRows: representativeRows, filterMs, pdfRuntimeLoadMs, pdfLibrariesLoadMs, pdfPageWarningSuppressed: true, reports: results, detailScope: 'All three modal report families when matching data exists; device-report inline detail cost is included in report switching. Missing detail data is labelled explicitly.', pdfScope: 'Real PDF bytes/layout; final user download replaced by getBuffer; no visual/readability or semantic-content proof.' };
         } finally {
             if (downloadHookCaptured) downloadPdfDocument = originalDownload;
             remediationReportMode = originalMode;
@@ -140,11 +149,19 @@ async function exerciseAdmin(page, guard, timeout) {
 
 function assertAdminExercise(result) {
     const reports = ['active-vulnerabilities', 'impact-analysis', 'remediation-activity', 'devices-by-remediation', 'remediations-by-device'];
-    assert(result && Number.isSafeInteger(result.representativeRows) && result.representativeRows > 0 && result.representativeRows <= 250);
+    assert(result && result.restored === true && Number.isSafeInteger(result.representativeRows) && result.representativeRows > 0 && result.representativeRows <= 250);
     assert.strictEqual(result.pdfLibrarySourceRows, result.representativeRows, 'PDF library loading must follow the admitted representative scope.');
     assert.strictEqual(result.reports.length, 10);
     for (const row of result.reports) {
         assert(['representative', 'empty'].includes(row.scope));
+        assert(Number.isSafeInteger(row.reportRows) && row.reportRows >= 0, 'Missing or invalid scoped report row count.');
+        assert(row.reportRows <= row.sourceRows, 'Grouped report rows exceed the selected source scope.');
+        assert(row.summaryCards && Object.keys(row.summaryCards).length > 0, 'Missing scoped summary cards.');
+        for (const value of Object.values(row.summaryCards)) {
+            assert((typeof value === 'number' || typeof value === 'string' && value.trim() !== '') && Number.isSafeInteger(Number(value)) && Number(value) >= 0, 'Invalid scoped summary count.');
+            if (row.scope === 'empty') assert.strictEqual(Number(value), 0, 'Empty scope summary broadened.');
+        }
+        if (row.scope === 'empty') assert.strictEqual(row.reportRows, 0, 'Empty report broadened.');
         assert(reports.includes(row.report));
         assert(Number.isFinite(row.switchMs) && row.switchMs >= 0);
         assert(Number.isFinite(row.scopedFilterMs) && row.scopedFilterMs >= 0);

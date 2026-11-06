@@ -116,10 +116,11 @@ function assertCardScopeCapture() {
     const summary = 'Showing only vulnerabilities still open on 2026-01-02. Resolved items from earlier in the range are excluded.';
     let visibleSummary = summary;
     let restorations = 0;
+    let expansions = 0;
     const context = {
         activeReportId: 'devices-by-remediation', filterState: { startDate: '2026-01-01', endDate: '2026-01-02' }, remediationReportMode: 'snapshot', REMEDIATION_REPORT_MODE_RANGE: 'range',
         document: { getElementById: id => id.endsWith('-section') ? section : id === 'remediationModeSummary' ? { innerText: visibleSummary } : { selectedOptions: [{ text: 'Devices by Remediation' }] } },
-        expandReportForPdf: () => ({ wasExpanded: false }), restoreReportState: () => { restorations++; },
+        expandReportForPdf: () => { expansions++; return { wasExpanded: false }; }, restoreReportState: () => { restorations++; },
         remediationAllData: [], impactAnalysisAllData: [], remediationDetailsAllData: [], devicesByRemediationAllData: [{}], remediationsByDeviceAllData: [],
         cloneFilterState: value => ({ ...value }), filteredData: [{}, {}], buildDashboardValidationSnapshot: () => ({ summaryCards: { high: '2' } }),
         getExportFilterText: () => 'All', isRemediationScopeReport: () => true, getRemediationReportModeSummaryText: () => summary
@@ -133,6 +134,9 @@ function assertCardScopeCapture() {
     assert.strictEqual(restorations, 1);
     visibleSummary = 'A different selected scope';
     assert.throws(capture, /Visible mode summary/); assert.strictEqual(restorations, 2);
+    context.devicesByRemediationAllData = [{}, {}, {}];
+    assert.throws(capture, /before PDF expansion/);
+    assert.strictEqual(expansions, 2, 'A broadened report must fail before expanding its DOM.');
 }
 
 async function run() {
