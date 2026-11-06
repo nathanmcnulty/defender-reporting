@@ -3,8 +3,9 @@
 This is a validation snapshot with open gates. Corrected small Hosted PDFs have
 passed real download, text/table comparison and rendered review. The final
 cache-only performance cohort passed all six cells. Small self-contained PDFs
-also passed real downloads, semantic checks and rendered review. Larger scoped
-checks and this browser lab's Azure cleanup are **PENDING**.
+also passed real downloads, semantic checks and rendered review. The larger
+scoped admin/PDF checks passed. Browser lab Azure resource cleanup was verified
+at 23:18 UTC: the owned resource group and all planned resources are absent.
 
 ## Source and workload boundaries
 
@@ -14,9 +15,11 @@ checks and this browser lab's Azure cleanup are **PENDING**.
 | `373df9e` / [#106](https://github.com/nathanmcnulty/defender-reporting/pull/106) | Atomic export generations, first-export/empty-enrichment corrections, scoped filtering and PDF snapshot fixes. |
 | `5b5dc2f` / [#108](https://github.com/nathanmcnulty/defender-reporting/pull/108) | Corrected PDF card metadata and resolved-vulnerability scope; the corrected product baseline for comparisons. |
 | `ecae168` / [#107](https://github.com/nathanmcnulty/defender-reporting/pull/107) | Candidate confined to cached-row derived refresh. The global date formatter is restored to its prior exact bytes. |
-| `99b4662` | Current harness adds an explicitly labelled scoped-first workflow. Each running cohort retains its own frozen common harness; later source does not rewrite its receipts. |
+| `99b4662` | Harness adds an explicitly labelled scoped-first workflow. Each running cohort retains its own frozen common harness; later source does not rewrite its receipts. |
+| `120614b` | Corrected export-table receipt captures collapsed overflow text; no production code changed. |
 
-Deterministic CI passed for the corrected PDF source, `ecae168` and `99b4662`.
+Deterministic CI passed for the corrected PDF source, `ecae168`, `99b4662` and
+`120614b` (full preflight and Azure package smoke).
 CI does not establish browser measurements or Azure deployment acceptance. The PRs
 remain reviewable work; this report does not close issues or merge changes.
 Intentional demo data and the owner/public-fork publishing work in draft
@@ -39,8 +42,17 @@ public hosting, authentication, WAN transfer or production cold starts.
 | Final cache-only comparison, cohort 03 | Passed all six alternating cells with identical inputs/engine/common harness, unchanged hashes, matching payload/summary/card/count/navigation digests and accepted resource/cleanup receipts. Those digests do not compare every rendered table value; temporal/cache semantic regressions provide separate source-level coverage. |
 | Corrected two-row self-contained PDFs | Passed 24 actual downloads from the executed inline HTML at its file URL, across cold/reload. Exact scope/card/mode text and table rows/order matched receipts. All 13 first-load rendered pages independently reviewed, with the same readable continuation as Hosted. Severity None stayed empty; this fixture could not exercise hidden-group intersections or long tables. Whole outer peak was 1,652,482,048 B; inputs and process cleanup passed. |
 | 19,677-row scoped administrator timing | Passed cold/reload with a 15-source-row selected device, all five representative/empty reports, all three actual modal detail families and device inline cards. Twenty real PDF buffers completed; final download was replaced by getBuffer in this timing lane. Source/report/card digests agreed across loads, scope restored, inputs unchanged, outer peak 1,917,571,072 B and cleanup verified. This does not qualify an initial unfiltered report tour. |
-| Larger scoped admin/PDF | **PENDING.** Requires real downloads, exact scope/table/card/mode comparison, rendered review and cold/reload scoped-workload parity. Long-table acceptance requires an actually captured bounded long table. |
-| Current Azure browser-lab cleanup | **PENDING.** Per-cell process cleanup is distinct from deleting and verifying absence of the VM and its owned paid resources. Recover and hash evidence before final cleanup. |
+| Larger scoped PDFs and filter UI | Passed 26 actual downloads across cold/reload with 19,677 rows loaded. Representative scope was 15 source rows, empty scope zero, and the bounded long-table scope 250 source rows/229 distinct CVEs. All exact filter/card/mode and table row/order checks passed. All 33 final first-load rendered page images are byte-identical to the independently reviewed pages. Real group/platform controls retained the hidden selected group, stayed empty after visible deselection, and revealed only its 15 rows after removing Platform; severity None stayed empty. Outer peak 1,937,772,544 B; input hashes, scope restoration, cold/reload digests and process cleanup passed. |
+| Azure browser-lab cleanup | Verified at 23:18 UTC after recovery/hash verification of all command evidence. The exact owned resource group and all ten planned VM/disk/network/NAT/IP/storage/schedule/deployment resources returned expected resource-not-found responses. The VM was deallocated before deletion. No role or policy changes were performed. The earlier rejected VM attempt was also deleted and its evidence retained. |
+
+The private final evidence archive contains 417 members (52,389,313 bytes),
+SHA-256 `f21093fb4ba63860cefd1ec872aabfe4006f00fe9dab849cd777fc10516716fb`.
+It retains recovered original evidence ZIPs, rendered pages, immutable driver
+archives, source/runtime/input pins, request accounting, failed attempts,
+independent reviews and cleanup proof. Runtime/fixture archives remain separately
+preserved; they were not duplicated into this archive. No private cloud records
+or input payloads are published with this report. Public whitelisted metrics are
+linked below. Issues remain open and PRs remain unmerged for review.
 
 The first prototype cohort completed six valid cells, but it combined cached-row
 work with a global formatter change and had mixed report-switch results. Its
@@ -51,7 +63,10 @@ RunCommand limit; its partial cells are not stitched into cohort 03.
 ### Final measured comparison
 
 Three alternating baseline/candidate pairs compare `5b5dc2f` with `ecae168` on
-the same pinned Chrome 156.0.8078.80 and 19,677-row input. Observed medians:
+the same pinned Chrome 156.0.8078.80 and 19,677-row input. The
+[whitelisted raw metrics and source/engine pins](browser-performance-results-2026-11-06.json)
+allow the medians and mixed results to be reviewed without publishing private
+cloud records. Observed medians:
 
 | Metric | Baseline | Candidate |
 | --- | ---: | ---: |
@@ -112,8 +127,14 @@ remediations for the selected device, matching those PDFs without extra IDs.
 Blank IP labels represent absent addresses and are omitted intentionally. A
 229-row table also produces three page-boundary row fragments: the verifier now
 requires exact column-wise reassembly in order, consuming every fragment and
-rejecting missing, duplicate or extra rows. Original flagged evidence is retained;
-the corrected frozen-harness rerun and complete visual review remain pending.
+rejecting missing, duplicate or extra rows. Original flagged evidence is retained.
+The corrected frozen-harness rerun passed all 26 PDFs; all 33 final rendered
+first-load pages matched the independently reviewed images byte for byte.
+Independent raw-data selection also confirmed the long-table scope's 250 rows,
+229 distinct CVEs and severity counts 23/70/97/60. Page-boundary continuation
+fragments are readable, including the repeated column headers. These checks do
+not qualify arbitrary unbounded PDFs, large self-contained loading or every
+reload page visually; reload content was checked semantically.
 
 ## Reproduction
 
