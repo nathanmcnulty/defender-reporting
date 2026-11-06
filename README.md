@@ -42,6 +42,8 @@ $secret = Read-Host -AsSecureString -Prompt 'Enter client secret'
     -IncludeAdvancedHunting
 ```
 
+The exporter creates the requested output directory before authentication, including on a clean checkout. An empty optional Advanced Hunting query does not discard other enrichment; if all three queries are empty, the prior enrichment store remains unchanged.
+
 2. Generate and validate the default self-contained dashboard.
 
 ```powershell

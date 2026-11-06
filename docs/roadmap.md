@@ -76,6 +76,12 @@ These are options to evaluate after the work above, not selected implementations
 
 ## Keeping this useful
 
+The [November 6 reliability reconciliation](reliability-review-2026-11-06.md)
+starts from main after #105, records the distinct #99–#104 correctness gaps,
+preserves #98's demo/fork-protection ownership, and separates accepted full-scale
+PackageOnly evidence from the remaining #67/#69 import/replay and #92 live gates.
+Its source checks do not close those acceptance gates.
+
 Use issues for concrete work and this document for order and product direction. Link verified review findings as they arrive; do not turn every idea into a promised feature. Update the roadmap when a decision or accepted result changes the next useful step.
 
 Planning snapshot: current main `69e5cfd53e5f1e6c8b762c86cb5b3967b3359e98`, open issues #67/#68/#69/#70/#92, and draft PR #98. The [October import/Dual measurements](import-dual-measurements-2026-10-28.md), [dashboard review](dashboard-performance-review.md), and [test guide](../tests/README.md) provide context with their own evidence limits. Older observations are not current performance guarantees, and this roadmap does not close any issue.

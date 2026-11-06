@@ -9,14 +9,23 @@ async function assertExportLifecycle() {
     for (const report of reports) {
         for (const { expanded, forceFull } of expansionStates) {
             for (const failure of ['preparation', 'libraries', 'confirmation', 'expansion', 'generation',
-                'filters', 'createPdf', 'download', 'download-rejection', 'download-timeout', 'restoration', 'cancel', null]) {
+                'filters', 'snapshot', 'createPdf', 'download', 'download-rejection', 'download-timeout', 'restoration', 'cancel', null]) {
                 if (expanded && failure === 'expansion' && report !== 'devices-by-remediation') continue;
                 const document = createDocumentStub();
                 const button = createStubElement({ textContent: 'Original export label' });
                 const progress = createStubElement({ remove() { this.removed = true; } });
+                const attributes = new Map(forceFull ? [['inert', '']] : []);
+                const listeners = new Map();
+                const main = createStubElement({
+                    getAttribute(name) { return attributes.get(name) ?? null; },
+                    setAttribute(name, value) { attributes.set(name, value); },
+                    removeAttribute(name) { attributes.delete(name); }
+                });
                 const classes = new Set();
-                document.querySelector = () => button;
+                document.querySelector = selector => selector === '.container' ? main : button;
                 document.createElement = () => progress;
+                document.addEventListener = (type, listener) => listeners.set(type, listener);
+                document.removeEventListener = type => listeners.delete(type);
                 document.body.classList = { add(value) { classes.add(value); }, remove(value) { classes.delete(value); } };
                 Object.assign(document.getElementById('reportSelector'), {
                     value: report, selectedIndex: 0, options: [{ text: 'Current Report' }]
@@ -29,6 +38,7 @@ async function assertExportLifecycle() {
                     run(stage) { if (this.failure === stage) throw new Error(`Injected ${stage}`); }
                 };
                 const dashboard = loadDashboardHarness(`
+activeReportId = ${JSON.stringify(report)};
 remediationExpanded = remediationDetailsExpanded = impactAnalysisExpanded = devicesByRemediationExpanded = remediationsByDeviceExpanded = ${expanded};
 forceFullDevicesByRemediationRows = ${forceFull};
 loadPdfLibraries = async () => testHooks.run('libraries');
@@ -42,11 +52,13 @@ restoreReportState = (...args) => {
 };
 renderRemediationTablePage = renderRemediationDetailsTablePage = renderImpactAnalysisTablePage = renderDevicesByRemediationTablePage = renderRemediationsByDeviceTablePage = () => testHooks.run(testHooks.phase);
 exportCardBasedReportToPdf = exportTableBasedReportToPdf = async () => { testHooks.run('generation'); return { content: [] }; };
+capturePdfReportSnapshot = () => { testHooks.run('snapshot'); return {}; };
 getExportFilterText = () => { testHooks.run('filters'); return 'All'; };
 setDashboardStatus = (message, kind) => testHooks.statuses.push({ message, kind });
 clearDashboardStatus = () => testHooks.statuses.push({ message: 'complete' });
 module.exports = {
     exportToPDF,
+    locked: () => pdfExportInProgress,
     state: () => [remediationExpanded, remediationDetailsExpanded, impactAnalysisExpanded,
         devicesByRemediationExpanded, remediationsByDeviceExpanded, forceFullDevicesByRemediationRows]
 };
@@ -86,6 +98,9 @@ module.exports = {
                 assert.strictEqual(button.textContent, 'Original export label');
                 assert.strictEqual(progress.removed, true, `${report}/${failure}: progress must be removed.`);
                 assert.strictEqual(classes.size, 0);
+                assert.strictEqual(dashboard.locked(), false, 'export lock must clear on every exit');
+                assert.strictEqual(attributes.has('inert'), forceFull, 'prior inert state must be preserved');
+                assert.strictEqual(listeners.size, 0, 'capture handlers must be removed on every exit');
                 if (failure && failure !== 'cancel') {
                     assert.ok(hooks.statuses.some(status => status.kind === 'error'), `${failure}: failure must be visible.`);
                 }

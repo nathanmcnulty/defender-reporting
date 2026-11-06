@@ -7,6 +7,7 @@
  * @param {string} range - The range preset (1w, 1m, 3m, 6m, 12m)
  */
 function setDateRange(range) {
+    if (pdfExportInProgress) return;
     filterState = finalizeFilterState(assignDatePreset(cloneFilterState(filterState), range));
     renderFilterPills(filterState);
 }
@@ -20,6 +21,7 @@ function setDateRange(range) {
  * Uses normalized lookups for efficiency instead of iterating all records
  */
 function populateFilters() {
+    if (pdfExportInProgress) return;
     filterState = createDefaultFilterState();
     renderFilterPills(filterState);
 }

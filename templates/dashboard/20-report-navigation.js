@@ -6,6 +6,7 @@
  * Handle report view change from toolbar report controls.
  */
 async function handleReportChange() {
+    if (pdfExportInProgress) return;
     const selector = document.getElementById('reportSelector');
     if (!selector) {
         return;
@@ -29,7 +30,7 @@ async function handleReportChange() {
         }
     }
 
-    if (selector.value !== selectedReport) {
+    if (pdfExportInProgress || selector.value !== selectedReport) {
         return;
     }
 
@@ -79,12 +80,18 @@ function handleReportSelectorPopoverClick(event) {
 }
 
 async function handleExportPdfClick(event) {
+    if (pdfExportInProgress) return;
+    if (document.getElementById('reportSelector')?.value !== activeReportId) {
+        setDashboardStatus('Wait for the selected report to finish loading before exporting PDF.', 'info');
+        return;
+    }
     const button = event && event.currentTarget instanceof HTMLElement
         ? event.currentTarget
         : document.getElementById('exportPdfButton');
     const requiresRuntimeLoad = (dashboardConfig.pdfExportRuntimeMode || 'embedded') === 'external'
         && typeof exportToPDF !== 'function';
     const previousLabel = button ? button.textContent : '';
+    const unlockDashboard = lockDashboardForPdf();
 
     if (button && requiresRuntimeLoad) {
         button.disabled = true;
@@ -106,6 +113,7 @@ async function handleExportPdfClick(event) {
             delete button.dataset.loading;
             button.textContent = previousLabel;
         }
+        unlockDashboard();
     }
 
     await exportToPDF();
@@ -191,6 +199,7 @@ function handleFilterChipClick(event) {
 }
 
 function handleClearAllFilters() {
+    if (pdfExportInProgress) return;
     closeActiveFilterPopover(false);
     filterState = finalizeFilterState(assignDatePreset(createEmptyFilterState(), '1w'));
     scheduleApplyFilters(true);
@@ -367,7 +376,8 @@ function getDraftSelectedCount(filterKey) {
     const hasAny = filterPopoverDraftState?.[config.hasAnyKey];
     if (!hasAny) return 0;
     if (values.length === 0) return activeFilterPopoverOptions.length;
-    return values.length;
+    const selected = new Set(values);
+    return activeFilterPopoverOptions.filter(option => selected.has(option.value)).length;
 }
 
 function isFilterDefaultState(filterKey, state = filterState) {
@@ -588,6 +598,7 @@ function handleFilterPopoverOptionsScroll(event) {
 }
 
 function setAllFilterPopoverOptionsSelected(isSelected) {
+    if (pdfExportInProgress) return;
     if (!activeFilterPopoverKey || activeFilterPopoverKey === 'date' || !filterPopoverDraftState) {
         return;
     }
@@ -603,6 +614,7 @@ function setAllFilterPopoverOptionsSelected(isSelected) {
 }
 
 function toggleFilterPopoverOptionSelection(optionValue, isSelected) {
+    if (pdfExportInProgress) return;
     if (!activeFilterPopoverKey || activeFilterPopoverKey === 'date' || !filterPopoverDraftState) {
         return;
     }
@@ -623,13 +635,10 @@ function toggleFilterPopoverOptionSelection(optionValue, isSelected) {
     if (selectedValues.size === 0) {
         filterPopoverDraftState[config.stateKey] = [];
         filterPopoverDraftState[config.hasAnyKey] = false;
-    } else if (selectedValues.size === activeFilterPopoverOptions.length) {
-        filterPopoverDraftState[config.stateKey] = [];
-        filterPopoverDraftState[config.hasAnyKey] = true;
     } else {
-        filterPopoverDraftState[config.stateKey] = activeFilterPopoverOptions
-            .map(option => option.value)
-            .filter(value => selectedValues.has(value));
+        // Scoped options can hide saved selections. Preserve those selections,
+        // and reserve the All sentinel for the explicit Select All action.
+        filterPopoverDraftState[config.stateKey] = Array.from(selectedValues);
         filterPopoverDraftState[config.hasAnyKey] = true;
     }
 
@@ -849,6 +858,7 @@ function openFilterPopover(filterKey, anchorButton) {
 }
 
 function handleFilterPopoverClick(event) {
+    if (pdfExportInProgress) return;
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
         return;
@@ -882,6 +892,7 @@ function handleFilterPopoverClick(event) {
 }
 
 function handleFilterPopoverInput(event) {
+    if (pdfExportInProgress) return;
     const target = event.target;
     if (!(target instanceof HTMLElement) || !activeFilterPopoverKey) {
         return;
