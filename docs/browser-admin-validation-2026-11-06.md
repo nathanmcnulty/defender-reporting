@@ -45,11 +45,14 @@ public hosting, authentication, WAN transfer or production cold starts.
 | Larger scoped PDFs and filter UI | Passed 26 actual downloads across cold/reload with 19,677 rows loaded. Representative scope was 15 source rows, empty scope zero, and the bounded long-table scope 250 source rows/229 distinct CVEs. All exact filter/card/mode and table row/order checks passed. All 33 final first-load rendered page images are byte-identical to the independently reviewed pages. Real group/platform controls retained the hidden selected group, stayed empty after visible deselection, and revealed only its 15 rows after removing Platform; severity None stayed empty. Outer peak 1,937,772,544 B; input hashes, scope restoration, cold/reload digests and process cleanup passed. |
 | Azure browser-lab cleanup | Verified at 23:18 UTC after recovery/hash verification of all command evidence. The exact owned resource group and all ten planned VM/disk/network/NAT/IP/storage/schedule/deployment resources returned expected resource-not-found responses. The VM was deallocated before deletion. No role or policy changes were performed. The earlier rejected VM attempt was also deleted and its evidence retained. |
 
-The private final evidence archive contains 417 members (52,389,313 bytes),
-SHA-256 `f21093fb4ba63860cefd1ec872aabfe4006f00fe9dab849cd777fc10516716fb`.
+The private final evidence archive (v2) contains 425 members (52,411,409 bytes),
+SHA-256 `bffc090c7d24003350d7cb39cc94c1964b1cb967a8fb81c5338ee3077499b515`.
 It retains recovered original evidence ZIPs, rendered pages, immutable driver
 archives, source/runtime/input pins, request accounting, failed attempts,
-independent reviews and cleanup proof. Runtime/fixture archives remain separately
+independent reviews and cleanup proof. Independent audit verified every member
+and all 36 command recovery receipts against their included source files. This
+version adds five raw diagnostic JSON files omitted from the first internally
+valid archive; that original archive remains preserved. Runtime/fixture archives remain separately
 preserved; they were not duplicated into this archive. No private cloud records
 or input payloads are published with this report. Public whitelisted metrics are
 linked below. Issues remain open and PRs remain unmerged for review.
