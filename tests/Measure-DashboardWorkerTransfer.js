@@ -54,8 +54,8 @@ function safeFailure(error, phase = 'unknown') {
 }
 
 class ResourceGuard {
-    constructor({ inventory, terminate, freeMemory = os.freemem, limits, interval = 1500 }) {
-        Object.assign(this, { inventory, terminate, freeMemory, limits, interval });
+    constructor({ inventory, terminate, freeMemory = os.freemem, limits, interval = 1500, recordSample = () => {} }) {
+        Object.assign(this, { inventory, terminate, freeMemory, limits, interval, recordSample });
         this.trace = [];
         this.peakBytes = 0;
         this.minimumFreeBytes = Infinity;
@@ -101,6 +101,7 @@ class ResourceGuard {
                 this.minimumFreeBytes = Math.min(this.minimumFreeBytes, freeBytes);
                 const validatedAtHostMs = performance.now();
                 this.trace.push({ stage, startedAtHostMs: startedAt, inventoryStartedAtHostMs, inventoryCompletedAtHostMs, validatedAtHostMs, sampledAtHostMs: performance.now(), sampledAtEpochMs: Date.now(), browserFamilyBytes: inventory.bytes, browserFamilyPrivateBytes: inventory.privateBytes ?? null, freeMemoryBytes: freeBytes, ownedProcessCount: inventory.pids.length });
+                this.recordSample(this.trace.at(-1));
                 assert(inventory.bytes <= this.limits.browserFamilyBytes, 'Browser family memory cap exceeded.');
                 assert(freeBytes >= this.limits.freeMemoryBytes, 'Safety memory floor prevents launch or continuation.');
                 this.check();
@@ -442,7 +443,7 @@ async function terminateFamily(state) {
 }
 
 function launchOwnerGuard(state, limits) {
-    return new ResourceGuard({ inventory: () => state.authority.inventory(), terminate: () => terminateFamily(state), limits });
+    return new ResourceGuard({ inventory: () => state.authority.inventory(), terminate: () => terminateFamily(state), limits, recordSample: state.recordSample });
 }
 
 async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit, owned, profile, authority, profileFinalizers, launchBoundMode }, overrides = {}) {
@@ -757,8 +758,9 @@ async function finishHeapSample(run, sample, timeout = 5000) {
     catch { run.incompleteHeapSample = true; }
 }
 
-async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot, evidence, expectedRows, iteration, positiveControl, profileFinalizers }) {
+async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot, evidence, expectedRows, iteration, positiveControl, profileFinalizers, recordSample }) {
     const state = {};
+    if (recordSample) state.recordSample = sample => recordSample({ iteration, ...sample });
     let measurementError;
     try {
         state.profile = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'issue70-edge-')));
@@ -1004,6 +1006,20 @@ async function main() {
         evidence.runtimeBytes = Buffer.byteLength(runtime);
         evidence.assetHashes = { chart: digest(chart), pako: digest(pako), pdfBundle: digest(input.pdfBundle) };
         Object.assign(evidence, payloadIdentity, { summarySha256: input.summary ? digest(input.summary) : null, htmlSha256: digest(html), runtimeSha256: digest(runtime) });
+        let recordSample;
+        if (process.argv.includes('--progress-journal')) {
+            const requestedJournal = path.resolve(outputArgument + '.progress.jsonl');
+            const journal = path.join(fs.realpathSync.native(path.dirname(requestedJournal)), path.basename(requestedJournal));
+            const relative = path.relative(root, journal);
+            assert(relative && (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)), 'Progress journal must be outside retained inputs.');
+            fs.writeFileSync(journal, JSON.stringify({ schema: 'dashboard-progress-v1', status: 'diagnostic-only-not-run-acceptance', htmlSha256: evidence.htmlSha256, payloadSha256: evidence.payloadSha256 }) + '\n', { flag: 'wx' });
+            recordSample = sample => {
+                const line = JSON.stringify(sample) + '\n';
+                assert(fs.statSync(journal).size + Buffer.byteLength(line) <= 2 * 1024 ** 2, 'Progress journal exceeded its size bound.');
+                fs.appendFileSync(journal, line);
+            };
+            evidence.progressJournal = { file: path.basename(journal), scope: 'Partial diagnostic samples survive outer termination; this file never establishes run completion or cleanup.' };
+        }
         const artifactRoot = path.resolve(outputArgument + '.artifacts');
         if (savedArtifacts) {
             assert(!fs.existsSync(outputArgument) && !fs.existsSync(artifactRoot), 'Artifact acceptance requires a fresh evidence destination.');
@@ -1030,7 +1046,7 @@ async function main() {
             const edge = fs.realpathSync.native(selectedBrowser.executable);
             evidence.browserEngine = { engine: selectedBrowser.engine, executable: edge, executableSha256: digest(fs.readFileSync(edge)), qualificationScope: 'Selected installed engine only; other engine acceptance remains separate.' };
             const { chromium } = require(process.env.PLAYWRIGHT_MODULE);
-            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, fileUrl, artifactRoot, evidence, expectedRows, iteration, positiveControl, profileFinalizers });
+            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, fileUrl, artifactRoot, evidence, expectedRows, iteration, positiveControl, profileFinalizers, recordSample });
         }, profileFinalizers);
         evidence.status = 'completed';
     } catch (error) {

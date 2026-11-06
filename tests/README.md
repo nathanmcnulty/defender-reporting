@@ -181,6 +181,13 @@ They exercise exact file URL scope, retained inline identity, operation deadline
 download-event ordering/failure, truncated PDF rejection and invalid receipts;
 they do not launch a browser or establish download/visual acceptance.
 
+Add `--progress-journal` to retain bounded stage/memory samples beside the
+evidence JSON when an outer supervisor terminates the process before its final
+write. Its parent directory must already exist outside the retained product.
+The fresh journal is capped at 2 MiB and contains input fingerprints and
+existing guard samples. It is partial diagnostic evidence, never proof of run
+completion or cleanup. Use the same setting for both sides of a comparison.
+
 Run the isolated two-row Hosted dashboard control, generated from synthetic data without root exports, authentication, or cloud writes:
 
 ```powershell
