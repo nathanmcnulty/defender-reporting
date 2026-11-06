@@ -151,6 +151,7 @@ For local testing of the split-assets build, use a local HTTP server instead of 
 
 | Topic | What it covers |
 |---|---|
+| [Roadmap](docs/roadmap.md) | Product priorities, future work, and the decisions that remain open |
 | [Azure setup](docs/azure-setup.md) | API permissions, authentication options, Azure Automation provisioning, and Container App publishing |
 | [Build guide](build/README.md) | Maintainer-facing build, validation, and packaging entrypoints |
 | [GitHub Actions setup](docs/github-actions-setup.md) | OIDC service principal setup, required repository secrets, and branch protection guidance |
