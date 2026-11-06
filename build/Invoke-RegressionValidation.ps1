@@ -244,6 +244,9 @@ if (Test-LastExitCodeFailed) {
 Write-Output 'Running shared-helper regression tests...'
 & (Join-Path $repoRoot 'tests\Run-SharedHelperRegression.ps1')
 
+Write-Output 'Running store transaction recovery regression tests...'
+& (Join-Path $repoRoot 'tests\Test-StoreTransactionRecovery.ps1')
+
 Write-Output 'Running hosted smoke diagnostics regression tests (no Edge required)...'
 & (Join-Path $repoRoot 'tests\Invoke-HostedSmokeDiagnosticsRegression.ps1')
 
