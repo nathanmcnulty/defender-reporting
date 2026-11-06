@@ -22,13 +22,9 @@ async function exerciseAdmin(page, guard, timeout) {
         const reports = ['active-vulnerabilities', 'impact-analysis', 'remediation-activity', 'devices-by-remediation', 'remediations-by-device'];
         const original = cloneFilterState(filterState);
         const originalReport = activeReportId;
-        const runtimeStart = performance.now();
-        await ensurePdfExportRuntimeLoaded();
-        const pdfRuntimeLoadMs = performance.now() - runtimeStart;
-        const librariesStart = performance.now();
-        await loadPdfLibraries();
-        const pdfLibrariesLoadMs = performance.now() - librariesStart;
-        const originalDownload = downloadPdfDocument;
+        const originalMode = remediationReportMode;
+        let originalDownload;
+        let downloadHookCaptured = false;
         const hadSkipWarning = Object.prototype.hasOwnProperty.call(window, '__skipPdfExportPageWarning');
         const originalSkipWarning = window.__skipPdfExportPageWarning;
         const results = [];
@@ -61,6 +57,14 @@ async function exerciseAdmin(page, guard, timeout) {
             // representative large payload used for loading/filter measurements.
             need(filteredData.length > 0 && filteredData.length <= 250, 'Selected device PDF scope must have 1-250 source rows.');
             const representativeRows = filteredData.length;
+            const runtimeStart = performance.now();
+            await ensurePdfExportRuntimeLoaded();
+            const pdfRuntimeLoadMs = performance.now() - runtimeStart;
+            const librariesStart = performance.now();
+            await loadPdfLibraries();
+            const pdfLibrariesLoadMs = performance.now() - librariesStart;
+            originalDownload = downloadPdfDocument;
+            downloadHookCaptured = true;
             // Same noninteractive synthetic-PDF convention as the shipped PDF
             // workflow; source-row and native memory/time bounds still apply.
             window.__skipPdfExportPageWarning = true;
@@ -114,9 +118,10 @@ async function exerciseAdmin(page, guard, timeout) {
                         scopedFilterMs, pdfPreparationMs: performance.now() - pdfStart, pdf });
                 }
             }
-            return { representativeRows, filterMs, pdfRuntimeLoadMs, pdfLibrariesLoadMs, pdfPageWarningSuppressed: true, reports: results, detailScope: 'All three modal report families when matching data exists; device-report inline detail cost is included in report switching. Missing detail data is labelled explicitly.', pdfScope: 'Real PDF bytes/layout; final user download replaced by getBuffer; no visual/readability or semantic-content proof.' };
+            return { representativeRows, pdfLibrarySourceRows: representativeRows, filterMs, pdfRuntimeLoadMs, pdfLibrariesLoadMs, pdfPageWarningSuppressed: true, reports: results, detailScope: 'All three modal report families when matching data exists; device-report inline detail cost is included in report switching. Missing detail data is labelled explicitly.', pdfScope: 'Real PDF bytes/layout; final user download replaced by getBuffer; no visual/readability or semantic-content proof.' };
         } finally {
-            downloadPdfDocument = originalDownload;
+            if (downloadHookCaptured) downloadPdfDocument = originalDownload;
+            remediationReportMode = originalMode;
             if (hadSkipWarning) window.__skipPdfExportPageWarning = originalSkipWarning;
             else delete window.__skipPdfExportPageWarning;
             closeModal();
@@ -136,6 +141,7 @@ async function exerciseAdmin(page, guard, timeout) {
 function assertAdminExercise(result) {
     const reports = ['active-vulnerabilities', 'impact-analysis', 'remediation-activity', 'devices-by-remediation', 'remediations-by-device'];
     assert(result && Number.isSafeInteger(result.representativeRows) && result.representativeRows > 0 && result.representativeRows <= 250);
+    assert.strictEqual(result.pdfLibrarySourceRows, result.representativeRows, 'PDF library loading must follow the admitted representative scope.');
     assert.strictEqual(result.reports.length, 10);
     for (const row of result.reports) {
         assert(['representative', 'empty'].includes(row.scope));

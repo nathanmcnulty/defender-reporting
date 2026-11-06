@@ -35,6 +35,15 @@ function expectedDownloadNames(reportLabel, interval) {
     return dates.map(day => `Vulnerability_Dashboard_${reportLabel.replace(/\s+/g, '_')}_${day}.pdf`);
 }
 
+async function loadScopedPdfRuntime() {
+    if (!filteredData.length || filteredData.length > 250) throw new Error('PDF runtime preparation requires the selected 1-250 row scope.');
+    const sourceRows = filteredData.length;
+    await ensurePdfExportRuntimeLoaded();
+    // Library loading belongs to the real Export PDF button, after this scope
+    // has been selected. Only expansion/scope-capture helpers are needed here.
+    return sourceRows;
+}
+
 async function captureRealDownload(page, trigger, filename, wait, reportLabel) {
     // Register the event before the real exporter can start a download.
     const pending = page.waitForEvent('download', { timeout: 120000 });
@@ -91,6 +100,7 @@ function captureReportScope() {
 function assertArtifactAcceptance(result) {
     assert(result && result.restored === true && result.status === 'captured', 'Artifact acceptance did not restore scope.');
     assert(Number.isSafeInteger(result.representativeRows) && result.representativeRows > 0 && result.representativeRows <= 250);
+    assert.strictEqual(result.runtimePreloadSourceRows, result.representativeRows, 'PDF runtime must be prepared after selecting the bounded scope.');
     assertUiExercise(result.uiExercise);
     assert(result.reports.length === 12 || result.reports.length === 13);
     const pairs = new Set();
@@ -139,7 +149,6 @@ async function exerciseSavedArtifacts(page, guard, timeout, directory) {
         await wait(page.setViewportSize({ width: 1440, height: 1000 }));
         await wait(page.evaluate(async () => {
             if (window.__savedArtifactSession) throw new Error('Artifact scope is already owned.');
-            await ensurePdfExportRuntimeLoaded(); await loadPdfLibraries();
             if (!filteredData.length) throw new Error('Set a fixture date range with matching rows before artifact acceptance.');
             const state = cloneFilterState(filterState);
             const counts = new Map();
@@ -177,6 +186,8 @@ async function exerciseSavedArtifacts(page, guard, timeout, directory) {
             }
             return null;
         };
+        await apply('representative', 'active-vulnerabilities');
+        result.runtimePreloadSourceRows = await wait(page.evaluate(loadScopedPdfRuntime));
         const capture = async (scope, report) => {
             const modeAction = await apply(scope, report);
             const before = await wait(page.evaluate(captureReportScope));
@@ -239,4 +250,4 @@ async function exerciseSavedArtifacts(page, guard, timeout, directory) {
     return result;
 }
 
-module.exports = { exerciseSavedArtifacts, assertArtifactAcceptance, captureRealDownload, withDeadline, fileReceipt, captureReportScope, expectedDownloadNames };
+module.exports = { exerciseSavedArtifacts, assertArtifactAcceptance, captureRealDownload, withDeadline, fileReceipt, captureReportScope, expectedDownloadNames, loadScopedPdfRuntime };

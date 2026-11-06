@@ -7,7 +7,7 @@ const vm = require('vm');
 const { pathToFileURL } = require('url');
 const { isAllowedDashboardRequest: allowed } = require('./helpers/offline-request-policy');
 const { readDashboardInput } = require('./helpers/dashboard-artifact-input');
-const { captureRealDownload, withDeadline, assertArtifactAcceptance, fileReceipt, expectedDownloadNames, captureReportScope } = require('./helpers/dashboard-artifact-acceptance');
+const { captureRealDownload, withDeadline, assertArtifactAcceptance, fileReceipt, expectedDownloadNames, captureReportScope, loadScopedPdfRuntime } = require('./helpers/dashboard-artifact-acceptance');
 const { planFacetUi, selectReportWithUi, selectRemediationModeWithUi, setFacetWithUi, clickExportWithUi, assertFacetSelection, assertUiExercise } = require('./helpers/dashboard-ui-exercise');
 
 async function assertUiControls() {
@@ -138,6 +138,16 @@ function assertCardScopeCapture() {
 async function run() {
     const uiExercise = await assertUiControls();
     assertCardScopeCapture();
+    let runtimeCalls = 0;
+    const scopedRuntimeContext = { filteredData: [{}], ensurePdfExportRuntimeLoaded: async () => { runtimeCalls++; } };
+    const prepareScopedRuntime = () => vm.runInNewContext(`(${loadScopedPdfRuntime.toString()})()`, scopedRuntimeContext);
+    assert.strictEqual(await prepareScopedRuntime(), 1);
+    assert.strictEqual(runtimeCalls, 1, 'Only the runtime is loaded; no PDF library function is supplied by this control.');
+    for (const size of [0, 251]) {
+        scopedRuntimeContext.filteredData = new Array(size);
+        await assert.rejects(prepareScopedRuntime(), /selected 1-250/);
+        assert.strictEqual(runtimeCalls, 1, 'An unadmitted scope must not load the runtime.');
+    }
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-artifact-control-'));
     try {
         const file = pathToFileURL(path.join(root, 'VulnerabilityDashboard.html')).href;
@@ -224,7 +234,7 @@ async function run() {
                     pdf: { ...fileEvidence, suggestedFilename: `Vulnerability_Dashboard_${report}_2026-11-06.pdf`, exportUtcDayBefore: interval.utcDayBefore, exportUtcDayAfter: interval.utcDayAfter },
                     screenshot: fileEvidence, receipt: fileEvidence };
         };
-        const result = { status: 'captured', restored: true, representativeRows: 2, uiExercise,
+        const result = { status: 'captured', restored: true, representativeRows: 2, runtimePreloadSourceRows: 2, uiExercise,
             reports: ['representative', 'empty'].flatMap(scope => reports.map(report => makeReport(scope, report)))
                 .concat(['devices-by-remediation', 'remediations-by-device'].map(report => makeReport('representative-range', report))) };
         assertArtifactAcceptance(result);

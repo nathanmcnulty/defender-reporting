@@ -125,6 +125,10 @@ Detail dialogs are opened through the actual delegated table-row click handlers.
 Missing matching rows are labelled explicitly rather than assigned a latency.
 The two device reports show details inline; that cost is included in report
 switching and is not reported again as a separate dialog-opening measurement.
+The representative filter must settle and pass the existing row cap before PDF
+runtime/library loading starts; their separate timings record that selected
+scope. Runtime/library failures still restore the original filter, report, mode
+and warning state without assuming a download hook was loaded.
 
 For genuine self-contained acceptance, add `--self-contained --generated-runtime`
 and supply a directory containing `VulnerabilityDashboard.html`. The harness
@@ -155,6 +159,9 @@ Platform, Patch and legacy Update references. Device receipts include the exact
 UI mode summary and resolved-inclusion label; mode-button transitions are
 recorded separately from already-selected controls. Compare all these fields
 against actual PDF text; matching receipts alone do not establish PDF parity.
+The saved-artifact lane prepares the PDF runtime only after the selected device
+scope passes the same row cap. PDF libraries load through the actual Export PDF
+button; there is no eager unfiltered library preload in this lane.
 One additional Active Vulnerabilities PDF is captured only when a selected
 subset of at most 250 source rows actually yields more than 100 grouped report
 rows. Unavailable long-table coverage is labelled; no row or resource bound is
