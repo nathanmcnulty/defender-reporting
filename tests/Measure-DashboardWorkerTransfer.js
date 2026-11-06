@@ -1502,7 +1502,7 @@ async function measurementControlProbes() {
     assert.strictEqual(reportReady('active-vulnerabilities'), false, 'Deferred render must finish before a switch is timed.');
     readiness.busy = false; readiness.active = false;
     assert.strictEqual(reportReady('active-vulnerabilities'), false);
-    const admin = { representativeRows: 2, reports: ['representative', 'empty'].flatMap(scope => REPORTS.map(report => {
+    const admin = { representativeRows: 2, pdfLibrarySourceRows: 2, reports: ['representative', 'empty'].flatMap(scope => REPORTS.map(report => {
         const modal = scope === 'representative' && ['active-vulnerabilities', 'impact-analysis', 'remediation-activity'].includes(report);
         return { scope, report, sourceRows: scope === 'empty' ? 0 : 2, switchMs: 1,
             detailKind: scope === 'empty' ? 'empty-scope' : modal ? 'modal' : 'inline-card',
@@ -1510,6 +1510,69 @@ async function measurementControlProbes() {
             pdf: { bytes: 101, sha256: 'a'.repeat(64) } };
     })) };
     assertAdminExercise(admin);
+    // Execute the actual serialized page helper with a modeled page boundary;
+    // this proves workflow ordering/restoration, not browser or PDF acceptance.
+    for (const fault of [null, 'runtime', 'libraries', 'oversize']) {
+        const events = [];
+        const failure = new Error('Synthetic preparation failure');
+        const originalDownload = async () => {};
+        const originalState = { deviceNames: [], hasDeviceNames: true, severities: [], hasSeverities: true };
+        const source = fault === 'oversize' ? Array.from({ length: 251 }, () => ({ id: 'a' })) : [{ id: 'a' }, { id: 'a' }, { id: 'b' }];
+        let clock = 0;
+        const context = {
+            filterState: structuredClone(originalState), filteredData: source, activeReportId: 'active-vulnerabilities', remediationReportMode: 'snapshot',
+            initializedReports: new Set(REPORTS), dirtyReports: new Set(), window: fault === 'libraries' ? { __skipPdfExportPageWarning: false } : {},
+            cloneFilterState: state => structuredClone(state), finalizeFilterState: state => state,
+            getDeviceNameFilterValue: row => row.id, performance: { now: () => ++clock },
+            requestAnimationFrame: callback => queueMicrotask(callback), setTimeout, clearTimeout,
+            crypto: crypto.webcrypto, pdfExportInProgress: false, closeModal() {},
+            document: { getElementById: id => ({
+                classList: { contains: () => id === context.activeReportId + '-section' },
+                getAttribute: () => null, querySelector: () => null
+            }) },
+            applyFilters() {
+                context.filteredData = !context.filterState.hasSeverities ? [] : source.filter(row => !context.filterState.deviceNames.length || context.filterState.deviceNames.includes(row.id));
+                events.push('apply:' + context.filteredData.length);
+            },
+            selectReportById: report => { context.activeReportId = report; },
+            async ensurePdfExportRuntimeLoaded() {
+                events.push('runtime:' + context.filteredData.length);
+                assert(context.filteredData.length > 0 && context.filteredData.length <= 250);
+                context.remediationReportMode = 'range'; // Failure cleanup must restore the saved mode too.
+                if (fault === 'runtime') throw failure;
+                context.downloadPdfDocument = originalDownload;
+            },
+            async loadPdfLibraries() {
+                events.push('libraries:' + context.filteredData.length);
+                assert(context.filteredData.length > 0 && context.filteredData.length <= 250);
+                if (fault === 'libraries') throw failure;
+            },
+            async exportToPDF() {
+                await context.downloadPdfDocument({ getBuffer: done => done(Buffer.from('%PDF-synthetic\n' + 'x'.repeat(110) + '\n%%EOF')) });
+            }
+        };
+        const operation = exerciseAdmin({ evaluate: script => require('vm').runInNewContext(script, context) }, { wait: promise => promise }, 1000);
+        if (fault === 'oversize') await assert.rejects(operation, /1-250/);
+        else if (fault) await assert.rejects(operation, error => error === failure);
+        else {
+            const result = await operation;
+            assertAdminExercise(result);
+            assert.strictEqual(result.pdfLibrarySourceRows, 2);
+        }
+        assert.deepStrictEqual(context.filterState, originalState);
+        assert.strictEqual(context.activeReportId, 'active-vulnerabilities');
+        assert.strictEqual(context.remediationReportMode, 'snapshot');
+        assert.strictEqual(Object.hasOwn(context.window, '__skipPdfExportPageWarning'), fault === 'libraries');
+        if (fault === 'libraries') assert.strictEqual(context.window.__skipPdfExportPageWarning, false);
+        assert.strictEqual(context.downloadPdfDocument, fault === 'runtime' || fault === 'oversize' ? undefined : originalDownload);
+        if (fault === 'oversize') assert(!events.some(event => event.startsWith('runtime:') || event.startsWith('libraries:')));
+        else {
+            assert.strictEqual(events[0], 'apply:2');
+            assert.strictEqual(events[1], 'runtime:2');
+            if (fault !== 'runtime') assert.strictEqual(events[2], 'libraries:2');
+        }
+    }
+    console.log('PASS serialized admin scope-before-runtime/library ordering, unchanged row cap and restoration on unavailable runtime/library failure');
     const invalidAdmin = structuredClone(admin); invalidAdmin.reports[5].sourceRows = 1;
     assert.throws(() => assertAdminExercise(invalidAdmin));
     const duplicateAdmin = structuredClone(admin); duplicateAdmin.reports[1] = duplicateAdmin.reports[0];
