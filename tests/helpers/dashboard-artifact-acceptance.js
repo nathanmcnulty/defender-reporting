@@ -2,7 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { selectReportWithUi, setFacetWithUi, exerciseFacetUi, clickExportWithUi, assertUiExercise } = require('./dashboard-ui-exercise');
+const { selectReportWithUi, selectRemediationModeWithUi, setFacetWithUi, exerciseFacetUi, clickExportWithUi, assertUiExercise } = require('./dashboard-ui-exercise');
 
 const REPORTS = ['active-vulnerabilities', 'impact-analysis', 'remediation-activity', 'devices-by-remediation', 'remediations-by-device'];
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -66,12 +66,22 @@ function captureReportScope() {
             'devices-by-remediation': devicesByRemediationAllData.length,
             'remediations-by-device': remediationsByDeviceAllData.length
         };
+        const cardDetails = Array.from(section.querySelectorAll('.remediation-card')).map(card => ({
+            title: card.querySelector('.remediation-card-header h3')?.innerText.trim() || '',
+            metadata: Array.from(card.querySelectorAll('.cve-details .stat-badge')).map(badge => badge.innerText.trim()).filter(Boolean),
+            statBadges: Array.from(card.querySelectorAll('.stat-badge')).map(badge => badge.innerText.trim()).filter(Boolean)
+        }));
+        const modeSummary = isRemediationScopeReport(report) ? getRemediationReportModeSummaryText(filterState) : null;
+        if (modeSummary !== null && document.getElementById('remediationModeSummary').innerText.trim() !== modeSummary) {
+            throw new Error('Visible mode summary differs from the selected report scope.');
+        }
         return {
             report, reportLabel: document.getElementById('reportSelector').selectedOptions[0].text,
             filter: JSON.parse(JSON.stringify(cloneFilterState(filterState))), mode: remediationReportMode,
             sourceRows: filteredData.length, reportRows: counts[report], cards: buildDashboardValidationSnapshot().summaryCards,
             appliedFilters: ['filterRbacGroup', 'filterDeviceTags', 'filterDeviceName', 'filterOSPlatform', 'filterSeverity'].map(id => ({ id, text: getExportFilterText(id, 'All') })),
-            expandedText: text, tables,
+            expandedText: text, tables, cardDetails, modeSummary,
+            includeResolvedText: modeSummary === null ? null : remediationReportMode === REMEDIATION_REPORT_MODE_RANGE ? 'Yes' : 'No',
             pdfExcludedText: Array.from(section.querySelectorAll('.pdf-exclude')).map(element => element.innerText),
             expansion: previous
         };
@@ -82,20 +92,41 @@ function assertArtifactAcceptance(result) {
     assert(result && result.restored === true && result.status === 'captured', 'Artifact acceptance did not restore scope.');
     assert(Number.isSafeInteger(result.representativeRows) && result.representativeRows > 0 && result.representativeRows <= 250);
     assertUiExercise(result.uiExercise);
-    assert(result.reports.length === 10 || result.reports.length === 11);
+    assert(result.reports.length === 12 || result.reports.length === 13);
     const pairs = new Set();
     for (const row of result.reports) {
-        assert(REPORTS.includes(row.report) && ['representative', 'empty', 'long-table'].includes(row.scope));
+        assert(REPORTS.includes(row.report) && ['representative', 'empty', 'representative-range', 'long-table'].includes(row.scope));
         assert(!pairs.has(`${row.scope}/${row.report}`)); pairs.add(`${row.scope}/${row.report}`);
         assert.strictEqual(row.before.report, row.report);
         assert.deepStrictEqual(row.after, row.before, 'Saved PDF changed report/filter/expanded DOM scope.');
-        assert.strictEqual(row.before.sourceRows, row.scope === 'empty' ? 0 : row.scope === 'representative' ? result.representativeRows : result.longTable.sourceRows);
+        assert.strictEqual(row.before.sourceRows, row.scope === 'empty' ? 0 : row.scope === 'long-table' ? result.longTable.sourceRows : result.representativeRows);
         assert(row.before.sourceRows <= 250 && row.before.expandedText.length <= 500000);
+        const deviceReport = ['devices-by-remediation', 'remediations-by-device'].includes(row.report);
+        assert(Array.isArray(row.before.cardDetails));
+        assert.strictEqual(row.before.cardDetails.length, deviceReport ? row.before.reportRows : 0);
+        for (const card of row.before.cardDetails) {
+            assert(typeof card.title === 'string' && card.title.length > 0);
+            for (const badges of [card.metadata, card.statBadges]) assert(Array.isArray(badges) && badges.every(value => typeof value === 'string' && value.length > 0));
+        }
+        if (deviceReport) {
+            assert.strictEqual(row.before.mode, row.scope === 'representative-range' ? 'range' : 'snapshot');
+            assert.strictEqual(row.before.includeResolvedText, row.before.mode === 'range' ? 'Yes' : 'No');
+            assert(typeof row.before.modeSummary === 'string' && row.before.modeSummary.length > 0);
+            assert(row.modeAction && row.modeAction.mode === row.before.mode && row.modeAction.path === 'shared-toolbar-button'
+                && ['clicked', 'already-selected'].includes(row.modeAction.action));
+        } else {
+            assert.strictEqual(row.before.modeSummary, null);
+            assert.strictEqual(row.before.includeResolvedText, null);
+            assert.strictEqual(row.modeAction, null);
+        }
+        if (row.scope === 'representative-range') assert(deviceReport, 'Range coverage belongs to the device report families.');
         for (const file of [row.pdf, row.screenshot, row.receipt]) assert(file && file.bytes > 0 && /^[a-f0-9]{64}$/.test(file.sha256));
         assert(expectedDownloadNames(row.before.reportLabel, { utcDayBefore: row.pdf.exportUtcDayBefore, utcDayAfter: row.pdf.exportUtcDayAfter }).includes(row.pdf.suggestedFilename), 'Saved PDF filename identity differs from its scope receipt.');
         if (row.scope === 'long-table') assert(row.report === 'active-vulnerabilities' && row.before.reportRows > 100, 'Long-table receipt must exceed the normal page size.');
     }
     for (const scope of ['representative', 'empty']) for (const report of REPORTS) assert(pairs.has(`${scope}/${report}`));
+    for (const report of ['devices-by-remediation', 'remediations-by-device']) assert(pairs.has(`representative-range/${report}`));
+    assert(result.reports.some(row => row.scope === 'representative-range' && row.modeAction.action === 'clicked'), 'Range coverage must exercise an actual mode-button transition.');
 }
 
 async function exerciseSavedArtifacts(page, guard, timeout, directory) {
@@ -141,9 +172,13 @@ async function exerciseSavedArtifacts(page, guard, timeout, directory) {
             }
             await setFacetWithUi(page, wait, timeout, 'filterSeverity', scope === 'empty' ? { values: [], hasAny: false } : selections.severity);
             await selectReportWithUi(page, wait, timeout, report);
+            if (['devices-by-remediation', 'remediations-by-device'].includes(report)) {
+                return selectRemediationModeWithUi(page, wait, timeout, report, scope === 'representative-range' ? 'range' : 'snapshot');
+            }
+            return null;
         };
         const capture = async (scope, report) => {
-            await apply(scope, report);
+            const modeAction = await apply(scope, report);
             const before = await wait(page.evaluate(captureReportScope));
             assert(before.sourceRows <= 250 && (scope !== 'empty' || before.sourceRows === 0), 'Artifact scope broadened beyond its bound.');
             if (scope === 'representative') result.representativeRows ||= before.sourceRows;
@@ -158,11 +193,12 @@ async function exerciseSavedArtifacts(page, guard, timeout, directory) {
             const after = await wait(page.evaluate(captureReportScope));
             assert.deepStrictEqual(after, before, 'Real PDF download changed the selected scope.');
             const receiptFile = path.join(directory, stem + '.json');
-            const receiptBytes = Buffer.from(JSON.stringify({ status: 'captured-pending-run-completion', scope, report, before, after, pdf, screenshot }, null, 2));
+            const receiptBytes = Buffer.from(JSON.stringify({ status: 'captured-pending-run-completion', scope, report, modeAction, before, after, pdf, screenshot }, null, 2));
             fs.writeFileSync(receiptFile, receiptBytes, { flag: 'wx' });
-            result.reports.push({ scope, report, before, after, pdf, screenshot, receipt: { file: path.basename(receiptFile), bytes: receiptBytes.length, sha256: sha256(receiptBytes) } });
+            result.reports.push({ scope, report, modeAction, before, after, pdf, screenshot, receipt: { file: path.basename(receiptFile), bytes: receiptBytes.length, sha256: sha256(receiptBytes) } });
         };
         for (const scope of ['representative', 'empty']) for (const report of REPORTS) await capture(scope, report);
+        for (const report of ['devices-by-remediation', 'remediations-by-device']) await capture('representative-range', report);
         // Try one known device subset that fits the same source-row bound and
         // exceeds TABLE_PAGE_SIZE. No larger dataset or bound is substituted.
         const longCandidate = await wait(page.evaluate(() => {
