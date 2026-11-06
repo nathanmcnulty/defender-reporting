@@ -291,17 +291,16 @@ async function exportCardBasedReportToPdf(selectedReport, reportName, snapshot =
         // Extract CVE details or device info
         const cveDetails = card.querySelector('.cve-details');
         let deviceInfo = {};
-        let publishedDate = '';
-        let updateInfo = '';
+        const metadataParts = [];
         
         if (cveDetails) {
             const statBadges = cveDetails.querySelectorAll('.stat-badge');
             statBadges.forEach(badge => {
                 const text = badge.textContent.trim();
-                if (text.startsWith('Published:')) {
-                    publishedDate = text.replace('Published:', '').trim();
-                } else if (text.startsWith('Update:')) {
-                    updateInfo = text.replace('Update:', '').trim();
+                if (['Platform:', 'Published:', 'Patch:', 'Update:'].some(prefix => text.startsWith(prefix))) {
+                    // Preserve every visible patch/reference badge, including
+                    // older Update labels and cards with multiple references.
+                    metadataParts.push(text);
                 } else if (text.startsWith('IP:')) {
                     deviceInfo.ip = text.replace('IP:', '').trim();
                 } else if (text.startsWith('Group:')) {
@@ -390,34 +389,19 @@ async function exportCardBasedReportToPdf(selectedReport, reportName, snapshot =
             margin: [0, i > 0 ? 12 : 0, 0, 4]
         });
         
-        // Device info (for remediations by device) or CVE details (for devices by remediation)
-        if (deviceInfo.ip) {
-            const deviceInfoParts = [];
-            if (deviceInfo.ip) deviceInfoParts.push(`IP: ${deviceInfo.ip}`);
-            if (deviceInfo.group) deviceInfoParts.push(`Group: ${deviceInfo.group}`);
-            if (deviceInfo.tags) deviceInfoParts.push(`Tags: ${deviceInfo.tags}`);
-            
-            if (deviceInfoParts.length > 0) {
-                cardContent.push({
-                    text: deviceInfoParts.join('  |  '),
-                    fontSize: 9,
-                    color: '#666666',
-                    margin: [0, 0, 0, 3]
-                });
-            }
-        } else {
-            // CVE details line for devices by remediation
-            const detailsParts = [];
-            if (publishedDate) detailsParts.push(`Published: ${publishedDate}`);
-            if (updateInfo) detailsParts.push(`Update: ${updateInfo}`);
-            if (detailsParts.length > 0) {
-                cardContent.push({
-                    text: detailsParts.join('  |  '),
-                    fontSize: 9,
-                    color: '#666666',
-                    margin: [0, 0, 0, 3]
-                });
-            }
+        // Keep metadata for either card family, including device cards that
+        // also expose platform or patch/reference badges.
+        const detailsParts = metadataParts.slice();
+        if (deviceInfo.ip) detailsParts.push(`IP: ${deviceInfo.ip}`);
+        if (deviceInfo.group) detailsParts.push(`Group: ${deviceInfo.group}`);
+        if (deviceInfo.tags) detailsParts.push(`Tags: ${deviceInfo.tags}`);
+        if (detailsParts.length > 0) {
+            cardContent.push({
+                text: detailsParts.join('  |  '),
+                fontSize: 9,
+                color: '#666666',
+                margin: [0, 0, 0, 3]
+            });
         }
         
         // Stats line - ONLY show counts, no severities
@@ -887,6 +871,9 @@ async function exportToPDF() {
         const deviceNamesText = getExportFilterText('filterDeviceName', 'All Devices');
         const osPlatformsText = getExportFilterText('filterOSPlatform', 'All Platforms');
         const severitiesText = getExportFilterText('filterSeverity', 'All Severities');
+        const capturedRemediationMode = remediationReportMode;
+        const remediationModeSummary = isRemediationScopeReport(selectedReport)
+            ? getRemediationReportModeSummaryText(filterState) : null;
         await loadPdfLibraries();
         updateProgress(20, 'Libraries loaded.');
 
@@ -954,6 +941,21 @@ async function exportToPDF() {
             });
         }
         
+        if (remediationModeSummary !== null) {
+            filterContent.push({
+                text: [
+                    { text: 'Include resolved vulnerabilities: ', bold: true },
+                    { text: capturedRemediationMode === REMEDIATION_REPORT_MODE_RANGE ? 'Yes' : 'No' }
+                ],
+                margin: [0, 2, 0, 2],
+                fontSize: 10
+            }, {
+                text: remediationModeSummary,
+                margin: [0, 2, 0, 2],
+                fontSize: 10
+            });
+        }
+
         filterContent.push({
             text: [
                 { text: 'Groups: ', bold: true },
