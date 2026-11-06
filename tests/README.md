@@ -106,6 +106,22 @@ Owned termination orders descendants before their roots and requires fresh proce
 
 ## Hosted smoke diagnostics
 
+The worker-transfer harness can also exercise the admin flow in its existing
+owned browser. Set `DASHBOARD_BROWSER_ENGINE=chrome` for the installed Chrome
+engine; the default remains Edge and a missing selected engine fails without
+fallback. Engine executable SHA-256 and actual version are recorded. Use
+`--generated-runtime` to measure the exact newly generated hosted runtime and
+optional chunks, rather than the default source overlay.
+
+Add `--admin-exercise` to measure filter completion, all five report switches,
+Active Vulnerabilities detail, PDF runtime/library loading and real PDF
+preparation for representative and empty scopes. This uses one selected device
+with at most 250 source rows for bounded PDFs while loading/filtering the full
+input. It checks ten real PDF buffers and restores the original scope. It does
+not establish visual readability, all detail-view latency or the final OS
+download. Normal native ownership, resource, admission and outer-supervision
+requirements still apply; do not run this option as an unguarded stress test.
+
 Run the isolated two-row Hosted dashboard control, generated from synthetic data without root exports, authentication, or cloud writes:
 
 ```powershell

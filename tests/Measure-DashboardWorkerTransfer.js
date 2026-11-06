@@ -11,6 +11,7 @@ const { execFile, spawn, spawnSync } = require('child_process');
 const { performance } = require('perf_hooks');
 const { LaunchBoundClient } = require('./helpers/launch-bound-owner');
 const { loadDashboardSource, loadDashboardHarness } = require('./helpers/dashboard-test-harness');
+const { exerciseAdmin, assertAdminExercise, getPdfBuffer } = require('./helpers/dashboard-admin-exercise');
 
 function safeInventoryDiagnostic(value = {}) {
     const categories = ['timeout', 'aborted', 'execution', 'response', 'InvalidOperation', 'InvalidArgument', 'InvalidData', 'OperationStopped', 'WriteError', 'ObjectNotFound', 'PermissionDenied', 'SecurityError', 'ResourceUnavailable', 'NotSpecified'];
@@ -549,6 +550,26 @@ async function withServer(server, evidence, operation, profileFinalizers = []) {
 const REPORTS = ['active-vulnerabilities', 'impact-analysis', 'remediation-activity', 'devices-by-remediation', 'remediations-by-device'];
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 
+// Browser choice changes only the installed executable. Both engines use the
+// same launch-bound native owner, all-image containment and resource limits.
+function selectInstalledBrowser(environment = process.env, exists = fs.existsSync) {
+    const engine = environment.DASHBOARD_BROWSER_ENGINE || 'edge';
+    assert(['edge', 'chrome'].includes(engine), 'Unsupported browser engine.');
+    const relative = engine === 'chrome' ? 'Google/Chrome/Application/chrome.exe' : 'Microsoft/Edge/Application/msedge.exe';
+    const candidates = [environment['ProgramFiles(x86)'], environment.ProgramFiles, environment.LOCALAPPDATA]
+        .filter(Boolean).map(base => path.join(base, relative));
+    const executable = candidates.find(candidate => exists(candidate));
+    assert(executable, 'Requested installed browser is unavailable.');
+    return { engine, executable };
+}
+
+function isReportReady(reportId) {
+    return activeReportId === reportId
+        && document.getElementById(reportId + '-section')?.classList.contains('active')
+        && initializedReports.has(reportId) && !dirtyReports.has(reportId)
+        && document.getElementById(reportId + '-section')?.getAttribute('aria-busy') !== 'true';
+}
+
 async function fingerprintPayload(filename) {
     const compressedHash = crypto.createHash('sha256');
     const decompressedHash = crypto.createHash('sha256');
@@ -754,6 +775,9 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
         const connection = chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 15000 });
         connection.then(browser => { state.browser = browser; }, () => {});
         state.browser = await state.guard.wait(connection);
+        const browserVersion = state.browser.version();
+        if (evidence.browserEngine.version) assert.strictEqual(browserVersion, evidence.browserEngine.version, 'Browser version changed between iterations.');
+        evidence.browserEngine.version = browserVersion;
         const context = state.browser.contexts()[0];
         state.page = context.pages()[0];
         state.cdp = await state.guard.wait(context.newCDPSession(state.page));
@@ -828,9 +852,12 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
                 assert(Number.isFinite(run.ttiBrowserMs), 'Missing browser readiness timestamp.');
                 run.stage = 'reports';
                 state.guard.stage = `${load}:reports`;
+                run.reportSwitches = [];
                 for (const report of REPORTS.slice(1).concat(REPORTS[0])) {
+                    const switchStarted = performance.now();
                     await state.guard.wait(state.page.evaluate(reportId => selectReportById(reportId), report));
-                    await state.guard.wait(state.page.waitForFunction(reportId => dashboardMetrics.reports[reportId]?.count > 0, report, { timeout: evidence.limits.readinessWallMs }));
+                    await state.guard.wait(state.page.waitForFunction(isReportReady, report, { timeout: evidence.limits.readinessWallMs }));
+                    run.reportSwitches.push({ report, completedHostWallMs: performance.now() - switchStarted });
                 }
                 const reports = await state.guard.wait(state.page.evaluate(() => ({
                     reportIds: Object.keys(getDashboardMetricsSnapshot().reports).sort(), impactRows: impactAnalysisAllData.length,
@@ -857,6 +884,11 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
                         await state.guard.wait(new Promise(resolve => setTimeout(resolve, 100)));
                     } while (performance.now() < deadline);
                 } else run.cacheEntries = { count: 0, matchingRows: 0 };
+                if (evidence.adminExerciseEnabled) {
+                    state.guard.stage = `${load}:admin-exercise`;
+                    run.adminExercise = await exerciseAdmin(state.page, state.guard, evidence.limits.readinessWallMs);
+                    assertAdminExercise(run.adminExercise);
+                }
                 clearInterval(heapTimer);
                 await state.guard.wait(finishHeapSample(run, heapSample));
                 await completeRun(run, state.guard, () => assertRun(run, expectedRows, first));
@@ -909,7 +941,7 @@ async function main() {
     assert(Number.isSafeInteger(repeats) && repeats > 0 && repeats <= 10, 'Repeats must be between 1 and 10.');
     assert(!positiveControl || expectedRows === 2, 'Positive control requires two expected rows.');
     const evidence = {
-        schemaVersion: 2, expectedRows,
+        schemaVersion: 2, expectedRows, adminExerciseEnabled: process.argv.includes('--admin-exercise'),
         limits: { browserFamilyBytes: 2 * 1024 ** 3, freeMemoryBytes: 3 * 1024 ** 3, readinessWallMs: 120000, inventoryTimeoutMs: 5000, terminationTimeoutMs: 15000 },
         heapScope: 'CDP JSHeapUsedSize is main-renderer only; sampled family working set and private memory include owned workers and descendants. Observational CDP probes are single-flight and may stall with the renderer; independent resource inventory remains bounded and fail-closed.',
         timingScope: 'ttiBrowserMs is first dashboard-ready performance.now from navigation timeOrigin, not a true interaction latency; readinessObservedHostWallMs includes host polling; snapshotBrowserMs is later.',
@@ -930,7 +962,12 @@ async function main() {
         const payloadIdentity = await fingerprintPayload(resolveAsset(config.payloadUrl));
         const summary = fs.readFileSync(resolveAsset(config.payloadSummaryUrl));
         phase = 'assets';
-        const runtime = loadDashboardSource().dashboardSource;
+        const generatedRuntime = process.argv.includes('--generated-runtime');
+        const runtimeUrl = generatedRuntime ? html.match(/<script\s+src="([^"]*\/runtime\/dashboard\.js)"/)?.[1] : null;
+        assert(!generatedRuntime || runtimeUrl, 'Generated runtime URL is required.');
+        const runtime = generatedRuntime ? fs.readFileSync(resolveAsset(runtimeUrl), 'utf8') : loadDashboardSource().dashboardSource;
+        evidence.runtimeMode = generatedRuntime ? 'generated-hosted-assets' : 'current-source-overlay';
+        evidence.runtimeBytes = Buffer.byteLength(runtime);
         const chart = fs.readFileSync(resolveAsset(config.chartJsUrl), 'utf8');
         const pakoUrl = html.match(/<script\s+src="([^"]*\/runtime\/pako\.js)"/)[1];
         const pako = fs.readFileSync(resolveAsset(pakoUrl), 'utf8');
@@ -954,9 +991,9 @@ async function main() {
         phase = 'browser';
         const profileFinalizers = [];
         await withServer(server, evidence, async origin => {
-            const candidates = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA].filter(Boolean).map(base => path.join(base, 'Microsoft/Edge/Application/msedge.exe'));
-            const edge = candidates.find(candidate => fs.existsSync(candidate));
-            assert(edge, 'Microsoft Edge is required.');
+            const selectedBrowser = selectInstalledBrowser();
+            const edge = fs.realpathSync.native(selectedBrowser.executable);
+            evidence.browserEngine = { engine: selectedBrowser.engine, executable: edge, executableSha256: digest(fs.readFileSync(edge)), qualificationScope: 'Selected installed engine only; other engine acceptance remains separate.' };
             const { chromium } = require(process.env.PLAYWRIGHT_MODULE);
             for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl, profileFinalizers });
         }, profileFinalizers);
@@ -1318,7 +1355,61 @@ async function privacyProbes() {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 
+async function measurementControlProbes() {
+    const installed = { ProgramFiles: 'C:/Installed' };
+    const edgeChoice = selectInstalledBrowser(installed, candidate => candidate.endsWith('msedge.exe'));
+    assert.strictEqual(edgeChoice.engine, 'edge');
+    const chromeChoice = selectInstalledBrowser({ ...installed, DASHBOARD_BROWSER_ENGINE: 'chrome' }, candidate => candidate.endsWith('chrome.exe'));
+    assert.strictEqual(chromeChoice.engine, 'chrome');
+    assert.throws(() => selectInstalledBrowser({ ...installed, DASHBOARD_BROWSER_ENGINE: 'chrome' }, candidate => candidate.endsWith('msedge.exe')), /unavailable/);
+    assert.throws(() => selectInstalledBrowser({ ...installed, DASHBOARD_BROWSER_ENGINE: 'custom' }, () => true), /Unsupported/);
+    console.log('PASS installed engine choice, missing Chrome fails without Edge fallback, unknown engine rejected');
+    const readiness = { activeReportId: 'active-vulnerabilities', initializedReports: new Set(['active-vulnerabilities']), dirtyReports: new Set(), busy: false, active: true };
+    readiness.document = { getElementById: () => ({ classList: { contains: () => readiness.active }, getAttribute: () => readiness.busy ? 'true' : null }) };
+    const reportReady = require('vm').runInNewContext(`(${isReportReady.toString()})`, readiness);
+    assert.strictEqual(reportReady('active-vulnerabilities'), true);
+    readiness.dirtyReports.add('active-vulnerabilities');
+    assert.strictEqual(reportReady('active-vulnerabilities'), false, 'Old render must not satisfy a dirty report switch.');
+    readiness.dirtyReports.clear(); readiness.busy = true;
+    assert.strictEqual(reportReady('active-vulnerabilities'), false, 'Deferred render must finish before a switch is timed.');
+    readiness.busy = false; readiness.active = false;
+    assert.strictEqual(reportReady('active-vulnerabilities'), false);
+    const admin = { representativeRows: 2, reports: ['representative', 'empty'].flatMap(scope => REPORTS.map(report => ({ scope, report, sourceRows: scope === 'empty' ? 0 : 2, switchMs: 1, scopedFilterMs: 1, pdfPreparationMs: 1, pdf: { bytes: 101, sha256: 'a'.repeat(64) } }))) };
+    assertAdminExercise(admin);
+    const invalidAdmin = structuredClone(admin); invalidAdmin.reports[5].sourceRows = 1;
+    assert.throws(() => assertAdminExercise(invalidAdmin));
+    const duplicateAdmin = structuredClone(admin); duplicateAdmin.reports[1] = duplicateAdmin.reports[0];
+    assert.throws(() => assertAdminExercise(duplicateAdmin));
+    console.log('PASS actual switch readiness rejects stale/dirty/deferred/inactive sections and admin evidence rejects broadened empty/duplicate reports');
+    const timers = new Map();
+    let timerId = 0;
+    const boundedBuffer = require('vm').runInNewContext(`(${getPdfBuffer.toString()})`, {
+        setTimeout(callback) { timers.set(++timerId, callback); return timerId; },
+        clearTimeout(id) { timers.delete(id); }
+    });
+    let callback;
+    const success = boundedBuffer({ getBuffer(resolve) { callback = resolve; } }, 25);
+    assert.strictEqual(timers.size, 1);
+    const bytes = Buffer.from('%PDF-synthetic');
+    callback(bytes);
+    assert.strictEqual(await success, bytes);
+    assert.strictEqual(timers.size, 0, 'Successful PDF callback must clear its timer.');
+    await assert.rejects(boundedBuffer({ getBuffer() { throw new Error('Synthetic layout failure'); } }, 25), /Synthetic layout failure/);
+    assert.strictEqual(timers.size, 0, 'Synchronous PDF failure must clear its timer.');
+    await assert.rejects(boundedBuffer({ getBuffer() { return Promise.reject(new Error('Synthetic asynchronous failure')); } }, 25), /Synthetic asynchronous failure/);
+    assert.strictEqual(timers.size, 0, 'Asynchronous PDF failure must clear its timer.');
+    const timeout = boundedBuffer({ getBuffer() {} }, 25);
+    assert.strictEqual(timers.size, 1);
+    timers.values().next().value();
+    await assert.rejects(timeout, /callback did not complete/);
+    assert.strictEqual(timers.size, 0, 'Expired PDF deadline must clear its timer.');
+    for (const invalid of [0, -1, NaN, 120001]) await assert.rejects(boundedBuffer({ getBuffer() {} }, invalid), /Invalid PDF callback deadline/);
+    assert.strictEqual(timers.size, 0);
+    console.log('PASS serialized PDF buffer wrapper handles success, synchronous/asynchronous failure and missing callbacks with no pending deadline timer');
+}
+
 async function mockProbes() {
+    await measurementControlProbes();
     const runtime = loadDashboardHarness('module.exports = { computeCompressedFingerprint };');
     const bytes = new Uint8Array([1, 2, 3]);
     const actualKey = await runtime.computeCompressedFingerprint(bytes);
@@ -1493,5 +1584,5 @@ async function mockProbes() {
     console.log('PASS bounded owned-root termination and already-exited race');
 }
 
-module.exports = { mockProbes, ownershipProbes, privacyProbes, inventoryProbes, safeFailure };
+module.exports = { mockProbes, ownershipProbes, privacyProbes, inventoryProbes, safeFailure, measurementControlProbes };
 if (require.main === module) (process.argv.includes('--privacy') ? privacyProbes() : process.argv.includes('--ownership') ? ownershipProbes() : process.argv.includes('--mock') ? mockProbes() : main()).catch(error => { console.error(JSON.stringify({ status: 'blocked-or-failed', failure: safeFailure(error, process.argv.includes('--mock') || process.argv.includes('--ownership') || process.argv.includes('--privacy') ? 'preflight' : 'arguments') })); process.exitCode = 1; });
