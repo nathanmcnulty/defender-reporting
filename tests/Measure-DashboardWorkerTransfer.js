@@ -5,13 +5,16 @@ const http = require('http');
 const os = require('os');
 const crypto = require('crypto');
 const zlib = require('zlib');
-const { Writable } = require('stream');
+const { Readable, Writable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { execFile, spawn, spawnSync } = require('child_process');
 const { performance } = require('perf_hooks');
 const { LaunchBoundClient } = require('./helpers/launch-bound-owner');
 const { loadDashboardSource, loadDashboardHarness } = require('./helpers/dashboard-test-harness');
 const { exerciseAdmin, assertAdminExercise, getPdfBuffer } = require('./helpers/dashboard-admin-exercise');
+const { isAllowedDashboardRequest } = require('./helpers/offline-request-policy');
+const { readDashboardInput } = require('./helpers/dashboard-artifact-input');
+const { exerciseSavedArtifacts, assertArtifactAcceptance } = require('./helpers/dashboard-artifact-acceptance');
 
 function safeInventoryDiagnostic(value = {}) {
     const categories = ['timeout', 'aborted', 'execution', 'response', 'InvalidOperation', 'InvalidArgument', 'InvalidData', 'OperationStopped', 'WriteError', 'ObjectNotFound', 'PermissionDenied', 'SecurityError', 'ResourceUnavailable', 'NotSpecified'];
@@ -575,7 +578,7 @@ async function fingerprintPayload(filename) {
     const decompressedHash = crypto.createHash('sha256');
     let payloadBytes = 0;
     let decompressedBytes = 0;
-    const input = fs.createReadStream(filename);
+    const input = Buffer.isBuffer(filename) ? Readable.from([filename]) : fs.createReadStream(filename);
     input.on('data', chunk => { payloadBytes += chunk.length; compressedHash.update(chunk); });
     await pipeline(input, zlib.createGunzip(), new Writable({
         write(chunk, encoding, callback) {
@@ -754,7 +757,7 @@ async function finishHeapSample(run, sample, timeout = 5000) {
     catch { run.incompleteHeapSample = true; }
 }
 
-async function measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl, profileFinalizers }) {
+async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot, evidence, expectedRows, iteration, positiveControl, profileFinalizers }) {
     const state = {};
     let measurementError;
     try {
@@ -772,7 +775,12 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
         state.guard.start();
         const portFile = path.join(state.profile, 'DevToolsActivePort');
         const port = await readDevToolsPort(portFile, state.guard);
-        const connection = chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 15000 });
+        const connectionOptions = { timeout: 15000 };
+        if (evidence.savedArtifactsEnabled) {
+            connectionOptions.artifactsDir = path.join(artifactRoot, `native-downloads-${iteration}`);
+            fs.mkdirSync(connectionOptions.artifactsDir);
+        }
+        const connection = chromium.connectOverCDP(`http://127.0.0.1:${port}`, connectionOptions);
         connection.then(browser => { state.browser = browser; }, () => {});
         state.browser = await state.guard.wait(connection);
         const browserVersion = state.browser.version();
@@ -782,7 +790,10 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
         state.page = context.pages()[0];
         state.cdp = await state.guard.wait(context.newCDPSession(state.page));
         await state.guard.wait(state.cdp.send('Performance.enable'));
-        await state.guard.wait(context.route('**/*', route => route.request().url().startsWith(origin + '/') ? route.continue() : route.abort()));
+        if (evidence.savedArtifactsEnabled) {
+            await state.guard.wait(state.page.setViewportSize({ width: 1440, height: 1000 }));
+        }
+        await state.guard.wait(context.route('**/*', route => isAllowedDashboardRequest(route.request().url(), origin, fileUrl) ? route.continue() : route.abort()));
         await state.guard.wait(context.addInitScript(installInstrumentation));
         let first;
         for (const load of ['first', 'reload']) {
@@ -791,7 +802,7 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
             state.guard.stage = `${load}:navigation`;
             const traceStart = state.guard.trace.length;
             const onError = () => { run.pageErrors++; };
-            const onRequest = request => { if (!request.url().startsWith(origin + '/')) run.externalRequests++; };
+            const onRequest = request => { if (!isAllowedDashboardRequest(request.url(), origin, fileUrl)) run.externalRequests++; };
             const onFailure = () => { run.failedResources++; };
             const onResponse = response => { if (response.status() >= 400) run.failedResponses++; };
             state.page.on('pageerror', onError);
@@ -818,7 +829,10 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
             try {
                 run.navigationStartedAtHostMs = performance.now();
                 run.navigationStartedAtEpochMs = Date.now();
-                const navigation = load === 'first' ? state.page.goto(origin + '/', { waitUntil: 'domcontentloaded', timeout: evidence.limits.readinessWallMs }) : state.page.reload({ waitUntil: 'domcontentloaded', timeout: evidence.limits.readinessWallMs });
+                const navigationTarget = load === 'first' ? fileUrl || origin + '/' : state.page.url();
+                assert(isAllowedDashboardRequest(navigationTarget, origin, fileUrl), 'Navigation escaped its retained product.');
+                run.navigationPolicy = fileUrl ? 'exact-self-contained-file-with-optional-single-view' : 'same-hosted-origin';
+                const navigation = load === 'first' ? state.page.goto(navigationTarget, { waitUntil: 'domcontentloaded', timeout: evidence.limits.readinessWallMs }) : state.page.reload({ waitUntil: 'domcontentloaded', timeout: evidence.limits.readinessWallMs });
                 await state.guard.wait(navigation);
                 run.stage = 'readiness';
                 state.guard.stage = `${load}:readiness`;
@@ -826,6 +840,16 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
                 run.initialization = await state.guard.wait(state.page.evaluate(() => window.__issue70.initialization));
                 assert(!run.initialization.some(record => record.name === 'init' && record.status === 'failed'), 'Dashboard initialization failed; inspect sanitized function frames.');
                 run.readinessObservedHostWallMs = performance.now() - run.navigationStartedAtHostMs;
+                if (evidence.fixedDateRange && !positiveControl) {
+                    const [start, end] = evidence.fixedDateRange.split('/');
+                    await state.guard.wait(state.page.locator('#filterPillDate').click());
+                    await state.guard.wait(state.page.locator('#filterPopoverStartDate').fill(start));
+                    await state.guard.wait(state.page.locator('#filterPopoverEndDate').fill(end));
+                    await state.guard.wait(state.page.locator('#filterPopoverApplyButton').click());
+                    await state.guard.wait(state.page.waitForFunction(({ start, end }) => filterState.startDate === start && filterState.endDate === end
+                        && initializedReports.has(activeReportId) && !dirtyReports.has(activeReportId)
+                        && document.getElementById(activeReportId + '-section').getAttribute('aria-busy') !== 'true', { start, end }, { timeout: evidence.limits.readinessWallMs }));
+                }
                 if (positiveControl) {
                     const controlRange = await state.guard.wait(state.page.evaluate(() => filterState.startDate === '2026-01-01' && filterState.endDate === '2026-01-02'));
                     if (!controlRange) {
@@ -889,6 +913,12 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
                     run.adminExercise = await exerciseAdmin(state.page, state.guard, evidence.limits.readinessWallMs);
                     assertAdminExercise(run.adminExercise);
                 }
+                if (evidence.savedArtifactsEnabled) {
+                    state.guard.stage = `${load}:saved-artifacts`;
+                    run.savedArtifacts = await exerciseSavedArtifacts(state.page, state.guard, evidence.limits.readinessWallMs,
+                        path.join(artifactRoot, `iteration-${iteration}-${load}`));
+                    assertArtifactAcceptance(run.savedArtifacts);
+                }
                 clearInterval(heapTimer);
                 await state.guard.wait(finishHeapSample(run, heapSample));
                 await completeRun(run, state.guard, () => assertRun(run, expectedRows, first));
@@ -937,11 +967,24 @@ async function main() {
     const expectedRows = Number(expectedArgument);
     const repeats = Number(repeatsArgument);
     const positiveControl = process.argv.includes('--positive-control');
+    const selfContained = process.argv.includes('--self-contained');
+    const savedArtifacts = process.argv.includes('--saved-artifacts');
+    assert(!savedArtifacts || !process.argv.includes('--admin-exercise'), 'Saved-artifact acceptance is separate from getBuffer timing.');
+    assert(!savedArtifacts || process.argv.includes('--generated-runtime'), 'Saved artifacts require the actual generated product runtime.');
+    const dateArguments = process.argv.filter(value => value.startsWith('--date-range='));
+    assert(dateArguments.length <= 1, 'Only one fixture date range may be supplied.');
+    const fixedDateRange = dateArguments[0]?.slice('--date-range='.length) || null;
+    if (fixedDateRange) {
+        assert(/^\d{4}-\d{2}-\d{2}\/\d{4}-\d{2}-\d{2}$/.test(fixedDateRange), 'Invalid fixed date range.');
+        const [start, end] = fixedDateRange.split('/');
+        for (const value of [start, end]) assert(new Date(value).toISOString().slice(0, 10) === value, 'Invalid fixed calendar date.');
+        assert(start <= end && (!positiveControl || fixedDateRange === '2026-01-01/2026-01-02'), 'Date range conflicts with fixture control.');
+    }
     assert(Number.isSafeInteger(expectedRows) && expectedRows > 0, 'Explicit expected rows are required; use 2 for the committed control fixture.');
     assert(Number.isSafeInteger(repeats) && repeats > 0 && repeats <= 10, 'Repeats must be between 1 and 10.');
     assert(!positiveControl || expectedRows === 2, 'Positive control requires two expected rows.');
     const evidence = {
-        schemaVersion: 2, expectedRows, adminExerciseEnabled: process.argv.includes('--admin-exercise'),
+        schemaVersion: 3, expectedRows, deliveryMode: selfContained ? 'self-contained-file' : 'hosted-http', savedArtifactsEnabled: savedArtifacts, fixedDateRange, adminExerciseEnabled: process.argv.includes('--admin-exercise'),
         limits: { browserFamilyBytes: 2 * 1024 ** 3, freeMemoryBytes: 3 * 1024 ** 3, readinessWallMs: 120000, inventoryTimeoutMs: 5000, terminationTimeoutMs: 15000 },
         heapScope: 'CDP JSHeapUsedSize is main-renderer only; sampled family working set and private memory include owned workers and descendants. Observational CDP probes are single-flight and may stall with the renderer; independent resource inventory remains bounded and fail-closed.',
         timingScope: 'ttiBrowserMs is first dashboard-ready performance.now from navigation timeOrigin, not a true interaction latency; readinessObservedHostWallMs includes host polling; snapshotBrowserMs is later.',
@@ -951,30 +994,22 @@ async function main() {
     try {
         phase = 'provenance';
         const root = fs.realpathSync(rootArgument);
-        const htmlName = 'VulnerabilityDashboard.Hosted.html';
-        const html = fs.readFileSync(path.join(root, htmlName), 'utf8');
-        const config = JSON.parse(html.match(/<script id="dashboardConfig"[^>]*>([\s\S]*?)<\/script>/)[1]);
-        const resolveAsset = relative => {
-            const filename = path.resolve(root, relative);
-            assert(filename.startsWith(root + path.sep), 'Asset outside retained dashboard root.');
-            return filename;
-        };
-        const payloadIdentity = await fingerprintPayload(resolveAsset(config.payloadUrl));
-        const summary = fs.readFileSync(resolveAsset(config.payloadSummaryUrl));
+        const input = readDashboardInput(root, selfContained, process.argv.includes('--generated-runtime'), () => loadDashboardSource().dashboardSource);
+        const { htmlName, html, fileUrl, resolveAsset, runtime, chart, pako } = input;
+        const payloadIdentity = await fingerprintPayload(input.payload);
         phase = 'assets';
-        const generatedRuntime = process.argv.includes('--generated-runtime');
-        const runtimeUrl = generatedRuntime ? html.match(/<script\s+src="([^"]*\/runtime\/dashboard\.js)"/)?.[1] : null;
-        assert(!generatedRuntime || runtimeUrl, 'Generated runtime URL is required.');
-        const runtime = generatedRuntime ? fs.readFileSync(resolveAsset(runtimeUrl), 'utf8') : loadDashboardSource().dashboardSource;
-        evidence.runtimeMode = generatedRuntime ? 'generated-hosted-assets' : 'current-source-overlay';
-        evidence.runtimeBytes = Buffer.byteLength(runtime);
-        const chart = fs.readFileSync(resolveAsset(config.chartJsUrl), 'utf8');
-        const pakoUrl = html.match(/<script\s+src="([^"]*\/runtime\/pako\.js)"/)[1];
-        const pako = fs.readFileSync(resolveAsset(pakoUrl), 'utf8');
         assertRuntimeAsset(chart, 'Chart.js');
         assertRuntimeAsset(pako, 'pako');
-        evidence.assetHashes = { chart: digest(chart), pako: digest(pako) };
-        Object.assign(evidence, payloadIdentity, { summarySha256: digest(summary), htmlSha256: digest(html), runtimeSha256: digest(runtime) });
+        evidence.runtimeMode = input.runtimeMode;
+        evidence.runtimeBytes = Buffer.byteLength(runtime);
+        evidence.assetHashes = { chart: digest(chart), pako: digest(pako), pdfBundle: digest(input.pdfBundle) };
+        Object.assign(evidence, payloadIdentity, { summarySha256: input.summary ? digest(input.summary) : null, htmlSha256: digest(html), runtimeSha256: digest(runtime) });
+        const artifactRoot = path.resolve(outputArgument + '.artifacts');
+        if (savedArtifacts) {
+            assert(!fs.existsSync(outputArgument) && !fs.existsSync(artifactRoot), 'Artifact acceptance requires a fresh evidence destination.');
+            assert(!artifactRoot.startsWith(root + path.sep) && !root.startsWith(artifactRoot + path.sep), 'Evidence must be outside the retained product.');
+            fs.mkdirSync(artifactRoot, { recursive: true });
+        }
         const server = http.createServer((request, response) => {
             try {
                 const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
@@ -995,7 +1030,7 @@ async function main() {
             const edge = fs.realpathSync.native(selectedBrowser.executable);
             evidence.browserEngine = { engine: selectedBrowser.engine, executable: edge, executableSha256: digest(fs.readFileSync(edge)), qualificationScope: 'Selected installed engine only; other engine acceptance remains separate.' };
             const { chromium } = require(process.env.PLAYWRIGHT_MODULE);
-            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl, profileFinalizers });
+            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, fileUrl, artifactRoot, evidence, expectedRows, iteration, positiveControl, profileFinalizers });
         }, profileFinalizers);
         evidence.status = 'completed';
     } catch (error) {
@@ -1356,6 +1391,7 @@ async function privacyProbes() {
 }
 
 async function measurementControlProbes() {
+    await require('./Assert-DashboardArtifactAcceptance').run();
     const installed = { ProgramFiles: 'C:/Installed' };
     const edgeChoice = selectInstalledBrowser(installed, candidate => candidate.endsWith('msedge.exe'));
     assert.strictEqual(edgeChoice.engine, 'edge');
