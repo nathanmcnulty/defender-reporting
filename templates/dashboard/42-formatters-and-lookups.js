@@ -15,7 +15,6 @@ function formatExploitLevel(level) {
  */
 function formatDateYMD(dateStr) {
     if (!dateStr) return '-';
-    if (typeof dateStr === 'string' && dateStr.length === 10 && /^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
     // Strip time portion from ISO or space-separated timestamps
     const datePart = dateStr.split(/[T ]/)[0];
     // If already YYYY-MM-DD, return as-is
