@@ -8,8 +8,87 @@ const { pathToFileURL } = require('url');
 const { isAllowedDashboardRequest: allowed } = require('./helpers/offline-request-policy');
 const { readDashboardInput } = require('./helpers/dashboard-artifact-input');
 const { captureRealDownload, withDeadline, assertArtifactAcceptance, fileReceipt, expectedDownloadNames } = require('./helpers/dashboard-artifact-acceptance');
+const { planFacetUi, selectReportWithUi, setFacetWithUi, clickExportWithUi, assertFacetSelection, assertUiExercise } = require('./helpers/dashboard-ui-exercise');
+
+async function assertUiControls() {
+    const calls = [];
+    let state = { values: ['Low'], hasAny: true, rows: 2 };
+    let draft;
+    const page = {
+        locator(selector) {
+            return {
+                async click() {
+                    if (selector === '#filterPopoverResetButton') {
+                        assert(!(draft.hasAny && draft.values.length === 0), 'A default facet has a disabled Reset button.');
+                        draft = { values: [], hasAny: true };
+                    }
+                    calls.push(selector + ':click');
+                    if (selector === '#filterPillSeverity') draft = structuredClone(state);
+                    if (selector === '#filterPopoverApplyButton') state = { ...draft, rows: draft.hasAny ? 2 : 0 };
+                },
+                async check() { calls.push(selector + ':check'); draft = { values: [], hasAny: true }; },
+                async uncheck() { calls.push(selector + ':uncheck'); draft = { values: [], hasAny: false }; },
+                async count() { return 0; }, async isEnabled() {
+                    if (selector === '#filterPopoverResetButton') return !(draft.hasAny && draft.values.length === 0);
+                    if (selector === '#filterPopoverApplyButton') return draft.hasAny !== state.hasAny || JSON.stringify(draft.values) !== JSON.stringify(state.values);
+                    return true;
+                },
+                async evaluateAll() { return ['High', 'Low']; },
+                nth(index) { return { async check() { calls.push('option:' + index); draft = { values: [['High', 'Low'][index]], hasAny: true }; } }; }
+            };
+        },
+        async evaluate(callback, argument) {
+            assert(!String(callback).includes('exportToPDF('), 'The UI lane must not invoke the export API directly.');
+            return argument === 'filterSeverity' ? structuredClone(state) : '2026-11-06';
+        },
+        async waitForFunction() { calls.push('ready'); }
+    };
+    const wait = operation => operation;
+    await setFacetWithUi(page, wait, 1000, 'filterSeverity', { values: ['High'], hasAny: true });
+    assert.deepStrictEqual(state, { values: ['High'], hasAny: true, rows: 2 });
+    await setFacetWithUi(page, wait, 1000, 'filterSeverity', { values: [], hasAny: false });
+    assert.strictEqual(state.rows, 0);
+    await setFacetWithUi(page, wait, 1000, 'filterSeverity', { values: [], hasAny: true });
+    const resetClicks = calls.filter(call => call === '#filterPopoverResetButton:click').length;
+    await setFacetWithUi(page, wait, 1000, 'filterSeverity', { values: [], hasAny: true });
+    assert.strictEqual(calls.filter(call => call === '#filterPopoverResetButton:click').length, resetClicks);
+    assert(calls.includes('#filterPopoverCancelButton:click'), 'An unchanged All selection closes through Cancel.');
+    await selectReportWithUi(page, wait, 1000, 'impact-analysis');
+    const interval = await clickExportWithUi(page, wait, 1000, { report: 'impact-analysis', reportLabel: 'Impact Analysis' });
+    assert.strictEqual(interval.utcDayBefore, '2026-11-06');
+    assert(calls.includes('#reportSelectorButton:click') && calls.includes('#reportSelectorOptions button[data-report-id="impact-analysis"]:click'));
+    assert(calls.includes('#exportPdfButton:click') && calls.includes('option:0'));
+    assert.throws(() => assertFacetSelection({ values: [], hasAny: true, rows: 2 }, { values: ['High'], hasAny: true }), /broadened/);
+    assert.throws(() => assertFacetSelection({ values: [], hasAny: false, rows: 2 }, { values: [], hasAny: false }), /empty/);
+    const ui = { status: 'exercised', path: 'locator-facet-click-check-apply', selectedFacet: 'filterSeverity', deselectionRows: 0, hiddenSelection: { status: 'unavailable-fixture-intersection' } };
+    assertUiExercise(ui);
+    assert.throws(() => assertUiExercise({ ...ui, deselectionRows: 1 }));
+    const hiddenUi = { ...ui, hiddenSelection: { status: 'exercised', deviceSubsetCount: 2, selectedGroupsAfter: ['Group A'], scopedRows: 0, reopenedRows: 1 } };
+    assertUiExercise(hiddenUi);
+    assert.throws(() => assertUiExercise({ ...hiddenUi, hiddenSelection: { ...hiddenUi.hiddenSelection, deviceSubsetCount: 1 } }));
+    const plan = rows => vm.runInNewContext(`(${planFacetUi.toString()})()`, {
+        filterState: {}, cloneFilterState: value => ({ ...value }), finalizeFilterState: value => value,
+        getScopedFilterOptions: () => [{ value: 'High' }], matchesFilterState: () => true,
+        getDeviceNameFilterValue: row => row.id, vulnerabilityData: rows
+    });
+    const row = (id, group, platform) => ({ id, _normalizedGroup: group, OSPlatform: platform });
+    // Both full groups span both OSes: only a subset of existing devices can
+    // expose the hidden-selection case, without changing any fixture bytes.
+    const fixture = [row('a-win', 'A', 'Windows'), row('a-linux', 'A', 'Linux'), row('b-win', 'B', 'Windows'), row('b-linux', 'B', 'Linux')];
+    const subset = plan(fixture).hidden;
+    assert.strictEqual(subset.devices.length, 2);
+    const chosen = subset.devices.map(id => fixture.find(row => row.id === id));
+    assert.notStrictEqual(chosen[0]._normalizedGroup, chosen[1]._normalizedGroup);
+    assert.notStrictEqual(chosen[0].OSPlatform, chosen[1].OSPlatform);
+    assert.strictEqual(plan([fixture[0]]).hidden, null, 'One-device control must label the intersection unavailable.');
+    assert.strictEqual(plan([row('mixed', 'A', 'Windows'), row('mixed', 'A', 'Linux'), row('other', 'B', 'Windows'), row('other', 'B', 'Linux')]).hidden, null,
+        'A changing device cannot be treated as a stable OS subset.');
+    await assert.rejects(selectReportWithUi(page, wait, 1000, 'unknown'), /Unknown/);
+    return ui;
+}
 
 async function run() {
+    const uiExercise = await assertUiControls();
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-artifact-control-'));
     try {
         const file = pathToFileURL(path.join(root, 'VulnerabilityDashboard.html')).href;
@@ -83,7 +162,7 @@ async function run() {
         assert.throws(() => fileReceipt(path.join(root, 'bad.pdf'), 'pdf'), /Incomplete/);
         const reports = ['active-vulnerabilities', 'impact-analysis', 'remediation-activity', 'devices-by-remediation', 'remediations-by-device'];
         const fileEvidence = { bytes: 150, sha256: 'a'.repeat(64) };
-        const result = { status: 'captured', restored: true, representativeRows: 2,
+        const result = { status: 'captured', restored: true, representativeRows: 2, uiExercise,
             reports: ['representative', 'empty'].flatMap(scope => reports.map(report => {
                 const before = { report, reportLabel: report, sourceRows: scope === 'empty' ? 0 : 2, expandedText: 'Synthetic exact report text', filter: { key: scope }, reportRows: scope === 'empty' ? 0 : 2 };
                 return { scope, report, before, after: structuredClone(before),

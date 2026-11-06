@@ -2,6 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { selectReportWithUi, setFacetWithUi, exerciseFacetUi, clickExportWithUi, assertUiExercise } = require('./dashboard-ui-exercise');
 
 const REPORTS = ['active-vulnerabilities', 'impact-analysis', 'remediation-activity', 'devices-by-remediation', 'remediations-by-device'];
 const sha256 = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
@@ -80,6 +81,7 @@ function captureReportScope() {
 function assertArtifactAcceptance(result) {
     assert(result && result.restored === true && result.status === 'captured', 'Artifact acceptance did not restore scope.');
     assert(Number.isSafeInteger(result.representativeRows) && result.representativeRows > 0 && result.representativeRows <= 250);
+    assertUiExercise(result.uiExercise);
     assert(result.reports.length === 10 || result.reports.length === 11);
     const pairs = new Set();
     for (const row of result.reports) {
@@ -122,16 +124,23 @@ async function exerciseSavedArtifacts(page, guard, timeout, directory) {
             window.__skipPdfExportPageWarning = true;
         }));
         started = true;
+        result.uiExercise = await exerciseFacetUi(page, wait, timeout);
         const apply = async (scope, report) => {
-            await wait(page.evaluate(({ scope, report }) => {
+            const selections = await wait(page.evaluate(scope => {
                 const session = window.__savedArtifactSession;
                 const state = scope === 'long-table' ? session.longTable : session.representative;
-                filterState = finalizeFilterState(scope === 'empty' ? { ...state, severities: [], hasSeverities: false } : cloneFilterState(state));
-                applyFilters(); selectReportById(report);
-            }, { scope, report }));
-            await wait(page.waitForFunction(report => activeReportId === report && initializedReports.has(report) && !dirtyReports.has(report)
-                && document.getElementById(report + '-section').classList.contains('active')
-                && document.getElementById(report + '-section').getAttribute('aria-busy') !== 'true', report, { timeout }));
+                return { device: { values: state.deviceNames, hasAny: state.hasDeviceNames },
+                    severity: { values: state.severities, hasAny: state.hasSeverities },
+                    currentDevice: { values: filterState.deviceNames, hasAny: filterState.hasDeviceNames } };
+            }, scope));
+            if (JSON.stringify(selections.device) !== JSON.stringify(selections.currentDevice)) {
+                // A None severity scope offers no device options; restore its
+                // fixture severity through the UI before choosing other devices.
+                await setFacetWithUi(page, wait, timeout, 'filterSeverity', selections.severity);
+                await setFacetWithUi(page, wait, timeout, 'filterDeviceName', selections.device);
+            }
+            await setFacetWithUi(page, wait, timeout, 'filterSeverity', scope === 'empty' ? { values: [], hasAny: false } : selections.severity);
+            await selectReportWithUi(page, wait, timeout, report);
         };
         const capture = async (scope, report) => {
             await apply(scope, report);
@@ -142,13 +151,9 @@ async function exerciseSavedArtifacts(page, guard, timeout, directory) {
             const imageFile = path.join(directory, stem + '.png');
             await wait(page.screenshot({ path: imageFile, fullPage: false }));
             const screenshot = fileReceipt(imageFile, 'png');
-            const pdf = await captureRealDownload(page, () => page.evaluate(async expected => {
-                const selector = document.getElementById('reportSelector');
-                if (activeReportId !== expected.report || selector.selectedOptions[0].text !== expected.reportLabel) throw new Error('Report changed before the actual download trigger.');
-                const utcDayBefore = new Date().toISOString().slice(0, 10);
-                await exportToPDF();
-                return { utcDayBefore, utcDayAfter: new Date().toISOString().slice(0, 10) };
-            }, { report, reportLabel: before.reportLabel }), path.join(directory, stem + '.pdf'), wait, before.reportLabel);
+            const pdf = await captureRealDownload(page,
+                () => clickExportWithUi(page, wait, timeout, { report, reportLabel: before.reportLabel }),
+                path.join(directory, stem + '.pdf'), wait, before.reportLabel);
             await wait(page.waitForFunction(() => !pdfExportInProgress && !document.querySelector('.export-pdf-btn').disabled, null, { timeout }));
             const after = await wait(page.evaluate(captureReportScope));
             assert.deepStrictEqual(after, before, 'Real PDF download changed the selected scope.');
