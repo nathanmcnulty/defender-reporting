@@ -48,7 +48,7 @@ function New-RecoveryCase {
 
 $parent = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../.local'))
 [void][IO.Directory]::CreateDirectory($parent)
-for ($ancestor = Get-Item -LiteralPath $parent; $null -ne $ancestor; $ancestor=$ancestor.Parent) {
+for ($ancestor = Get-Item -LiteralPath $parent -Force; $null -ne $ancestor; $ancestor=$ancestor.Parent) {
     if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Reparse-point test parent refused.' }
 }
 $root = Join-Path $parent ('store-transaction-recovery-' + [guid]::NewGuid().ToString('N'))
