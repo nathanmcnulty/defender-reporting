@@ -657,10 +657,32 @@ function requireCapturedFingerprint(values) {
 }
 
 function installInstrumentation() {
-    const phaseNames = ['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs'];
+    const phaseNames = ['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs', 'cacheReadMs', 'cacheDerivedMs'];
     const functionNames = ['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded'];
     window.__issue70 = { phases: [], workerMessages: [], initialization: [], compressedFingerprints: [] };
     window.addEventListener('DOMContentLoaded', () => {
+        const originalCacheRead = window.getCachedData;
+        if (typeof originalCacheRead === 'function') {
+            window.getCachedData = async function(...args) {
+                const start = performance.now();
+                try { return await originalCacheRead.apply(this, args); }
+                finally {
+                    try { recordDashboardPhaseTiming('cacheReadMs', performance.now() - start); } catch { /* instrumentation must not change the result */ }
+                }
+            };
+        }
+        const originalCacheDerived = window.applyDerivedVulnerabilityFields;
+        if (typeof originalCacheDerived === 'function') {
+            // This production function is synchronous: an async wrapper would
+            // turn thrown errors into rejections and change its callers.
+            window.applyDerivedVulnerabilityFields = function(...args) {
+                const start = performance.now();
+                try { return originalCacheDerived.apply(this, args); }
+                finally {
+                    try { recordDashboardPhaseTiming('cacheDerivedMs', performance.now() - start); } catch { /* instrumentation must not change the result */ }
+                }
+            };
+        }
         const originalFingerprint = window.computeCompressedFingerprint;
         if (typeof originalFingerprint === 'function') {
             window.computeCompressedFingerprint = async function(...args) {
@@ -1411,6 +1433,56 @@ async function privacyProbes() {
 }
 
 async function measurementControlProbes() {
+    const timingCallbacks = {};
+    const timingMetrics = { phases: {} };
+    const timingResult = {};
+    const timingError = new Error('Synthetic operation failure');
+    const timingReceiver = {};
+    let timingNow = 0;
+    let timingSample;
+    let recordingFails = false;
+    const timingContext = {
+        performance: { now: () => timingNow, timeOrigin: 0 },
+        setInterval(callback) { timingSample = callback; },
+        getDashboardMetricsSnapshot: () => timingMetrics,
+        recordDashboardPhaseTiming(name, value) {
+            if (recordingFails) throw new Error('Synthetic instrumentation failure');
+            timingMetrics.phases[name] = value;
+        },
+        window: {
+            addEventListener(name, callback) { timingCallbacks[name] = callback; }, Worker: class {},
+            async getCachedData(...args) {
+                assert.strictEqual(this, timingReceiver);
+                assert.strictEqual(args[1], timingResult);
+                await Promise.resolve(); timingNow += 5;
+                if (args[0] === 'failure') throw timingError;
+                return timingResult;
+            },
+            applyDerivedVulnerabilityFields(...args) {
+                assert.strictEqual(this, timingReceiver);
+                assert.strictEqual(args[1], timingResult);
+                timingNow += 7;
+                if (args[0] === 'failure') throw timingError;
+                return timingResult;
+            }
+        }
+    };
+    require('vm').runInNewContext(`(${installInstrumentation.toString()})()`, timingContext);
+    timingCallbacks.DOMContentLoaded();
+    assert.strictEqual(await timingContext.window.getCachedData.call(timingReceiver, 'success', timingResult), timingResult);
+    await assert.rejects(timingContext.window.getCachedData.call(timingReceiver, 'failure', timingResult), error => error === timingError);
+    assert.strictEqual(timingContext.window.applyDerivedVulnerabilityFields.call(timingReceiver, 'success', timingResult), timingResult, 'Derived instrumentation must remain synchronous.');
+    assert.throws(() => timingContext.window.applyDerivedVulnerabilityFields.call(timingReceiver, 'failure', timingResult), error => error === timingError);
+    assert.strictEqual(timingMetrics.phases.cacheReadMs, 5);
+    assert.strictEqual(timingMetrics.phases.cacheDerivedMs, 7);
+    timingSample();
+    assert.deepStrictEqual(Array.from(timingContext.window.__issue70.phases, record => record.name).sort(), ['cacheDerivedMs', 'cacheReadMs']);
+    recordingFails = true;
+    assert.strictEqual(await timingContext.window.getCachedData.call(timingReceiver, 'success', timingResult), timingResult);
+    await assert.rejects(timingContext.window.getCachedData.call(timingReceiver, 'failure', timingResult), error => error === timingError);
+    assert.strictEqual(timingContext.window.applyDerivedVulnerabilityFields.call(timingReceiver, 'success', timingResult), timingResult);
+    assert.throws(() => timingContext.window.applyDerivedVulnerabilityFields.call(timingReceiver, 'failure', timingResult), error => error === timingError);
+    console.log('PASS actual cache read/derived instrumentation preserves async/sync results, receiver, arguments, errors and allowlisted phase capture');
     await require('./Assert-DashboardArtifactAcceptance').run();
     const installed = { ProgramFiles: 'C:/Installed' };
     const edgeChoice = selectInstalledBrowser(installed, candidate => candidate.endsWith('msedge.exe'));
