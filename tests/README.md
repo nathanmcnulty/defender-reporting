@@ -114,13 +114,17 @@ fallback. Engine executable SHA-256 and actual version are recorded. Use
 optional chunks, rather than the default source overlay.
 
 Add `--admin-exercise` to measure filter completion, all five report switches,
-Active Vulnerabilities detail, PDF runtime/library loading and real PDF
+all three report detail dialogs, PDF runtime/library loading and real PDF
 preparation for representative and empty scopes. This uses one selected device
 with at most 250 source rows for bounded PDFs while loading/filtering the full
 input. It checks ten real PDF buffers and restores the original scope. It does
-not establish visual readability, all detail-view latency or the final OS
+not establish visual readability or the final OS
 download. Normal native ownership, resource, admission and outer-supervision
 requirements still apply; do not run this option as an unguarded stress test.
+Detail dialogs are opened through the actual delegated table-row click handlers.
+Missing matching rows are labelled explicitly rather than assigned a latency.
+The two device reports show details inline; that cost is included in report
+switching and is not reported again as a separate dialog-opening measurement.
 
 Run the isolated two-row Hosted dashboard control, generated from synthetic data without root exports, authentication, or cloud writes:
 

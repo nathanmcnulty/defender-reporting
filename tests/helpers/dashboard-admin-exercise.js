@@ -74,13 +74,24 @@ async function exerciseAdmin(page, guard, timeout) {
                     await settle(() => ready(report));
                     const switchMs = performance.now() - switchStart;
                     let detailMs = null;
-                    if (scope === 'representative' && report === 'active-vulnerabilities' && remediationAllData.length) {
+                    let detailKind = scope === 'empty' ? 'empty-scope' : 'no-matching-data';
+                    const section = document.getElementById(report + '-section');
+                    const usesModal = ['active-vulnerabilities', 'remediation-activity', 'impact-analysis'].includes(report);
+                    const detailRow = usesModal ? section.querySelector('tbody tr[data-row-index]') : null;
+                    if (scope === 'representative' && detailRow) {
                         const detailStart = performance.now();
-                        showDetails(remediationAllData[0]);
+                        // Exercise the real delegated row handler, including its
+                        // report-specific payload mapping and deferred rendering.
+                        detailRow.click();
                         await settle(() => document.getElementById('detailModal').classList.contains('active')
                             && !document.getElementById('modalBody').querySelector('.loading'));
                         detailMs = performance.now() - detailStart;
+                        detailKind = 'modal';
                         closeModal();
+                    } else if (scope === 'representative' && !usesModal) {
+                        // The two device reports show their details inline. Their
+                        // completion cost is already included in switchMs.
+                        detailKind = section.querySelector('.remediation-card') ? 'inline-card' : 'no-matching-data';
                     }
                     const before = JSON.stringify(cloneFilterState(filterState));
                     let pdf;
@@ -99,11 +110,11 @@ async function exerciseAdmin(page, guard, timeout) {
                     await exportToPDF();
                     need(pdf && !pdfExportInProgress, 'Real PDF export failed or did not restore controls.');
                     need(before === JSON.stringify(cloneFilterState(filterState)) && activeReportId === report, 'PDF changed selected scope.');
-                    results.push({ scope, report, sourceRows: filteredData.length, switchMs, detailMs,
+                    results.push({ scope, report, sourceRows: filteredData.length, switchMs, detailMs, detailKind,
                         scopedFilterMs, pdfPreparationMs: performance.now() - pdfStart, pdf });
                 }
             }
-            return { representativeRows, filterMs, pdfRuntimeLoadMs, pdfLibrariesLoadMs, pdfPageWarningSuppressed: true, reports: results, detailScope: 'Active Vulnerabilities remediation detail only; other detail views unmeasured.', pdfScope: 'Real PDF bytes/layout; final user download replaced by getBuffer; no visual/readability or semantic-content proof.' };
+            return { representativeRows, filterMs, pdfRuntimeLoadMs, pdfLibrariesLoadMs, pdfPageWarningSuppressed: true, reports: results, detailScope: 'All three modal report families when matching data exists; device-report inline detail cost is included in report switching. Missing detail data is labelled explicitly.', pdfScope: 'Real PDF bytes/layout; final user download replaced by getBuffer; no visual/readability or semantic-content proof.' };
         } finally {
             downloadPdfDocument = originalDownload;
             if (hadSkipWarning) window.__skipPdfExportPageWarning = originalSkipWarning;
@@ -132,6 +143,19 @@ function assertAdminExercise(result) {
         assert(Number.isFinite(row.switchMs) && row.switchMs >= 0);
         assert(Number.isFinite(row.scopedFilterMs) && row.scopedFilterMs >= 0);
         assert(Number.isFinite(row.pdfPreparationMs) && row.pdfPreparationMs >= 0);
+        assert(['modal', 'inline-card', 'empty-scope', 'no-matching-data'].includes(row.detailKind));
+        if (row.scope === 'representative') {
+            assert.strictEqual(row.sourceRows, result.representativeRows, 'Every report must retain the selected representative scope.');
+            assert.notStrictEqual(row.detailKind, 'empty-scope');
+        }
+        if (row.detailKind === 'modal') {
+            assert(['active-vulnerabilities', 'impact-analysis', 'remediation-activity'].includes(row.report));
+            assert(Number.isFinite(row.detailMs) && row.detailMs >= 0);
+        } else {
+            assert.strictEqual(row.detailMs, null, 'Unmeasured detail actions must not be assigned a latency.');
+        }
+        if (row.scope === 'empty') assert.strictEqual(row.detailKind, 'empty-scope');
+        if (row.detailKind === 'inline-card') assert(['devices-by-remediation', 'remediations-by-device'].includes(row.report));
         assert(row.pdf.bytes > 100 && /^[a-f0-9]{64}$/.test(row.pdf.sha256));
         if (row.scope === 'empty') assert.strictEqual(row.sourceRows, 0);
     }

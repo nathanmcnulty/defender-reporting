@@ -1374,12 +1374,30 @@ async function measurementControlProbes() {
     assert.strictEqual(reportReady('active-vulnerabilities'), false, 'Deferred render must finish before a switch is timed.');
     readiness.busy = false; readiness.active = false;
     assert.strictEqual(reportReady('active-vulnerabilities'), false);
-    const admin = { representativeRows: 2, reports: ['representative', 'empty'].flatMap(scope => REPORTS.map(report => ({ scope, report, sourceRows: scope === 'empty' ? 0 : 2, switchMs: 1, scopedFilterMs: 1, pdfPreparationMs: 1, pdf: { bytes: 101, sha256: 'a'.repeat(64) } }))) };
+    const admin = { representativeRows: 2, reports: ['representative', 'empty'].flatMap(scope => REPORTS.map(report => {
+        const modal = scope === 'representative' && ['active-vulnerabilities', 'impact-analysis', 'remediation-activity'].includes(report);
+        return { scope, report, sourceRows: scope === 'empty' ? 0 : 2, switchMs: 1,
+            detailKind: scope === 'empty' ? 'empty-scope' : modal ? 'modal' : 'inline-card',
+            detailMs: modal ? 1 : null, scopedFilterMs: 1, pdfPreparationMs: 1,
+            pdf: { bytes: 101, sha256: 'a'.repeat(64) } };
+    })) };
     assertAdminExercise(admin);
     const invalidAdmin = structuredClone(admin); invalidAdmin.reports[5].sourceRows = 1;
     assert.throws(() => assertAdminExercise(invalidAdmin));
     const duplicateAdmin = structuredClone(admin); duplicateAdmin.reports[1] = duplicateAdmin.reports[0];
     assert.throws(() => assertAdminExercise(duplicateAdmin));
+    const missingDetailTime = structuredClone(admin); missingDetailTime.reports[0].detailMs = null;
+    assert.throws(() => assertAdminExercise(missingDetailTime));
+    const inventedDetailTime = structuredClone(admin); inventedDetailTime.reports[5].detailMs = 1;
+    assert.throws(() => assertAdminExercise(inventedDetailTime));
+    const broadenedScope = structuredClone(admin); broadenedScope.reports[0].sourceRows = 3;
+    assert.throws(() => assertAdminExercise(broadenedScope));
+    const mislabeledScope = structuredClone(admin); mislabeledScope.reports[0].detailKind = 'empty-scope';
+    mislabeledScope.reports[0].detailMs = null;
+    assert.throws(() => assertAdminExercise(mislabeledScope));
+    const wrongDetailType = structuredClone(admin); wrongDetailType.reports[0].detailKind = 'inline-card';
+    wrongDetailType.reports[0].detailMs = null;
+    assert.throws(() => assertAdminExercise(wrongDetailType));
     console.log('PASS actual switch readiness rejects stale/dirty/deferred/inactive sections and admin evidence rejects broadened empty/duplicate reports');
     const timers = new Map();
     let timerId = 0;
