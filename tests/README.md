@@ -145,9 +145,16 @@ Do not infer a valid empty input or supported tenant maximum from these fixtures
 `--saved-artifacts` is a separate acceptance lane and cannot be combined with
 `--admin-exercise` getBuffer timing. It retains the real `downloadPdfDocument`,
 observes the browser download event, and saves actual PDFs with `saveAs` for
-all five reports in representative and empty scopes. Each load captures ten
+all five reports in representative and empty scopes, with snapshot mode selected
+for the two device reports. Two additional representative PDFs select observed
+range mode through the real device-report mode buttons. Each load captures twelve
 PDFs plus viewport screenshots and JSON receipts of the exact expanded DOM,
 table cells, report/filter/mode, source/grouped counts, cards and restoration.
+Card receipts retain every title, visible metadata and stat badge, including
+Platform, Patch and legacy Update references. Device receipts include the exact
+UI mode summary and resolved-inclusion label; mode-button transitions are
+recorded separately from already-selected controls. Compare all these fields
+against actual PDF text; matching receipts alone do not establish PDF parity.
 One additional Active Vulnerabilities PDF is captured only when a selected
 subset of at most 250 source rows actually yields more than 100 grouped report
 rows. Unavailable long-table coverage is labelled; no row or resource bound is

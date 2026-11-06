@@ -7,13 +7,15 @@ const vm = require('vm');
 const { pathToFileURL } = require('url');
 const { isAllowedDashboardRequest: allowed } = require('./helpers/offline-request-policy');
 const { readDashboardInput } = require('./helpers/dashboard-artifact-input');
-const { captureRealDownload, withDeadline, assertArtifactAcceptance, fileReceipt, expectedDownloadNames } = require('./helpers/dashboard-artifact-acceptance');
-const { planFacetUi, selectReportWithUi, setFacetWithUi, clickExportWithUi, assertFacetSelection, assertUiExercise } = require('./helpers/dashboard-ui-exercise');
+const { captureRealDownload, withDeadline, assertArtifactAcceptance, fileReceipt, expectedDownloadNames, captureReportScope } = require('./helpers/dashboard-artifact-acceptance');
+const { planFacetUi, selectReportWithUi, selectRemediationModeWithUi, setFacetWithUi, clickExportWithUi, assertFacetSelection, assertUiExercise } = require('./helpers/dashboard-ui-exercise');
 
 async function assertUiControls() {
     const calls = [];
     let state = { values: ['Low'], hasAny: true, rows: 2 };
     let draft;
+    let mode = 'snapshot';
+    let disabledMode = false;
     const page = {
         locator(selector) {
             return {
@@ -23,16 +25,20 @@ async function assertUiControls() {
                         draft = { values: [], hasAny: true };
                     }
                     calls.push(selector + ':click');
+                    if (selector.endsWith('#remediationModeRangeButton')) mode = 'range';
+                    if (selector.endsWith('#remediationModeSnapshotButton')) mode = 'snapshot';
                     if (selector === '#filterPillSeverity') draft = structuredClone(state);
                     if (selector === '#filterPopoverApplyButton') state = { ...draft, rows: draft.hasAny ? 2 : 0 };
                 },
                 async check() { calls.push(selector + ':check'); draft = { values: [], hasAny: true }; },
                 async uncheck() { calls.push(selector + ':uncheck'); draft = { values: [], hasAny: false }; },
                 async count() { return 0; }, async isEnabled() {
+                    if (selector.includes('#remediationReportToolbar')) return !disabledMode;
                     if (selector === '#filterPopoverResetButton') return !(draft.hasAny && draft.values.length === 0);
                     if (selector === '#filterPopoverApplyButton') return draft.hasAny !== state.hasAny || JSON.stringify(draft.values) !== JSON.stringify(state.values);
                     return true;
                 },
+                async getAttribute() { return selector.endsWith(mode === 'range' ? '#remediationModeRangeButton' : '#remediationModeSnapshotButton') ? 'true' : 'false'; },
                 async evaluateAll() { return ['High', 'Low']; },
                 nth(index) { return { async check() { calls.push('option:' + index); draft = { values: [['High', 'Low'][index]], hasAny: true }; } }; }
             };
@@ -58,6 +64,19 @@ async function assertUiControls() {
     assert.strictEqual(interval.utcDayBefore, '2026-11-06');
     assert(calls.includes('#reportSelectorButton:click') && calls.includes('#reportSelectorOptions button[data-report-id="impact-analysis"]:click'));
     assert(calls.includes('#exportPdfButton:click') && calls.includes('option:0'));
+    await selectRemediationModeWithUi(page, wait, 1000, 'devices-by-remediation', 'range');
+    assert.strictEqual(mode, 'range');
+    const rangeSelector = '#remediationReportToolbar #remediationModeRangeButton:click';
+    const rangeClicks = calls.filter(call => call === rangeSelector).length;
+    assert.strictEqual(rangeClicks, 1, 'Observed-range mode must use the actual mode button.');
+    disabledMode = true;
+    await selectRemediationModeWithUi(page, wait, 1000, 'devices-by-remediation', 'range');
+    assert.strictEqual(calls.filter(call => call === rangeSelector).length, rangeClicks, 'Already-selected mode must not be clicked again.');
+    await assert.rejects(selectRemediationModeWithUi(page, wait, 1000, 'devices-by-remediation', 'snapshot'), /disabled/);
+    disabledMode = false;
+    await selectRemediationModeWithUi(page, wait, 1000, 'remediations-by-device', 'snapshot');
+    assert.strictEqual(mode, 'snapshot');
+    await assert.rejects(selectRemediationModeWithUi(page, wait, 1000, 'active-vulnerabilities', 'range'), /Invalid/);
     assert.throws(() => assertFacetSelection({ values: [], hasAny: true, rows: 2 }, { values: ['High'], hasAny: true }), /broadened/);
     assert.throws(() => assertFacetSelection({ values: [], hasAny: false, rows: 2 }, { values: [], hasAny: false }), /empty/);
     const ui = { status: 'exercised', path: 'locator-facet-click-check-apply', selectedFacet: 'filterSeverity', deselectionRows: 0, hiddenSelection: { status: 'unavailable-fixture-intersection' } };
@@ -87,8 +106,38 @@ async function assertUiControls() {
     return ui;
 }
 
+function assertCardScopeCapture() {
+    const metadata = ['Platform: Windows 11', 'Published: 2025-12-20', 'Patch: KB000001', 'Patch: KB000002', 'Update: legacy-reference'];
+    const stats = [...metadata, 'Devices: 1', 'CVEs: 2'];
+    const badges = values => values.map(innerText => ({ innerText }));
+    const card = { querySelector: () => ({ innerText: 'Synthetic remediation' }),
+        querySelectorAll: selector => badges(selector === '.cve-details .stat-badge' ? metadata : stats) };
+    const section = { innerText: 'Synthetic expanded report', querySelectorAll: selector => selector === '.remediation-card' ? [card] : [] };
+    const summary = 'Showing only vulnerabilities still open on 2026-01-02. Resolved items from earlier in the range are excluded.';
+    let visibleSummary = summary;
+    let restorations = 0;
+    const context = {
+        activeReportId: 'devices-by-remediation', filterState: { startDate: '2026-01-01', endDate: '2026-01-02' }, remediationReportMode: 'snapshot', REMEDIATION_REPORT_MODE_RANGE: 'range',
+        document: { getElementById: id => id.endsWith('-section') ? section : id === 'remediationModeSummary' ? { innerText: visibleSummary } : { selectedOptions: [{ text: 'Devices by Remediation' }] } },
+        expandReportForPdf: () => ({ wasExpanded: false }), restoreReportState: () => { restorations++; },
+        remediationAllData: [], impactAnalysisAllData: [], remediationDetailsAllData: [], devicesByRemediationAllData: [{}], remediationsByDeviceAllData: [],
+        cloneFilterState: value => ({ ...value }), filteredData: [{}, {}], buildDashboardValidationSnapshot: () => ({ summaryCards: { high: '2' } }),
+        getExportFilterText: () => 'All', isRemediationScopeReport: () => true, getRemediationReportModeSummaryText: () => summary
+    };
+    const capture = () => vm.runInNewContext(`(${captureReportScope.toString()})()`, context);
+    const receipt = capture();
+    assert.strictEqual(receipt.cardDetails[0].title, 'Synthetic remediation');
+    assert.deepStrictEqual(Array.from(receipt.cardDetails[0].metadata), metadata);
+    assert.deepStrictEqual(Array.from(receipt.cardDetails[0].statBadges), stats);
+    assert.strictEqual(receipt.modeSummary, summary); assert.strictEqual(receipt.includeResolvedText, 'No');
+    assert.strictEqual(restorations, 1);
+    visibleSummary = 'A different selected scope';
+    assert.throws(capture, /Visible mode summary/); assert.strictEqual(restorations, 2);
+}
+
 async function run() {
     const uiExercise = await assertUiControls();
+    assertCardScopeCapture();
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-artifact-control-'));
     try {
         const file = pathToFileURL(path.join(root, 'VulnerabilityDashboard.html')).href;
@@ -162,18 +211,32 @@ async function run() {
         assert.throws(() => fileReceipt(path.join(root, 'bad.pdf'), 'pdf'), /Incomplete/);
         const reports = ['active-vulnerabilities', 'impact-analysis', 'remediation-activity', 'devices-by-remediation', 'remediations-by-device'];
         const fileEvidence = { bytes: 150, sha256: 'a'.repeat(64) };
-        const result = { status: 'captured', restored: true, representativeRows: 2, uiExercise,
-            reports: ['representative', 'empty'].flatMap(scope => reports.map(report => {
-                const before = { report, reportLabel: report, sourceRows: scope === 'empty' ? 0 : 2, expandedText: 'Synthetic exact report text', filter: { key: scope }, reportRows: scope === 'empty' ? 0 : 2 };
+        const makeReport = (scope, report) => {
+                const deviceReport = ['devices-by-remediation', 'remediations-by-device'].includes(report);
+                const mode = scope === 'representative-range' ? 'range' : 'snapshot';
+                const reportRows = scope === 'empty' ? 0 : 2;
+                const before = { report, reportLabel: report, sourceRows: scope === 'empty' ? 0 : 2, expandedText: 'Synthetic exact report text', filter: { key: scope }, reportRows,
+                    mode, modeSummary: deviceReport ? `Synthetic exact ${mode} UI scope explanation` : null,
+                    includeResolvedText: deviceReport ? mode === 'range' ? 'Yes' : 'No' : null,
+                    cardDetails: deviceReport ? Array.from({ length: reportRows }, () => ({ title: 'Synthetic card', metadata: ['Patch: KB000001', 'Platform: Windows 11'], statBadges: ['Devices: 1'] })) : [] };
                 return { scope, report, before, after: structuredClone(before),
+                    modeAction: deviceReport ? { mode, path: 'shared-toolbar-button', action: 'clicked' } : null,
                     pdf: { ...fileEvidence, suggestedFilename: `Vulnerability_Dashboard_${report}_2026-11-06.pdf`, exportUtcDayBefore: interval.utcDayBefore, exportUtcDayAfter: interval.utcDayAfter },
                     screenshot: fileEvidence, receipt: fileEvidence };
-            })) };
+        };
+        const result = { status: 'captured', restored: true, representativeRows: 2, uiExercise,
+            reports: ['representative', 'empty'].flatMap(scope => reports.map(report => makeReport(scope, report)))
+                .concat(['devices-by-remediation', 'remediations-by-device'].map(report => makeReport('representative-range', report))) };
         assertArtifactAcceptance(result);
         for (const mutate of [value => { value.restored = false; }, value => { value.reports[0].after.filter.key = 'broadened'; },
             value => { value.reports[5].before.sourceRows = 1; value.reports[5].after.sourceRows = 1; },
             value => { value.reports[1] = value.reports[0]; }, value => { value.reports[0].pdf.sha256 = 'missing'; },
-            value => { value.reports[0].pdf.suggestedFilename = 'unrelated.pdf'; }]) {
+            value => { value.reports[0].pdf.suggestedFilename = 'unrelated.pdf'; },
+            value => { value.reports.pop(); },
+            value => { value.reports[10].before.mode = value.reports[10].after.mode = 'snapshot'; },
+            value => { value.reports[3].before.modeSummary = value.reports[3].after.modeSummary = ''; },
+            value => { value.reports.filter(row => row.scope === 'representative-range').forEach(row => { row.modeAction.action = 'already-selected'; }); },
+            value => { value.reports[3].before.cardDetails[0].title = value.reports[3].after.cardDetails[0].title = ''; }]) {
             const invalid = structuredClone(result); mutate(invalid); assert.throws(() => assertArtifactAcceptance(invalid));
         }
         console.log('PASS exact file URL/view policy, actual inline provenance, bounded callback operations, real-download ordering/failure, PDF truncation and scope/receipt invalidation controls (no browser launched)');

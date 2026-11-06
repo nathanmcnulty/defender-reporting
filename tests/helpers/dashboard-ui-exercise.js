@@ -36,6 +36,26 @@ async function selectReportWithUi(page, wait, timeout, report) {
     await waitForUiReport(page, wait, timeout, report);
 }
 
+async function selectRemediationModeWithUi(page, wait, timeout, report, mode) {
+    assert(['devices-by-remediation', 'remediations-by-device'].includes(report) && ['snapshot', 'range'].includes(mode), 'Invalid remediation mode action.');
+    await waitForUiReport(page, wait, timeout, report);
+    // Both device sections share this real footer toolbar. It is exposed only
+    // for the selected device report; there are no per-section duplicate IDs.
+    const selector = '#remediationReportToolbar #' + (mode === 'range' ? 'remediationModeRangeButton' : 'remediationModeSnapshotButton');
+    const button = page.locator(selector);
+    const alreadySelected = (await wait(button.getAttribute('aria-pressed'))) === 'true';
+    if (!alreadySelected) {
+        assert(await wait(button.isEnabled()), 'Requested remediation mode is disabled.');
+        await wait(button.click());
+    }
+    await wait(page.waitForFunction(({ report, mode, selector }) => remediationReportMode === mode && activeReportId === report
+        && document.querySelector(selector)?.getAttribute('aria-pressed') === 'true'
+        && initializedReports.has(report) && !dirtyReports.has(report)
+        && document.getElementById(report + '-section').classList.contains('active')
+        && document.getElementById(report + '-section').getAttribute('aria-busy') !== 'true', { report, mode, selector }, { timeout }));
+    return { mode, path: 'shared-toolbar-button', action: alreadySelected ? 'already-selected' : 'clicked' };
+}
+
 async function setFacetWithUi(page, wait, timeout, key, selection) {
     assert(Object.hasOwn(FACETS, key) && Array.isArray(selection.values) && typeof selection.hasAny === 'boolean', 'Invalid UI facet selection.');
     assert(selection.hasAny || selection.values.length === 0, 'None must have no explicit values.');
@@ -183,4 +203,4 @@ function assertUiExercise(result) {
     }
 }
 
-module.exports = { planFacetUi, selectReportWithUi, setFacetWithUi, exerciseFacetUi, clickExportWithUi, assertFacetSelection, assertUiExercise };
+module.exports = { planFacetUi, selectReportWithUi, selectRemediationModeWithUi, setFacetWithUi, exerciseFacetUi, clickExportWithUi, assertFacetSelection, assertUiExercise };
