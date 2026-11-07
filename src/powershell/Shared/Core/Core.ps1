@@ -3371,6 +3371,59 @@ function Get-VulnPartitionFilePath {
     return Join-Path -Path $Root -ChildPath $fileName
 }
 
+function Get-VulnTemporaryPartitionIntegrity {
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    $hash = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return [pscustomobject]@{
+            Length = $stream.Length
+            Sha256 = [System.Convert]::ToHexString($hash.ComputeHash($stream)).ToLowerInvariant()
+        }
+    }
+    finally {
+        $hash.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Assert-VulnTemporaryPartitionIntegrity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [System.Collections.IDictionary]$TemporaryPartitionIntegrity,
+        [switch]$AllowMissing
+    )
+
+    if ($null -eq $TemporaryPartitionIntegrity) { throw 'Compressed temporary partitions require importer-owned integrity metadata.' }
+    $key = Get-NormalizedAbsolutePath -Path $Path
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        if ($AllowMissing -and -not $TemporaryPartitionIntegrity.Contains($key)) { return }
+        throw 'Compressed temporary partition is missing.'
+    }
+    if (-not $TemporaryPartitionIntegrity.Contains($key)) { throw 'Compressed temporary partition has no finalized integrity metadata.' }
+    $expected = $TemporaryPartitionIntegrity[$key]
+    $actual = Get-VulnTemporaryPartitionIntegrity -Path $Path
+    if ($actual.Length -ne $expected.Length -or $actual.Sha256 -cne $expected.Sha256) {
+        throw 'Compressed temporary partition integrity verification failed.'
+    }
+}
+
+function Write-VulnTemporaryPartitionIntegrity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [System.Collections.IDictionary]$TemporaryPartitionIntegrity
+    )
+
+    if ($null -eq $TemporaryPartitionIntegrity) { throw 'Compressed temporary partition metadata is unavailable.' }
+    $key = Get-NormalizedAbsolutePath -Path $Path
+    $TemporaryPartitionIntegrity[$key] = Get-VulnTemporaryPartitionIntegrity -Path $Path
+}
+
 function Open-VulnPartitionWriter {
     [CmdletBinding()]
     [OutputType([System.IO.StreamWriter])]
@@ -3382,15 +3435,26 @@ function Open-VulnPartitionWriter {
         [switch]$Append,
 
         [Parameter(Mandatory = $false)]
-        [switch]$CompressTemporaryPartitions
+        [switch]$CompressTemporaryPartitions,
+
+        [Parameter(Mandatory = $false)]
+        [System.Collections.IDictionary]$TemporaryPartitionIntegrity
     )
 
     if (-not $CompressTemporaryPartitions) {
         return [System.IO.StreamWriter]::new($Path, [bool]$Append, [System.Text.UTF8Encoding]::new($false))
     }
 
-    # One encoder per open partition writer: no plaintext chunk, second disk
-    # pass or per-row byte conversion. Closing the writer finalizes its member.
+    if (-not $Path.EndsWith('.gz', [System.StringComparison]::OrdinalIgnoreCase)) { throw 'Compressed temporary partition path must use .gz.' }
+    Assert-VulnTemporaryPartitionIntegrity -Path $Path -TemporaryPartitionIntegrity $TemporaryPartitionIntegrity -AllowMissing
+    # Invalidate before any append/truncation. A failed write cannot bless a
+    # partial member with an older (or newly recomputed) expected hash.
+    $key = Get-NormalizedAbsolutePath -Path $Path
+    if ($TemporaryPartitionIntegrity.Contains($key)) { $TemporaryPartitionIntegrity.Remove($key) }
+
+    # One encoder per open partition writer: no plaintext chunk/recompression
+    # pass or per-row byte conversion. Closing the writer finalizes its member;
+    # the caller then records a checksum of the completed compressed bytes.
     $mode = if ($Append) { [System.IO.FileMode]::Append } else { [System.IO.FileMode]::Create }
     $fileStream = [System.IO.File]::Open($Path, $mode, [System.IO.FileAccess]::Write)
     try {
@@ -3429,12 +3493,16 @@ function Split-VulnJsonPartition {
         [int]$PartitionCount = $Script:VulnDiskPartitionCount,
 
         [Parameter(Mandatory = $false)]
-        [switch]$CompressTemporaryPartitions
+        [switch]$CompressTemporaryPartitions,
+
+        [Parameter(Mandatory = $false)]
+        [System.Collections.IDictionary]$TemporaryPartitionIntegrity
     )
 
     [void](New-Item -Path $OutputRoot -ItemType Directory -Force)
 
     $writers = @{}
+    $operationError = $null
     $writtenIndexes = [System.Collections.Generic.HashSet[int]]::new()
     try {
         foreach ($inputPath in @($InputPaths)) {
@@ -3450,7 +3518,7 @@ function Split-VulnJsonPartition {
                 $partitionIndex = Get-VulnPartitionIndex -Id $id -PartitionCount $PartitionCount
                 if (-not $writers.ContainsKey($partitionIndex)) {
                     $partitionPath = Get-VulnPartitionFilePath -Root $OutputRoot -Prefix $Prefix -Index $partitionIndex -CompressTemporaryPartitions:$CompressTemporaryPartitions
-                    $writers[$partitionIndex] = Open-VulnPartitionWriter -Path $partitionPath -Append -CompressTemporaryPartitions:$CompressTemporaryPartitions
+                    $writers[$partitionIndex] = Open-VulnPartitionWriter -Path $partitionPath -Append -CompressTemporaryPartitions:$CompressTemporaryPartitions -TemporaryPartitionIntegrity $TemporaryPartitionIntegrity
                 }
 
                 $writers[$partitionIndex].WriteLine($jsonLine)
@@ -3458,10 +3526,26 @@ function Split-VulnJsonPartition {
             }
         }
     }
+    catch { $operationError = $_; throw }
     finally {
-        foreach ($writer in @($writers.Values)) {
-            if ($null -ne $writer) {
-                $writer.Dispose()
+        if (-not $CompressTemporaryPartitions) {
+            foreach ($writer in @($writers.Values)) { if ($null -ne $writer) { $writer.Dispose() } }
+        }
+        else {
+            $closeError = $null
+            foreach ($writer in @($writers.Values)) {
+                try { $writer.Dispose() }
+                catch { if ($null -eq $closeError) { $closeError = $_ } }
+            }
+            if ($null -ne $closeError) {
+                if ($null -ne $operationError) { $operationError.Exception.Data['TemporaryPartitionCloseFailure'] = $closeError.Exception.GetType().FullName }
+                else { throw $closeError }
+            }
+            if ($null -eq $operationError) {
+                foreach ($index in @($writers.Keys)) {
+                    $path = Get-VulnPartitionFilePath -Root $OutputRoot -Prefix $Prefix -Index $index -CompressTemporaryPartitions
+                    Write-VulnTemporaryPartitionIntegrity -Path $path -TemporaryPartitionIntegrity $TemporaryPartitionIntegrity
+                }
             }
         }
     }
@@ -3474,9 +3558,14 @@ function Read-VulnPartitionMapFile {
     [OutputType([hashtable])]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+
+        [switch]$CompressTemporaryPartitions,
+
+        [System.Collections.IDictionary]$TemporaryPartitionIntegrity
     )
 
+    if ($CompressTemporaryPartitions) { Assert-VulnTemporaryPartitionIntegrity -Path $Path -TemporaryPartitionIntegrity $TemporaryPartitionIntegrity -AllowMissing }
     $rows = @{}
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return $rows
@@ -3511,17 +3600,26 @@ function Write-VulnPartitionMapFile {
         [hashtable]$RowsById,
 
         [Parameter(Mandatory = $false)]
-        [switch]$CompressTemporaryPartitions
+        [switch]$CompressTemporaryPartitions,
+
+        [Parameter(Mandatory = $false)]
+        [System.Collections.IDictionary]$TemporaryPartitionIntegrity
     )
 
     if ($RowsById.Count -eq 0) {
-        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        if ($CompressTemporaryPartitions) {
+            Assert-VulnTemporaryPartitionIntegrity -Path $Path -TemporaryPartitionIntegrity $TemporaryPartitionIntegrity -AllowMissing
+            if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop }
+            $TemporaryPartitionIntegrity.Remove((Get-NormalizedAbsolutePath -Path $Path))
+        }
+        elseif (Test-Path -LiteralPath $Path -PathType Leaf) {
             Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
         }
         return 0
     }
 
-    $writer = Open-VulnPartitionWriter -Path $Path -CompressTemporaryPartitions:$CompressTemporaryPartitions
+    $writer = Open-VulnPartitionWriter -Path $Path -CompressTemporaryPartitions:$CompressTemporaryPartitions -TemporaryPartitionIntegrity $TemporaryPartitionIntegrity
+    $operationError = $null
     try {
         $rowCount = 0
         foreach ($id in @($RowsById.Keys | Sort-Object)) {
@@ -3530,8 +3628,17 @@ function Write-VulnPartitionMapFile {
         }
         return $rowCount
     }
+    catch { $operationError = $_; throw }
     finally {
-        $writer.Dispose()
+        if (-not $CompressTemporaryPartitions) { $writer.Dispose() }
+        else {
+            try { $writer.Dispose() }
+            catch {
+                if ($null -ne $operationError) { $operationError.Exception.Data['TemporaryPartitionCloseFailure'] = $_.Exception.GetType().FullName }
+                else { throw }
+            }
+            if ($null -eq $operationError) { Write-VulnTemporaryPartitionIntegrity -Path $Path -TemporaryPartitionIntegrity $TemporaryPartitionIntegrity }
+        }
     }
 }
 
@@ -3553,7 +3660,10 @@ function Write-VulnCurrentFileFromPartition {
         [int]$PartitionCount = $Script:VulnDiskPartitionCount,
 
         [Parameter(Mandatory = $false)]
-        [switch]$CompressTemporaryPartitions
+        [switch]$CompressTemporaryPartitions,
+
+        [Parameter(Mandatory = $false)]
+        [System.Collections.IDictionary]$TemporaryPartitionIntegrity
     )
 
     $fileStream = [System.IO.File]::Create($OutputPath)
@@ -3565,6 +3675,7 @@ function Write-VulnCurrentFileFromPartition {
                 $rowCount = 0
                 for ($partitionIndex = 0; $partitionIndex -lt $PartitionCount; $partitionIndex++) {
                     $partitionPath = Get-VulnPartitionFilePath -Root $PartitionRoot -Prefix $PartitionPrefix -Index $partitionIndex -CompressTemporaryPartitions:$CompressTemporaryPartitions
+                    if ($CompressTemporaryPartitions) { Assert-VulnTemporaryPartitionIntegrity -Path $partitionPath -TemporaryPartitionIntegrity $TemporaryPartitionIntegrity -AllowMissing }
                     if (-not (Test-Path -LiteralPath $partitionPath -PathType Leaf)) { continue }
 
                     foreach ($jsonLine in Read-VulnNdjsonLinesFromPath -Path $partitionPath) {

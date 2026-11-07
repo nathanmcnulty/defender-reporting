@@ -9,6 +9,17 @@ The existing procedural initial-import shortcut is preserved. The plain ID
 validation partition path remains plain. No runbook, export entrypoint or schedule
 automatically enables the option.
 
+The importer owns a fresh local integrity dictionary for this invocation. After
+a complete successful write and stream close, it records compressed length and
+SHA-256. The opt-in path verifies those bytes before map reads, final assembly
+and append/overwrite, and invalidates metadata before writing. Incomplete source
+operations or failed closes never finalize metadata; metadata failure stops the
+import. The context is not a persistent/global registry. This catches partial
+members, missing trailers and other temporary-file changes even when the legacy
+GZip reader would return a valid prefix. Legacy and canonical input readers are
+unchanged. Checksum creation/verification rereads compressed bytes and adds
+unmeasured I/O/CPU cost.
+
 The hypothesis is reduced temporary disk occupancy under the unchanged 1 GiB
 scratch limit. It is not a measured speedup, memory improvement or full-scale
 admission result. There can be 128 simultaneously open encoders; native codec
@@ -27,8 +38,8 @@ consistent memory or sampled scratch benefit. Only the first pair was admitted;
 the second containing parent remains failed and cells 5–6 were not run. These
 receipts do not identify the causal cost of each implementation step.
 
-This option uses the stock importer and omits A6's plaintext spool, second disk
-pass, per-row byte counting and repeated chunk codec creation. It introduces no
+This option uses the stock importer and omits A6's plaintext spool, plaintext
+reread/recompression pass, per-row byte counting and repeated chunk codec creation. It introduces no
 private importer or alternate normalizer. That difference supports a new capacity
 hypothesis, not reuse or promotion of the rejected A6 result.
 
@@ -38,7 +49,9 @@ hypothesis, not reuse or promotion of the rejected A6 result.
 with exact complete canonical bytes, expanded full rows/order and typed return
 summary comparisons. It covers multiple files/dates, case/duplicate IDs,
 changes/removals, empty maps, overwrite and concatenated-member append,
-Unicode/long/final lines, corrupt compression, disposal on parse failure and real
+Unicode/long/final lines, partial-member/trailer truncation, changed or missing
+bytes, corrupt-before-append/overwrite, metadata-finalization failure, primary
+source error preservation, disposal on parse failure and real
 transaction rollback/raw-retention/retry after a commit-marker failure. The
 collision fixture deliberately uses one partition; production remains at 128.
 These are correctness tests, not resource measurements.
