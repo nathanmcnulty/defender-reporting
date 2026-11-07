@@ -214,6 +214,75 @@ $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($setupPath, [ref]$null, [ref]$errors)
 if ($errors.Count) { throw 'Setup source is not parseable.' }
 
+# Exercise only actual pure helper declarations and parameter/guard ASTs. Never
+# invoke setup, load Az modules, authenticate or issue a package request.
+foreach ($name in @('Get-AutomationAzAccountsPackageUri','Test-AutomationAzAccountsPackageImport')) {
+    $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true)
+    if (-not $definition) { throw "Missing Automation package helper: $name" }
+    . ([scriptblock]::Create($definition.Extent.Text))
+}
+$pinParameter = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'AutomationAzAccountsVersion' })
+if ($pinParameter.Count -ne 1) { throw 'Expected one explicit Automation version parameter.' }
+$pinBinder = [scriptblock]::Create("param($($pinParameter[0].Extent.Text))`nreturn `$AutomationAzAccountsVersion")
+$uriCalls = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Get-AutomationAzAccountsPackageUri' }, $true))
+$readbackCalls = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Test-AutomationAzAccountsPackageImport' }, $true))
+if ($uriCalls.Count -ne 1 -or $uriCalls[0].Extent.Text -cne 'Get-AutomationAzAccountsPackageUri -Version $AutomationAzAccountsVersion' -or
+    $readbackCalls.Count -ne 1 -or $readbackCalls[0].Extent.Text -cne 'Test-AutomationAzAccountsPackageImport -Package $pkg -ExpectedVersion $AutomationAzAccountsVersion') { throw 'Setup lost actual requested-version payload/readback threading.' }
+if ((& $pinBinder) -or (Get-AutomationAzAccountsPackageUri) -cne 'https://www.powershellgallery.com/api/v2/package/Az.Accounts') { throw 'Omitted version must preserve latest package behavior.' }
+foreach ($version in @('0.0.0','5.3.1','10.20.300')) {
+    if ((& $pinBinder -AutomationAzAccountsVersion $version) -cne $version -or
+        (Get-AutomationAzAccountsPackageUri -Version $version) -cne "https://www.powershellgallery.com/api/v2/package/Az.Accounts/$version") { throw 'Exact package URI/version changed.' }
+}
+foreach ($invalid in @('', 'latest', '5.3', '5.3.1.0', '05.3.1', '5.3.1-preview', '5.3.1?x=y', '../5.3.1', "5.3.1`n", ([string][char]0xff15 + '.3.1'), ('1' * 33 + '.0.0'))) {
+    $rejected = $false
+    try { & $pinBinder -AutomationAzAccountsVersion $invalid | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Malformed version passed actual setup parameter binding.' }
+}
+$computeParameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq 'ComputeType' }
+$computeGuard = @($ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.IfStatementAst] -and $_.Extent.Text.StartsWith("if (`$PSBoundParameters.ContainsKey('AutomationAzAccountsVersion')") })
+if ($computeGuard.Count -ne 1) { throw 'Missing early Automation-only parameter guard.' }
+$guard = [scriptblock]::Create("param($($pinParameter[0].Extent.Text),$($computeParameter.Extent.Text))`n$($computeGuard[0].Extent.Text)")
+& $guard -ComputeType FunctionApp
+& $guard -AutomationAzAccountsVersion '5.3.1'
+$rejected = $false
+try { & $guard -AutomationAzAccountsVersion '5.3.1' -ComputeType FunctionApp } catch { $rejected = $true }
+if (-not $rejected) { throw 'Function App accepted an Automation-only pin.' }
+foreach ($state in @('Created','Succeeded','Creating','Failed','Canceled')) {
+    $package = [PSCustomObject]@{ properties = [PSCustomObject]@{ provisioningState = $state; version = '5.3.1' } }
+    $complete = $state -in @('Created','Succeeded')
+    if ($state -in @('Failed','Canceled')) {
+        foreach ($version in @('', '5.3.1')) {
+            $rejected = $false
+            try { Test-AutomationAzAccountsPackageImport -Package $package -ExpectedVersion $version | Out-Null } catch { $rejected = $true }
+            if (-not $rejected) { throw 'Failed package import was accepted with or without a version pin.' }
+        }
+    } else {
+        if ((Test-AutomationAzAccountsPackageImport -Package $package) -ne $complete -or
+            (Test-AutomationAzAccountsPackageImport -Package $package -ExpectedVersion '5.3.1') -ne $complete) { throw 'Package completion changed.' }
+    }
+}
+foreach ($value in @($null, '5.3.2', 531)) {
+    $package = [PSCustomObject]@{ properties = [PSCustomObject]@{ provisioningState = 'Succeeded'; version = $value } }
+    $rejected = $false
+    try { Test-AutomationAzAccountsPackageImport -Package $package -ExpectedVersion '5.3.1' | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Pinned version readback mismatch was accepted.' }
+}
+$package = [PSCustomObject]@{ properties = [PSCustomObject]@{ provisioningState = 'Created' } }
+if (-not (Test-AutomationAzAccountsPackageImport -Package $package)) { throw 'Unpinned successful import must not require version readback.' }
+$rejected = $false
+try { Test-AutomationAzAccountsPackageImport -Package $package -ExpectedVersion '5.3.1' | Out-Null } catch { $rejected = $true }
+if (-not $rejected) { throw 'Missing pinned version readback was accepted.' }
+$timeoutGuard = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text.StartsWith('if (-not $packageImported)') }, $true))
+if ($timeoutGuard.Count -ne 1) { throw 'Missing package import timeout failure.' }
+$guard = [scriptblock]::Create("param(`$AutomationAzAccountsVersion,`$packageImported)`n$($timeoutGuard[0].Extent.Text)")
+foreach ($version in @('', '5.3.1')) {
+    & $guard $version $true
+    $rejected = $false
+    try { & $guard $version $false } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Timed-out import proceeded with or without a version pin.' }
+}
+Write-Output 'Automation package pin checks passed: actual parameter/URI, compute guard, state/version readback and timeout.'
+
 # Inspect the real deployment payload AST without invoking setup or any cloud command.
 $runtimeTables = @($ast.FindAll({
     param($node)
