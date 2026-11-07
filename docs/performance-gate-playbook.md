@@ -18,7 +18,9 @@ This playbook keeps performance work measurable while preserving memory headroom
 
 Function validation submits the non-idempotent admin POST once and records its UTC start before submission. An uncertain or unsuccessful response stops validation; reconcile the invocation and publication status before invoking again. Readiness GET polling does not authorize another POST.
 
-A fresh dashboard blob or execution metric alone is not completion. Validation also requires a fresh version 2 terminal success status for the same run, Function host, storage account, delivery mode and export settings. A fresh failure status or failure trace rejects the run even when HTML was published. The status document supports validation when admin VFS traces are unavailable; status updates are re-read even when their HTTP timestamps share a second. Missing, stale, running or mismatched status cannot qualify a run.
+A fresh dashboard blob or execution metric alone is not completion. Validation also requires a fresh version 2 terminal success status for the same observed run ID, Function host class, storage account, delivery mode and export settings. A fresh failure status or failure trace rejects the run even when HTML was published. The status document supports validation when admin VFS traces are unavailable; status updates are re-read even when their HTTP timestamps share a second. Missing, stale, running or mismatched status cannot qualify a run.
+
+Run correlation assumes exclusive sequential invocation with recurrence disabled and no overlapping producer sharing the target. The first fresh matching run ID is retained and later changes fail validation. This does not establish invocation-ID correlation under concurrency or identify an exact Function App from the host-class field alone.
 
 These are validation correctness checks, not live acceptance. Issue #92 remains unqualified until its separately approved Azure acceptance scope and evidence gates are met.
 
