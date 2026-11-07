@@ -69,4 +69,17 @@ The corresponding measurement lane completed 20 header/buffer phase pairs and si
 
 Before promotion, use immutable source/runtime/data pins, the same common harness on both sides, positive controls, valid controlled comparisons and admitted representative runs. Keep initialization, filtering, switching, detail, header capture and PDF buffer preparation separate. Do not calculate improvement percentages from failed parents, stitch partial attempts into a pass or replace the unfiltered tour with scoped-first acceptance.
 
+Recovered native telemetry separates additional orchestration and ownership costs in the failed `1c783f8` full run. Its 527,355,904-byte PowerShell figure is the aggregate of **three processes**, not one retained producer. The operation root runs `Invoke-GuestBrowserOperation.ps1`; dashboard generation and admission had already completed in disposable children. The root subsequently reads a small manifest, hashes payload files and records inventories. Source inspection does not show it retaining the normalized data body.
+
+| Sample time, seconds | PowerShell processes | Combined PowerShell working set, bytes | Chrome working set, bytes |
+| --- | ---: | ---: | ---: |
+| 124.196 | 1 | 145,952,768 | 0 |
+| 126.200 | 3 | 416,083,968 | 0 |
+| 127.232 | 3 | 520,413,184 | 99,381,248 |
+| 139.475, failed peak | 3 | 527,355,904 | 1,477,156,864 |
+
+The other two PowerShell hosts are part of the pinned containment architecture. `tests/helpers/launch-bound-owner.js` starts `Invoke-LaunchBoundOwnerBridge.ps1`, which compiles the bridge/job C#; the bridge starts the PowerShell owner, which compiles the job implementation and retains ownership handles. All six inspected ownership files match the actual `1c783f8` source archive. Those required helpers cannot simply be removed or terminated during measurement.
+
+The retained samples contain role aggregates rather than per-PID memory. They cannot divide the PowerShell total among the root, bridge and owner, or attribute it to Roslyn, live object graphs or retained GC segments. Combined PowerShell private bytes were 239,529,984; that working-set/private difference is not a GC-retention diagnosis. The next decisive control is bounded per-process working-set/private observations from the same already-open owned handles, correlated with validated operation/bridge/owner identities. Preserve the whole-family cap, admission/floor checks and cleanup. Working-set trimming, forced GC or an ownership redesign is not justified by these aggregates. This analysis produces no new containing pass or performance-improvement claim.
+
 Small Windows import/replay diagnostics, PackageOnly, Automation's 400,000,000-byte and 110% comparison gates, actual Storage publication #104 and Functions/Automation #92 acceptance remain separate. This browser evidence does not close #67, #69, #70, #92 or #104.
