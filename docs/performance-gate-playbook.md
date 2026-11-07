@@ -14,6 +14,14 @@ This playbook keeps performance work measurable while preserving memory headroom
 | Azure acceptance | Before merging perf-sensitive changes and before release packaging changes | `pwsh -NoProfile -File .\build\Invoke-AzureDeploymentValidation.ps1 -AutomationAccountName <name> -FunctionAppName <name>` | live Azure validation artifacts | Investigate runbook or Function App regressions above `10%`; investigate Function execution-unit growth above `15%`; compare the standard large-dataset run against the accepted envelope in `docs/performance-baselines.md` |
 | Baseline refresh | After an accepted improvement or a durable dataset change | update `docs/performance-baselines.md` and keep raw JSON under `.local/` | doc summary plus local raw artifacts | Capture only after the new behavior is accepted |
 
+## Function execution evidence
+
+Function validation submits the non-idempotent admin POST once and records its UTC start before submission. An uncertain or unsuccessful response stops validation; reconcile the invocation and publication status before invoking again. Readiness GET polling does not authorize another POST.
+
+A fresh dashboard blob or execution metric alone is not completion. Validation also requires a fresh version 2 terminal success status for the same run, Function host, storage account, delivery mode and export settings. A fresh failure status or failure trace rejects the run even when HTML was published. The status document supports validation when admin VFS traces are unavailable; status updates are re-read even when their HTTP timestamps share a second. Missing, stale, running or mismatched status cannot qualify a run.
+
+These are validation correctness checks, not live acceptance. Issue #92 remains unqualified until its separately approved Azure acceptance scope and evidence gates are met.
+
 ## Dataset cadence
 
 - Use `tests/fixtures/legacy-migration` only for correctness smoke checks.
