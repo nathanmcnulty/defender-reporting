@@ -1,0 +1,359 @@
+{
+  "schemaVersion": 1,
+  "status": "compared",
+  "cohort": "load-cohort03",
+  "pairs": 3,
+  "scope": "Three alternating pairs on one Azure VM, same Chrome/runtime/inputs/common harness. Generated Hosted HTTP via loopback; no production-network/Core-Web-Vitals/Automation/import/replay acceptance.",
+  "reportingParity": "Identical payload/summary/card/count/navigation digests; not full table-value semantics.",
+  "memorySemantics": "browserPeakBytes and outerPeakBytes are whole-cell peaks across both loads, duplicated in per-load rows; not phase-specific peaks. Sampling is not an instantaneous maximum.",
+  "limitations": [
+    "Cold readiness varied; one candidate pair regressed 34.6%.",
+    "Three warm report-switch medians regressed about 4\u20139%.",
+    "No full-scale, public-network, Core Web Vitals, Automation, fresh-import or replay acceptance."
+  ],
+  "sources": [
+    {
+      "label": "baseline",
+      "sourceCommit": "5b5dc2f2c0a31fba9a2481fe2488b28e986469f7",
+      "sha256": "17c84d3cd9e151748623a79ddaafa7777e8a3fd139ea5c028194086fecfd8dfe"
+    },
+    {
+      "label": "candidate",
+      "sourceCommit": "ecae16841116b4d344a15cbdf622f75850f796d0",
+      "sha256": "4be561f0eff29b4fccd6a5def593bf6ea1568e60f76cdd5c50b48d23c98cd252"
+    },
+    {
+      "label": "harness",
+      "sourceCommit": "ecae16841116b4d344a15cbdf622f75850f796d0",
+      "sha256": "4be561f0eff29b4fccd6a5def593bf6ea1568e60f76cdd5c50b48d23c98cd252"
+    }
+  ],
+  "driverSha256": "7f8ab23d75985224414e168160a69c63a215514b86435ad36115d3f771c4f48b",
+  "payloadSha256": "92e76d87e5886f83ca6cdb42e8a388e0b4daa74115be2d6f0d612d742d07f0f0",
+  "engine": {
+    "executableSha256": "46461accbdc87dc88a5bdd6d611be095dd6147db009863d794f742ca90662efa",
+    "version": "156.0.8078.80"
+  },
+  "observedMedians": {
+    "first": {
+      "baseline": {
+        "readyMs": 798.2999999998137,
+        "denormalizeMs": 133.1,
+        "filterMs": 6.7,
+        "mainHeapBytes": 73573400,
+        "browserPeakBytes": 1326215168,
+        "outerPeakBytes": 1984765952,
+        "switchMs": {
+          "impact-analysis": 298.3517999999999,
+          "remediation-activity": 126.54620000000023,
+          "devices-by-remediation": 172.71870000000035,
+          "remediations-by-device": 315.45600000000013,
+          "active-vulnerabilities": 29.0012999999999
+        }
+      },
+      "candidate": {
+        "readyMs": 788.2000000001863,
+        "denormalizeMs": 127.2,
+        "filterMs": 6.9,
+        "mainHeapBytes": 70982472,
+        "browserPeakBytes": 1096761344,
+        "outerPeakBytes": 1939435520,
+        "switchMs": {
+          "impact-analysis": 285.8856999999998,
+          "remediation-activity": 108.7174,
+          "devices-by-remediation": 181.39840000000004,
+          "remediations-by-device": 290.0612000000001,
+          "active-vulnerabilities": 29.86949999999979
+        }
+      },
+      "candidateToBaselineRatios": {
+        "readyMs": 0.9873481147442943,
+        "denormalizeMs": 0.955672426746807,
+        "filterMs": 1.0298507462686568,
+        "mainHeapBytes": 0.9647844465526944,
+        "browserPeakBytes": 0.8269859751747313,
+        "outerPeakBytes": 0.97716081739798
+      }
+    },
+    "reload": {
+      "baseline": {
+        "readyMs": 719.5,
+        "denormalizeMs": 298.7,
+        "filterMs": 13.5,
+        "mainHeapBytes": 146781644,
+        "browserPeakBytes": 1326215168,
+        "outerPeakBytes": 1984765952,
+        "derivedMs": 134.6,
+        "cacheReadMs": 121.7,
+        "switchMs": {
+          "impact-analysis": 454.89840000000004,
+          "remediation-activity": 175.0502000000006,
+          "devices-by-remediation": 246.58640000000014,
+          "remediations-by-device": 484.54729999999927,
+          "active-vulnerabilities": 71.93399999999929
+        }
+      },
+      "candidate": {
+        "readyMs": 681.9000000003725,
+        "denormalizeMs": 236.5,
+        "filterMs": 12.3,
+        "mainHeapBytes": 140162164,
+        "browserPeakBytes": 1096761344,
+        "outerPeakBytes": 1939435520,
+        "derivedMs": 101.1,
+        "cacheReadMs": 89.6,
+        "switchMs": {
+          "impact-analysis": 472.8169000000007,
+          "remediation-activity": 190.14649999999983,
+          "devices-by-remediation": 264.53729999999996,
+          "remediations-by-device": 445.4852000000001,
+          "active-vulnerabilities": 42.65359999999964
+        }
+      },
+      "candidateToBaselineRatios": {
+        "readyMs": 0.9477414871443677,
+        "denormalizeMs": 0.791764312018748,
+        "filterMs": 0.9111111111111112,
+        "mainHeapBytes": 0.9549025353606204,
+        "browserPeakBytes": 0.8269859751747313,
+        "outerPeakBytes": 0.97716081739798,
+        "derivedMs": 0.7511144130757801,
+        "cacheReadMs": 0.7362366474938372
+      }
+    }
+  },
+  "raw": {
+    "baseline": [
+      {
+        "cell": "load-cohort03-b1",
+        "load": "first",
+        "readyMs": 608.0999999996275,
+        "derivedMs": null,
+        "cacheReadMs": 40.9,
+        "denormalizeMs": 133.1,
+        "filterMs": 6.7,
+        "switchMs": {
+          "impact-analysis": 255.91869999999972,
+          "remediation-activity": 126.54620000000023,
+          "devices-by-remediation": 156.89399999999932,
+          "remediations-by-device": 315.45600000000013,
+          "active-vulnerabilities": 29.0012999999999
+        },
+        "mainHeapBytes": 64036584,
+        "browserPeakBytes": 1326215168,
+        "outerPeakBytes": 1984765952
+      },
+      {
+        "cell": "load-cohort03-b1",
+        "load": "reload",
+        "readyMs": 716,
+        "derivedMs": 134.6,
+        "cacheReadMs": 118,
+        "denormalizeMs": 296.2,
+        "filterMs": 13.5,
+        "switchMs": {
+          "impact-analysis": 438.3622999999998,
+          "remediation-activity": 156.96820000000025,
+          "devices-by-remediation": 286.8626999999997,
+          "remediations-by-device": 524.1255000000001,
+          "active-vulnerabilities": 44.470800000000054
+        },
+        "mainHeapBytes": 146781644,
+        "browserPeakBytes": 1326215168,
+        "outerPeakBytes": 1984765952
+      },
+      {
+        "cell": "load-cohort03-b2",
+        "load": "first",
+        "readyMs": 798.2999999998137,
+        "derivedMs": null,
+        "cacheReadMs": 130.2,
+        "denormalizeMs": 225.3,
+        "filterMs": 6,
+        "switchMs": {
+          "impact-analysis": 298.3517999999999,
+          "remediation-activity": 105.70409999999993,
+          "devices-by-remediation": 172.71870000000035,
+          "remediations-by-device": 293.09010000000035,
+          "active-vulnerabilities": 28.998599999999897
+        },
+        "mainHeapBytes": 75434404,
+        "browserPeakBytes": 1357168640,
+        "outerPeakBytes": 1961713664
+      },
+      {
+        "cell": "load-cohort03-b2",
+        "load": "reload",
+        "readyMs": 719.5,
+        "derivedMs": 139.7,
+        "cacheReadMs": 121.7,
+        "denormalizeMs": 298.7,
+        "filterMs": 15.4,
+        "switchMs": {
+          "impact-analysis": 454.97330000000056,
+          "remediation-activity": 175.0502000000006,
+          "devices-by-remediation": 246.58640000000014,
+          "remediations-by-device": 484.54729999999927,
+          "active-vulnerabilities": 80.10909999999967
+        },
+        "mainHeapBytes": 136967104,
+        "browserPeakBytes": 1357168640,
+        "outerPeakBytes": 1961713664
+      },
+      {
+        "cell": "load-cohort03-b3",
+        "load": "first",
+        "readyMs": 857.5,
+        "derivedMs": null,
+        "cacheReadMs": 38.4,
+        "denormalizeMs": 123.3,
+        "filterMs": 7.5,
+        "switchMs": {
+          "impact-analysis": 318.6322,
+          "remediation-activity": 145.19970000000012,
+          "devices-by-remediation": 217.35810000000038,
+          "remediations-by-device": 368.8198000000002,
+          "active-vulnerabilities": 42.27939999999944
+        },
+        "mainHeapBytes": 73573400,
+        "browserPeakBytes": 1287041024,
+        "outerPeakBytes": 1993150464
+      },
+      {
+        "cell": "load-cohort03-b3",
+        "load": "reload",
+        "readyMs": 748.5,
+        "derivedMs": 131.8,
+        "cacheReadMs": 121.7,
+        "denormalizeMs": 298.7,
+        "filterMs": 13.2,
+        "switchMs": {
+          "impact-analysis": 454.89840000000004,
+          "remediation-activity": 225.78330000000005,
+          "devices-by-remediation": 245.10620000000017,
+          "remediations-by-device": 469.28340000000026,
+          "active-vulnerabilities": 71.93399999999929
+        },
+        "mainHeapBytes": 149928728,
+        "browserPeakBytes": 1287041024,
+        "outerPeakBytes": 1993150464
+      }
+    ],
+    "candidate": [
+      {
+        "cell": "load-cohort03-c1",
+        "load": "first",
+        "readyMs": 818.2999999998137,
+        "derivedMs": null,
+        "cacheReadMs": 40.2,
+        "denormalizeMs": 127.2,
+        "filterMs": 6.9,
+        "switchMs": {
+          "impact-analysis": 285.8856999999998,
+          "remediation-activity": 105.49799999999959,
+          "devices-by-remediation": 177.15009999999984,
+          "remediations-by-device": 294.0077000000001,
+          "active-vulnerabilities": 29.86949999999979
+        },
+        "mainHeapBytes": 59409888,
+        "browserPeakBytes": 1096761344,
+        "outerPeakBytes": 2056871936
+      },
+      {
+        "cell": "load-cohort03-c1",
+        "load": "reload",
+        "readyMs": 681.9000000003725,
+        "derivedMs": 100.7,
+        "cacheReadMs": 89.6,
+        "denormalizeMs": 236.5,
+        "filterMs": 13.4,
+        "switchMs": {
+          "impact-analysis": 472.8169000000007,
+          "remediation-activity": 190.1221999999998,
+          "devices-by-remediation": 255.94750000000022,
+          "remediations-by-device": 445.4852000000001,
+          "active-vulnerabilities": 61.59700000000066
+        },
+        "mainHeapBytes": 146166552,
+        "browserPeakBytes": 1096761344,
+        "outerPeakBytes": 2056871936
+      },
+      {
+        "cell": "load-cohort03-c2",
+        "load": "first",
+        "readyMs": 788.2000000001863,
+        "derivedMs": null,
+        "cacheReadMs": 39.3,
+        "denormalizeMs": 126,
+        "filterMs": 6.9,
+        "switchMs": {
+          "impact-analysis": 329.68920000000026,
+          "remediation-activity": 108.7174,
+          "devices-by-remediation": 181.39840000000004,
+          "remediations-by-device": 290.0612000000001,
+          "active-vulnerabilities": 34.49070000000029
+        },
+        "mainHeapBytes": 74105156,
+        "browserPeakBytes": 1069133824,
+        "outerPeakBytes": 1910185984
+      },
+      {
+        "cell": "load-cohort03-c2",
+        "load": "reload",
+        "readyMs": 654,
+        "derivedMs": 101.1,
+        "cacheReadMs": 79.8,
+        "denormalizeMs": 216.7,
+        "filterMs": 12.3,
+        "switchMs": {
+          "impact-analysis": 454.9411,
+          "remediation-activity": 196.73689999999988,
+          "devices-by-remediation": 266.08809999999994,
+          "remediations-by-device": 507.15769999999975,
+          "active-vulnerabilities": 42.65359999999964
+        },
+        "mainHeapBytes": 140162164,
+        "browserPeakBytes": 1069133824,
+        "outerPeakBytes": 1910185984
+      },
+      {
+        "cell": "load-cohort03-c3",
+        "load": "first",
+        "readyMs": 675.2000000001863,
+        "derivedMs": null,
+        "cacheReadMs": 58.5,
+        "denormalizeMs": 149.5,
+        "filterMs": 8.4,
+        "switchMs": {
+          "impact-analysis": 262.4854999999998,
+          "remediation-activity": 124.4331000000002,
+          "devices-by-remediation": 213.36479999999983,
+          "remediations-by-device": 278.7393999999995,
+          "active-vulnerabilities": 28.838999999999942
+        },
+        "mainHeapBytes": 70982472,
+        "browserPeakBytes": 1111896064,
+        "outerPeakBytes": 1939435520
+      },
+      {
+        "cell": "load-cohort03-c3",
+        "load": "reload",
+        "readyMs": 695.3000000007451,
+        "derivedMs": 104.4,
+        "cacheReadMs": 107.2,
+        "denormalizeMs": 253,
+        "filterMs": 11.2,
+        "switchMs": {
+          "impact-analysis": 494.89620000000014,
+          "remediation-activity": 190.14649999999983,
+          "devices-by-remediation": 264.53729999999996,
+          "remediations-by-device": 383.5635000000002,
+          "active-vulnerabilities": 36.71530000000075
+        },
+        "mainHeapBytes": 134335196,
+        "browserPeakBytes": 1111896064,
+        "outerPeakBytes": 1939435520
+      }
+    ]
+  }
+}

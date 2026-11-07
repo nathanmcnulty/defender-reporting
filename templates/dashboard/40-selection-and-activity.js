@@ -372,12 +372,15 @@ function applyDerivedVulnerabilityFields(rows) {
     if (!Array.isArray(rows)) return;
 
     const earliestEnvironmentFirstSeenByIssue = new Map();
+    // Index scratch remains valid even when several entries share one object.
+    const issueKeys = new Array(rows.length);
     const qualitySummary = createEmptyDataQualitySummary();
     const qualityDeviceKeys = new Set();
     const qualityCveIds = new Set();
 
-    rows.forEach(v => {
+    rows.forEach((v, index) => {
         const issueKey = getEnvironmentIssueKey(v);
+        issueKeys[index] = issueKey;
         const firstSeenDate = getFirstSeenDate(v);
         if (!issueKey || !firstSeenDate) return;
 
@@ -388,15 +391,16 @@ function applyDerivedVulnerabilityFields(rows) {
     });
 
     let _maxLatest = '';
-    rows.forEach(v => {
-        const machineLastSeenDate = getMachineLastSeenDate(v);
-        const latestActivityDate = getRowLatestActivityDate(v);
-        if (latestActivityDate > _maxLatest) _maxLatest = latestActivityDate;
-        const remediationEvidence = hasKnownPatchEvidence(v);
+    rows.forEach((v, index) => {
         const firstSeenDate = getFirstSeenDate(v);
         const lastSeenDate = getLastSeenDate(v);
-        const effectiveOpenEndDate = getEffectiveOpenEndDate(v);
-        const environmentFirstSeenDate = earliestEnvironmentFirstSeenByIssue.get(getEnvironmentIssueKey(v)) || firstSeenDate;
+        const machineLastSeenDate = getMachineLastSeenDate(v);
+        const latestActivityDate = machineLastSeenDate > lastSeenDate ? machineLastSeenDate : lastSeenDate;
+        if (latestActivityDate > _maxLatest) _maxLatest = latestActivityDate;
+        const remediationEvidence = Boolean(lastSeenDate && latestActivityDate && latestActivityDate > lastSeenDate);
+        const effectiveOpenEndDate = !lastSeenDate ? '' : remediationEvidence ? lastSeenDate : addDaysYmd(latestActivityDate, DEVICE_INACTIVITY_WINDOW_DAYS);
+        const environmentFirstSeenDate = earliestEnvironmentFirstSeenByIssue.get(issueKeys[index]) || firstSeenDate;
+        issueKeys[index] = null;
 
         v._firstSeenDate = firstSeenDate;
         v._machineLastSeenDate = machineLastSeenDate;

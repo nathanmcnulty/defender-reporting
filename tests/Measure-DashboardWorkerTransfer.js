@@ -5,12 +5,16 @@ const http = require('http');
 const os = require('os');
 const crypto = require('crypto');
 const zlib = require('zlib');
-const { Writable } = require('stream');
+const { Readable, Writable } = require('stream');
 const { pipeline } = require('stream/promises');
 const { execFile, spawn, spawnSync } = require('child_process');
 const { performance } = require('perf_hooks');
 const { LaunchBoundClient } = require('./helpers/launch-bound-owner');
 const { loadDashboardSource, loadDashboardHarness } = require('./helpers/dashboard-test-harness');
+const { exerciseAdmin, assertAdminExercise, getPdfBuffer } = require('./helpers/dashboard-admin-exercise');
+const { isAllowedDashboardRequest } = require('./helpers/offline-request-policy');
+const { readDashboardInput } = require('./helpers/dashboard-artifact-input');
+const { exerciseSavedArtifacts, assertArtifactAcceptance } = require('./helpers/dashboard-artifact-acceptance');
 
 function safeInventoryDiagnostic(value = {}) {
     const categories = ['timeout', 'aborted', 'execution', 'response', 'InvalidOperation', 'InvalidArgument', 'InvalidData', 'OperationStopped', 'WriteError', 'ObjectNotFound', 'PermissionDenied', 'SecurityError', 'ResourceUnavailable', 'NotSpecified'];
@@ -50,8 +54,8 @@ function safeFailure(error, phase = 'unknown') {
 }
 
 class ResourceGuard {
-    constructor({ inventory, terminate, freeMemory = os.freemem, limits, interval = 1500 }) {
-        Object.assign(this, { inventory, terminate, freeMemory, limits, interval });
+    constructor({ inventory, terminate, freeMemory = os.freemem, limits, interval = 1500, recordSample = () => {} }) {
+        Object.assign(this, { inventory, terminate, freeMemory, limits, interval, recordSample });
         this.trace = [];
         this.peakBytes = 0;
         this.minimumFreeBytes = Infinity;
@@ -97,6 +101,7 @@ class ResourceGuard {
                 this.minimumFreeBytes = Math.min(this.minimumFreeBytes, freeBytes);
                 const validatedAtHostMs = performance.now();
                 this.trace.push({ stage, startedAtHostMs: startedAt, inventoryStartedAtHostMs, inventoryCompletedAtHostMs, validatedAtHostMs, sampledAtHostMs: performance.now(), sampledAtEpochMs: Date.now(), browserFamilyBytes: inventory.bytes, browserFamilyPrivateBytes: inventory.privateBytes ?? null, freeMemoryBytes: freeBytes, ownedProcessCount: inventory.pids.length });
+                this.recordSample(this.trace.at(-1));
                 assert(inventory.bytes <= this.limits.browserFamilyBytes, 'Browser family memory cap exceeded.');
                 assert(freeBytes >= this.limits.freeMemoryBytes, 'Safety memory floor prevents launch or continuation.');
                 this.check();
@@ -438,7 +443,7 @@ async function terminateFamily(state) {
 }
 
 function launchOwnerGuard(state, limits) {
-    return new ResourceGuard({ inventory: () => state.authority.inventory(), terminate: () => terminateFamily(state), limits });
+    return new ResourceGuard({ inventory: () => state.authority.inventory(), terminate: () => terminateFamily(state), limits, recordSample: state.recordSample });
 }
 
 async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit, owned, profile, authority, profileFinalizers, launchBoundMode }, overrides = {}) {
@@ -549,12 +554,32 @@ async function withServer(server, evidence, operation, profileFinalizers = []) {
 const REPORTS = ['active-vulnerabilities', 'impact-analysis', 'remediation-activity', 'devices-by-remediation', 'remediations-by-device'];
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 
+// Browser choice changes only the installed executable. Both engines use the
+// same launch-bound native owner, all-image containment and resource limits.
+function selectInstalledBrowser(environment = process.env, exists = fs.existsSync) {
+    const engine = environment.DASHBOARD_BROWSER_ENGINE || 'edge';
+    assert(['edge', 'chrome'].includes(engine), 'Unsupported browser engine.');
+    const relative = engine === 'chrome' ? 'Google/Chrome/Application/chrome.exe' : 'Microsoft/Edge/Application/msedge.exe';
+    const candidates = [environment['ProgramFiles(x86)'], environment.ProgramFiles, environment.LOCALAPPDATA]
+        .filter(Boolean).map(base => path.join(base, relative));
+    const executable = candidates.find(candidate => exists(candidate));
+    assert(executable, 'Requested installed browser is unavailable.');
+    return { engine, executable };
+}
+
+function isReportReady(reportId) {
+    return activeReportId === reportId
+        && document.getElementById(reportId + '-section')?.classList.contains('active')
+        && initializedReports.has(reportId) && !dirtyReports.has(reportId)
+        && document.getElementById(reportId + '-section')?.getAttribute('aria-busy') !== 'true';
+}
+
 async function fingerprintPayload(filename) {
     const compressedHash = crypto.createHash('sha256');
     const decompressedHash = crypto.createHash('sha256');
     let payloadBytes = 0;
     let decompressedBytes = 0;
-    const input = fs.createReadStream(filename);
+    const input = Buffer.isBuffer(filename) ? Readable.from([filename]) : fs.createReadStream(filename);
     input.on('data', chunk => { payloadBytes += chunk.length; compressedHash.update(chunk); });
     await pipeline(input, zlib.createGunzip(), new Writable({
         write(chunk, encoding, callback) {
@@ -568,6 +593,52 @@ async function fingerprintPayload(filename) {
 
 function assertRuntimeAsset(source, label) {
     assert(source.length > 1024 && !source.includes('offline regression fixture'), `${label} must be a real runtime library, not a regression placeholder.`);
+}
+
+function measurementWorkflow(args) {
+    const admin = args.includes('--admin-exercise');
+    const saved = args.includes('--saved-artifacts');
+    const scopedAdminFirst = args.includes('--scoped-admin-first');
+    assert(!saved || !admin, 'Saved-artifact acceptance is separate from getBuffer timing.');
+    assert(!scopedAdminFirst || admin || saved, '--scoped-admin-first requires --admin-exercise or --saved-artifacts.');
+    return { scopedAdminFirst, workload: scopedAdminFirst ? 'load-filter-scoped-reports-detail-pdf-restore' : 'load-unfiltered-report-tour-then-optional-scoped-exercise' };
+}
+
+function summarizeScopedExercise(result, savedArtifacts) {
+    if (savedArtifacts) assertArtifactAcceptance(result);
+    else assertAdminExercise(result);
+    const steps = result.reports.map(row => {
+        const state = savedArtifacts ? row.before : row;
+        const cards = savedArtifacts ? state.cards : state.summaryCards;
+        assert(Number.isSafeInteger(state.reportRows) && state.reportRows >= 0, 'Missing or invalid scoped report rows.');
+        assert(cards && Object.keys(cards).length > 0, 'Missing scoped report summary cards.');
+        const summaryCards = Object.fromEntries(Object.keys(cards).sort().map(key => {
+            const value = cards[key];
+            assert((typeof value === 'number' || typeof value === 'string' && value.trim() !== '') && Number.isSafeInteger(Number(value)) && Number(value) >= 0, 'Invalid scoped summary count.');
+            if (row.scope === 'empty') assert.strictEqual(Number(value), 0, 'Empty scoped cards broadened.');
+            return [key, Number(value)];
+        }));
+        if (row.scope === 'empty') assert.strictEqual(state.reportRows, 0, 'Empty scoped report broadened.');
+        return { scope: row.scope, report: row.report, sourceRows: state.sourceRows, reportRows: state.reportRows, summaryCards,
+            ...(savedArtifacts ? { mode: state.mode } : {}) };
+    }).sort((a, b) => `${a.scope}/${a.report}`.localeCompare(`${b.scope}/${b.report}`));
+    return { representativeRows: result.representativeRows, steps };
+}
+
+function recordScopedExercise(run, savedArtifacts) {
+    const summary = summarizeScopedExercise(savedArtifacts ? run.savedArtifacts : run.adminExercise, savedArtifacts);
+    run.scopedWorkloadSummary = summary;
+    run.scopedWorkloadDigest = digest(JSON.stringify(summary));
+    const representative = summary.steps.filter(step => step.scope === 'representative');
+    run.reportIds = representative.map(step => step.report).sort();
+    run.reportRows = Object.fromEntries(representative.map(step => [step.report, step.reportRows]));
+    run.impactRows = run.reportRows['impact-analysis'];
+    run.readinessCacheDigest = null;
+    if (run.positiveControl) {
+        const active = representative.find(step => step.report === 'active-vulnerabilities');
+        run.controlObservation = { filteredSourceRows: active.sourceRows, selectedRows: active.reportRows, impactRows: run.impactRows,
+            cardTotal: Object.values(active.summaryCards).reduce((total, value) => total + value, 0), dateRange: '2026-01-01/2026-01-02' };
+    }
 }
 
 function assertRun(run, expectedRows, first) {
@@ -586,6 +657,18 @@ function assertRun(run, expectedRows, first) {
         if (first) assert.deepStrictEqual(run.controlObservation, first.controlObservation, 'Cold/reload positive-control counts differ.');
     }
     for (const report of REPORTS) assert(run.reportIds.includes(report), `Required report missing: ${report}`);
+    if (run.scopedAdminFirst) {
+        assert.strictEqual(run.workload, 'load-filter-scoped-reports-detail-pdf-restore');
+        assert.deepStrictEqual(run.reportSwitches, [], 'Scoped-first evidence must not claim an unfiltered report tour.');
+        assert.strictEqual(run.readinessCacheDigest, null, 'Scoped-first evidence cannot claim full-tour readiness/cache consistency.');
+        const summary = summarizeScopedExercise(run.savedArtifacts || run.adminExercise, Boolean(run.savedArtifacts));
+        assert.deepStrictEqual(run.scopedWorkloadSummary, summary, 'Scoped summary differs from actual helper receipts.');
+        assert.strictEqual(run.scopedWorkloadDigest, digest(JSON.stringify(summary)), 'Scoped receipt digest differs.');
+        const representative = summary.steps.filter(step => step.scope === 'representative');
+        assert.deepStrictEqual(run.reportIds, representative.map(step => step.report).sort());
+        assert.deepStrictEqual(run.reportRows, Object.fromEntries(representative.map(step => [step.report, step.reportRows])));
+        assert.strictEqual(run.impactRows, run.reportRows['impact-analysis']);
+    }
     const policy = run.cachePolicy;
     assert(Number.isSafeInteger(policy.maxRowsExclusive) && policy.maxRowsExclusive > 0, 'Invalid cache row policy.');
     assert.strictEqual(policy.eligible, policy.available && expectedRows < policy.maxRowsExclusive, 'Cache eligibility differs from production policy.');
@@ -607,7 +690,9 @@ function assertRun(run, expectedRows, first) {
         assert.deepStrictEqual(run.reportIds, first.reportIds, 'Cold/reload reports differ.');
         assert.deepStrictEqual(run.cachePolicy, first.cachePolicy, 'Cold/reload cache policy differs.');
         assert.strictEqual(digest(JSON.stringify(run.snapshot.summaryCards)), digest(JSON.stringify(first.snapshot.summaryCards)), 'Cold/reload severity summary differs.');
-        assert.strictEqual(run.readinessCacheDigest, first.readinessCacheDigest, 'Cold/reload readiness/cache digest differs.');
+        assert.strictEqual(Boolean(run.scopedAdminFirst), Boolean(first.scopedAdminFirst), 'Cold/reload workflow differs.');
+        if (run.scopedAdminFirst) assert.strictEqual(run.scopedWorkloadDigest, first.scopedWorkloadDigest, 'Cold/reload scoped source/report/card counts differ.');
+        else assert.strictEqual(run.readinessCacheDigest, first.readinessCacheDigest, 'Cold/reload readiness/cache digest differs.');
     }
     assert.strictEqual(run.externalRequests, 0, 'All assets must be same-origin.');
     assert.strictEqual(run.pageErrors, 0, 'Dashboard page errors.');
@@ -632,10 +717,32 @@ function requireCapturedFingerprint(values) {
 }
 
 function installInstrumentation() {
-    const phaseNames = ['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs'];
+    const phaseNames = ['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs', 'cacheReadMs', 'cacheDerivedMs'];
     const functionNames = ['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded'];
     window.__issue70 = { phases: [], workerMessages: [], initialization: [], compressedFingerprints: [] };
     window.addEventListener('DOMContentLoaded', () => {
+        const originalCacheRead = window.getCachedData;
+        if (typeof originalCacheRead === 'function') {
+            window.getCachedData = async function(...args) {
+                const start = performance.now();
+                try { return await originalCacheRead.apply(this, args); }
+                finally {
+                    try { recordDashboardPhaseTiming('cacheReadMs', performance.now() - start); } catch { /* instrumentation must not change the result */ }
+                }
+            };
+        }
+        const originalCacheDerived = window.applyDerivedVulnerabilityFields;
+        if (typeof originalCacheDerived === 'function') {
+            // This production function is synchronous: an async wrapper would
+            // turn thrown errors into rejections and change its callers.
+            window.applyDerivedVulnerabilityFields = function(...args) {
+                const start = performance.now();
+                try { return originalCacheDerived.apply(this, args); }
+                finally {
+                    try { recordDashboardPhaseTiming('cacheDerivedMs', performance.now() - start); } catch { /* instrumentation must not change the result */ }
+                }
+            };
+        }
         const originalFingerprint = window.computeCompressedFingerprint;
         if (typeof originalFingerprint === 'function') {
             window.computeCompressedFingerprint = async function(...args) {
@@ -733,8 +840,9 @@ async function finishHeapSample(run, sample, timeout = 5000) {
     catch { run.incompleteHeapSample = true; }
 }
 
-async function measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl, profileFinalizers }) {
+async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot, evidence, expectedRows, iteration, positiveControl, profileFinalizers, recordSample }) {
     const state = {};
+    if (recordSample) state.recordSample = sample => recordSample({ iteration, ...sample });
     let measurementError;
     try {
         state.profile = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'issue70-edge-')));
@@ -751,14 +859,25 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
         state.guard.start();
         const portFile = path.join(state.profile, 'DevToolsActivePort');
         const port = await readDevToolsPort(portFile, state.guard);
-        const connection = chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 15000 });
+        const connectionOptions = { timeout: 15000 };
+        if (evidence.savedArtifactsEnabled) {
+            connectionOptions.artifactsDir = path.join(artifactRoot, `native-downloads-${iteration}`);
+            fs.mkdirSync(connectionOptions.artifactsDir);
+        }
+        const connection = chromium.connectOverCDP(`http://127.0.0.1:${port}`, connectionOptions);
         connection.then(browser => { state.browser = browser; }, () => {});
         state.browser = await state.guard.wait(connection);
+        const browserVersion = state.browser.version();
+        if (evidence.browserEngine.version) assert.strictEqual(browserVersion, evidence.browserEngine.version, 'Browser version changed between iterations.');
+        evidence.browserEngine.version = browserVersion;
         const context = state.browser.contexts()[0];
         state.page = context.pages()[0];
         state.cdp = await state.guard.wait(context.newCDPSession(state.page));
         await state.guard.wait(state.cdp.send('Performance.enable'));
-        await state.guard.wait(context.route('**/*', route => route.request().url().startsWith(origin + '/') ? route.continue() : route.abort()));
+        if (evidence.savedArtifactsEnabled) {
+            await state.guard.wait(state.page.setViewportSize({ width: 1440, height: 1000 }));
+        }
+        await state.guard.wait(context.route('**/*', route => isAllowedDashboardRequest(route.request().url(), origin, fileUrl) ? route.continue() : route.abort()));
         await state.guard.wait(context.addInitScript(installInstrumentation));
         let first;
         for (const load of ['first', 'reload']) {
@@ -767,7 +886,7 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
             state.guard.stage = `${load}:navigation`;
             const traceStart = state.guard.trace.length;
             const onError = () => { run.pageErrors++; };
-            const onRequest = request => { if (!request.url().startsWith(origin + '/')) run.externalRequests++; };
+            const onRequest = request => { if (!isAllowedDashboardRequest(request.url(), origin, fileUrl)) run.externalRequests++; };
             const onFailure = () => { run.failedResources++; };
             const onResponse = response => { if (response.status() >= 400) run.failedResponses++; };
             state.page.on('pageerror', onError);
@@ -794,7 +913,10 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
             try {
                 run.navigationStartedAtHostMs = performance.now();
                 run.navigationStartedAtEpochMs = Date.now();
-                const navigation = load === 'first' ? state.page.goto(origin + '/', { waitUntil: 'domcontentloaded', timeout: evidence.limits.readinessWallMs }) : state.page.reload({ waitUntil: 'domcontentloaded', timeout: evidence.limits.readinessWallMs });
+                const navigationTarget = load === 'first' ? fileUrl || origin + '/' : state.page.url();
+                assert(isAllowedDashboardRequest(navigationTarget, origin, fileUrl), 'Navigation escaped its retained product.');
+                run.navigationPolicy = fileUrl ? 'exact-self-contained-file-with-optional-single-view' : 'same-hosted-origin';
+                const navigation = load === 'first' ? state.page.goto(navigationTarget, { waitUntil: 'domcontentloaded', timeout: evidence.limits.readinessWallMs }) : state.page.reload({ waitUntil: 'domcontentloaded', timeout: evidence.limits.readinessWallMs });
                 await state.guard.wait(navigation);
                 run.stage = 'readiness';
                 state.guard.stage = `${load}:readiness`;
@@ -802,6 +924,20 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
                 run.initialization = await state.guard.wait(state.page.evaluate(() => window.__issue70.initialization));
                 assert(!run.initialization.some(record => record.name === 'init' && record.status === 'failed'), 'Dashboard initialization failed; inspect sanitized function frames.');
                 run.readinessObservedHostWallMs = performance.now() - run.navigationStartedAtHostMs;
+                if (evidence.fixedDateRange && !positiveControl) {
+                    const [start, end] = evidence.fixedDateRange.split('/');
+                    const alreadySelected = await state.guard.wait(state.page.evaluate(({ start, end }) => filterState.startDate === start && filterState.endDate === end, { start, end }));
+                    if (!alreadySelected) {
+                        await state.guard.wait(state.page.locator('#filterPillDate').click());
+                        await state.guard.wait(state.page.locator('#filterPopoverStartDate').fill(start));
+                        await state.guard.wait(state.page.locator('#filterPopoverEndDate').fill(end));
+                        await state.guard.wait(state.page.locator('#filterPopoverApplyButton').click());
+                    }
+                    run.fixtureDateRange = { start, end, reusedSelectedRange: alreadySelected };
+                    await state.guard.wait(state.page.waitForFunction(({ start, end }) => filterState.startDate === start && filterState.endDate === end
+                        && initializedReports.has(activeReportId) && !dirtyReports.has(activeReportId)
+                        && document.getElementById(activeReportId + '-section').getAttribute('aria-busy') !== 'true', { start, end }, { timeout: evidence.limits.readinessWallMs }));
+                }
                 if (positiveControl) {
                     const controlRange = await state.guard.wait(state.page.evaluate(() => filterState.startDate === '2026-01-01' && filterState.endDate === '2026-01-02'));
                     if (!controlRange) {
@@ -826,25 +962,54 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
                 run.ttiBrowserMs = run.snapshot.ready.browserMs;
                 run.cachePolicy = run.snapshot.cachePolicy;
                 assert(Number.isFinite(run.ttiBrowserMs), 'Missing browser readiness timestamp.');
-                run.stage = 'reports';
-                state.guard.stage = `${load}:reports`;
-                for (const report of REPORTS.slice(1).concat(REPORTS[0])) {
-                    await state.guard.wait(state.page.evaluate(reportId => selectReportById(reportId), report));
-                    await state.guard.wait(state.page.waitForFunction(reportId => dashboardMetrics.reports[reportId]?.count > 0, report, { timeout: evidence.limits.readinessWallMs }));
+                run.scopedAdminFirst = evidence.scopedAdminFirst;
+                run.workload = evidence.workload;
+                run.reportSwitches = [];
+                const exerciseScoped = async () => {
+                    if (evidence.adminExerciseEnabled) {
+                        run.stage = 'admin-exercise';
+                        state.guard.stage = `${load}:admin-exercise`;
+                        run.adminExercise = await exerciseAdmin(state.page, state.guard, evidence.limits.readinessWallMs);
+                        assertAdminExercise(run.adminExercise);
+                    }
+                    if (evidence.savedArtifactsEnabled) {
+                        run.stage = 'saved-artifacts';
+                        state.guard.stage = `${load}:saved-artifacts`;
+                        run.savedArtifacts = await exerciseSavedArtifacts(state.page, state.guard, evidence.limits.readinessWallMs,
+                            path.join(artifactRoot, `iteration-${iteration}-${load}`));
+                        assertArtifactAcceptance(run.savedArtifacts);
+                    }
+                };
+                if (evidence.scopedAdminFirst) {
+                    await exerciseScoped();
+                    recordScopedExercise(run, evidence.savedArtifactsEnabled);
+                    const observations = await state.guard.wait(state.page.evaluate(() => ({ phases: window.__issue70.phases, workerMessages: window.__issue70.workerMessages })));
+                    run.phaseTrace = observations.phases;
+                    run.workerMessages = observations.workerMessages;
+                    run.workerReturnFormats = [...new Set(observations.workerMessages.filter(message => message.format !== 'phase').map(message => message.format))];
+                } else {
+                    run.stage = 'reports';
+                    state.guard.stage = `${load}:reports`;
+                    for (const report of REPORTS.slice(1).concat(REPORTS[0])) {
+                        const switchStarted = performance.now();
+                        await state.guard.wait(state.page.evaluate(reportId => selectReportById(reportId), report));
+                        await state.guard.wait(state.page.waitForFunction(isReportReady, report, { timeout: evidence.limits.readinessWallMs }));
+                        run.reportSwitches.push({ report, completedHostWallMs: performance.now() - switchStarted });
+                    }
+                    const reports = await state.guard.wait(state.page.evaluate(() => ({
+                        reportIds: Object.keys(getDashboardMetricsSnapshot().reports).sort(), impactRows: impactAnalysisAllData.length,
+                        summaryCards: buildDashboardValidationSnapshot().summaryCards, activeRows: filteredData.length, selectedRows: remediationAllData.length,
+                        reportSections: buildDashboardValidationSnapshot().reportSections,
+                        phases: window.__issue70.phases, workerMessages: window.__issue70.workerMessages
+                    })));
+                    run.reportIds = reports.reportIds.filter(report => REPORTS.includes(report));
+                    run.impactRows = reports.impactRows;
+                    run.phaseTrace = reports.phases;
+                    run.workerMessages = reports.workerMessages;
+                    run.workerReturnFormats = [...new Set(reports.workerMessages.filter(message => message.format !== 'phase').map(message => message.format))];
+                    run.readinessCacheDigest = digest(JSON.stringify({ summaryCards: reports.summaryCards, activeRows: reports.activeRows, impactRows: reports.impactRows, reportIds: run.reportIds, reportSections: reports.reportSections }));
+                    if (positiveControl) run.controlObservation = { filteredSourceRows: reports.activeRows, selectedRows: reports.selectedRows, impactRows: reports.impactRows, cardTotal: Object.values(reports.summaryCards).reduce((total, value) => total + Number(value), 0), dateRange: '2026-01-01/2026-01-02' };
                 }
-                const reports = await state.guard.wait(state.page.evaluate(() => ({
-                    reportIds: Object.keys(getDashboardMetricsSnapshot().reports).sort(), impactRows: impactAnalysisAllData.length,
-                    summaryCards: buildDashboardValidationSnapshot().summaryCards, activeRows: filteredData.length, selectedRows: remediationAllData.length,
-                    reportSections: buildDashboardValidationSnapshot().reportSections,
-                    phases: window.__issue70.phases, workerMessages: window.__issue70.workerMessages
-                })));
-                run.reportIds = reports.reportIds.filter(report => REPORTS.includes(report));
-                run.impactRows = reports.impactRows;
-                run.phaseTrace = reports.phases;
-                run.workerMessages = reports.workerMessages;
-                run.workerReturnFormats = [...new Set(reports.workerMessages.filter(message => message.format !== 'phase').map(message => message.format))];
-                run.readinessCacheDigest = digest(JSON.stringify({ summaryCards: reports.summaryCards, activeRows: reports.activeRows, impactRows: reports.impactRows, reportIds: run.reportIds, reportSections: reports.reportSections }));
-                if (positiveControl) run.controlObservation = { filteredSourceRows: reports.activeRows, selectedRows: reports.selectedRows, impactRows: reports.impactRows, cardTotal: Object.values(reports.summaryCards).reduce((total, value) => total + Number(value), 0), dateRange: '2026-01-01/2026-01-02' };
                 run.summaryCardsSha256 = digest(JSON.stringify(run.snapshot.summaryCards));
                 run.stage = 'cache';
                 state.guard.stage = `${load}:cache`;
@@ -857,6 +1022,7 @@ async function measureIteration({ chromium, edge, origin, evidence, expectedRows
                         await state.guard.wait(new Promise(resolve => setTimeout(resolve, 100)));
                     } while (performance.now() < deadline);
                 } else run.cacheEntries = { count: 0, matchingRows: 0 };
+                if (!evidence.scopedAdminFirst) await exerciseScoped();
                 clearInterval(heapTimer);
                 await state.guard.wait(finishHeapSample(run, heapSample));
                 await completeRun(run, state.guard, () => assertRun(run, expectedRows, first));
@@ -905,11 +1071,24 @@ async function main() {
     const expectedRows = Number(expectedArgument);
     const repeats = Number(repeatsArgument);
     const positiveControl = process.argv.includes('--positive-control');
+    const selfContained = process.argv.includes('--self-contained');
+    const savedArtifacts = process.argv.includes('--saved-artifacts');
+    const workflow = measurementWorkflow(process.argv);
+    assert(!savedArtifacts || process.argv.includes('--generated-runtime'), 'Saved artifacts require the actual generated product runtime.');
+    const dateArguments = process.argv.filter(value => value.startsWith('--date-range='));
+    assert(dateArguments.length <= 1, 'Only one fixture date range may be supplied.');
+    const fixedDateRange = dateArguments[0]?.slice('--date-range='.length) || null;
+    if (fixedDateRange) {
+        assert(/^\d{4}-\d{2}-\d{2}\/\d{4}-\d{2}-\d{2}$/.test(fixedDateRange), 'Invalid fixed date range.');
+        const [start, end] = fixedDateRange.split('/');
+        for (const value of [start, end]) assert(new Date(value).toISOString().slice(0, 10) === value, 'Invalid fixed calendar date.');
+        assert(start <= end && (!positiveControl || fixedDateRange === '2026-01-01/2026-01-02'), 'Date range conflicts with fixture control.');
+    }
     assert(Number.isSafeInteger(expectedRows) && expectedRows > 0, 'Explicit expected rows are required; use 2 for the committed control fixture.');
     assert(Number.isSafeInteger(repeats) && repeats > 0 && repeats <= 10, 'Repeats must be between 1 and 10.');
     assert(!positiveControl || expectedRows === 2, 'Positive control requires two expected rows.');
     const evidence = {
-        schemaVersion: 2, expectedRows,
+        schemaVersion: 3, expectedRows, ...workflow, deliveryMode: selfContained ? 'self-contained-file' : 'hosted-http', savedArtifactsEnabled: savedArtifacts, fixedDateRange, adminExerciseEnabled: process.argv.includes('--admin-exercise'),
         limits: { browserFamilyBytes: 2 * 1024 ** 3, freeMemoryBytes: 3 * 1024 ** 3, readinessWallMs: 120000, inventoryTimeoutMs: 5000, terminationTimeoutMs: 15000 },
         heapScope: 'CDP JSHeapUsedSize is main-renderer only; sampled family working set and private memory include owned workers and descendants. Observational CDP probes are single-flight and may stall with the renderer; independent resource inventory remains bounded and fail-closed.',
         timingScope: 'ttiBrowserMs is first dashboard-ready performance.now from navigation timeOrigin, not a true interaction latency; readinessObservedHostWallMs includes host polling; snapshotBrowserMs is later.',
@@ -919,25 +1098,36 @@ async function main() {
     try {
         phase = 'provenance';
         const root = fs.realpathSync(rootArgument);
-        const htmlName = 'VulnerabilityDashboard.Hosted.html';
-        const html = fs.readFileSync(path.join(root, htmlName), 'utf8');
-        const config = JSON.parse(html.match(/<script id="dashboardConfig"[^>]*>([\s\S]*?)<\/script>/)[1]);
-        const resolveAsset = relative => {
-            const filename = path.resolve(root, relative);
-            assert(filename.startsWith(root + path.sep), 'Asset outside retained dashboard root.');
-            return filename;
-        };
-        const payloadIdentity = await fingerprintPayload(resolveAsset(config.payloadUrl));
-        const summary = fs.readFileSync(resolveAsset(config.payloadSummaryUrl));
+        const input = readDashboardInput(root, selfContained, process.argv.includes('--generated-runtime'), () => loadDashboardSource().dashboardSource);
+        const { htmlName, html, fileUrl, resolveAsset, runtime, chart, pako } = input;
+        const payloadIdentity = await fingerprintPayload(input.payload);
         phase = 'assets';
-        const runtime = loadDashboardSource().dashboardSource;
-        const chart = fs.readFileSync(resolveAsset(config.chartJsUrl), 'utf8');
-        const pakoUrl = html.match(/<script\s+src="([^"]*\/runtime\/pako\.js)"/)[1];
-        const pako = fs.readFileSync(resolveAsset(pakoUrl), 'utf8');
         assertRuntimeAsset(chart, 'Chart.js');
         assertRuntimeAsset(pako, 'pako');
-        evidence.assetHashes = { chart: digest(chart), pako: digest(pako) };
-        Object.assign(evidence, payloadIdentity, { summarySha256: digest(summary), htmlSha256: digest(html), runtimeSha256: digest(runtime) });
+        evidence.runtimeMode = input.runtimeMode;
+        evidence.runtimeBytes = Buffer.byteLength(runtime);
+        evidence.assetHashes = { chart: digest(chart), pako: digest(pako), pdfBundle: digest(input.pdfBundle) };
+        Object.assign(evidence, payloadIdentity, { summarySha256: input.summary ? digest(input.summary) : null, htmlSha256: digest(html), runtimeSha256: digest(runtime) });
+        let recordSample;
+        if (process.argv.includes('--progress-journal')) {
+            const requestedJournal = path.resolve(outputArgument + '.progress.jsonl');
+            const journal = path.join(fs.realpathSync.native(path.dirname(requestedJournal)), path.basename(requestedJournal));
+            const relative = path.relative(root, journal);
+            assert(relative && (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)), 'Progress journal must be outside retained inputs.');
+            fs.writeFileSync(journal, JSON.stringify({ schema: 'dashboard-progress-v1', status: 'diagnostic-only-not-run-acceptance', htmlSha256: evidence.htmlSha256, payloadSha256: evidence.payloadSha256 }) + '\n', { flag: 'wx' });
+            recordSample = sample => {
+                const line = JSON.stringify(sample) + '\n';
+                assert(fs.statSync(journal).size + Buffer.byteLength(line) <= 2 * 1024 ** 2, 'Progress journal exceeded its size bound.');
+                fs.appendFileSync(journal, line);
+            };
+            evidence.progressJournal = { file: path.basename(journal), scope: 'Partial diagnostic samples survive outer termination; this file never establishes run completion or cleanup.' };
+        }
+        const artifactRoot = path.resolve(outputArgument + '.artifacts');
+        if (savedArtifacts) {
+            assert(!fs.existsSync(outputArgument) && !fs.existsSync(artifactRoot), 'Artifact acceptance requires a fresh evidence destination.');
+            assert(!artifactRoot.startsWith(root + path.sep) && !root.startsWith(artifactRoot + path.sep), 'Evidence must be outside the retained product.');
+            fs.mkdirSync(artifactRoot, { recursive: true });
+        }
         const server = http.createServer((request, response) => {
             try {
                 const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
@@ -954,11 +1144,11 @@ async function main() {
         phase = 'browser';
         const profileFinalizers = [];
         await withServer(server, evidence, async origin => {
-            const candidates = [process.env['ProgramFiles(x86)'], process.env.ProgramFiles, process.env.LOCALAPPDATA].filter(Boolean).map(base => path.join(base, 'Microsoft/Edge/Application/msedge.exe'));
-            const edge = candidates.find(candidate => fs.existsSync(candidate));
-            assert(edge, 'Microsoft Edge is required.');
+            const selectedBrowser = selectInstalledBrowser();
+            const edge = fs.realpathSync.native(selectedBrowser.executable);
+            evidence.browserEngine = { engine: selectedBrowser.engine, executable: edge, executableSha256: digest(fs.readFileSync(edge)), qualificationScope: 'Selected installed engine only; other engine acceptance remains separate.' };
             const { chromium } = require(process.env.PLAYWRIGHT_MODULE);
-            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, evidence, expectedRows, iteration, positiveControl, profileFinalizers });
+            for (let iteration = 1; iteration <= repeats; iteration++) await measureIteration({ chromium, edge, origin, fileUrl, artifactRoot, evidence, expectedRows, iteration, positiveControl, profileFinalizers, recordSample });
         }, profileFinalizers);
         evidence.status = 'completed';
     } catch (error) {
@@ -1318,7 +1508,267 @@ async function privacyProbes() {
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
 
+async function measurementControlProbes() {
+    const timingCallbacks = {};
+    const timingMetrics = { phases: {} };
+    const timingResult = {};
+    const timingError = new Error('Synthetic operation failure');
+    const timingReceiver = {};
+    let timingNow = 0;
+    let timingSample;
+    let recordingFails = false;
+    const timingContext = {
+        performance: { now: () => timingNow, timeOrigin: 0 },
+        setInterval(callback) { timingSample = callback; },
+        getDashboardMetricsSnapshot: () => timingMetrics,
+        recordDashboardPhaseTiming(name, value) {
+            if (recordingFails) throw new Error('Synthetic instrumentation failure');
+            timingMetrics.phases[name] = value;
+        },
+        window: {
+            addEventListener(name, callback) { timingCallbacks[name] = callback; }, Worker: class {},
+            async getCachedData(...args) {
+                assert.strictEqual(this, timingReceiver);
+                assert.strictEqual(args[1], timingResult);
+                await Promise.resolve(); timingNow += 5;
+                if (args[0] === 'failure') throw timingError;
+                return timingResult;
+            },
+            applyDerivedVulnerabilityFields(...args) {
+                assert.strictEqual(this, timingReceiver);
+                assert.strictEqual(args[1], timingResult);
+                timingNow += 7;
+                if (args[0] === 'failure') throw timingError;
+                return timingResult;
+            }
+        }
+    };
+    require('vm').runInNewContext(`(${installInstrumentation.toString()})()`, timingContext);
+    timingCallbacks.DOMContentLoaded();
+    assert.strictEqual(await timingContext.window.getCachedData.call(timingReceiver, 'success', timingResult), timingResult);
+    await assert.rejects(timingContext.window.getCachedData.call(timingReceiver, 'failure', timingResult), error => error === timingError);
+    assert.strictEqual(timingContext.window.applyDerivedVulnerabilityFields.call(timingReceiver, 'success', timingResult), timingResult, 'Derived instrumentation must remain synchronous.');
+    assert.throws(() => timingContext.window.applyDerivedVulnerabilityFields.call(timingReceiver, 'failure', timingResult), error => error === timingError);
+    assert.strictEqual(timingMetrics.phases.cacheReadMs, 5);
+    assert.strictEqual(timingMetrics.phases.cacheDerivedMs, 7);
+    timingSample();
+    assert.deepStrictEqual(Array.from(timingContext.window.__issue70.phases, record => record.name).sort(), ['cacheDerivedMs', 'cacheReadMs']);
+    recordingFails = true;
+    assert.strictEqual(await timingContext.window.getCachedData.call(timingReceiver, 'success', timingResult), timingResult);
+    await assert.rejects(timingContext.window.getCachedData.call(timingReceiver, 'failure', timingResult), error => error === timingError);
+    assert.strictEqual(timingContext.window.applyDerivedVulnerabilityFields.call(timingReceiver, 'success', timingResult), timingResult);
+    assert.throws(() => timingContext.window.applyDerivedVulnerabilityFields.call(timingReceiver, 'failure', timingResult), error => error === timingError);
+    console.log('PASS actual cache read/derived instrumentation preserves async/sync results, receiver, arguments, errors and allowlisted phase capture');
+    await require('./Assert-DashboardArtifactAcceptance').run();
+    const installed = { ProgramFiles: 'C:/Installed' };
+    const edgeChoice = selectInstalledBrowser(installed, candidate => candidate.endsWith('msedge.exe'));
+    assert.strictEqual(edgeChoice.engine, 'edge');
+    const chromeChoice = selectInstalledBrowser({ ...installed, DASHBOARD_BROWSER_ENGINE: 'chrome' }, candidate => candidate.endsWith('chrome.exe'));
+    assert.strictEqual(chromeChoice.engine, 'chrome');
+    assert.throws(() => selectInstalledBrowser({ ...installed, DASHBOARD_BROWSER_ENGINE: 'chrome' }, candidate => candidate.endsWith('msedge.exe')), /unavailable/);
+    assert.throws(() => selectInstalledBrowser({ ...installed, DASHBOARD_BROWSER_ENGINE: 'custom' }, () => true), /Unsupported/);
+    console.log('PASS installed engine choice, missing Chrome fails without Edge fallback, unknown engine rejected');
+    const readiness = { activeReportId: 'active-vulnerabilities', initializedReports: new Set(['active-vulnerabilities']), dirtyReports: new Set(), busy: false, active: true };
+    readiness.document = { getElementById: () => ({ classList: { contains: () => readiness.active }, getAttribute: () => readiness.busy ? 'true' : null }) };
+    const reportReady = require('vm').runInNewContext(`(${isReportReady.toString()})`, readiness);
+    assert.strictEqual(reportReady('active-vulnerabilities'), true);
+    readiness.dirtyReports.add('active-vulnerabilities');
+    assert.strictEqual(reportReady('active-vulnerabilities'), false, 'Old render must not satisfy a dirty report switch.');
+    readiness.dirtyReports.clear(); readiness.busy = true;
+    assert.strictEqual(reportReady('active-vulnerabilities'), false, 'Deferred render must finish before a switch is timed.');
+    readiness.busy = false; readiness.active = false;
+    assert.strictEqual(reportReady('active-vulnerabilities'), false);
+    const admin = { restored: true, representativeRows: 2, pdfLibrarySourceRows: 2, reports: ['representative', 'empty'].flatMap(scope => REPORTS.map(report => {
+        const modal = scope === 'representative' && ['active-vulnerabilities', 'impact-analysis', 'remediation-activity'].includes(report);
+        return { scope, report, sourceRows: scope === 'empty' ? 0 : 2, reportRows: scope === 'empty' ? 0 : 2, summaryCards: { high: scope === 'empty' ? '0' : '2' }, switchMs: 1,
+            detailKind: scope === 'empty' ? 'empty-scope' : modal ? 'modal' : 'inline-card',
+            detailMs: modal ? 1 : null, scopedFilterMs: 1, pdfPreparationMs: 1,
+            pdf: { bytes: 101, sha256: 'a'.repeat(64) } };
+    })) };
+    assertAdminExercise(admin);
+    assert.throws(() => measurementWorkflow(['--scoped-admin-first']), /requires/);
+    assert.throws(() => measurementWorkflow(['--scoped-admin-first', '--admin-exercise', '--saved-artifacts']), /separate/);
+    for (const lane of ['--admin-exercise', '--saved-artifacts']) assert.strictEqual(measurementWorkflow(['--scoped-admin-first', lane]).scopedAdminFirst, true);
+    assert.strictEqual(measurementWorkflow([]).scopedAdminFirst, false);
+    const scopedRun = { scopedAdminFirst: true, workload: measurementWorkflow(['--scoped-admin-first', '--admin-exercise']).workload,
+        reportSwitches: [], adminExercise: admin };
+    recordScopedExercise(scopedRun, false);
+    assert.deepStrictEqual(scopedRun.reportIds, [...REPORTS].sort());
+    assert.strictEqual(scopedRun.impactRows, 2);
+    assert.strictEqual(scopedRun.readinessCacheDigest, null);
+    const reordered = structuredClone(admin); reordered.reports.reverse();
+    assert.deepStrictEqual(summarizeScopedExercise(reordered, false), scopedRun.scopedWorkloadSummary);
+    for (const mutate of [result => result.reports.pop(), result => { result.reports[0].report = 'wrong'; },
+        result => { result.reports[0].sourceRows = 3; }, result => { delete result.reports[0].reportRows; },
+        result => { result.reports[5].reportRows = 1; }, result => { result.reports[5].summaryCards.high = '1'; },
+        result => { result.restored = false; }]) {
+        const invalid = structuredClone(admin); mutate(invalid);
+        assert.throws(() => summarizeScopedExercise(invalid, false));
+    }
+    const changedRows = structuredClone(admin); changedRows.reports[0].reportRows = 1;
+    assert.notDeepStrictEqual(summarizeScopedExercise(changedRows, false), scopedRun.scopedWorkloadSummary);
+    const scopedCold = { ...structuredClone(scopedRun), compressedFingerprint: 'runtime_fixture',
+        snapshot: { rows: 2, rawRows: 2, activeRows: 2, counts: {}, summaryCards: { high: '2' } },
+        cachePolicy: { eligible: true, available: true, maxRowsExclusive: 500000, maxEntries: 4 },
+        cacheEntries: { matchingRows: 2, count: 1 }, externalRequests: 0, pageErrors: 0 };
+    assertRun(scopedCold, 2);
+    const scopedWarm = structuredClone(scopedCold); scopedWarm.snapshot.counts.compressedCacheHits = 1;
+    assertRun(scopedWarm, 2, scopedCold);
+    for (const mutate of [value => { value.reportSwitches.push({ report: REPORTS[0], completedHostWallMs: 1 }); },
+        value => { value.readinessCacheDigest = 'invented-full-tour'; }, value => { value.reportRows[REPORTS[0]]++; },
+        value => { value.impactRows++; }, value => { value.scopedWorkloadSummary.steps[0].sourceRows++; },
+        value => { value.scopedWorkloadDigest = 'invented'; }]) {
+        const invalid = structuredClone(scopedCold); mutate(invalid); assert.throws(() => assertRun(invalid, 2));
+    }
+    for (const key of ['reportRows', 'summaryCards']) {
+        const changed = structuredClone(scopedWarm);
+        if (key === 'reportRows') changed.adminExercise.reports[0].reportRows = 1;
+        else changed.adminExercise.reports[0].summaryCards.high = '1';
+        recordScopedExercise(changed, false);
+        assert.throws(() => assertRun(changed, 2, scopedCold), /scoped source\/report\/card counts differ/);
+    }
+    const saved = { status: 'captured', restored: true, representativeRows: 2, runtimePreloadSourceRows: 2,
+        uiExercise: { status: 'exercised', path: 'locator-facet-click-check-apply', selectedFacet: 'filterSeverity', deselectionRows: 0,
+            hiddenSelection: { status: 'unavailable-fixture-intersection' } },
+        reports: admin.reports.concat(['devices-by-remediation', 'remediations-by-device'].map(report => ({ scope: 'representative-range', report, sourceRows: 2, reportRows: 2, summaryCards: { high: '2' } }))).map(row => {
+            const device = ['devices-by-remediation', 'remediations-by-device'].includes(row.report);
+            const mode = row.scope === 'representative-range' ? 'range' : 'snapshot';
+            const before = { report: row.report, reportLabel: row.report, sourceRows: row.sourceRows, reportRows: row.reportRows,
+                cards: row.summaryCards, expandedText: 'Synthetic exact report text', mode,
+                modeSummary: device ? 'Synthetic mode summary' : null, includeResolvedText: device ? mode === 'range' ? 'Yes' : 'No' : null,
+                cardDetails: device ? Array.from({ length: row.reportRows }, () => ({ title: 'Synthetic card', metadata: ['Patch: KB1'], statBadges: ['Devices: 1'] })) : [] };
+            const file = { bytes: 150, sha256: 'a'.repeat(64) };
+            return { scope: row.scope, report: row.report, before, after: structuredClone(before),
+                modeAction: device ? { mode, path: 'shared-toolbar-button', action: 'clicked' } : null,
+                pdf: { ...file, suggestedFilename: `Vulnerability_Dashboard_${row.report}_2026-11-06.pdf`, exportUtcDayBefore: '2026-11-06', exportUtcDayAfter: '2026-11-06' },
+                screenshot: file, receipt: file };
+        }) };
+    const savedSummary = summarizeScopedExercise(saved, true);
+    assert.strictEqual(savedSummary.steps.length, 12);
+    assert.strictEqual(savedSummary.steps.filter(step => step.scope === 'representative-range' && step.mode === 'range').length, 2);
+    for (const mutate of [value => { value.reports.pop(); }, value => { value.reports[0].before.report = 'wrong'; },
+        value => { value.reports[0].before.sourceRows = value.reports[0].after.sourceRows = 3; },
+        value => { delete value.reports[0].before.cards; delete value.reports[0].after.cards; },
+        value => { value.reports[5].before.reportRows = value.reports[5].after.reportRows = 1; },
+        value => { value.reports[5].before.cards.high = value.reports[5].after.cards.high = '1'; }]) {
+        const invalid = structuredClone(saved); mutate(invalid); assert.throws(() => summarizeScopedExercise(invalid, true));
+    }
+    console.log('PASS scoped-first dependencies, both helper receipt summaries, full-tour claim rejection and cold/reload source/report/card consistency controls');
+    // Execute the actual serialized page helper with a modeled page boundary;
+    // this proves workflow ordering/restoration, not browser or PDF acceptance.
+    for (const fault of [null, 'runtime', 'libraries', 'oversize']) {
+        const events = [];
+        const failure = new Error('Synthetic preparation failure');
+        const originalDownload = async () => {};
+        const originalState = { deviceNames: [], hasDeviceNames: true, severities: [], hasSeverities: true };
+        const source = fault === 'oversize' ? Array.from({ length: 251 }, () => ({ id: 'a' })) : [{ id: 'a' }, { id: 'a' }, { id: 'b' }];
+        let clock = 0;
+        const context = {
+            filterState: structuredClone(originalState), filteredData: source, activeReportId: 'active-vulnerabilities', remediationReportMode: 'snapshot',
+            initializedReports: new Set(REPORTS), dirtyReports: new Set(), window: fault === 'libraries' ? { __skipPdfExportPageWarning: false } : {},
+            cloneFilterState: state => structuredClone(state), finalizeFilterState: state => state,
+            getDeviceNameFilterValue: row => row.id, performance: { now: () => ++clock },
+            requestAnimationFrame: callback => queueMicrotask(callback), setTimeout, clearTimeout,
+            crypto: crypto.webcrypto, pdfExportInProgress: false, closeModal() {},
+            document: { getElementById: id => ({
+                classList: { contains: () => id === context.activeReportId + '-section' },
+                getAttribute: () => null, querySelector: () => null
+            }) },
+            applyFilters() {
+                context.filteredData = !context.filterState.hasSeverities ? [] : source.filter(row => !context.filterState.deviceNames.length || context.filterState.deviceNames.includes(row.id));
+                events.push('apply:' + context.filteredData.length);
+            },
+            get remediationAllData() { return context.filteredData; },
+            get impactAnalysisAllData() { return context.filteredData; },
+            get remediationDetailsAllData() { return context.filteredData; },
+            get devicesByRemediationAllData() { return context.filteredData; },
+            get remediationsByDeviceAllData() { return context.filteredData; },
+            buildDashboardValidationSnapshot: () => ({ summaryCards: { high: String(context.filteredData.length) } }),
+            selectReportById: report => { context.activeReportId = report; },
+            async ensurePdfExportRuntimeLoaded() {
+                events.push('runtime:' + context.filteredData.length);
+                assert(context.filteredData.length > 0 && context.filteredData.length <= 250);
+                context.remediationReportMode = 'range'; // Failure cleanup must restore the saved mode too.
+                if (fault === 'runtime') throw failure;
+                context.downloadPdfDocument = originalDownload;
+            },
+            async loadPdfLibraries() {
+                events.push('libraries:' + context.filteredData.length);
+                assert(context.filteredData.length > 0 && context.filteredData.length <= 250);
+                if (fault === 'libraries') throw failure;
+            },
+            async exportToPDF() {
+                await context.downloadPdfDocument({ getBuffer: done => done(Buffer.from('%PDF-synthetic\n' + 'x'.repeat(110) + '\n%%EOF')) });
+            }
+        };
+        const operation = exerciseAdmin({ evaluate: script => require('vm').runInNewContext(script, context) }, { wait: promise => promise }, 1000);
+        if (fault === 'oversize') await assert.rejects(operation, /1-250/);
+        else if (fault) await assert.rejects(operation, error => error === failure);
+        else {
+            const result = await operation;
+            assertAdminExercise(result);
+            assert.strictEqual(result.pdfLibrarySourceRows, 2);
+        }
+        assert.deepStrictEqual(context.filterState, originalState);
+        assert.strictEqual(context.activeReportId, 'active-vulnerabilities');
+        assert.strictEqual(context.remediationReportMode, 'snapshot');
+        assert.strictEqual(Object.hasOwn(context.window, '__skipPdfExportPageWarning'), fault === 'libraries');
+        if (fault === 'libraries') assert.strictEqual(context.window.__skipPdfExportPageWarning, false);
+        assert.strictEqual(context.downloadPdfDocument, fault === 'runtime' || fault === 'oversize' ? undefined : originalDownload);
+        if (fault === 'oversize') assert(!events.some(event => event.startsWith('runtime:') || event.startsWith('libraries:')));
+        else {
+            assert.strictEqual(events[0], 'apply:2');
+            assert.strictEqual(events[1], 'runtime:2');
+            if (fault !== 'runtime') assert.strictEqual(events[2], 'libraries:2');
+        }
+    }
+    console.log('PASS serialized admin scope-before-runtime/library ordering, unchanged row cap and restoration on unavailable runtime/library failure');
+    const invalidAdmin = structuredClone(admin); invalidAdmin.reports[5].sourceRows = 1;
+    assert.throws(() => assertAdminExercise(invalidAdmin));
+    const duplicateAdmin = structuredClone(admin); duplicateAdmin.reports[1] = duplicateAdmin.reports[0];
+    assert.throws(() => assertAdminExercise(duplicateAdmin));
+    const missingDetailTime = structuredClone(admin); missingDetailTime.reports[0].detailMs = null;
+    assert.throws(() => assertAdminExercise(missingDetailTime));
+    const inventedDetailTime = structuredClone(admin); inventedDetailTime.reports[5].detailMs = 1;
+    assert.throws(() => assertAdminExercise(inventedDetailTime));
+    const broadenedScope = structuredClone(admin); broadenedScope.reports[0].sourceRows = 3;
+    assert.throws(() => assertAdminExercise(broadenedScope));
+    const mislabeledScope = structuredClone(admin); mislabeledScope.reports[0].detailKind = 'empty-scope';
+    mislabeledScope.reports[0].detailMs = null;
+    assert.throws(() => assertAdminExercise(mislabeledScope));
+    const wrongDetailType = structuredClone(admin); wrongDetailType.reports[0].detailKind = 'inline-card';
+    wrongDetailType.reports[0].detailMs = null;
+    assert.throws(() => assertAdminExercise(wrongDetailType));
+    console.log('PASS actual switch readiness rejects stale/dirty/deferred/inactive sections and admin evidence rejects broadened empty/duplicate reports');
+    const timers = new Map();
+    let timerId = 0;
+    const boundedBuffer = require('vm').runInNewContext(`(${getPdfBuffer.toString()})`, {
+        setTimeout(callback) { timers.set(++timerId, callback); return timerId; },
+        clearTimeout(id) { timers.delete(id); }
+    });
+    let callback;
+    const success = boundedBuffer({ getBuffer(resolve) { callback = resolve; } }, 25);
+    assert.strictEqual(timers.size, 1);
+    const bytes = Buffer.from('%PDF-synthetic');
+    callback(bytes);
+    assert.strictEqual(await success, bytes);
+    assert.strictEqual(timers.size, 0, 'Successful PDF callback must clear its timer.');
+    await assert.rejects(boundedBuffer({ getBuffer() { throw new Error('Synthetic layout failure'); } }, 25), /Synthetic layout failure/);
+    assert.strictEqual(timers.size, 0, 'Synchronous PDF failure must clear its timer.');
+    await assert.rejects(boundedBuffer({ getBuffer() { return Promise.reject(new Error('Synthetic asynchronous failure')); } }, 25), /Synthetic asynchronous failure/);
+    assert.strictEqual(timers.size, 0, 'Asynchronous PDF failure must clear its timer.');
+    const timeout = boundedBuffer({ getBuffer() {} }, 25);
+    assert.strictEqual(timers.size, 1);
+    timers.values().next().value();
+    await assert.rejects(timeout, /callback did not complete/);
+    assert.strictEqual(timers.size, 0, 'Expired PDF deadline must clear its timer.');
+    for (const invalid of [0, -1, NaN, 120001]) await assert.rejects(boundedBuffer({ getBuffer() {} }, invalid), /Invalid PDF callback deadline/);
+    assert.strictEqual(timers.size, 0);
+    console.log('PASS serialized PDF buffer wrapper handles success, synchronous/asynchronous failure and missing callbacks with no pending deadline timer');
+}
+
 async function mockProbes() {
+    await measurementControlProbes();
     const runtime = loadDashboardHarness('module.exports = { computeCompressedFingerprint };');
     const bytes = new Uint8Array([1, 2, 3]);
     const actualKey = await runtime.computeCompressedFingerprint(bytes);
@@ -1493,5 +1943,5 @@ async function mockProbes() {
     console.log('PASS bounded owned-root termination and already-exited race');
 }
 
-module.exports = { mockProbes, ownershipProbes, privacyProbes, inventoryProbes, safeFailure };
+module.exports = { mockProbes, ownershipProbes, privacyProbes, inventoryProbes, safeFailure, measurementControlProbes };
 if (require.main === module) (process.argv.includes('--privacy') ? privacyProbes() : process.argv.includes('--ownership') ? ownershipProbes() : process.argv.includes('--mock') ? mockProbes() : main()).catch(error => { console.error(JSON.stringify({ status: 'blocked-or-failed', failure: safeFailure(error, process.argv.includes('--mock') || process.argv.includes('--ownership') || process.argv.includes('--privacy') ? 'preflight' : 'arguments') })); process.exitCode = 1; });
