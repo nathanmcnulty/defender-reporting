@@ -20,7 +20,7 @@ const { exerciseSavedArtifacts, assertArtifactAcceptance } = require('./helpers/
 // or an ever-growing copy of the browser's phase history.
 function compactReadinessSample(readiness) {
     if (!readiness) return null;
-    const phaseNames = new Set(['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs', 'cacheReadMs', 'cacheDerivedMs']);
+    const phaseNames = new Set(['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainDecodeMs', 'mainParseMs', 'mainFallbackMs', 'cacheReadMs', 'cacheDerivedMs']);
     const functions = new Set(['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded']);
     const phases = {};
     const initialization = {};
@@ -49,18 +49,66 @@ function readDiagnosticCheckpoint(text) {
     let value;
     try { value = JSON.parse(text.slice('ISSUE70_CHECKPOINT:'.length)); } catch { return null; }
     const names = ['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded', 'worker-delivery',
-        'workerInflateMs', 'workerParseMs', 'loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs', 'cacheReadMs', 'cacheDerivedMs',
-        'admin-filter', 'admin-runtime', 'admin-libraries', 'admin-switch', 'admin-detail', 'admin-pdf'];
+        'workerInflateMs', 'workerParseMs', 'loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainDecodeMs', 'mainParseMs', 'mainFallbackMs', 'cacheReadMs', 'cacheDerivedMs',
+        'admin-filter', 'admin-runtime', 'admin-libraries', 'admin-switch', 'admin-detail', 'admin-pdf', 'admin-pdf-header', 'admin-pdf-buffer'];
     if (!value || !names.includes(value.name) || !['start', 'completed', 'failed'].includes(value.state)
         || value.report !== null && !REPORTS.includes(value.report)
         || !Number.isFinite(value.browserMs) || value.browserMs < 0 || !Number.isFinite(value.epochMs)) return null;
-    return { name: value.name, state: value.state, report: value.report, browserMs: value.browserMs, epochMs: value.epochMs,
+    const record = { name: value.name, state: value.state, report: value.report, browserMs: value.browserMs, epochMs: value.epochMs,
         durationMs: Number.isFinite(value.durationMs) && value.durationMs >= 0 ? value.durationMs : null };
+    if (Object.hasOwn(value, 'counts')) {
+        if (!value.counts || typeof value.counts !== 'object' || Array.isArray(value.counts)) return null;
+        const entries = Object.entries(value.counts);
+        if (!entries.length || entries.some(([key, count]) => !['sourceRows', 'reportRows'].includes(key)
+            || !Number.isInteger(count) || count < 0 || count > 2147483647)) return null;
+        record.counts = Object.fromEntries(entries);
+    }
+    return record;
 }
 
 function writeBrowserDiagnostic(guard, writer, sample) {
     try { writer(sample); }
     catch (error) { guard.abort(error); throw error; }
+}
+
+// Host-side breadcrumbs are written before renderer work can stall. They use
+// only existing snapshots; no additional browser queries or row/DOM traversal.
+function reportSwitchCheckpoint({ iteration, load, report, state, run, durationHostWallMs = null }) {
+    assert(Number.isSafeInteger(iteration) && iteration > 0 && iteration <= 2147483647, 'Invalid report-switch iteration.');
+    assert(['first', 'reload'].includes(load) && REPORTS.includes(report)
+        && ['start', 'completed', 'failed'].includes(state), 'Invalid report-switch checkpoint.');
+    const counts = {};
+    const values = { rawRows: run.snapshot?.rawRows, normalizedRows: run.snapshot?.rows,
+        filteredRows: run.snapshot?.activeRows, activeReportRenders: run.lastReadiness?.activeReportRenders };
+    for (const [key, value] of Object.entries(values)) {
+        if (Number.isSafeInteger(value) && value >= 0 && value <= 2147483647) counts[key] = value;
+    }
+    return { kind: 'report-switch', name: 'unfiltered-report-switch', iteration, load, report, state,
+        observationScope: 'prior-snapshot-and-sampled-run-peak',
+        sampledAtEpochMs: Date.now(), observedHostMs: performance.now(), counts,
+        peakMainHeapBytes: Number.isSafeInteger(run.peakMainHeapBytes) && run.peakMainHeapBytes >= 0 ? run.peakMainHeapBytes : null,
+        durationHostWallMs: Number.isFinite(durationHostWallMs) && durationHostWallMs >= 0 ? durationHostWallMs : null };
+}
+
+async function switchUnfilteredReport({ page, guard, report, readinessWallMs, recordSample, iteration, load, run }) {
+    const checkpoint = (state, durationHostWallMs = null) => {
+        if (!recordSample) return;
+        writeBrowserDiagnostic(guard, recordSample, reportSwitchCheckpoint({ iteration, load, report, state, run, durationHostWallMs }));
+    };
+    checkpoint('start');
+    const started = performance.now();
+    let completedHostWallMs;
+    try {
+        await guard.wait(page.evaluate(reportId => selectReportById(reportId), report));
+        await guard.wait(page.waitForFunction(isReportReady, report, { timeout: readinessWallMs }));
+        completedHostWallMs = performance.now() - started;
+    } catch (error) {
+        try { checkpoint('failed', performance.now() - started); }
+        catch { /* Keep the operation's original error; journal failure already aborted the guard. */ }
+        throw error;
+    }
+    checkpoint('completed', completedHostWallMs);
+    return { report, completedHostWallMs };
 }
 
 function safeInventoryDiagnostic(value = {}) {
@@ -764,11 +812,11 @@ function requireCapturedFingerprint(values) {
 }
 
 function installInstrumentation({ progressJournal = false } = {}) {
-    const phaseNames = ['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs', 'cacheReadMs', 'cacheDerivedMs'];
+    const phaseNames = ['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainDecodeMs', 'mainParseMs', 'mainFallbackMs', 'cacheReadMs', 'cacheDerivedMs'];
     const functionNames = ['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded'];
     window.__issue70 = { phases: [], workerMessages: [], initialization: [], compressedFingerprints: [] };
-    if (progressJournal) window.__issue70.checkpoint = (name, state, report = null, durationMs = null) => {
-        try { console.debug('ISSUE70_CHECKPOINT:' + JSON.stringify({ name, state, report, durationMs,
+    if (progressJournal) window.__issue70.checkpoint = (name, state, report = null, durationMs = null, counts) => {
+        try { console.debug('ISSUE70_CHECKPOINT:' + JSON.stringify({ name, state, report, durationMs, ...(counts === undefined ? {} : { counts }),
             browserMs: performance.now(), epochMs: performance.timeOrigin + performance.now() })); } catch { /* diagnostic only */ }
     };
     window.addEventListener('DOMContentLoaded', () => {
@@ -852,7 +900,7 @@ function installInstrumentation({ progressJournal = false } = {}) {
             super(...args);
             this.addEventListener('message', event => {
                 const data = event.data || {};
-                const format = data.phase ? 'phase' : Array.isArray(data) ? 'legacy-array' : data.rows === null ? 'lookups-raw-columns' : Array.isArray(data.rows) ? 'row-envelope' : 'unknown';
+                const format = data.phase ? 'phase' : Array.isArray(data) ? 'legacy-array' : data.jsonUtf8 ? 'utf8-json-buffer' : data.rows === null ? 'lookups-raw-columns' : Array.isArray(data.rows) ? 'row-envelope' : 'unknown';
                 if (phaseNames.includes(data.phase)) window.__issue70.checkpoint?.(data.phase, 'completed', null, data.duration);
                 else if (!data.phase) window.__issue70.checkpoint?.('worker-delivery', 'completed');
                 window.__issue70.workerMessages.push({ format, phase: phaseNames.includes(data.phase) ? data.phase : null, durationMs: Number.isFinite(data.duration) ? data.duration : null, postedAtEpochMs: Number.isFinite(data.postedAt) ? data.postedAt : null, receivedBrowserMs: performance.now(), receivedEpochMs: performance.timeOrigin + performance.now() });
@@ -1066,10 +1114,8 @@ async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot,
                     run.stage = 'reports';
                     state.guard.stage = `${load}:reports`;
                     for (const report of REPORTS.slice(1).concat(REPORTS[0])) {
-                        const switchStarted = performance.now();
-                        await state.guard.wait(state.page.evaluate(reportId => selectReportById(reportId), report));
-                        await state.guard.wait(state.page.waitForFunction(isReportReady, report, { timeout: evidence.limits.readinessWallMs }));
-                        run.reportSwitches.push({ report, completedHostWallMs: performance.now() - switchStarted });
+                        run.reportSwitches.push(await switchUnfilteredReport({ page: state.page, guard: state.guard, report,
+                            readinessWallMs: evidence.limits.readinessWallMs, recordSample, iteration, load, run }));
                     }
                     const reports = await state.guard.wait(state.page.evaluate(() => ({
                         reportIds: Object.keys(getDashboardMetricsSnapshot().reports).sort(), impactRows: impactAnalysisAllData.length,
@@ -1620,6 +1666,14 @@ async function measurementControlProbes() {
         { ...checkpoint, report: diagnosticSentinel }, { ...checkpoint, browserMs: -1 }, { ...checkpoint, epochMs: null }]) {
         assert.strictEqual(readDiagnosticCheckpoint(checkpointText(value)), null);
     }
+    assert(!Object.hasOwn(readDiagnosticCheckpoint(checkpointText(checkpoint)), 'counts'));
+    assert.deepStrictEqual(readDiagnosticCheckpoint(checkpointText({ ...checkpoint, counts: { sourceRows: 2147483647, reportRows: 0 } })).counts,
+        { sourceRows: 2147483647, reportRows: 0 });
+    for (const counts of [null, [], {}, { privateRow: diagnosticSentinel }, { sourceRows: diagnosticSentinel },
+        { sourceRows: -1 }, { sourceRows: 1.5 }, { sourceRows: 2147483648 }, { sourceRows: null },
+        { sourceRows: 2, unexpected: 1 }]) assert.strictEqual(readDiagnosticCheckpoint(checkpointText({ ...checkpoint, counts })), null);
+    for (const name of ['admin-pdf-header', 'admin-pdf-buffer']) for (const state of ['start', 'completed', 'failed'])
+        assert.strictEqual(readDiagnosticCheckpoint(checkpointText({ ...checkpoint, name, state })).state, state);
     assert.strictEqual(readDiagnosticCheckpoint('ISSUE70_CHECKPOINT:{'), null);
     assert.strictEqual(readDiagnosticCheckpoint('x'.repeat(1025)), null);
     assert.strictEqual(readDiagnosticCheckpoint(diagnosticSentinel), null);
@@ -1694,6 +1748,9 @@ async function measurementControlProbes() {
     diagnosticWorker.message({ data: { phase: 'workerParseMs', duration: 5 } });
     diagnosticWorker.message({ data: { rows: null, lookups: {}, rawVulns: {} } });
     assert.deepStrictEqual(checkpointEvents.slice(-2).map(row => row.name), ['workerParseMs', 'worker-delivery']);
+    assert(checkpointEvents.every(row => !Object.hasOwn(row, 'counts')), 'Existing checkpoint shape must remain unchanged.');
+    checkpointContext.window.__issue70.checkpoint('admin-pdf', 'start', REPORTS[0], null, { sourceRows: 2, reportRows: 1 });
+    assert.deepStrictEqual(checkpointEvents.at(-1).counts, { sourceRows: 2, reportRows: 1 }, 'The actual fifth checkpoint argument must survive the sanitized console boundary.');
     consoleFails = true;
     assert.strictEqual(await checkpointContext.window.init('success'), timingResult, 'Console diagnostics must not alter initialization.');
     console.log('PASS opt-in initialization/worker checkpoints survive partial runs without changing return values or errors');
@@ -1794,16 +1851,26 @@ async function measurementControlProbes() {
     console.log('PASS scoped-first dependencies, both helper receipt summaries, full-tour claim rejection and cold/reload source/report/card consistency controls');
     // Execute the actual serialized page helper with a modeled page boundary;
     // this proves workflow ordering/restoration, not browser or PDF acceptance.
-    for (const fault of [null, 'runtime', 'libraries', 'oversize']) {
+    for (const fault of [null, 'disabled', 'runtime', 'libraries', 'oversize', 'header', 'buffer']) {
         const events = [];
         const failure = new Error('Synthetic preparation failure');
         const originalDownload = async () => {};
+        const headerThis = {};
+        const headerArgument = {};
+        const headerResult = {};
+        const originalHeader = async function(argument) {
+            assert.strictEqual(this, headerThis);
+            assert.strictEqual(argument, headerArgument);
+            if (fault === 'header') throw failure;
+            return headerResult;
+        };
+        const diagnostics = [];
         const originalState = { deviceNames: [], hasDeviceNames: true, severities: [], hasSeverities: true };
         const source = fault === 'oversize' ? Array.from({ length: 251 }, () => ({ id: 'a' })) : [{ id: 'a' }, { id: 'a' }, { id: 'b' }];
         let clock = 0;
         const context = {
             filterState: structuredClone(originalState), filteredData: source, activeReportId: 'active-vulnerabilities', remediationReportMode: 'snapshot',
-            initializedReports: new Set(REPORTS), dirtyReports: new Set(), window: fault === 'libraries' ? { __skipPdfExportPageWarning: false } : {},
+            initializedReports: new Set(REPORTS), dirtyReports: new Set(), window: { ...(fault === 'disabled' ? {} : { __issue70: { checkpoint: (name, state, report, duration, counts) => diagnostics.push({ name, state, report, counts }) } }), ...(fault === 'libraries' ? { __skipPdfExportPageWarning: false } : {}) },
             cloneFilterState: state => structuredClone(state), finalizeFilterState: state => state,
             getDeviceNameFilterValue: row => row.id, performance: { now: () => ++clock },
             requestAnimationFrame: callback => queueMicrotask(callback), setTimeout, clearTimeout,
@@ -1829,6 +1896,7 @@ async function measurementControlProbes() {
                 context.remediationReportMode = 'range'; // Failure cleanup must restore the saved mode too.
                 if (fault === 'runtime') throw failure;
                 context.downloadPdfDocument = originalDownload;
+                context.capturePdfHeaderImage = originalHeader;
             },
             async loadPdfLibraries() {
                 events.push('libraries:' + context.filteredData.length);
@@ -1836,16 +1904,33 @@ async function measurementControlProbes() {
                 if (fault === 'libraries') throw failure;
             },
             async exportToPDF() {
-                await context.downloadPdfDocument({ getBuffer: done => done(Buffer.from('%PDF-synthetic\n' + 'x'.repeat(110) + '\n%%EOF')) });
+                if (fault === 'disabled') assert.strictEqual(context.capturePdfHeaderImage, originalHeader);
+                assert.strictEqual(await context.capturePdfHeaderImage.call(headerThis, headerArgument), headerResult);
+                await context.downloadPdfDocument({ getBuffer: done => {
+                    if (fault === 'buffer') throw failure;
+                    done(Buffer.from('%PDF-synthetic\n' + 'x'.repeat(110) + '\n%%EOF'));
+                } });
             }
         };
         const operation = exerciseAdmin({ evaluate: script => require('vm').runInNewContext(script, context) }, { wait: promise => promise }, 1000);
         if (fault === 'oversize') await assert.rejects(operation, /1-250/);
-        else if (fault) await assert.rejects(operation, error => error === failure);
+        else if (fault && fault !== 'disabled') await assert.rejects(operation, error => error === failure);
         else {
             const result = await operation;
             assertAdminExercise(result);
             assert.strictEqual(result.pdfLibrarySourceRows, 2);
+        }
+        if (fault === 'disabled') assert.deepStrictEqual(diagnostics, []);
+        assert.strictEqual(context.capturePdfHeaderImage, fault === 'runtime' || fault === 'oversize' ? undefined : originalHeader);
+        if (!fault || fault === 'header' || fault === 'buffer') {
+            const starts = diagnostics.filter(row => row.name === 'admin-pdf' && row.state === 'start');
+            assert.strictEqual(starts[0].counts.sourceRows, 2);
+            assert.strictEqual(starts[0].counts.reportRows, 2);
+            const header = diagnostics.filter(row => row.name === 'admin-pdf-header');
+            assert.deepStrictEqual(header.slice(0, 2).map(row => row.state), ['start', fault === 'header' ? 'failed' : 'completed']);
+            const buffer = diagnostics.filter(row => row.name === 'admin-pdf-buffer');
+            if (fault === 'header') assert.strictEqual(buffer.length, 0);
+            else assert.deepStrictEqual(buffer.slice(0, 2).map(row => row.state), ['start', fault === 'buffer' ? 'failed' : 'completed']);
         }
         assert.deepStrictEqual(context.filterState, originalState);
         assert.strictEqual(context.activeReportId, 'active-vulnerabilities');
@@ -1860,7 +1945,7 @@ async function measurementControlProbes() {
             if (fault !== 'runtime') assert.strictEqual(events[2], 'libraries:2');
         }
     }
-    console.log('PASS serialized admin scope-before-runtime/library ordering, unchanged row cap and restoration on unavailable runtime/library failure');
+    console.log('PASS serialized admin scope-before-library ordering, opt-in PDF header/buffer diagnostics, exact scope counts, result/error preservation and all failure restorations');
     const invalidAdmin = structuredClone(admin); invalidAdmin.reports[5].sourceRows = 1;
     assert.throws(() => assertAdminExercise(invalidAdmin));
     const duplicateAdmin = structuredClone(admin); duplicateAdmin.reports[1] = duplicateAdmin.reports[0];
@@ -2081,5 +2166,5 @@ async function mockProbes() {
     console.log('PASS bounded owned-root termination and already-exited race');
 }
 
-module.exports = { mockProbes, ownershipProbes, privacyProbes, inventoryProbes, safeFailure, measurementControlProbes };
+module.exports = { reportSwitchCheckpoint, switchUnfilteredReport, mockProbes, ownershipProbes, privacyProbes, inventoryProbes, safeFailure, measurementControlProbes };
 if (require.main === module) (process.argv.includes('--privacy') ? privacyProbes() : process.argv.includes('--ownership') ? ownershipProbes() : process.argv.includes('--mock') ? mockProbes() : main()).catch(error => { console.error(JSON.stringify({ status: 'blocked-or-failed', failure: safeFailure(error, process.argv.includes('--mock') || process.argv.includes('--ownership') || process.argv.includes('--privacy') ? 'preflight' : 'arguments') })); process.exitCode = 1; });
