@@ -36,6 +36,8 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('streamed-scratch-' + [guid]::NewG
 $originalPartitions = $Script:VulnDiskPartitionCount
 $originalJournal = ${function:Write-StoreTransactionState}
 $originalPartitionWriter = ${function:Open-VulnPartitionWriter}
+$originalIntegrityWriter = ${function:Write-VulnTemporaryPartitionIntegrity}
+$originalSplitter = ${function:Split-VulnJsonPartition}
 try {
     [void][IO.Directory]::CreateDirectory($root)
     # Force collisions in these tiny fixtures, including case variants. This is
@@ -43,9 +45,9 @@ try {
     $Script:VulnDiskPartitionCount = 1
     $script:ScratchWriterModes = [Collections.Generic.List[object]]::new()
     Set-Item Function:Open-VulnPartitionWriter -Value {
-        param($Path, [switch]$Append, [switch]$CompressTemporaryPartitions)
+        param($Path, [switch]$Append, [switch]$CompressTemporaryPartitions, [System.Collections.IDictionary]$TemporaryPartitionIntegrity)
         $script:ScratchWriterModes.Add(@{ Path = $Path; Compressed = [bool]$CompressTemporaryPartitions })
-        & $originalPartitionWriter -Path $Path -Append:$Append -CompressTemporaryPartitions:$CompressTemporaryPartitions
+        & $originalPartitionWriter -Path $Path -Append:$Append -CompressTemporaryPartitions:$CompressTemporaryPartitions -TemporaryPartitionIntegrity $TemporaryPartitionIntegrity
     }
     $one = Get-TestVulnRow -Id 'same' -CveId 'CVE-2026-0001' -SnapshotDate '2026-01-01' -Version '1'
     $last = Get-TestVulnRow -Id 'SAME' -CveId 'CVE-2026-0001' -SnapshotDate '2026-01-01' -Version '2'
@@ -112,16 +114,17 @@ try {
     # The shared plain ID-validation spool keeps its original path and reader.
     Assert-True ((Get-VulnPartitionFilePath -Root $root -Prefix id -Index 0).EndsWith('id-00.ndjson')) 'Default ID partition contract changed.'
     foreach ($compressed in @($false, $true)) {
+        $integrity = @{}
         $parts = Join-Path $root "parts-$compressed"
         $sourcePath = Write-Snapshot $root "source-$compressed.json" @($one, $last)
         $script:PartitionWriterCalls = 0
         Set-Item Function:Open-VulnPartitionWriter -Value {
-            param($Path, [switch]$Append, [switch]$CompressTemporaryPartitions)
+            param($Path, [switch]$Append, [switch]$CompressTemporaryPartitions, [System.Collections.IDictionary]$TemporaryPartitionIntegrity)
             $script:PartitionWriterCalls++
-            & $originalPartitionWriter -Path $Path -Append:$Append -CompressTemporaryPartitions:$CompressTemporaryPartitions
+            & $originalPartitionWriter -Path $Path -Append:$Append -CompressTemporaryPartitions:$CompressTemporaryPartitions -TemporaryPartitionIntegrity $TemporaryPartitionIntegrity
         }
         try {
-            for ($repeat = 0; $repeat -lt 2; $repeat++) { [void](Split-VulnJsonPartition -InputPaths @($sourcePath) -OutputRoot $parts -Prefix current -PartitionCount 1 -CompressTemporaryPartitions:$compressed) }
+            for ($repeat = 0; $repeat -lt 2; $repeat++) { [void](Split-VulnJsonPartition -InputPaths @($sourcePath) -OutputRoot $parts -Prefix current -PartitionCount 1 -CompressTemporaryPartitions:$compressed -TemporaryPartitionIntegrity $integrity) }
             Assert-True ($script:PartitionWriterCalls -eq 2) 'Expected one retained writer per partition per splitter invocation, not per row.'
         }
         finally { Set-Item Function:Open-VulnPartitionWriter -Value $originalPartitionWriter }
@@ -129,22 +132,118 @@ try {
         $partition = Get-VulnPartitionFilePath -Root $parts -Prefix current -Index 0 -CompressTemporaryPartitions:$compressed
         $lines = @(Read-VulnNdjsonLinesFromPath -Path $partition)
         Assert-True ($lines.Count -eq 4 -and $lines[1] -ceq $lines[3]) 'Append/concatenated members lost row text or order.'
-        $map = Read-VulnPartitionMapFile -Path $partition
+        $map = Read-VulnPartitionMapFile -Path $partition -CompressTemporaryPartitions:$compressed -TemporaryPartitionIntegrity $integrity
         Assert-True ($map.Count -eq 1 -and $map.same.Signature -ceq 'SAME') 'Case-insensitive last-wins map changed.'
-        [void](Write-VulnPartitionMapFile -Path $partition -RowsById $map -CompressTemporaryPartitions:$compressed)
+        [void](Write-VulnPartitionMapFile -Path $partition -RowsById $map -CompressTemporaryPartitions:$compressed -TemporaryPartitionIntegrity $integrity)
         Assert-True (@(Read-VulnNdjsonLinesFromPath -Path $partition).Count -eq 1) 'Map rewrite appended stale rows.'
         $final = Join-Path $root "current-$compressed.gz"
-        [void](Write-VulnCurrentFileFromPartition -PartitionRoot $parts -PartitionPrefix current -OutputPath $final -PartitionCount 1 -CompressTemporaryPartitions:$compressed)
-        [void](Write-VulnPartitionMapFile -Path $partition -RowsById @{} -CompressTemporaryPartitions:$compressed)
+        [void](Write-VulnCurrentFileFromPartition -PartitionRoot $parts -PartitionPrefix current -OutputPath $final -PartitionCount 1 -CompressTemporaryPartitions:$compressed -TemporaryPartitionIntegrity $integrity)
+        [void](Write-VulnPartitionMapFile -Path $partition -RowsById @{} -CompressTemporaryPartitions:$compressed -TemporaryPartitionIntegrity $integrity)
         Assert-True (-not(Test-Path -LiteralPath $partition)) 'Empty map did not remove its partition.'
         $bad = Join-Path $root "bad-$compressed.json"; [IO.File]::WriteAllText($bad, ($one | ConvertTo-Json -Depth 20 -Compress) + "`n{broken")
         $badParts = Join-Path $root "bad-parts-$compressed"
-        Assert-Failure { Split-VulnJsonPartition -InputPaths @($bad) -OutputRoot $badParts -Prefix bad -PartitionCount 1 -CompressTemporaryPartitions:$compressed } 'Malformed input should fail.'
+        Assert-Failure { Split-VulnJsonPartition -InputPaths @($bad) -OutputRoot $badParts -Prefix bad -PartitionCount 1 -CompressTemporaryPartitions:$compressed -TemporaryPartitionIntegrity $integrity } 'Malformed input should fail.'
         foreach ($file in @($bad) + @(Get-ChildItem -LiteralPath $badParts -File | Select-Object -ExpandProperty FullName)) {
             $exclusive = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $exclusive.Dispose()
         }
     }
     Assert-True ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $root 'current-False.gz'))) -ceq [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $root 'current-True.gz')))) 'Final canonical GZip bytes changed.'
+    # An unfinished GZip member/trailer can yield a valid prefix in the legacy
+    # reader. The new opt-in path must reject it before reading or appending.
+    $appendInput = Write-Snapshot $root 'append-source.json' @([pscustomobject]@{ Id = 'c' })
+    foreach ($damage in @('PartialMember', 'Trailer', 'SameLengthCorruption', 'MissingFile')) {
+        $parts = Join-Path $root ('integrity-' + $damage); [void][IO.Directory]::CreateDirectory($parts)
+        $partition = Get-VulnPartitionFilePath -Root $parts -Prefix current -Index 0 -CompressTemporaryPartitions
+        $integrity = @{}
+        $writer = Open-VulnPartitionWriter -Path $partition -CompressTemporaryPartitions -TemporaryPartitionIntegrity $integrity
+        try {
+            $writer.WriteLine('{"Id":"a"}'); $writer.Flush()
+            $prefixLength = $writer.BaseStream.BaseStream.Length
+            $writer.WriteLine('{"Id":"b"}')
+        }
+        finally { $writer.Dispose() }
+        Write-VulnTemporaryPartitionIntegrity -Path $partition -TemporaryPartitionIntegrity $integrity
+        $complete = [IO.File]::ReadAllBytes($partition)
+        if ($damage -eq 'PartialMember') { [IO.File]::WriteAllBytes($partition, $complete[0..($prefixLength - 1)]) }
+        elseif ($damage -eq 'Trailer') { [IO.File]::WriteAllBytes($partition, $complete[0..($complete.Length - 9)]) }
+        elseif ($damage -eq 'SameLengthCorruption') { $complete[-1] = $complete[-1] -bxor 1; [IO.File]::WriteAllBytes($partition, $complete) }
+        else { [IO.File]::Delete($partition) }
+        if ($damage -in @('PartialMember', 'Trailer')) {
+            $legacyRows = @(Read-VulnNdjsonLinesFromPath -Path $partition)
+            $expectedPrefixRows = if ($damage -eq 'PartialMember') { 1 } else { 2 }
+            Assert-True ($legacyRows.Count -eq $expectedPrefixRows) 'Legacy incomplete-member control did not reproduce.'
+        }
+        Assert-Failure { Read-VulnPartitionMapFile -Path $partition -CompressTemporaryPartitions -TemporaryPartitionIntegrity $integrity } "New temporary reader accepted $damage."
+        Assert-Failure { Write-VulnCurrentFileFromPartition -PartitionRoot $parts -PartitionPrefix current -OutputPath (Join-Path $root ("rejected-$damage.gz")) -PartitionCount 1 -CompressTemporaryPartitions -TemporaryPartitionIntegrity $integrity } "Final assembly accepted $damage."
+        $damagedBytes = if (Test-Path -LiteralPath $partition) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($partition)) } else { 'missing' }
+        Assert-Failure { Split-VulnJsonPartition -InputPaths @($appendInput) -OutputRoot $parts -Prefix current -PartitionCount 1 -CompressTemporaryPartitions -TemporaryPartitionIntegrity $integrity } "Append legitimized $damage."
+        Assert-Failure { Write-VulnPartitionMapFile -Path $partition -RowsById @{ c = [pscustomobject]@{ Json = '{"Id":"c"}' } } -CompressTemporaryPartitions -TemporaryPartitionIntegrity $integrity } "Map rewrite legitimized $damage."
+        $after = if (Test-Path -LiteralPath $partition) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($partition)) } else { 'missing' }
+        Assert-True ($after -ceq $damagedBytes) 'Rejected append/rewrite changed damaged input.'
+    }
+    # Failed metadata finalization closes all streams and cannot bless bytes.
+    $readOnlyIntegrity = [Collections.Specialized.OrderedDictionary]::new().AsReadOnly()
+    $metadataParts = Join-Path $root 'metadata-readonly'
+    Assert-Failure { Split-VulnJsonPartition -InputPaths @($appendInput) -OutputRoot $metadataParts -Prefix current -PartitionCount 1 -CompressTemporaryPartitions -TemporaryPartitionIntegrity $readOnlyIntegrity } 'Read-only metadata must stop the splitter.'
+    $metadataPath = Get-VulnPartitionFilePath -Root $metadataParts -Prefix current -Index 0 -CompressTemporaryPartitions
+    Assert-Failure { Read-VulnPartitionMapFile -Path $metadataPath -CompressTemporaryPartitions -TemporaryPartitionIntegrity @{} } 'Missing finalized metadata must reject complete-looking bytes.'
+    $exclusive = [IO.File]::Open($metadataPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $exclusive.Dispose()
+    # Preserve original parse/row failures when closing the compressed stream
+    # also fails. No successful-operation metadata may be recorded in that case.
+    Set-Item Function:Open-VulnPartitionWriter -Value {
+        param($Path, [switch]$Append, [switch]$CompressTemporaryPartitions, [System.Collections.IDictionary]$TemporaryPartitionIntegrity)
+        $inner = & $originalPartitionWriter -Path $Path -Append:$Append -CompressTemporaryPartitions:$CompressTemporaryPartitions -TemporaryPartitionIntegrity $TemporaryPartitionIntegrity
+        $wrapper = [pscustomobject]@{ Inner = $inner }
+        $wrapper | Add-Member -MemberType ScriptMethod -Name WriteLine -Value { param($Line) $this.Inner.WriteLine($Line) }
+        $wrapper | Add-Member -MemberType ScriptMethod -Name Dispose -Value { $this.Inner.Dispose(); throw 'Injected secondary close failure.' }
+        return $wrapper
+    }
+    try {
+        $bad = Join-Path $root 'primary-source-error.json'; [IO.File]::WriteAllText($bad, '{"Id":"a"}' + [Environment]::NewLine + '{broken')
+        $failure = $null; $integrity = @{}; $badParts = Join-Path $root 'primary-source-error'
+        try { [void](Split-VulnJsonPartition -InputPaths @($bad) -OutputRoot $badParts -Prefix current -PartitionCount 1 -CompressTemporaryPartitions -TemporaryPartitionIntegrity $integrity) } catch { $failure = $_ }
+        Assert-True ($null -ne $failure -and $failure.Exception.Message -notlike '*Injected secondary close failure*' -and $failure.Exception.Data.Contains('TemporaryPartitionCloseFailure')) 'Splitter replaced its original source failure.'
+        Assert-True ($integrity.Count -eq 0) 'Failed source operation finalized metadata.'
+        $mapPath = Get-VulnPartitionFilePath -Root $badParts -Prefix current -Index 0 -CompressTemporaryPartitions
+        $exclusive = [IO.File]::Open($mapPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $exclusive.Dispose()
+        $mapPath = Join-Path $root 'primary-map-error.ndjson.gz'
+        $badRow = $null # StrictMode rejects an invalid map entry before closing.
+        $failure = $null; $integrity = @{}
+        try { [void](Write-VulnPartitionMapFile -Path $mapPath -RowsById @{ a = $badRow } -CompressTemporaryPartitions -TemporaryPartitionIntegrity $integrity) } catch { $failure = $_ }
+        Assert-True ($null -ne $failure -and $failure.Exception.Message -notlike '*Injected secondary close failure*' -and $failure.Exception.Data.Contains('TemporaryPartitionCloseFailure')) 'Map writer replaced its original row failure.'
+        Assert-True ($integrity.Count -eq 0) 'Failed map write finalized metadata.'
+        $exclusive = [IO.File]::Open($mapPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $exclusive.Dispose()
+    }
+    finally { Set-Item Function:Open-VulnPartitionWriter -Value $originalPartitionWriter }
+    # Real-import metadata failure must preserve canonical bytes and raw input.
+    $metadataStore = Join-Path $root 'metadata-import'; [void][IO.Directory]::CreateDirectory($metadataStore)
+    $first = Write-Snapshot $metadataStore 'VulnExport_1_2026-01-01.json' @($one)
+    [void](Publish-VulnerabilityHistoryStore -OutputPath $metadataStore -DownloadedFiles @($first))
+    $beforeMetadata = Get-CanonicalFileState $metadataStore
+    $nextMetadata = Write-Snapshot $metadataStore 'VulnExport_1_2026-01-02.json' @($second)
+    Set-Item Function:Write-VulnTemporaryPartitionIntegrity -Value { throw 'Injected integrity metadata failure.' }
+    try { Assert-Failure { Publish-VulnerabilityHistoryStore -OutputPath $metadataStore -DownloadedFiles @($nextMetadata) -CompressTemporaryPartitions } 'Metadata failure must abort the real importer.' }
+    finally { Set-Item Function:Write-VulnTemporaryPartitionIntegrity -Value $originalIntegrityWriter }
+    Assert-True ((Get-CanonicalFileState $metadataStore) -ceq $beforeMetadata -and (Test-Path -LiteralPath $nextMetadata)) 'Metadata failure changed canonical bytes or retired raw input.'
+    [void](Publish-VulnerabilityHistoryStore -OutputPath $metadataStore -DownloadedFiles @($nextMetadata) -CompressTemporaryPartitions)
+    Assert-True (-not(Test-Path -LiteralPath $nextMetadata)) 'Metadata-failure retry did not complete.'
+    # A deleted first-date snapshot partition must not take the importer's
+    # ordinary both-paths-missing fast skip and silently publish an empty store.
+    $missingStore = Join-Path $root 'missing-partition-import'; [void][IO.Directory]::CreateDirectory($missingStore)
+    $missingInput = Write-Snapshot $missingStore 'VulnExport_1_2026-01-01.json' @($one)
+    Set-Item Function:Split-VulnJsonPartition -Value {
+        param($InputPaths, $OutputRoot, $Prefix, [switch]$OnboardedOnly, [int]$PartitionCount, [switch]$CompressTemporaryPartitions, [System.Collections.IDictionary]$TemporaryPartitionIntegrity)
+        $indexes = @(& $originalSplitter @PSBoundParameters)
+        if ($CompressTemporaryPartitions -and $Prefix -eq 'snapshot') {
+            $missing = Get-VulnPartitionFilePath -Root $OutputRoot -Prefix $Prefix -Index $indexes[0] -CompressTemporaryPartitions
+            [IO.File]::Delete($missing)
+        }
+        return $indexes
+    }
+    try { Assert-Failure { Publish-VulnerabilityHistoryStore -OutputPath $missingStore -DownloadedFiles @($missingInput) -CompressTemporaryPartitions } 'A deleted first-date partition must fail the real importer.' }
+    finally { Set-Item Function:Split-VulnJsonPartition -Value $originalSplitter }
+    Assert-True (-not(Test-VulnStoreExistence -BasePath $missingStore) -and (Test-Path -LiteralPath $missingInput)) 'A missing partition created a canonical store or retired its raw input.'
+    [void](Publish-VulnerabilityHistoryStore -OutputPath $missingStore -DownloadedFiles @($missingInput) -CompressTemporaryPartitions)
     $corrupt = Join-Path $root 'corrupt.ndjson.gz'; [IO.File]::WriteAllBytes($corrupt, [byte[]](1..32))
     Assert-Failure { Read-VulnPartitionMapFile -Path $corrupt } 'Corrupt compression should fail.'
     $exclusive = [IO.File]::Open($corrupt, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $exclusive.Dispose()
@@ -174,6 +273,8 @@ finally {
     Set-Item Function:Write-StoreTransactionState -Value $originalJournal
     Set-Item Function:Open-VulnPartitionWriter -Value $originalPartitionWriter
     $Script:VulnDiskPartitionCount = $originalPartitions
+    Set-Item Function:Write-VulnTemporaryPartitionIntegrity -Value $originalIntegrityWriter
+    Set-Item Function:Split-VulnJsonPartition -Value $originalSplitter
     if (Test-Path -LiteralPath $root) {
         $resolved = [IO.Path]::GetFullPath($root)
         if (-not $resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Test cleanup escaped its named temp parent.' }
