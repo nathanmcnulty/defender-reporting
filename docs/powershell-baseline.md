@@ -63,9 +63,11 @@ For a reviewed Automation deployment, `Setup-AzureResources.ps1` accepts
 the example is not a package availability or compatibility claim. Setup uses
 `https://www.powershellgallery.com/api/v2/package/Az.Accounts/<version>` and
 requires the imported package's reported `properties.version` to match exactly
-after its import completes. A missing/different version, failed/canceled import
-or the existing 300-second import timeout stops pinned setup. Omitting the
-parameter retains the existing latest Gallery URI and polling behavior.
+after its import completes. A missing/different version stops pinned setup.
+Omitting the parameter retains the existing latest Gallery URI and does not
+require version readback. Every import now stops setup on a failed/canceled
+state or the existing 300-second timeout, correcting the previous behavior that
+could announce success after an unsuccessful unpinned import.
 
 This option applies only to Automation; Function App modules are bundled by
 the package builder, and setup rejects this option with `-ComputeType FunctionApp`.
