@@ -39,6 +39,26 @@ The shared-helper regression lane now logs `START <Test-Name>` and a per-test el
 
 ## Test lanes at a glance
 
+The first-run/empty-enrichment and Azure export-generation protocol regressions
+run in deterministic preflight:
+
+```powershell
+pwsh -NoProfile -File ./tests/Invoke-FirstExportRegression.ps1
+pwsh -NoProfile -File ./tests/Invoke-AtomicExportPublicationRegression.ps1
+node ./tests/Assert-DashboardScopePdfConsistency.js
+```
+
+The PDF scope test always checks the production extraction/snapshot paths. For
+actual pdfmake layout and PDF-byte generation, set `PDFMAKE_TEST_LIBRARY` and
+`PDFMAKE_TEST_FONTS` to the existing pinned `pdfmake` and `vfs_fonts` JavaScript
+files before running it. Without those files it explicitly reports that real
+PDF generation was not run. Image capture in this Node test is stubbed; browser
+canvas rendering, visual readability and the final user download remain separate.
+
+See [the generation protocol](../docs/export-generation-publication.md) for
+legacy cutover, failure recovery and retention boundaries. The in-memory storage
+test does not establish actual Azure conditional requests or runtime acceptance.
+
 | Lane | Primary entrypoint | Use it for |
 | --- | --- | --- |
 | Deterministic regression gate | `build/Invoke-RegressionValidation.ps1` | Every PR and before heavier validation |

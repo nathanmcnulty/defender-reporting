@@ -37,6 +37,8 @@ $entrypoints = @(
     'tests/helpers/Stop-LaunchBoundOwnerFixture.ps1'
     'tests/helpers/Wait-LaunchBoundFixtureExit.ps1'
     'tests/Invoke-AtomicDashboardPublicationRegression.ps1'
+    'tests/Invoke-AtomicExportPublicationRegression.ps1'
+    'tests/Invoke-FirstExportRegression.ps1'
     'tests/Invoke-AzureRunbookValidation.ps1'
     'tests/Invoke-BenchmarkSeries.ps1'
     'tests/Invoke-CompiledContentNormalization.ps1'

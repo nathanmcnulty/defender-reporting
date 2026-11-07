@@ -9682,6 +9682,7 @@ function Invoke-MdeAdvancedHuntingStoreRefresh {
         [CmdletBinding()]
         param(
             [Parameter(Mandatory = $true)]
+            [AllowEmptyCollection()]
             [object[]]$Records,
 
             [Parameter(Mandatory = $true)]
@@ -21802,7 +21803,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 8660731f3a8f93c4c18523a6dfdc5bca2a3b9b3f5c971a56ae782f7a06f7e1ad
+# ArtifactFingerprint: 8b788a89f803aec3e4aa9c9c916b1389e8a6c17a85e3307f7ea38dda4c103312
 
 
 
@@ -22668,11 +22669,150 @@ function Get-DashboardRootETag {
     return [string]$response.Headers.ETag[0]
 }
 
+function Assert-ExportGenerationManifest {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Manifest)
+
+    foreach ($property in @('Version', 'Generation', 'Files')) {
+        if ($null -eq $Manifest.PSObject.Properties[$property]) { throw 'Incomplete export generation manifest.' }
+    }
+    if ($Manifest.Version -ne 1 -or [string]$Manifest.Generation -cnotmatch '^[0-9a-f]{32}$' -or $null -eq $Manifest.Files -or @($Manifest.Files).Count -eq 0) {
+        throw 'Invalid export generation manifest.'
+    }
+    $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in $Manifest.Files) {
+        if ($null -eq $file) { throw 'Missing export generation file entry.' }
+        foreach ($property in @('Name', 'BlobName', 'Sha256', 'Length')) {
+            if ($null -eq $file.PSObject.Properties[$property]) { throw 'Incomplete export generation file entry.' }
+        }
+        $name = [string]$file.Name
+        if ($name -cne (Resolve-RelativeExportArtifactName -Name $name) -or -not (Test-IsExportTransferArtifactName -Name $name) -or
+            -not $names.Add($name) -or [string]$file.BlobName -cne "_generations/$($Manifest.Generation)/$name" -or
+            [string]$file.Sha256 -cnotmatch '^[0-9a-f]{64}$' -or ($file.Length -isnot [long] -and $file.Length -isnot [int]) -or $file.Length -lt 0) {
+            throw 'Invalid export generation file entry.'
+        }
+    }
+}
+
+function Get-ExportPublicationSnapshot {
+    [CmdletBinding()]
+    param([string]$AccountName, [string]$StorageToken)
+
+    # A single GET binds the manifest and the CAS token to the same generation.
+    try {
+        $response = Invoke-WebRequestWithRetry -Uri "https://$AccountName.blob.core.windows.net/$($Script:BlobContainers.Exports)/_publication/exports.current.json" -Method Get -Headers (Get-BlobHeader -StorageToken $StorageToken)
+    }
+    catch {
+        if ((Get-BlobErrorStatusCode -ErrorRecord $_) -eq 404) { return [pscustomobject]@{ ETag = $null; Manifest = $null } }
+        throw
+    }
+    $etag = [string]@($response.Headers.ETag)[0]
+    if ([string]::IsNullOrWhiteSpace($etag)) { throw 'Export generation pointer has no ETag.' }
+    $manifest = $response.Content | ConvertFrom-Json -Depth 12 -ErrorAction Stop
+    Assert-ExportGenerationManifest -Manifest $manifest
+    return [pscustomobject]@{ ETag = $etag; Manifest = $manifest }
+}
+
+function Receive-ExportGeneration {
+    [CmdletBinding()]
+    param([string]$AccountName, [string]$StorageToken, [Parameter(Mandatory)]$Snapshot, [string]$DestinationPath)
+
+    Assert-ExportGenerationManifest -Manifest $Snapshot.Manifest
+    foreach ($file in $Snapshot.Manifest.Files) {
+        $path = Join-Path $DestinationPath $file.Name
+        Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $file.BlobName -DestinationPath $path -StorageToken $StorageToken
+        if ((Get-Item -LiteralPath $path).Length -ne $file.Length -or (Get-FileSha256Hex -Path $path) -cne $file.Sha256) {
+            throw 'Export generation verification failed; no legacy fallback is permitted.'
+        }
+    }
+}
+
+function Publish-ExportGeneration {
+    [CmdletBinding()]
+    param([string]$AccountName, [string]$StorageToken, [string]$ExportsPath, [Parameter(Mandatory)]$Snapshot, [bool]$UseGzip = $true)
+
+    $generation = [guid]::NewGuid().ToString('N')
+    $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("export-publication-$generation")
+    [void](New-Item -Path $scratch -ItemType Directory)
+    try {
+        $files = [System.Collections.Generic.List[object]]::new()
+        $names = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($name in @(Get-ExportTransferArtifactNames -BasePath $ExportsPath)) {
+            $sourcePath = Join-Path $ExportsPath $name
+            $storedName = $name
+            # Keep the synthetic manifest in its recognized transfer format.
+            if ($UseGzip -and $name -notlike '*.gz' -and $name -ne 'synthetic-manifest.json') {
+                $storedName += '.gz'
+                $compressedPath = Join-Path $scratch $storedName
+                [void](New-Item -Path (Split-Path $compressedPath -Parent) -ItemType Directory -Force)
+                Compress-GzipFile -InputPath $sourcePath -OutputPath $compressedPath
+                $sourcePath = $compressedPath
+            }
+            if (-not $names.Add($storedName)) { throw 'Duplicate export generation filename.' }
+            $file = [pscustomobject]@{
+                Name = $storedName
+                BlobName = "_generations/$generation/$storedName"
+                Sha256 = Get-FileSha256Hex -Path $sourcePath
+                Length = (Get-Item -LiteralPath $sourcePath).Length
+            }
+            $contentType = if ($storedName -like '*.gz') { 'application/gzip' } else { 'application/json' }
+            try {
+                Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $file.BlobName -SourcePath $sourcePath -StorageToken $StorageToken -ContentType $contentType -AccessTier $Script:BlobAccessTiers.Exports -Conditions @{ 'If-None-Match' = '*' }
+            }
+            catch {
+                # The PUT may have committed before its response was lost. Only
+                # exact verified bytes may reconcile that uncertain outcome.
+                $uploadError = $_
+                try {
+                    $check = Join-Path $scratch 'verify-upload'
+                    Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $file.BlobName -DestinationPath $check -StorageToken $StorageToken
+                    if ((Get-Item -LiteralPath $check).Length -ne $file.Length -or (Get-FileSha256Hex -Path $check) -cne $file.Sha256) { throw 'Export upload differs from candidate.' }
+                }
+                catch { throw $uploadError }
+            }
+            # Verify successful uploads too, before publishing any pointer.
+            $check = Join-Path $scratch 'verify-upload'
+            Get-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $file.BlobName -DestinationPath $check -StorageToken $StorageToken
+            if ((Get-Item -LiteralPath $check).Length -ne $file.Length -or (Get-FileSha256Hex -Path $check) -cne $file.Sha256) { throw 'Export upload verification failed.' }
+            $files.Add($file)
+            Remove-Item -LiteralPath $check -Force
+            if ($sourcePath -cne (Join-Path $ExportsPath $name)) { Remove-Item -LiteralPath $sourcePath -Force }
+        }
+        if ($files.Count -eq 0) { throw 'Cannot publish an empty export generation.' }
+        $manifest = [pscustomobject]@{ Version = 1; Generation = $generation; Files = $files.ToArray() }
+        Assert-ExportGenerationManifest -Manifest $manifest
+        $manifestPath = Join-Path $scratch 'manifest.json'
+        $manifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $manifestPath -Encoding utf8
+        $conditions = if ($null -eq $Snapshot.Manifest) { @{ 'If-None-Match' = '*' } } else { @{ 'If-Match' = $Snapshot.ETag } }
+        try {
+            Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName '_publication/exports.current.json' -SourcePath $manifestPath -StorageToken $StorageToken -ContentType 'application/json' -AccessTier $Script:BlobAccessTiers.Exports -Conditions $conditions
+        }
+        catch {
+            $publicationError = $_
+            try {
+                $current = Get-ExportPublicationSnapshot -AccountName $AccountName -StorageToken $StorageToken
+                if ($null -eq $current.Manifest -or $current.Manifest.Generation -cne $generation) { throw 'Export publication was not committed.' }
+                # Generation identity is unique; still compare the entire manifest.
+                if (($current.Manifest | ConvertTo-Json -Depth 12 -Compress) -cne ($manifest | ConvertTo-Json -Depth 12 -Compress)) { throw 'Export pointer differs from candidate.' }
+            }
+            catch { throw $publicationError }
+        }
+        # Old generations and legacy canonical files deliberately remain intact:
+        # a reader holding an older snapshot must be able to finish safely.
+    }
+    finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force
+    }
+}
+
 function Export-ToBlobStorage {
     <#
     .SYNOPSIS
         Uploads new export files (compressed) and dashboard output to blob storage.
     #>
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'LegacyMachineBlobNames', Justification = 'Compatibility parameter; legacy roots remain frozen for older readers.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'LegacyAdvancedHuntingBlobNames', Justification = 'Compatibility parameter; legacy roots remain frozen for older readers.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'LegacyVulnerabilityBlobNames', Justification = 'Compatibility parameter; legacy roots remain frozen for older readers.')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
@@ -22697,91 +22837,20 @@ function Export-ToBlobStorage {
 
         [bool]$UseGzip = $true,
 
+        $ExportSnapshot = $null,
+
         [bool]$UseBoundedPublicationMetadataReader = $false
     )
 
     Write-Output "`nUploading results to blob storage..."
 
-    # Upload new export files (compressed)
-    $exportFiles = @(
-        Get-ChildItem -Path $ExportsPath -File -Recurse -Force |
-            Where-Object {
-                $relativeBlobName = [System.IO.Path]::GetRelativePath($ExportsPath, $_.FullName).Replace('\', '/')
-                Test-IsExportTransferArtifactName -Name $relativeBlobName
-            }
-    )
-    $canonicalStoreFileNames = @(Get-ExportTransferArtifactNames -BasePath $ExportsPath)
-    $canonicalStoreFileNameSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($canonicalStoreFileName in $canonicalStoreFileNames) {
-        [void]$canonicalStoreFileNameSet.Add($canonicalStoreFileName)
-    }
-    foreach ($file in $exportFiles) {
-        if (-not (Test-Path -LiteralPath $file.FullName -PathType Leaf)) {
-            Write-Output "  Skipping missing file $($file.FullName)..."
-            continue
+    # The export store has its own transaction, independent of HTML publication.
+    # Preserve the old call shape for dashboard-only publication tests/tools.
+    if (@(Get-ExportTransferArtifactNames -BasePath $ExportsPath).Count -gt 0) {
+        if ($null -eq $ExportSnapshot) {
+            throw 'Export publication requires the snapshot captured before reading export inputs.'
         }
-
-        $relativeBlobName = [System.IO.Path]::GetRelativePath($ExportsPath, $file.FullName).Replace('\', '/')
-        $isCanonicalStoreFile = $canonicalStoreFileNameSet.Contains($relativeBlobName)
-        if ($UseGzip) {
-            if ($file.Extension -eq '.gz') {
-                $blobName = $relativeBlobName
-                Write-Output "  Uploading $blobName..."
-                Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -SourcePath $file.FullName -StorageToken $StorageToken -ContentType 'application/gzip' -AccessTier $Script:BlobAccessTiers.Exports
-                continue
-            }
-
-            $gzPath = "$($file.FullName).gz"
-            $blobName = "$relativeBlobName.gz"
-
-            # Skip if this blob already exists
-            if ((-not $isCanonicalStoreFile) -and (Test-BlobExistence -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken)) {
-                Write-Output "  Skipping $blobName (already exists)"
-                continue
-            }
-
-            Write-Output "  Compressing and uploading $($file.Name)..."
-            Compress-GzipFile -InputPath $file.FullName -OutputPath $gzPath
-            $originalSize = (Get-Item $file.FullName).Length
-            $compressedSize = (Get-Item $gzPath).Length
-            $ratio = if ($originalSize -gt 0) { [math]::Round((1 - $compressedSize / $originalSize) * 100, 1) } else { 0 }
-            Write-Output "    Compressed: $([math]::Round($originalSize/1KB))KB -> $([math]::Round($compressedSize/1KB))KB ($ratio% reduction)"
-
-            Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -SourcePath $gzPath -StorageToken $StorageToken -ContentType 'application/gzip' -AccessTier $Script:BlobAccessTiers.Exports
-            Remove-Item -Path $gzPath -Force
-        }
-        else {
-            $blobName = $relativeBlobName
-            if ((-not $isCanonicalStoreFile) -and (Test-BlobExistence -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken)) {
-                Write-Output "  Skipping $blobName (already exists)"
-                continue
-            }
-            Write-Output "  Uploading $($file.Name)..."
-            Set-BlobContent -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -SourcePath $file.FullName -StorageToken $StorageToken -ContentType 'application/json' -AccessTier $Script:BlobAccessTiers.Exports
-        }
-    }
-
-    foreach ($legacyBlob in $LegacyMachineBlobNames) {
-        Write-Output "  Removing legacy machine snapshot blob $legacyBlob..."
-        Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $legacyBlob -StorageToken $StorageToken
-    }
-
-    foreach ($legacyBlob in $LegacyAdvancedHuntingBlobNames) {
-        Write-Output "  Removing legacy Advanced Hunting snapshot blob $legacyBlob..."
-        Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $legacyBlob -StorageToken $StorageToken
-    }
-
-    foreach ($legacyBlob in $LegacyVulnerabilityBlobNames) {
-        Write-Output "  Removing legacy vulnerability snapshot blob $legacyBlob..."
-        Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $legacyBlob -StorageToken $StorageToken
-    }
-
-    $staleBlobNames = @(Get-StaleExportStoreArtifactNames `
-        -ExistingNames (Get-BlobList -AccountName $AccountName -Container $Script:BlobContainers.Exports -StorageToken $StorageToken) `
-        -CanonicalNames $canonicalStoreFileNames)
-    foreach ($blobName in $staleBlobNames) {
-        Write-Output "  Removing stale store blob $blobName..."
-        Remove-Blob -AccountName $AccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -StorageToken $StorageToken
+        Publish-ExportGeneration -AccountName $AccountName -StorageToken $StorageToken -ExportsPath $ExportsPath -Snapshot $ExportSnapshot -UseGzip $UseGzip
     }
 
     # Upload dashboard output bundle
@@ -23108,7 +23177,7 @@ try {
         throw 'Unable to resolve a temporary directory for the dashboard pipeline.'
     }
 
-    $tempRoot = Join-Path -Path $tempBasePath -ChildPath "dashboard-pipeline-$(Get-Date -Format 'yyyyMMddHHmmss')"
+    $tempRoot = Join-Path -Path $tempBasePath -ChildPath "dashboard-pipeline-$Script:PipelineRunId"
     $tempExports = Join-Path -Path $tempRoot -ChildPath "exports"
     $tempTemplates = Join-Path -Path $tempRoot -ChildPath "templates"
     $tempDashboards = Join-Path -Path $tempRoot -ChildPath "dashboards"
@@ -23123,7 +23192,16 @@ try {
 
     # Download historical export files
     Write-Output "Downloading historical exports..."
-    $existingBlobs = @(Get-BlobList -AccountName $StorageAccountName -Container $Script:BlobContainers.Exports -StorageToken $storageToken)
+    $exportSnapshot = Get-ExportPublicationSnapshot -AccountName $StorageAccountName -StorageToken $storageToken
+    if ($null -ne $exportSnapshot.Manifest) {
+        Receive-ExportGeneration -AccountName $StorageAccountName -StorageToken $storageToken -Snapshot $exportSnapshot -DestinationPath $tempExports
+        $existingBlobs = @($exportSnapshot.Manifest.Files | ForEach-Object { $_.Name })
+    }
+    else {
+        # Read-only migration from the pre-generation layout. Once the pointer
+        # exists, malformed pointers or missing files must fail closed instead.
+        $existingBlobs = @(Get-BlobList -AccountName $StorageAccountName -Container $Script:BlobContainers.Exports -StorageToken $storageToken)
+    }
     $downloadableBlobs = @($existingBlobs | Where-Object { Test-IsExportTransferArtifactName -Name $_ })
     $legacyMachineBlobs = @($existingBlobs | Where-Object { $_ -match '^Machines_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
     $legacyAdvancedHuntingBlobs = @($existingBlobs | Where-Object { $_ -match '^AdvancedHunting_\d+_\d{4}-\d{2}-\d{2}\.json(\.gz)?$' })
@@ -23164,7 +23242,9 @@ try {
             New-Item -Path $localDirectory -ItemType Directory -Force | Out-Null
         }
         Write-Output "  Downloading $blobName..."
-        Get-BlobContent -AccountName $StorageAccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -DestinationPath $localFile -StorageToken $storageToken
+        if ($null -eq $exportSnapshot.Manifest) {
+            Get-BlobContent -AccountName $StorageAccountName -Container $Script:BlobContainers.Exports -BlobName $blobName -DestinationPath $localFile -StorageToken $storageToken
+        }
 
         # Decompress .gz files
         if (($blobName -like '.dashboard-cache/*') -or (Test-IsNativeCompressedStoreFileName -Name $blobName)) {
@@ -23842,6 +23922,7 @@ try {
                 -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -LegacyVulnerabilityBlobNames $legacyVulnerabilityBlobs `
                 -UseGzip $useGzip `
+                -ExportSnapshot $exportSnapshot `
                 -UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader
         }
         'SharePoint' {
@@ -23856,6 +23937,7 @@ try {
                 -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -LegacyVulnerabilityBlobNames $legacyVulnerabilityBlobs `
                 -UseGzip $useGzip `
+                -ExportSnapshot $exportSnapshot `
                 -UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader
             Export-ToSharePoint -DashboardPath $dashboardStatusOutputPath
         }
@@ -23870,6 +23952,7 @@ try {
                 -LegacyAdvancedHuntingBlobNames $legacyAdvancedHuntingBlobs `
                 -LegacyVulnerabilityBlobNames $legacyVulnerabilityBlobs `
                 -UseGzip $useGzip `
+                -ExportSnapshot $exportSnapshot `
                 -UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader
             Export-ToStaticWebApp -DashboardPath $dashboardStatusOutputPath
         }
