@@ -6128,6 +6128,110 @@ function Test-DashboardDualPackagingGenerationAndValidation {
     }
 }
 
+function Test-VulnDeviceProfileProjectionParity {
+    [CmdletBinding()]
+    param()
+
+    # Independent v1 field contract; RbacGroupId is intentionally unrepresented.
+    $fields = @('Id','DeviceId','DeviceName','RbacGroupName','OSPlatform','OSVersion','MachineTags',
+        'CveId','SoftwareVendor','SoftwareName','SoftwareVersion','VulnerabilitySeverityLevel','CvssScore',
+        'ExploitabilityLevel','RecommendationReference','RecommendedSecurityUpdate','RecommendedSecurityUpdateId',
+        'RecommendedSecurityUpdateUrl','SecurityUpdateAvailable','FirstSeenTimestamp','LastSeenTimestamp',
+        'DiskPaths','RegistryPaths','CveBatchTitle','CveBatchUrl','IsOnboarded')
+    function Get-ExpectedDeviceProjection($Row) {
+        $projected = [ordered]@{}
+        foreach ($field in $fields) {
+            if ($field -eq 'OSVersion') { $projected[$field] = [string]$Row.PSObject.Properties[$field]?.Value }
+            else { $projected[$field] = $Row.$field }
+        }
+        return [PSCustomObject]$projected
+    }
+    function Assert-DeviceProjectionValue($Expected, $Actual, [string]$At) {
+        if ($null -eq $Expected -or $null -eq $Actual) {
+            Assert-True ($null -eq $Expected -and $null -eq $Actual) "Null mismatch at $At"; return
+        }
+        if ($Expected -is [array]) {
+            Assert-True ($Actual -is [array] -and $Expected.Count -eq $Actual.Count) "Array mismatch at $At"
+            for ($i=0; $i -lt $Expected.Count; $i++) { Assert-DeviceProjectionValue $Expected[$i] $Actual[$i] "$At/$i" }
+            return
+        }
+        if ($Expected -is [PSCustomObject]) {
+            Assert-True ($Actual -is [PSCustomObject]) "Object mismatch at $At"
+            Assert-True ((@($Expected.PSObject.Properties.Name) -join '|') -ceq (@($Actual.PSObject.Properties.Name) -join '|')) "Fields/order mismatch at $At"
+            foreach ($field in $Expected.PSObject.Properties.Name) { Assert-DeviceProjectionValue $Expected.$field $Actual.$field "$At/$field" }
+            return
+        }
+        Assert-True ($Expected.GetType() -eq $Actual.GetType() -and $Expected -ceq $Actual) "Scalar type/value mismatch at $At"
+    }
+
+    $rows = @(0..13 | ForEach-Object { Get-TestVulnRow -Id ('profile-{0:D2}' -f $_) -CveId 'CVE-2026-0101' -SnapshotDate '2026-03-20' -Version '1.0' })
+    $rows[0].PSObject.Properties.Remove('OSVersion')
+    $rows[2].OSVersion = '10.0.different'
+    $rows[3].DeviceName = 'DEVICE01.contoso.com'
+    $rows[4].RbacGroupName = 'Clients'
+    $rows[5].OSPlatform = 'Linux'
+    $rows[6].MachineTags = @('left','right')
+    $rows[7].MachineTags = @("left$([char]0x1e)right")
+    $rows[8].IsOnboarded = $false
+    $rows[9].DeviceId = 'DEVICE-001'
+    $rows[10].DeviceId = ''; $rows[10].DeviceName = "alpha$([char]0x1f)beta"; $rows[10].RbacGroupName = 'gamma'
+    $rows[11].DeviceId = ''; $rows[11].DeviceName = 'alpha'; $rows[11].RbacGroupName = "beta$([char]0x1f)gamma"
+    $rows[12].MachineTags = @('right','left')
+    $rows[13] | Add-Member -NotePropertyName RbacGroupId -NotePropertyValue 9001
+    $history = Get-TestVulnRow -Id 'profile-history' -CveId 'CVE-2026-0102' -SnapshotDate '2026-03-18' -Version '1.0'
+    $history.OSVersion = 'history-version'
+    $expected = @(@($rows)+@($history) | ForEach-Object { Get-ExpectedDeviceProjection $_ })
+    $originalPartitions = $Script:VulnDiskPartitionCount
+    $root = Join-Path ([IO.Path]::GetTempPath()) ('device-profile-parity-' + [guid]::NewGuid().ToString('N'))
+    try {
+        foreach ($mode in @('Compiled','Partitioned')) {
+            $base = Join-Path $root $mode
+            [void][IO.Directory]::CreateDirectory($base)
+            $currentPath = Get-VulnCurrentPath -BasePath $base
+            $historyPath = Get-VulnHistoryRowsPath -BasePath $base -PeriodKey '2026Q1'
+            Write-NdjsonRecordsFile -Path $currentPath -Records $rows
+            Write-NdjsonRecordsFile -Path $historyPath -Records @($history)
+            $rawHashes = @((Get-FileHash $currentPath).Hash,(Get-FileHash $historyPath).Hash)
+            if ($mode -eq 'Compiled') { Publish-VulnContentStoreUnlocked -BasePath $base }
+            else {
+                # Force case-distinct signatures into the same bucket.
+                $Script:VulnDiskPartitionCount = 1
+                Publish-VulnContentStorePartitioned -BasePath $base
+            }
+            $actual = @(Read-VulnContentStoreRow -BasePath $base)
+            Assert-True ($actual.Count -eq $expected.Count) "$mode row count differs"
+            for ($i=0; $i -lt $expected.Count; $i++) { Assert-DeviceProjectionValue $expected[$i] $actual[$i] "$mode/$i" }
+            Assert-True ($rawHashes[0] -ceq (Get-FileHash $currentPath).Hash -and $rawHashes[1] -ceq (Get-FileHash $historyPath).Hash) "$mode changed raw canonical rows"
+            $refs = @(Read-VulnNdjsonLinesFromPath -Path (Get-VulnCurrentRefsPath -BasePath $base) | ForEach-Object { ,($_ | ConvertFrom-Json) })
+            $byId = @{}; foreach ($ref in $refs) { $byId[[string]$ref[0]] = $ref }
+            Assert-True ($byId['profile-00'][1] -ne $byId['profile-01'][1]) "$mode merged missing and nonempty OSVersion"
+            Assert-True ($byId['profile-01'][1] -eq $byId['profile-13'][1]) "$mode failed to reuse identical represented profiles"
+        }
+        Assert-True ((Get-VulnDeviceProfileSignature $rows[10]) -cne (Get-VulnDeviceProfileSignature $rows[11])) 'Value delimiter collision'
+        Assert-True ((Get-VulnDeviceProfileSignature $rows[6]) -cne (Get-VulnDeviceProfileSignature $rows[7])) 'Tag delimiter collision'
+        $legacy = Join-Path $PSScriptRoot 'fixtures/legacy-migration'
+        $legacyPins = @(Get-ChildItem $legacy -File | Get-FileHash | Select-Object Path,Hash)
+        $legacyRaw = @(@(Read-VulnNdjsonLinesFromPath -Path (Get-VulnCurrentPath $legacy)) +
+            @(Read-VulnNdjsonLinesFromPath -Path (Get-VulnHistoryRowsPath $legacy '2026Q1')) |
+            ForEach-Object { $_ | ConvertFrom-Json })
+        $legacyRows = @(Read-VulnContentStoreRow -BasePath $legacy)
+        Assert-True ($legacyRaw.Count -eq $legacyRows.Count) 'Legacy dictionary row count changed'
+        for ($i=0; $i -lt $legacyRows.Count; $i++) {
+            Assert-DeviceProjectionValue (Get-ExpectedDeviceProjection $legacyRaw[$i]) $legacyRows[$i] "legacy/$i"
+        }
+        Assert-True (($legacyPins | ConvertTo-Json -Compress) -ceq (@(Get-ChildItem $legacy -File | Get-FileHash | Select-Object Path,Hash) | ConvertTo-Json -Compress)) 'Legacy read mutated fixture'
+    }
+    finally {
+        $Script:VulnDiskPartitionCount = $originalPartitions
+        if (Test-Path -LiteralPath $root) {
+            $fullRoot = [IO.Path]::GetFullPath($root)
+            $tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)
+            if ([IO.Path]::GetDirectoryName($fullRoot) -cne $tempParent -or [IO.Path]::GetFileName($fullRoot) -notlike 'device-profile-parity-*') { throw 'Unexpected test cleanup path.' }
+            Remove-Item -LiteralPath $fullRoot -Recurse -Force
+        }
+    }
+}
+
 function Test-VulnContentStoreRoundTrip {
     [CmdletBinding()]
     param()
@@ -7777,6 +7881,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-WriteProgressMarkerIncludesEtaWhenTotalCountKnown'; SuccessMessage = 'Progress marker ETA checks passed.' }
     @{ Name = 'Test-WriteCombinedPayloadGzipCanConsumeColumnLookupData'; SuccessMessage = 'Payload lookup consumption checks passed.' }
     @{ Name = 'Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload'; SuccessMessage = 'Embedded payload inspection checks passed.' }
+    @{ Name = 'Test-VulnDeviceProfileProjectionParity'; SuccessMessage = 'Complete collision-safe device profile projection checks passed.' }
     @{ Name = 'Test-VulnContentStoreRoundTrip'; SuccessMessage = 'Vulnerability content store round-trip checks passed.' }
     @{ Name = 'Test-ProceduralSyntheticDatasetGeneration'; SuccessMessage = 'Procedural synthetic generation and immutable overlay checks passed.' }
     @{ Name = 'Test-BulkSnapshotFreshImportProfilerParityAndGuards'; SuccessMessage = 'Fresh import profiler store parity, attribution, restoration and source guards passed.' }

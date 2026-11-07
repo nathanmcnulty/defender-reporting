@@ -451,8 +451,9 @@ namespace DefenderReporting.Store
                                 var row = document.RootElement;
                                 if (row.ValueKind != JsonValueKind.Object) continue;
                                 var deviceJson = DeviceJson(row);
-                                var deviceId = String(row, "DeviceId");
-                                var deviceKey = string.IsNullOrWhiteSpace(deviceId) ? Hash(deviceJson) : deviceId;
+                                // The complete projected JSON is an unambiguous ordinal key.
+                                // DeviceId alone cannot represent different per-observation profiles.
+                                var deviceKey = deviceJson;
                                 if (!devices.TryGetValue(deviceKey, out var deviceIndex))
                                 {
                                     deviceIndex = devices.Count;
