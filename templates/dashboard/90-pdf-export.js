@@ -29,7 +29,15 @@ function capturePdfReportSnapshot(selectedReport) {
 async function capturePdfHeaderImage(headerDiv) {
     document.body.appendChild(headerDiv);
     try {
-        const canvas = await html2canvas(headerDiv, { scale: 2.5, backgroundColor: '#ffffff' });
+        const head = headerDiv.ownerDocument?.head || document.head;
+        const canvas = await html2canvas(headerDiv, {
+            scale: 2.5,
+            backgroundColor: '#ffffff',
+            // html2canvas clones the document, even for a small target. Keep the
+            // header's layout/style context without cloning visited report DOM.
+            ignoreElements: element => !element.contains(headerDiv)
+                && !headerDiv.contains(element) && !head?.contains(element)
+        });
         return canvas.toDataURL('image/png');
     } finally {
         document.body.removeChild(headerDiv);
