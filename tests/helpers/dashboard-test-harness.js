@@ -138,6 +138,7 @@ function loadDashboardHarness(exportSource, sandboxOverrides = {}) {
             now() { return 0; }
         },
         TextEncoder,
+        TextDecoder,
         Buffer,
         URL,
         setTimeout,

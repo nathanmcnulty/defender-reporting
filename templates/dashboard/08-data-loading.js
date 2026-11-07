@@ -689,6 +689,21 @@ function materializeRow(v) {
     return v;
 }
 
+// Keep the serialized bytes and decoded text out of the row-building frame.
+// denormalizeInWorker has already terminated the worker before resolving.
+function readWorkerPayload(result) {
+    if (!result.jsonUtf8) return result;
+    const bytes = result.jsonUtf8;
+    result.jsonUtf8 = null;
+    const decodeStart = performance.now();
+    const text = new TextDecoder().decode(bytes);
+    recordDashboardPhaseTiming('mainDecodeMs', performance.now() - decodeStart);
+    const parseStart = performance.now();
+    const data = JSON.parse(text);
+    recordDashboardPhaseTiming('mainParseMs', performance.now() - parseStart);
+    return { rows: null, lookups: data.lookups, rawVulns: data.vulns };
+}
+
 /**
  * Denormalize with Worker + IndexedDB caching.
  * Falls back to main-thread denormalization on any failure.
@@ -751,7 +766,7 @@ async function denormalizeWithCaching() {
         const label = compBytes ? 'decompressing' : 'denormalizing';
         logDebug(label, compBytes ? '(compressed bytes via Worker)' : getRawVulnCount(), 'records via Web Worker...');
         const startTime = performance.now();
-        const result = await denormalizeInWorker(compBytes);
+        const result = readWorkerPayload(await denormalizeInWorker(compBytes));
         if (result.lookups) lookups = result.lookups;
         if (result.rawVulns) rawVulns = result.rawVulns;
         if (result.skippedInvalidRows > 0) {

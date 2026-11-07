@@ -218,14 +218,26 @@ existing guard samples, separate Node RSS/heap/external counters, and bounded
 browser main-heap/initialization/worker observations. Opt-in console checkpoints
 retain initialization and worker delivery even if final measurement JSON is
 never written. The `--admin-exercise` timing lane additionally records per-action
-filter/library/detail/PDF boundaries; the saved-artifact lane does not yet record
-those per-action checkpoints. Only allowlisted
+filter/library/detail/PDF boundaries, including header capture versus buffer
+generation and exact bounded source/report row counts before export. The
+saved-artifact lane does not yet record those per-action checkpoints. Only allowlisted
 names, states and numeric observations are retained; row contents and arbitrary
 console text are excluded. Missing observations are not evidence that a phase
 did not execute. Node RSS, browser-family working set and the outer all-descendant
 working-set cap remain distinct; do not subtract asynchronous samples as exact
 per-process attribution. It is partial diagnostic evidence, never proof of run
 completion or cleanup. Use the same setting for both sides of a comparison.
+
+Compressed worker replies transfer inflated UTF-8 bytes and terminate the worker
+before main-thread decoding/parsing and row construction. The compressed input
+remains available for fallback; payload schema and cache eligibility are unchanged.
+Observe `workerInflateMs`, `workerDeliveryMs`, `mainDecodeMs` and `mainParseMs`;
+`workerParseMs` is absent on this route. Parsing moves to main rather than
+disappearing, so assess whole initialization latency and native memory together.
+`Assert-DashboardWorkerBufferTransfer.js` exercises real worker transfer/detachment,
+native gzip and the pako-compatible view path, Unicode/BOM, matrix/columnar/empty
+full-field parity and failure fallback with retained compressed bytes. These tiny
+controls do not establish representative browser performance.
 
 Run the isolated two-row Hosted dashboard control, generated from synthetic data without root exports, authentication, or cloud writes:
 
