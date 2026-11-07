@@ -766,6 +766,7 @@ function Invoke-MdeAdvancedHuntingStoreRefresh {
         [CmdletBinding()]
         param(
             [Parameter(Mandatory = $true)]
+            [AllowEmptyCollection()]
             [object[]]$Records,
 
             [Parameter(Mandatory = $true)]
