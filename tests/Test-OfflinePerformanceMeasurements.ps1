@@ -19,7 +19,7 @@ $sourceLoadBlock = [scriptblock]::Create($generatorText.Substring($loadStart, $l
 function Invoke-SourceLoadDiagnosticControl {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'DirectMergeDeviceLookup', Justification = 'Consumed by the dot-invoked production source-load block.')]
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', 'effectiveSkipObservedWindowMerge', Justification = 'Consumed by the dot-invoked production source-load block.')]
-    param([string]$LogPath, [string]$FailureStage = '', [switch]$DirectMerge, [switch]$Bucketed)
+    param([string]$LogPath, [string]$FailureStage = '', [string]$CompletionFailureStage = '', [switch]$DirectMerge, [switch]$Bucketed)
     Initialize-LocalDiagnosticPhaseLog -Path $LogPath
     $DirectoryPath = 'controlled-source'
     $DirectMergeDeviceLookup = [bool]$DirectMerge
@@ -27,6 +27,14 @@ function Invoke-SourceLoadDiagnosticControl {
     $effectiveSkipObservedWindowMerge = $false
     $localPhaseTimings = [Collections.Generic.List[object]]::new()
     $calls = [Collections.Generic.List[string]]::new()
+    $completionCalls = [Collections.Generic.List[object]]::new()
+    $originalCompletion = ${function:Complete-LocalDiagnosticPhase}
+    function Complete-LocalDiagnosticPhase {
+        param($PhaseContext, [string]$Status = 'completed')
+        $completionCalls.Add([pscustomobject]@{ Name = $PhaseContext.Name; Status = $Status })
+        if ($PhaseContext.Name -ceq ('Load source data/' + $CompletionFailureStage)) { throw ('completion-failed-' + $CompletionFailureStage) }
+        & $originalCompletion -PhaseContext $PhaseContext -Status $Status
+    }
     $machineRows = @{ device = 'machine-tuple' }
     $cveRows = @{ cve = 'cve-enrichment' }
     $userRows = @{ device = 'users' }
@@ -61,10 +69,14 @@ function Invoke-SourceLoadDiagnosticControl {
         return @{ MachineCount = $MachineCount }
     }
     $failureMessage = $null
+    $primaryException = $null
     try { . $sourceLoadBlock }
-    catch { $failureMessage = $_.Exception.Message }
+    catch { $failureMessage = $_.Exception.Message; $primaryException = $_.Exception }
     if ($FailureStage) {
         if ($failureMessage -cne ('reader-failed-' + $FailureStage)) { throw "Reader exception was replaced: $failureMessage" }
+    }
+    elseif ($CompletionFailureStage) {
+        if ($failureMessage -cne ('completion-failed-' + $CompletionFailureStage)) { throw "Diagnostic completion failure was lost: $failureMessage" }
     }
     else {
         if ($failureMessage) { throw $failureMessage }
@@ -76,7 +88,7 @@ function Invoke-SourceLoadDiagnosticControl {
         }
         elseif (-not [object]::ReferenceEquals($machines, $machineRows)) { throw 'Machine lookup identity changed.' }
     }
-    return [pscustomobject]@{ Calls = @($calls); Phases = @($localPhaseTimings); Failure = $failureMessage }
+    return [pscustomobject]@{ Calls = @($calls); Phases = @($localPhaseTimings); Failure = $failureMessage; PrimaryException = $primaryException; CompletionCalls = @($completionCalls) }
 }
 $root = Join-Path ([IO.Path]::GetTempPath()) ('offline-metrics-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $root
@@ -170,6 +182,12 @@ try {
         if ($failed.Phases[-1].Name -cne ('Load source data/' + $stage) -or $failed.Phases[-1].Status -cne 'failed') { throw 'Failed reader was labelled completed.' }
         $failureEnd = (Get-Content -LiteralPath $failedLog -Tail 1) -split "`t", 4
         if ($failureEnd[1] -cne 'phase-end' -or $failureEnd[2] -cne ('Load source data/' + $stage) -or $failureEnd[3] -cne 'failed' -or $failed.Calls[-1] -cne $stage) { throw 'Failure crossed reader boundary or lost diagnostic status.' }
+    }
+    foreach ($stage in @('machines', 'advanced-hunting', 'nvd')) {
+        $dual = Invoke-SourceLoadDiagnosticControl -LogPath (Join-Path $root ($stage + '-dual-failed.tsv')) -FailureStage $stage -CompletionFailureStage $stage
+        if ($dual.PrimaryException.Data['SourceLoadDiagnosticFailure'] -cne 'System.Management.Automation.RuntimeException' -or $dual.CompletionCalls[-1].Status -cne 'failed' -or $dual.Calls[-1] -cne $stage) { throw 'Dual failure lost primary reader error, sanitized diagnostic evidence or failed status.' }
+        $diagnostic = Invoke-SourceLoadDiagnosticControl -LogPath (Join-Path $root ($stage + '-completion-failed.tsv')) -CompletionFailureStage $stage
+        if ($diagnostic.PrimaryException.Data.Contains('SourceLoadDiagnosticFailure') -or $diagnostic.Calls[-1] -cne $stage) { throw 'Successful reader diagnostic failure did not remain fail-closed.' }
     }
     Write-Output 'PASS offline measurement counters, source subphases and lane guards.'
 }
