@@ -58,6 +58,11 @@ function readDiagnosticCheckpoint(text) {
         durationMs: Number.isFinite(value.durationMs) && value.durationMs >= 0 ? value.durationMs : null };
 }
 
+function writeBrowserDiagnostic(guard, writer, sample) {
+    try { writer(sample); }
+    catch (error) { guard.abort(error); throw error; }
+}
+
 function safeInventoryDiagnostic(value = {}) {
     const categories = ['timeout', 'aborted', 'execution', 'response', 'InvalidOperation', 'InvalidArgument', 'InvalidData', 'OperationStopped', 'WriteError', 'ObjectNotFound', 'PermissionDenied', 'SecurityError', 'ResourceUnavailable', 'NotSpecified'];
     const types = ['RuntimeException', 'CimException', 'MethodInvocationException', 'PSInvalidOperationException', 'SessionStateUnauthorizedAccessException', 'UnauthorizedAccessException', 'InvalidOperationException', 'ArgumentException', 'Win32Exception'];
@@ -947,9 +952,9 @@ async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot,
                 if (!recordSample) return;
                 const checkpoint = readDiagnosticCheckpoint(message.text());
                 if (!checkpoint) return;
-                try { recordSample({ kind: 'browser-checkpoint', iteration, load, stage: state.guard.stage,
+                try { writeBrowserDiagnostic(state.guard, recordSample, { kind: 'browser-checkpoint', iteration, load, stage: state.guard.stage,
                     sampledAtEpochMs: Date.now(), ...checkpoint }); }
-                catch (error) { state.guard.abort(error); }
+                catch { /* The guard is already aborted; event handlers must not throw. */ }
             };
             state.page.on('pageerror', onError);
             state.page.on('request', onRequest);
@@ -973,7 +978,7 @@ async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot,
                     if (readiness) run.lastReadiness = readiness;
                     if (recordSample && performance.now() - lastHeapJournalAt >= 500) {
                         lastHeapJournalAt = performance.now();
-                        recordSample({ kind: 'browser-heap', iteration, load, stage: state.guard.stage,
+                        writeBrowserDiagnostic(state.guard, recordSample, { kind: 'browser-heap', iteration, load, stage: state.guard.stage,
                             sampledAtEpochMs: Date.now(), mainHeapUsedBytes: heap?.value ?? null,
                             readiness: compactReadinessSample(readiness) });
                     }
@@ -1580,6 +1585,19 @@ async function privacyProbes() {
 }
 
 async function measurementControlProbes() {
+    const journalError = new Error('Synthetic one-shot diagnostic write failure');
+    let journalKills = 0;
+    const journalGuard = new ResourceGuard({ inventory: async () => ({ bytes: 0, pids: [] }), terminate: async () => { journalKills++; },
+        freeMemory: () => 3, limits: { browserFamilyBytes: 2, freeMemoryBytes: 2 } });
+    assert.throws(() => writeBrowserDiagnostic(journalGuard, () => { throw journalError; }, { kind: 'browser-heap' }), error => error === journalError);
+    // A later successful append cannot turn a partially failed journal into a pass.
+    writeBrowserDiagnostic(journalGuard, () => {}, { kind: 'browser-heap' });
+    await assert.rejects(journalGuard.wait(Promise.resolve()), error => error === journalError);
+    const journalRun = { status: 'running' };
+    await assert.rejects(completeRun(journalRun, journalGuard, () => {}), error => error === journalError);
+    assert.strictEqual(journalRun.status, 'failed');
+    await journalGuard.stop();
+    assert.strictEqual(journalKills, 1);
     const diagnosticSentinel = 'synthetic-private-row-content';
     const compact = compactReadinessSample({ instrumentationPresent: true, readyEventSeen: false, dashboardReady: false,
         phases: [...Array.from({ length: 1000 }, (_, durationMs) => ({ name: 'workerParseMs', durationMs })),
@@ -1605,7 +1623,7 @@ async function measurementControlProbes() {
     assert.strictEqual(readDiagnosticCheckpoint('ISSUE70_CHECKPOINT:{'), null);
     assert.strictEqual(readDiagnosticCheckpoint('x'.repeat(1025)), null);
     assert.strictEqual(readDiagnosticCheckpoint(diagnosticSentinel), null);
-    console.log('PASS bounded phase diagnostics, absent-versus-zero observations, content exclusion and separate Node memory counters');
+    console.log('PASS diagnostic write failure prevents acceptance, bounded phases, absent-versus-zero observations, content exclusion and separate Node memory');
     const timingCallbacks = {};
     const timingMetrics = { phases: {} };
     const timingResult = {};
