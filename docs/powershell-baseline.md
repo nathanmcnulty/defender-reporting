@@ -56,3 +56,24 @@ invoke Pester or prove an Azure-hosted runtime. Issue #92's live Azure validatio
 remains open until separately authorized execution supplies that evidence. The
 repository guard and setup payload checks establish source intent, not live
 runtime availability or endpoint behavior.
+
+For a reviewed Automation deployment, `Setup-AzureResources.ps1` accepts
+`-AutomationAzAccountsVersion` as an optional stable `major.minor.patch` value
+(for example, the format `5.3.1`). Select the actual reviewed module version;
+the example is not a package availability or compatibility claim. Setup uses
+`https://www.powershellgallery.com/api/v2/package/Az.Accounts/<version>` and
+requires the imported package's reported `properties.version` to match exactly
+after its import completes. A missing/different version, failed/canceled import
+or the existing 300-second import timeout stops pinned setup. Omitting the
+parameter retains the existing latest Gallery URI and polling behavior.
+
+This option applies only to Automation; Function App modules are bundled by
+the package builder, and setup rejects this option with `-ComputeType FunctionApp`.
+The existing named Automation runtime environment is still the target, so review
+the effect on runbooks already bound to it before updating its module version.
+The [Automation Package GET contract](https://learn.microsoft.com/en-us/rest/api/automation/package/get?view=rest-automation-2024-10-23)
+documents the reported version. A versioned URI plus version readback is not
+cryptographic package identity: this option does not fetch/hash a local Gallery
+archive, supply a content hash, prove module loading, or establish source/package
+correspondence for #92. Retain the selected source/package/module hashes and real
+host observations separately in that deployment's evidence.
