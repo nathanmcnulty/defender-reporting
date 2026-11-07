@@ -58,6 +58,7 @@ $entrypoints = @(
     'tests/Invoke-SetupArtifactValidationRegression.ps1'
     'tests/Invoke-SetupRuntimeRegression.ps1'
     'tests/Invoke-SetupSchedulingRegression.ps1'
+    'tests/Invoke-StreamedScratchRegression.ps1'
     'tests/Invoke-ValidationModeComparison.ps1'
     'tests/Invoke-WithPwshMemoryGuard.ps1'
     'tests/manual/Invoke-DashboardPathCoverage.ps1'
