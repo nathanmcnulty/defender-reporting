@@ -216,8 +216,10 @@ write. Its parent directory must already exist outside the retained product.
 The fresh version-2 journal is capped at 2 MiB and contains input fingerprints,
 existing guard samples, separate Node RSS/heap/external counters, and bounded
 browser main-heap/initialization/worker observations. Opt-in console checkpoints
-retain initialization, worker delivery and admin filter/library/detail/PDF
-boundaries even if the final measurement JSON is never written. Only allowlisted
+retain initialization and worker delivery even if final measurement JSON is
+never written. The `--admin-exercise` timing lane additionally records per-action
+filter/library/detail/PDF boundaries; the saved-artifact lane does not yet record
+those per-action checkpoints. Only allowlisted
 names, states and numeric observations are retained; row contents and arbitrary
 console text are excluded. Missing observations are not evidence that a phase
 did not execute. Node RSS, browser-family working set and the outer all-descendant
