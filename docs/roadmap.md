@@ -82,6 +82,14 @@ preserves #98's demo/fork-protection ownership, and separates accepted full-scal
 PackageOnly evidence from the remaining #67/#69 import/replay and #92 live gates.
 Its source checks do not close those acceptance gates.
 
+The [subsequent browser/admin validation](browser-admin-validation-2026-11-06.md)
+records corrected Hosted/self-contained PDF checks, the 19,677-row scoped admin
+experience and the measured cached-row refresh improvement. It retains mixed
+switch timings and full-scale memory failures. The next performance work must
+address admitted full-scale loading/unfiltered rendering; a framework rewrite
+is not established by these measurements. Import/replay, live blob interruption
+and #92 runtime acceptance remain separate work with their existing gates.
+
 Use issues for concrete work and this document for order and product direction. Link verified review findings as they arrive; do not turn every idea into a promised feature. Update the roadmap when a decision or accepted result changes the next useful step.
 
 Planning snapshot: current main `69e5cfd53e5f1e6c8b762c86cb5b3967b3359e98`, open issues #67/#68/#69/#70/#92, and draft PR #98. The [October import/Dual measurements](import-dual-measurements-2026-10-28.md), [dashboard review](dashboard-performance-review.md), and [test guide](../tests/README.md) provide context with their own evidence limits. Older observations are not current performance guarantees, and this roadmap does not close any issue.

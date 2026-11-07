@@ -86,4 +86,12 @@ No threshold was lowered and no unrelated files/processes were removed. Full
 preflight, representative large browser measurements, visual PDF review and
 measured bottleneck improvements remain open; no new speedup is claimed.
 
+The local admission observations above are the initial source-review checkpoint.
+The user subsequently authorized an isolated Azure browser test VM, with mandatory
+cleanup. [The follow-up validation report](browser-admin-validation-2026-11-06.md)
+records passing full CI, actual Hosted/self-contained PDFs, scoped larger admin
+work and narrow measured cache improvement, alongside full-scale failures and
+remaining live gates. This authorization did not cover a production reporting
+deployment, role/policy changes or a renewed #92 campaign.
+
 This document records acceptance boundaries; it does not close any issue.
