@@ -4425,10 +4425,53 @@ function Get-VulnPartitionFilePath {
         [string]$Prefix,
 
         [Parameter(Mandatory = $true)]
-        [int]$Index
+        [int]$Index,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
     )
 
-    return Join-Path -Path $Root -ChildPath ("{0}-{1:D2}.ndjson" -f $Prefix, $Index)
+    $fileName = "{0}-{1:D2}.ndjson" -f $Prefix, $Index
+    if ($CompressTemporaryPartitions) { $fileName += '.gz' }
+    return Join-Path -Path $Root -ChildPath $fileName
+}
+
+function Open-VulnPartitionWriter {
+    [CmdletBinding()]
+    [OutputType([System.IO.StreamWriter])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Append,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
+    )
+
+    if (-not $CompressTemporaryPartitions) {
+        return [System.IO.StreamWriter]::new($Path, [bool]$Append, [System.Text.UTF8Encoding]::new($false))
+    }
+
+    # One encoder per open partition writer: no plaintext chunk, second disk
+    # pass or per-row byte conversion. Closing the writer finalizes its member.
+    $mode = if ($Append) { [System.IO.FileMode]::Append } else { [System.IO.FileMode]::Create }
+    $fileStream = [System.IO.File]::Open($Path, $mode, [System.IO.FileAccess]::Write)
+    try {
+        $gzip = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionLevel]::Fastest)
+        try {
+            return [System.IO.StreamWriter]::new($gzip, [System.Text.UTF8Encoding]::new($false))
+        }
+        catch {
+            $gzip.Dispose()
+            throw
+        }
+    }
+    catch {
+        $fileStream.Dispose()
+        throw
+    }
 }
 
 function Split-VulnJsonPartition {
@@ -4448,7 +4491,10 @@ function Split-VulnJsonPartition {
         [switch]$OnboardedOnly,
 
         [Parameter(Mandatory = $false)]
-        [int]$PartitionCount = $Script:VulnDiskPartitionCount
+        [int]$PartitionCount = $Script:VulnDiskPartitionCount,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
     )
 
     [void](New-Item -Path $OutputRoot -ItemType Directory -Force)
@@ -4468,8 +4514,8 @@ function Split-VulnJsonPartition {
 
                 $partitionIndex = Get-VulnPartitionIndex -Id $id -PartitionCount $PartitionCount
                 if (-not $writers.ContainsKey($partitionIndex)) {
-                    $partitionPath = Get-VulnPartitionFilePath -Root $OutputRoot -Prefix $Prefix -Index $partitionIndex
-                    $writers[$partitionIndex] = [System.IO.StreamWriter]::new($partitionPath, $true, [System.Text.UTF8Encoding]::new($false))
+                    $partitionPath = Get-VulnPartitionFilePath -Root $OutputRoot -Prefix $Prefix -Index $partitionIndex -CompressTemporaryPartitions:$CompressTemporaryPartitions
+                    $writers[$partitionIndex] = Open-VulnPartitionWriter -Path $partitionPath -Append -CompressTemporaryPartitions:$CompressTemporaryPartitions
                 }
 
                 $writers[$partitionIndex].WriteLine($jsonLine)
@@ -4527,7 +4573,10 @@ function Write-VulnPartitionMapFile {
         [string]$Path,
 
         [Parameter(Mandatory = $true)]
-        [hashtable]$RowsById
+        [hashtable]$RowsById,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
     )
 
     if ($RowsById.Count -eq 0) {
@@ -4537,7 +4586,7 @@ function Write-VulnPartitionMapFile {
         return 0
     }
 
-    $writer = [System.IO.StreamWriter]::new($Path, $false, [System.Text.UTF8Encoding]::new($false))
+    $writer = Open-VulnPartitionWriter -Path $Path -CompressTemporaryPartitions:$CompressTemporaryPartitions
     try {
         $rowCount = 0
         foreach ($id in @($RowsById.Keys | Sort-Object)) {
@@ -4566,7 +4615,10 @@ function Write-VulnCurrentFileFromPartition {
         [string]$OutputPath,
 
         [Parameter(Mandatory = $false)]
-        [int]$PartitionCount = $Script:VulnDiskPartitionCount
+        [int]$PartitionCount = $Script:VulnDiskPartitionCount,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
     )
 
     $fileStream = [System.IO.File]::Create($OutputPath)
@@ -4577,7 +4629,7 @@ function Write-VulnCurrentFileFromPartition {
             try {
                 $rowCount = 0
                 for ($partitionIndex = 0; $partitionIndex -lt $PartitionCount; $partitionIndex++) {
-                    $partitionPath = Get-VulnPartitionFilePath -Root $PartitionRoot -Prefix $PartitionPrefix -Index $partitionIndex
+                    $partitionPath = Get-VulnPartitionFilePath -Root $PartitionRoot -Prefix $PartitionPrefix -Index $partitionIndex -CompressTemporaryPartitions:$CompressTemporaryPartitions
                     if (-not (Test-Path -LiteralPath $partitionPath -PathType Leaf)) { continue }
 
                     foreach ($jsonLine in Read-VulnNdjsonLinesFromPath -Path $partitionPath) {
@@ -6574,6 +6626,10 @@ function Publish-VulnerabilityHistoryStore {
         immediately into VulnExport_current.json.gz plus quarterly VulnHistory_YYYYQn.json.gz /
         VulnHistoryRows_YYYYQn.json.gz files and removes the temporary raw snapshot files after
         successful publication.
+
+    .PARAMETER CompressTemporaryPartitions
+        Opt-in capacity experiment: stream temporary snapshot/current-map partitions
+        through GZip Fastest. Canonical output and the default path are unchanged.
     #>
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -6582,7 +6638,10 @@ function Publish-VulnerabilityHistoryStore {
         [string]$OutputPath,
 
         [Parameter(Mandatory = $false)]
-        [string[]]$DownloadedFiles
+        [string[]]$DownloadedFiles,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
     )
 
     $downloadedFileList = @($DownloadedFiles | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
@@ -6628,7 +6687,9 @@ function Publish-VulnerabilityHistoryStore {
         Assert-LegacyMigrationAllowed -FeatureName 'vulnerability snapshot compatibility' -LegacyPaths @($legacyFiles.FullName)
     }
 
-    $publishResult = Publish-VulnStoreFromBulkSnapshot -BasePath $OutputPath -SnapshotFilePaths @($legacyFiles.FullName) -RemoveSnapshotFiles
+    $publishArguments = @{ BasePath = $OutputPath; SnapshotFilePaths = @($legacyFiles.FullName); RemoveSnapshotFiles = $true }
+    if ($CompressTemporaryPartitions) { $publishArguments.CompressTemporaryPartitions = $true }
+    $publishResult = Publish-VulnStoreFromBulkSnapshot @publishArguments
     Write-Host "  Canonical vulnerability store updated: $($publishResult.CurrentRows) current row(s), $($publishResult.HistoryYears) history period file(s)" -ForegroundColor Green
     return $publishResult
 }
@@ -6659,6 +6720,7 @@ function Get-VulnSnapshotFilesBySnapshotDate {
 
 function Publish-VulnStoreFromBulkSnapshot {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', 'CompressTemporaryPartitions', Justification = 'Captured by the store-lock script block and forwarded to its temporary partition helpers.')]
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -6668,7 +6730,10 @@ function Publish-VulnStoreFromBulkSnapshot {
         [string[]]$SnapshotFilePaths,
 
         [Parameter(Mandatory = $false)]
-        [switch]$RemoveSnapshotFiles
+        [switch]$RemoveSnapshotFiles,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
     )
 
     $snapshotFiles = @(Get-VulnLegacySnapshotFile -BasePath $BasePath -LegacyFilePaths $SnapshotFilePaths)
@@ -6780,7 +6845,7 @@ function Publish-VulnStoreFromBulkSnapshot {
             $currentPartitionRoot = Join-Path $stageRoot 'current-partitions'
             [void](New-Item -Path $currentPartitionRoot -ItemType Directory -Force)
             if ($storeExists -and (Test-Path -LiteralPath $currentPath -PathType Leaf)) {
-                [void](Split-VulnJsonPartition -InputPaths @($currentPath) -OutputRoot $currentPartitionRoot -Prefix 'current' -PartitionCount $partitionCount)
+                [void](Split-VulnJsonPartition -InputPaths @($currentPath) -OutputRoot $currentPartitionRoot -Prefix 'current' -PartitionCount $partitionCount -CompressTemporaryPartitions:$CompressTemporaryPartitions)
             }
 
             Write-Output ("  Canonicalizing {0} new snapshot date(s) across {1} file(s) using {2} disk partition(s)..." -f $snapshotDates.Count, $snapshotFiles.Count, $partitionCount)
@@ -6801,11 +6866,11 @@ function Publish-VulnStoreFromBulkSnapshot {
                         -OutputRoot $snapshotPartitionRoot `
                         -Prefix 'snapshot' `
                         -OnboardedOnly `
-                        -PartitionCount $partitionCount)
+                        -PartitionCount $partitionCount -CompressTemporaryPartitions:$CompressTemporaryPartitions)
 
                     for ($partitionIndex = 0; $partitionIndex -lt $partitionCount; $partitionIndex++) {
-                        $currentPartitionPath = Get-VulnPartitionFilePath -Root $currentPartitionRoot -Prefix 'current' -Index $partitionIndex
-                        $snapshotPartitionPath = Get-VulnPartitionFilePath -Root $snapshotPartitionRoot -Prefix 'snapshot' -Index $partitionIndex
+                        $currentPartitionPath = Get-VulnPartitionFilePath -Root $currentPartitionRoot -Prefix 'current' -Index $partitionIndex -CompressTemporaryPartitions:$CompressTemporaryPartitions
+                        $snapshotPartitionPath = Get-VulnPartitionFilePath -Root $snapshotPartitionRoot -Prefix 'snapshot' -Index $partitionIndex -CompressTemporaryPartitions:$CompressTemporaryPartitions
 
                         if (-not (Test-Path -LiteralPath $currentPartitionPath -PathType Leaf) -and -not (Test-Path -LiteralPath $snapshotPartitionPath -PathType Leaf)) {
                             continue
@@ -6846,7 +6911,7 @@ function Publish-VulnStoreFromBulkSnapshot {
                             }
                         }
 
-                        [void](Write-VulnPartitionMapFile -Path $currentPartitionPath -RowsById $snapshotRows)
+                        [void](Write-VulnPartitionMapFile -Path $currentPartitionPath -RowsById $snapshotRows -CompressTemporaryPartitions:$CompressTemporaryPartitions)
                     }
                 }
                 finally {
@@ -6862,7 +6927,7 @@ function Publish-VulnStoreFromBulkSnapshot {
             Close-VulnHistoryAppendStore -AppendStateByPeriod $historyAppendState
 
             $stagedCurrentPath = Get-VulnCurrentPath -BasePath $stageRoot
-            [void](Write-VulnCurrentFileFromPartition -PartitionRoot $currentPartitionRoot -PartitionPrefix 'current' -OutputPath $stagedCurrentPath -PartitionCount $partitionCount)
+            [void](Write-VulnCurrentFileFromPartition -PartitionRoot $currentPartitionRoot -PartitionPrefix 'current' -OutputPath $stagedCurrentPath -PartitionCount $partitionCount -CompressTemporaryPartitions:$CompressTemporaryPartitions)
             $currentCount = Test-VulnCurrentFile -Path $stagedCurrentPath
 
             $filesToPublish = [System.Collections.Generic.List[object]]::new()
@@ -21803,7 +21868,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 5b693f8acac2344d06e80869565aee951268280c0688216e4f3e84f606727890
+# ArtifactFingerprint: ce9ae88daaea42a8d5e3ad8a92ad7cfdd28d082705212b45504190961c586b05
 
 
 

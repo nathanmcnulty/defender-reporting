@@ -3360,10 +3360,53 @@ function Get-VulnPartitionFilePath {
         [string]$Prefix,
 
         [Parameter(Mandatory = $true)]
-        [int]$Index
+        [int]$Index,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
     )
 
-    return Join-Path -Path $Root -ChildPath ("{0}-{1:D2}.ndjson" -f $Prefix, $Index)
+    $fileName = "{0}-{1:D2}.ndjson" -f $Prefix, $Index
+    if ($CompressTemporaryPartitions) { $fileName += '.gz' }
+    return Join-Path -Path $Root -ChildPath $fileName
+}
+
+function Open-VulnPartitionWriter {
+    [CmdletBinding()]
+    [OutputType([System.IO.StreamWriter])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Append,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
+    )
+
+    if (-not $CompressTemporaryPartitions) {
+        return [System.IO.StreamWriter]::new($Path, [bool]$Append, [System.Text.UTF8Encoding]::new($false))
+    }
+
+    # One encoder per open partition writer: no plaintext chunk, second disk
+    # pass or per-row byte conversion. Closing the writer finalizes its member.
+    $mode = if ($Append) { [System.IO.FileMode]::Append } else { [System.IO.FileMode]::Create }
+    $fileStream = [System.IO.File]::Open($Path, $mode, [System.IO.FileAccess]::Write)
+    try {
+        $gzip = [System.IO.Compression.GZipStream]::new($fileStream, [System.IO.Compression.CompressionLevel]::Fastest)
+        try {
+            return [System.IO.StreamWriter]::new($gzip, [System.Text.UTF8Encoding]::new($false))
+        }
+        catch {
+            $gzip.Dispose()
+            throw
+        }
+    }
+    catch {
+        $fileStream.Dispose()
+        throw
+    }
 }
 
 function Split-VulnJsonPartition {
@@ -3383,7 +3426,10 @@ function Split-VulnJsonPartition {
         [switch]$OnboardedOnly,
 
         [Parameter(Mandatory = $false)]
-        [int]$PartitionCount = $Script:VulnDiskPartitionCount
+        [int]$PartitionCount = $Script:VulnDiskPartitionCount,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
     )
 
     [void](New-Item -Path $OutputRoot -ItemType Directory -Force)
@@ -3403,8 +3449,8 @@ function Split-VulnJsonPartition {
 
                 $partitionIndex = Get-VulnPartitionIndex -Id $id -PartitionCount $PartitionCount
                 if (-not $writers.ContainsKey($partitionIndex)) {
-                    $partitionPath = Get-VulnPartitionFilePath -Root $OutputRoot -Prefix $Prefix -Index $partitionIndex
-                    $writers[$partitionIndex] = [System.IO.StreamWriter]::new($partitionPath, $true, [System.Text.UTF8Encoding]::new($false))
+                    $partitionPath = Get-VulnPartitionFilePath -Root $OutputRoot -Prefix $Prefix -Index $partitionIndex -CompressTemporaryPartitions:$CompressTemporaryPartitions
+                    $writers[$partitionIndex] = Open-VulnPartitionWriter -Path $partitionPath -Append -CompressTemporaryPartitions:$CompressTemporaryPartitions
                 }
 
                 $writers[$partitionIndex].WriteLine($jsonLine)
@@ -3462,7 +3508,10 @@ function Write-VulnPartitionMapFile {
         [string]$Path,
 
         [Parameter(Mandatory = $true)]
-        [hashtable]$RowsById
+        [hashtable]$RowsById,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
     )
 
     if ($RowsById.Count -eq 0) {
@@ -3472,7 +3521,7 @@ function Write-VulnPartitionMapFile {
         return 0
     }
 
-    $writer = [System.IO.StreamWriter]::new($Path, $false, [System.Text.UTF8Encoding]::new($false))
+    $writer = Open-VulnPartitionWriter -Path $Path -CompressTemporaryPartitions:$CompressTemporaryPartitions
     try {
         $rowCount = 0
         foreach ($id in @($RowsById.Keys | Sort-Object)) {
@@ -3501,7 +3550,10 @@ function Write-VulnCurrentFileFromPartition {
         [string]$OutputPath,
 
         [Parameter(Mandatory = $false)]
-        [int]$PartitionCount = $Script:VulnDiskPartitionCount
+        [int]$PartitionCount = $Script:VulnDiskPartitionCount,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$CompressTemporaryPartitions
     )
 
     $fileStream = [System.IO.File]::Create($OutputPath)
@@ -3512,7 +3564,7 @@ function Write-VulnCurrentFileFromPartition {
             try {
                 $rowCount = 0
                 for ($partitionIndex = 0; $partitionIndex -lt $PartitionCount; $partitionIndex++) {
-                    $partitionPath = Get-VulnPartitionFilePath -Root $PartitionRoot -Prefix $PartitionPrefix -Index $partitionIndex
+                    $partitionPath = Get-VulnPartitionFilePath -Root $PartitionRoot -Prefix $PartitionPrefix -Index $partitionIndex -CompressTemporaryPartitions:$CompressTemporaryPartitions
                     if (-not (Test-Path -LiteralPath $partitionPath -PathType Leaf)) { continue }
 
                     foreach ($jsonLine in Read-VulnNdjsonLinesFromPath -Path $partitionPath) {
