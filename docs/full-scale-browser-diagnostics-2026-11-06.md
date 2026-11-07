@@ -30,6 +30,16 @@ The additional PDF run resolves a different question: the selected report has on
 
 ## Candidates and required checks
 
+The combined worker/header candidate `77d672b` passed 48 actual small PDF exports across Hosted and self-contained modes. Independent checks covered exact captured filters, cards and complete table order, including all five empty reports on both loads. All 26 rendered first-load pages matched the previously reviewed baseline Hosted pages byte for byte.
+
+A complete three-pair alternating Hosted comparison used 19,677 rows, identical data/runtime pins and common harness `77d672b`. Each containing run passed cold/reload, filtering, all five report switches and native cleanup. Generated HTML was separately recovered and checked against its original inventory hashes: the only within-product difference was the single validated `dataQualityMeta.generatedOnUtc` timestamp. All other HTML bytes, data and runtime assets were preserved in the comparison.
+
+Observed baseline-to-candidate cold medians were 171.5 to 136.0 ms for denormalization and 25.5 to 1.0 ms for worker delivery. Overall initialization was mixed, warm results overlapped, and whole-family peak memory increased in every pair (median 2,030,149,632 to 2,040,623,104 bytes). This supports a narrower handoff improvement, not a memory or overall readiness improvement.
+
+The subsequent full Hosted candidate still failed during initial readiness at 2,189,185,024 family working-set bytes. Cleanup passed. Its last main-heap observation was 379,864,012 bytes; initialization completed, but no accepted full reload, filter/report tour, detail or PDF result followed. Worker delivery was 1 ms; main decoding/parsing took 41.8/239.2 ms. These partial diagnostics from failed parents cannot establish a full-scale speedup.
+
+The next row-allocation candidate predeclares the final environment-first-seen date and recomputes its temporary canonical issue key from the original raw index in the second pass. It avoids retaining a scratch field and adding a new field to every completed row. Existing cache/worker rows still have their old scratch cleared when present. This is a measured-phase hypothesis, not an established allocation-size or memory improvement; exact identity/date/materialization parity and new guarded measurements are required.
+
 The worker candidate transfers inflated UTF-8 bytes, terminates the worker, then decodes/parses on main before building rows. It retains compressed input for fallback and leaves schema, lazy fields and cache eligibility unchanged. Parsing moves to main rather than disappearing; assess whole initialization latency, main-thread work and native memory together. Its memory benefit is unproven until measured.
 
 The header candidate keeps the header subtree, its ancestors and the document head/styles in html2canvas's clone, excluding unrelated body branches. It does not remove live dashboard content, change selected data, reduce resolution or change the PDF snapshot lifecycle. Validate actual header raster, table/filter/card content, pagination and failure cleanup in Hosted and self-contained modes.

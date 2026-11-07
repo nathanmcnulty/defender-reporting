@@ -31,6 +31,7 @@ function assertDerivedDateParity() {
         ...overrides
     });
     const shared = row('shared');
+    const legacy = row('legacy', { _issueKey: 'legacy-cache-key' });
     const rows = [shared, row('earlier', { FirstSeenTimestamp: '2026-02-01' }), shared,
         row('other-version', { SoftwareVersion: '2', FirstSeenTimestamp: '2026-01-01' }),
         row('other-vendor', { SoftwareVendor: 'Other', FirstSeenTimestamp: '2025-01-01' }),
@@ -59,7 +60,7 @@ function assertDerivedDateParity() {
         rows.forEach((value, index) => {
             assert.deepStrictEqual([value._firstSeenDate, value._machineLastSeenDate, value._latestActivityDate, value._hasPatchEvidence,
                 value._effectiveOpenEndDate, value._remediationDate, value._remediationString], Object.values(temporal[index]));
-            assert.strictEqual(value._issueKey, null);
+            assert.strictEqual(Object.hasOwn(value, '_issueKey'), false, 'Fresh derived rows must not acquire an issue scratch slot.');
             for (const field of ['DiskPaths', 'RegistryPaths', 'VulnerabilityDescription', '_mat']) assert(!Object.prototype.hasOwnProperty.call(value, field), 'Derived refresh must keep detail evidence lazy.');
         });
         assert.strictEqual(JSON.stringify(rows.map(value => [value.FirstSeenTimestamp, value.LastSeenTimestamp, value.MachineInfo, value.CveId, value.SoftwareVendor, value.SoftwareName, value.SoftwareVersion])), source);
@@ -72,6 +73,8 @@ function assertDerivedDateParity() {
         assert.strictEqual(quality.invertedRanges, 3);
         assert.strictEqual(dashboard.latest(), 'invalid', 'Retain legacy malformed-date ordering rather than silently changing its semantics.');
     }
+    dashboard.applyDerivedVulnerabilityFields([legacy, legacy]);
+    assert.strictEqual(legacy._issueKey, null, 'Legacy cached own scratch keys must still clear.');
     assert.strictEqual(rows[8]._effectiveOpenEndDate, '2026-03-02', 'Preserve month rollover at the inactivity cutoff.');
     assert.strictEqual(rows[9]._effectiveOpenEndDate, '2024-03-02', 'Preserve leap-year inactivity arithmetic.');
 }
@@ -393,7 +396,7 @@ module.exports = { runCompressedCacheHit, runCacheMiss };
     const result = await dashboard.runCompressedCacheHit();
     assert.strictEqual(result.lazyAfterDerived, true, 'Warm derived fields must not allocate detail evidence.');
     assert.strictEqual(result.lazyAfterDescriptor, true, 'Aggregate descriptors must not allocate detail evidence.');
-    assert.strictEqual(result.row._issueKey, null, 'Warm cache rows must release issue identity scratch strings.');
+    assert.strictEqual(Object.hasOwn(result.row, '_issueKey'), false, 'New cache rows must not gain an issue scratch slot.');
     assert.strictEqual(result.descriptor.updateUrl, 'https://updates.example/kb/5000001');
     assert.strictEqual(result.inflateCount, 1, 'Expected compressed cache hit to decompress once to restore raw columns.');
     assert.strictEqual(result.rawCount, 1, 'Expected raw vulnerability columns to be restored after compressed cache hit.');

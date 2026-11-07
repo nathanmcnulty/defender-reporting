@@ -239,6 +239,14 @@ native gzip and the pako-compatible view path, Unicode/BOM, matrix/columnar/empt
 full-field parity and failure fallback with retained compressed bytes. These tiny
 controls do not establish representative browser performance.
 
+`Assert-DashboardRowShapeParity.js` compares every row field against the pinned
+`77d672bbf682351b35773ce80bcf4d83341c5f3b` oracle, excluding only the internal
+`_issueKey` scratch property. It covers matrix/columnar input, equivalent lookup
+identities, skipped raw indexes, numeric-zero and overflow keys, cold/worker/warm
+paths, legacy scratch cleanup and materialized detail fields. New rows reserve
+their final environment-first-seen date directly and retain no issue scratch;
+these small controls establish semantic parity, not a browser memory benefit.
+
 Run the isolated two-row Hosted dashboard control, generated from synthetic data without root exports, authentication, or cloud writes:
 
 ```powershell

@@ -132,7 +132,7 @@ module.exports = {
         await dashboard.denormalizeAllVulns();
         const cold = dashboard.getRows();
         assert.deepStrictEqual(Array.from(cold, row => row._environmentFirstSeenDate), fixture.expected, fixture.name);
-        assert.ok(cold.every(row => row._issueKey === null), `${fixture.name} releases cold scratch keys`);
+        assert.ok(cold.every(row => !Object.hasOwn(row, '_issueKey')), `${fixture.name} avoids cold scratch slots`);
         cold.forEach(row => { row._issueKey = dashboard.getEnvironmentIssueKey(row); });
         dashboard.applyDerivedVulnerabilityFields(cold);
         assert.deepStrictEqual(Array.from(cold, row => row._environmentFirstSeenDate), fixture.expected, `${fixture.name} warm parity`);
@@ -142,7 +142,7 @@ module.exports = {
         assert.deepStrictEqual(Array.from(dashboard.getRows(), row => row._environmentFirstSeenDate), fixture.expected, `${fixture.name} columnar parity`);
         await dashboard.runTupleFallback();
         assert.deepStrictEqual(Array.from(dashboard.getRows(), row => row._environmentFirstSeenDate), fixture.expected, `${fixture.name} oversized-domain fallback parity`);
-        assert.ok(dashboard.getRows().every(row => row._issueKey === null), `${fixture.name} releases fallback scratch keys`);
+        assert.ok(dashboard.getRows().every(row => !Object.hasOwn(row, '_issueKey')), `${fixture.name} avoids fallback scratch slots`);
         for (const compressed of [false, true]) {
             await dashboard.runWorkerFixture(compressed);
             assert.deepStrictEqual(Array.from(dashboard.getRows(), row => row._environmentFirstSeenDate), fixture.expected, `${fixture.name} worker compressed=${compressed}`);
