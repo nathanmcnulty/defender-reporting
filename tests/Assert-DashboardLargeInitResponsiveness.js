@@ -79,12 +79,13 @@ module.exports = {
         const workerContext = {
             self: { postMessage: value => { result = value; } },
             performance: require('perf_hooks').performance,
-            pako: { inflate: () => JSON.stringify({ lookups, vulns: rawVulns }) }
+            pako: { inflate: () => new TextEncoder().encode(JSON.stringify({ lookups, vulns: rawVulns })) }
         };
         require('vm').runInNewContext(buildWorkerSource(), workerContext);
         await workerContext.self.onmessage({ data: compressed
             ? { compressedBytes: new Uint8Array([1]), decompressOnly: true }
             : { lookups, rawVulns } });
+        result = readWorkerPayload(result);
         if (result.rows) {
             vulnerabilityData = result.rows;
             applyDerivedVulnerabilityFields(vulnerabilityData);
