@@ -6436,6 +6436,128 @@ function Test-FunctionAppWriteOutputNoEnumeratePreservesJObject {
     Assert-True ((Get-VulnPropertyValue -InputObject $observed[0] -Name 'ob') -eq $true) 'Expected Function App Write-Output -NoEnumerate to preserve compact boolean properties.'
 }
 
+function Test-FunctionExecutionInvocationDoesNotReplay {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [CmdletBinding()]
+    param()
+    $path = Join-Path (Split-Path $PSScriptRoot -Parent) 'build/Invoke-AzureDeploymentValidation.ps1'
+    $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$null)
+    $node = $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Start-FunctionExecution'}, $false)
+    . ([scriptblock]::Create($node.Extent.Text))
+    $calls = [Collections.Generic.List[string]]::new()
+    function Write-ValidationLogLine { param($Message,$ForegroundColor) $calls.Add($Message) }
+    function Start-Sleep { param($Seconds) }
+    function Wait-FunctionHostReady { param($HostName,$MasterKey,$TimeoutMinutes) }
+    function Wait-FunctionAdminFunctionReady { param($HostName,$MasterKey,$TimeoutMinutes) }
+    $posts = [ref]0
+    function Invoke-FunctionAdminRequest { param($Method,$HostName,$MasterKey,$Path,$Body) $posts.Value++;if($posts.Value -eq 1){throw 'response lost after accepted POST'};[pscustomobject]@{StatusCode=202} }
+    $failure=$null
+    try { $null=Start-FunctionExecution -HostName 'test.invalid' -MasterKey 'test-only' } catch {$failure=$_}
+    Assert-True ($posts.Value -eq 1 -and $null -ne $failure -and $failure.Exception.Message -like '*Reconcile*no retry*') 'Uncertain non-idempotent POST must stop after one attempt, not replay a mutation.'
+    $postObserved=[ref]([datetime]::MinValue)
+    function Invoke-FunctionAdminRequest { param($Method,$HostName,$MasterKey,$Path,$Body) $posts.Value++;$postObserved.Value=[datetime]::UtcNow;[pscustomobject]@{StatusCode=202} }
+    $start=Start-FunctionExecution -HostName 'test.invalid' -MasterKey 'test-only'
+    Assert-True ($start -is [datetime] -and $start.Kind -eq [DateTimeKind]::Utc -and $start -le $postObserved.Value) 'Invocation timestamp must be a single real UTC DateTime recorded before POST.'
+    Assert-True ($calls[0] -like 'Submitting one Function App invocation at*') 'Invocation intent must be logged before the transport call.'
+}
+
+function Test-FunctionExecutionValidationRequiresTerminalEvidence {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [CmdletBinding()]
+    param()
+    $path = Join-Path (Split-Path $PSScriptRoot -Parent) 'build/Invoke-AzureDeploymentValidation.ps1'
+    $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$null)
+    foreach($name in @('Start-FunctionExecution','ConvertTo-FunctionTraceEvent','Get-FunctionTraceTerminalStatus','Get-FunctionExecutionStatusEvidence','Get-FunctionExecutionStatusSummaryText','Invoke-FunctionExecutionValidation')) {
+        $node=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$false)
+        . ([scriptblock]::Create($node.Extent.Text))
+    }
+    function Write-ValidationLogLine { param($Message,$ForegroundColor) }
+    function Invoke-AzCliText {param($Arguments) if($Arguments -contains 'id'){'/test/resource'}else{'test.invalid'} }
+    function Invoke-AzCliJson {param($Arguments) [pscustomobject]@{masterKey='test-only'} }
+    function Get-FunctionAppSettingValue {param($FunctionAppName,$FunctionResourceGroup,$SettingName) $null }
+    function Set-FunctionAppAppSettings {param($FunctionAppName,$FunctionResourceGroup,$Settings) $state.Settings++ }
+    function Restart-FunctionAppInstance {param($FunctionAppName,$FunctionResourceGroup,$Reason) }
+    function Refresh-FunctionExecutionTemplates {param($StorageAccountName) }
+    function Clear-BlobContainer {param($AccountName,$ContainerName) $state.Clears++ }
+    function Seed-ExportsContainer {param($AccountName,$DatasetPath) $state.Seeds++ }
+    function Set-FunctionExecutionControlBlob {param($StorageAccountName,$UseExistingExportsOnly) }
+    function Remove-FunctionExecutionControlBlob {param($StorageAccountName) }
+    function Restore-FunctionAppSettingValue {param($FunctionAppName,$FunctionResourceGroup,$SettingName,$OriginalValue) $state.Restores++ }
+    function Wait-FunctionHostReady {param($HostName,$MasterKey,$TimeoutMinutes) }
+    function Wait-FunctionAdminFunctionReady {param($HostName,$MasterKey,$TimeoutMinutes) }
+    function Invoke-FunctionTraceCleanup {param($HostName,$MasterKey) }
+    function Get-FunctionTraceAccessState {param($HostName,$MasterKey) 'Forbidden' }
+    function Get-FunctionExecutionActivity {param($ResourceId,$StartTimeUtc,$EndTimeUtc) [pscustomobject]@{total_count=10;latest_timestamp_utc=[datetime]::UtcNow} }
+    function Get-FunctionMetricSummary {param($ResourceId,$StartTimeUtc,$EndTimeUtc) $null }
+    function Invoke-FunctionAdminRequest {param($Method,$HostName,$MasterKey,$Path,$Body) $state.Posts++;$state.Started=[datetime]::UtcNow;if($state.Scenario -ceq 'post-uncertain'){throw 'response lost after accepted POST'};[pscustomobject]@{StatusCode=202} }
+    function Get-BlobLastModifiedUtc {param($StorageAccountName,$ContainerName,$BlobName)
+        if($null -eq $state.Started){return $null}
+        if($state.Scenario -ceq 'stale-blob' -and [string]::IsNullOrEmpty($BlobName)){return $state.Started.AddSeconds(-10)}
+        # Both running and terminal writes deliberately share this rounded HTTP timestamp.
+        return $state.Started.AddTicks(-($state.Started.Ticks % [timespan]::TicksPerSecond))
+    }
+    function Get-FunctionTraceContent {param($HostName,$MasterKey)
+        if($state.Scenario -ceq 'trace-failed'){return ('[{0}] Pipeline Failed!' -f [datetime]::UtcNow.ToString('o'))}
+        if($state.Scenario -in @('trace-only','status-upload-failed')){return ('[{0}] Pipeline Complete!' -f [datetime]::UtcNow.ToString('o'))}
+        return $null
+    }
+    function Get-FunctionExecutionStatus {param($StorageAccountName)
+        $state.Reads++
+        if($state.Scenario -in @('missing','trace-only')){return $null}
+        $document=[pscustomobject]@{version=2;runId=('a'*32);status='succeeded';stage='Completed';executionHost='FunctionApp';storageAccountName='syntheticacct';dashboardDeliveryMode='SelfContained';useExistingExportsOnly=$true;includeAdvancedHunting=$true;exportTarget='BlobStorage';startedOnUtc=$state.Started;updatedOnUtc=$state.Started;completedOnUtc=$state.Started}
+        switch($state.Scenario){
+            'running' {$document.status='running'}
+            'stale' {$document.startedOnUtc=$state.Started.AddMinutes(-1)}
+            'wrong-scope' {$document.storageAccountName='otheracct'}
+            'wrong-delivery' {$document.dashboardDeliveryMode='Hosted'}
+            'wrong-version' {$document.version=1}
+            'wrong-host' {$document.executionHost='Automation'}
+            'wrong-mode' {$document.useExistingExportsOnly=$false}
+            'wrong-export' {$document.exportTarget='SharePoint'}
+            'wrong-stage' {$document.stage='Publishing'}
+            'string-boolean' {$document.includeAdvancedHunting='true'}
+            'invalid-date' {$document.startedOnUtc='not-a-date'}
+            'future-date' {$document.completedOnUtc=$state.Started.AddMinutes(1)}
+            'reversed-date' {$document.completedOnUtc=$state.Started.AddSeconds(-1)}
+            'missing-completion' {$document.PSObject.Properties.Remove('completedOnUtc')}
+            'array-scope' {$document.storageAccountName=@('syntheticacct','syntheticacct')}
+            'failed' {$document.status='failed'}
+            'status-upload-failed' {$document.status='failed';$document|Add-Member error 'DashboardPublishedStatusFailed'}
+            'running-then-failed' {$document.status=if($state.Reads -eq 1){'running'}else{'failed'}}
+            'running-then-success' {$document.status=if($state.Reads -eq 1){'running'}else{'succeeded'}}
+            'run-id-changed' {if($state.Reads -eq 1){$document.status='running'}else{$document.runId=('b'*32)}}
+        }
+        # Exercise actual ConvertFrom-Json date typing, not just manually constructed strings.
+        return ($document|ConvertTo-Json -Compress|ConvertFrom-Json)
+    }
+    function Start-Sleep {param($Seconds) if($state.Scenario -notin @('running-then-failed','running-then-success','run-id-changed')){throw 'CONTROL-POLL-STOP'} }
+    $savedStatusContainer=Get-Variable FunctionExecutionStatusContainerName -Scope Script -ErrorAction SilentlyContinue
+    $savedStatusBlob=Get-Variable FunctionExecutionStatusBlobName -Scope Script -ErrorAction SilentlyContinue
+    $script:FunctionExecutionStatusContainerName='dashboards';$script:FunctionExecutionStatusBlobName='_diagnostics/ExportAndGenerate.status.json'
+    try {
+        foreach($scenario in @('succeeded','running-then-success','missing','running','stale','wrong-scope','wrong-delivery','wrong-version','wrong-host','wrong-mode','wrong-export','wrong-stage','string-boolean','invalid-date','future-date','reversed-date','missing-completion','array-scope','post-uncertain','failed','status-upload-failed','running-then-failed','trace-failed','trace-only','run-id-changed','stale-blob')) {
+            $state=@{Scenario=$scenario;Posts=0;Settings=0;Clears=0;Seeds=0;Restores=0;Reads=0;Started=$null}
+            $result=$null;$failure=$null
+            try {$result=Invoke-FunctionExecutionValidation -FunctionAppName 'synthetic-function' -FunctionResourceGroup 'synthetic-group' -StorageAccountName 'syntheticacct' -DashboardDeliveryMode SelfContained -TimeoutMinutes 1 -UseExistingExportsOnly -DatasetPath 'synthetic-fixture'}catch{$failure=$_}
+            if($scenario -in @('succeeded','running-then-success')) {
+                Assert-True ($null -eq $failure -and $result.terminalStatus -ceq 'Completed' -and $result.completionSource -ceq 'status-and-blob') ('Matching terminal status must support unavailable VFS: '+$scenario)
+            }else{Assert-True ($null -ne $failure -and $null -eq $result) ('Fresh blob/metrics must not accept nonterminal, stale, wrong-scope or failed work: '+$scenario)}
+            Assert-True ($state.Posts -eq 1 -and $state.Settings -eq 1 -and $state.Clears -eq 1 -and $state.Seeds -eq 1 -and $state.Restores -eq 5) ('Validation must not replay mutations and must restore settings: '+$scenario)
+            if($scenario -like 'running-then-*'){Assert-True ($state.Reads -eq 2) 'Same-second status writes must be re-read, not cached by Last-Modified.'}
+        }
+    }finally{
+        foreach($entry in @(@('FunctionExecutionStatusContainerName',$savedStatusContainer),@('FunctionExecutionStatusBlobName',$savedStatusBlob))){if($null -eq $entry[1]){Remove-Variable $entry[0] -Scope Script}else{Set-Variable $entry[0] -Scope Script -Value $entry[1].Value}}
+    }
+}
+
 function Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo {
     [CmdletBinding()]
     param()
@@ -7810,6 +7932,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-VulnPropertyHelpersSupportSupportedRowShapes'; SuccessMessage = 'Vulnerability property helper shape checks passed.' }
     @{ Name = 'Test-VulnObservedWindowCacheRoundTrip'; SuccessMessage = 'Observed-window cache round-trip checks passed.' }
     @{ Name = 'Test-FunctionAppWriteOutputNoEnumeratePreservesJObject'; SuccessMessage = 'Function App Write-Output -NoEnumerate checks passed.' }
+    @{ Name = 'Test-FunctionExecutionInvocationDoesNotReplay'; SuccessMessage = 'Function non-idempotent invocation checks passed.' }
+    @{ Name = 'Test-FunctionExecutionValidationRequiresTerminalEvidence'; SuccessMessage = 'Function terminal status and publication validation checks passed.' }
     @{ Name = 'Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo'; SuccessMessage = 'Function execution status summary metadata checks passed.' }
     @{ Name = 'Test-BenchmarkEvidenceEnvelopeWritesTransactionally'; SuccessMessage = 'Benchmark evidence schema and transactional publication checks passed.' }
     @{ Name = 'Test-GetBlobListPagination'; SuccessMessage = 'Blob listing pagination, encoding, empty-page, and cycle checks passed.' }

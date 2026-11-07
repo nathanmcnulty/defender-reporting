@@ -910,64 +910,28 @@ function Wait-FunctionAdminFunctionReady {
 }
 
 function Start-FunctionExecution {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper triggers a Function App execution as part of scripted validation.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Internal helper triggers one Function App execution as part of scripted validation.')]
     [CmdletBinding()]
     [OutputType([datetime])]
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$HostName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$MasterKey,
-
-        [Parameter(Mandatory = $false)]
-        [int]$TimeoutMinutes = 5
+        [Parameter(Mandatory = $true)][string]$HostName,
+        [Parameter(Mandatory = $true)][string]$MasterKey
     )
 
-    Write-ValidationLogLine -Message 'Invoking Function App admin endpoint...'
-
-    $deadline = [datetime]::UtcNow.AddMinutes($TimeoutMinutes)
-    $lastFailure = $null
-    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    $lastHeartbeatSecond = -30
-    while ([datetime]::UtcNow -lt $deadline) {
-        try {
-            $response = Invoke-FunctionAdminRequest -Method Post -HostName $HostName -MasterKey $MasterKey -Path 'admin/functions/ExportAndGenerate' -Body '{}'
-            if ($null -ne $response -and $response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
-                $startedUtc = [datetime]::UtcNow
-                Write-ValidationLogLine -Message ("Function App execution accepted at {0}." -f $startedUtc.ToString('o')) -ForegroundColor Green
-                return $startedUtc
-            }
-
-            $lastFailure = 'Function admin invocation returned no response.'
-        }
-        catch {
-            $lastFailure = $_.Exception.Message
-        }
-
-        $elapsedWholeSeconds = [Math]::Floor($stopwatch.Elapsed.TotalSeconds)
-        if (($lastHeartbeatSecond + 30) -le $elapsedWholeSeconds) {
-            $message = if ([string]::IsNullOrWhiteSpace($lastFailure)) {
-                'Function admin invocation has not succeeded yet.'
-            }
-            else {
-                "Function admin invocation still waiting: $lastFailure"
-            }
-
-            Write-ValidationLogLine -Message ("{0} ({1}s elapsed)." -f $message, $elapsedWholeSeconds)
-            $lastHeartbeatSecond = $elapsedWholeSeconds
-        }
-
-        Start-Sleep -Seconds 10
-        Wait-FunctionHostReady -HostName $HostName -MasterKey $MasterKey -TimeoutMinutes 2
-        Wait-FunctionAdminFunctionReady -HostName $HostName -MasterKey $MasterKey -TimeoutMinutes 2
+    # The POST is non-idempotent: a lost response may still have started the workload.
+    $startedUtc = [datetime]::UtcNow
+    Write-ValidationLogLine -Message ("Submitting one Function App invocation at {0}." -f $startedUtc.ToString('o'))
+    try {
+        $response = Invoke-FunctionAdminRequest -Method Post -HostName $HostName -MasterKey $MasterKey -Path 'admin/functions/ExportAndGenerate' -Body '{}'
     }
-
-    if (-not [string]::IsNullOrWhiteSpace($lastFailure)) {
-        throw "Function App execution did not start successfully. $lastFailure"
+    catch {
+        throw [System.InvalidOperationException]::new('Function admin POST outcome is uncertain. Reconcile the invocation and publication status before invoking again; no retry was attempted.', $_.Exception)
     }
-
-    throw 'Function App execution did not start successfully before timeout.'
+    if ($null -eq $response -or $response.StatusCode -lt 200 -or $response.StatusCode -ge 300) {
+        throw 'Function admin POST was not confirmed accepted. Reconcile the invocation and publication status before invoking again; no retry was attempted.'
+    }
+    Write-ValidationLogLine -Message 'Function App invocation accepted; waiting for fresh terminal evidence.' -ForegroundColor Green
+    return $startedUtc
 }
 
 function Invoke-FunctionTraceCleanup {
@@ -1161,6 +1125,52 @@ function Get-FunctionExecutionStatus {
             rawContent = $content
         }
     }
+}
+
+function Get-FunctionExecutionStatusEvidence {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]$StatusDocument,
+        [datetime]$NotBeforeUtc,
+        [string]$StorageAccountName,
+        [string]$DashboardDeliveryMode,
+        [bool]$UseExistingExportsOnly
+    )
+
+    if ($null -eq $StatusDocument) { return $null }
+    foreach ($name in @('version','runId','status','stage','executionHost','storageAccountName','dashboardDeliveryMode','useExistingExportsOnly','includeAdvancedHunting','exportTarget','startedOnUtc','updatedOnUtc')) {
+        if ($null -eq $StatusDocument.PSObject.Properties[$name]) { return $null }
+    }
+    foreach ($name in @('runId','status','stage','executionHost','storageAccountName','dashboardDeliveryMode','exportTarget')) {
+        if ($StatusDocument.$name -isnot [string]) { return $null }
+    }
+    if (($StatusDocument.version -isnot [int] -and $StatusDocument.version -isnot [long]) -or $StatusDocument.version -ne 2 -or
+        [string]$StatusDocument.runId -cnotmatch '^[a-f0-9]{32}$' -or
+        $StatusDocument.executionHost -cne 'FunctionApp' -or $StatusDocument.storageAccountName -ne $StorageAccountName -or
+        $StatusDocument.dashboardDeliveryMode -ne $DashboardDeliveryMode -or $StatusDocument.exportTarget -cne 'BlobStorage' -or
+        $StatusDocument.useExistingExportsOnly -isnot [bool] -or $StatusDocument.useExistingExportsOnly -ne $UseExistingExportsOnly -or
+        $StatusDocument.includeAdvancedHunting -isnot [bool] -or -not $StatusDocument.includeAdvancedHunting -or
+        $StatusDocument.status -cnotin @('running','succeeded','failed')) { return $null }
+
+    $dates = @{}
+    $dateNames = @('startedOnUtc','updatedOnUtc')
+    if ($StatusDocument.status -cne 'running') { $dateNames += 'completedOnUtc' }
+    foreach ($name in $dateNames) {
+        if ($null -eq $StatusDocument.PSObject.Properties[$name]) { return $null }
+        $value = $StatusDocument.$name
+        if ($value -is [datetime] -and $value.Kind -eq [DateTimeKind]::Utc) { $dates[$name] = $value }
+        elseif ($value -is [datetimeoffset] -and $value.Offset -eq [timespan]::Zero) { $dates[$name] = $value.UtcDateTime }
+        elseif ($value -is [string] -and $value -match '(?:Z|\+00:00)$') {
+            $parsed = [datetimeoffset]::MinValue
+            if (-not [datetimeoffset]::TryParse($value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$parsed)) { return $null }
+            $dates[$name] = $parsed.UtcDateTime
+        }
+        else { return $null }
+    }
+    if ($dates.startedOnUtc -lt $NotBeforeUtc -or $dates.updatedOnUtc -lt $dates.startedOnUtc -or $dates.updatedOnUtc -gt [datetime]::UtcNow.AddSeconds(1)) { return $null }
+    if ($StatusDocument.status -cne 'running' -and ($dates.completedOnUtc -lt $dates.updatedOnUtc -or $dates.completedOnUtc -gt [datetime]::UtcNow.AddSeconds(1))) { return $null }
+    if ($StatusDocument.status -ceq 'succeeded' -and $StatusDocument.stage -cne 'Completed') { return $null }
+    return [PSCustomObject]@{ RunId = [string]$StatusDocument.runId; Status = [string]$StatusDocument.status }
 }
 
 function Get-FunctionExecutionStatusSummaryText {
@@ -1540,13 +1550,15 @@ function Invoke-FunctionExecutionValidation {
 
         $traceAccessState = Get-FunctionTraceAccessState -HostName $hostName -MasterKey $masterKey
         if ($traceAccessState -ne 'Accessible') {
-            Write-ValidationLogLine -Message ("Function trace files are not directly readable via admin VFS ({0}). Falling back to Azure Monitor execution metrics and dashboard blob polling." -f $traceAccessState) -ForegroundColor Yellow
+            Write-ValidationLogLine -Message ("Function trace files are not directly readable via admin VFS ({0}). Waiting for matching terminal status and dashboard publication; metrics remain diagnostic only." -f $traceAccessState) -ForegroundColor Yellow
         }
 
-        $invokeStartedUtc = Start-FunctionExecution -HostName $hostName -MasterKey $masterKey -TimeoutMinutes 5
+        $invokeStartedUtc = Start-FunctionExecution -HostName $hostName -MasterKey $masterKey
         Write-ValidationLogLine -Message ("Waiting for a fresh dashboard blob write until {0}." -f $invokeStartedUtc.AddMinutes($TimeoutMinutes).ToString('o'))
 
         $deadlineUtc = $invokeStartedUtc.AddMinutes($TimeoutMinutes)
+        # Azure blob HTTP timestamps may have only whole-second precision.
+        $freshBlobNotBeforeUtc = $invokeStartedUtc.AddTicks(-($invokeStartedUtc.Ticks % [timespan]::TicksPerSecond))
         $events = @()
         $terminalStatus = $null
         $blobUpdated = $false
@@ -1558,7 +1570,8 @@ function Invoke-FunctionExecutionValidation {
         $metricSummary = $null
         $lastExecutionMetricPollUtc = [datetime]::MinValue
         $latestPipelineStatus = $null
-        $latestPipelineStatusBlobUtc = $null
+        $latestPipelineEvidence = $null
+        $pipelineRunId = $null
 
         while ([datetime]::UtcNow -lt $deadlineUtc) {
             $nowUtc = [datetime]::UtcNow
@@ -1576,30 +1589,38 @@ function Invoke-FunctionExecutionValidation {
             }
 
             $statusBlobUtc = Get-BlobLastModifiedUtc -StorageAccountName $StorageAccountName -ContainerName $script:FunctionExecutionStatusContainerName -BlobName $script:FunctionExecutionStatusBlobName
-            if ($null -ne $statusBlobUtc -and ($null -eq $latestPipelineStatusBlobUtc -or $statusBlobUtc -gt $latestPipelineStatusBlobUtc)) {
+            $latestPipelineStatus = $null
+            $latestPipelineEvidence = $null
+            if ($null -ne $statusBlobUtc -and $statusBlobUtc -ge $freshBlobNotBeforeUtc) {
+                # Re-read even when Last-Modified is unchanged: running and terminal
+                # writes can fall in the same HTTP timestamp second.
                 $statusDocument = Get-FunctionExecutionStatus -StorageAccountName $StorageAccountName
-                if ($null -ne $statusDocument) {
+                $evidence = Get-FunctionExecutionStatusEvidence -StatusDocument $statusDocument -NotBeforeUtc $invokeStartedUtc -StorageAccountName $StorageAccountName -DashboardDeliveryMode $DashboardDeliveryMode -UseExistingExportsOnly ([bool]$UseExistingExportsOnly)
+                if ($null -ne $evidence) {
+                    if ($null -ne $pipelineRunId -and $evidence.RunId -cne $pipelineRunId) { throw 'Function execution run ID changed during validation. Reconcile overlapping invocations before invoking again.' }
+                    $pipelineRunId = $evidence.RunId
                     $latestPipelineStatus = $statusDocument
-                    $latestPipelineStatusBlobUtc = $statusBlobUtc
+                    $latestPipelineEvidence = $evidence
                 }
             }
 
             $finalBlobUtc = Get-BlobLastModifiedUtc -StorageAccountName $StorageAccountName
-            $blobUpdated = ($null -ne $finalBlobUtc -and $finalBlobUtc -ge $invokeStartedUtc.AddSeconds(-5))
+            $blobUpdated = ($null -ne $finalBlobUtc -and $finalBlobUtc -ge $freshBlobNotBeforeUtc -and $finalBlobUtc -le [datetime]::UtcNow.AddSeconds(1))
 
             if ($terminalStatus -eq 'Failed') {
                 Write-ValidationLogLine -Message 'Function App trace reported pipeline failure.' -ForegroundColor Red
                 break
             }
 
-            if ($blobUpdated) {
-                Write-ValidationLogLine -Message ("Function App wrote dashboard blob at {0}." -f $finalBlobUtc.ToString('o')) -ForegroundColor Green
-                $completionSource = if ($terminalStatus -eq 'Completed') { 'trace-and-blob' } else { 'blob-write' }
+            if ($null -ne $latestPipelineEvidence -and $latestPipelineEvidence.Status -ceq 'failed') {
+                Write-ValidationLogLine -Message ("Function execution status blob reported failure: {0}" -f (Get-FunctionExecutionStatusSummaryText -StatusDocument $latestPipelineStatus)) -ForegroundColor Red
                 break
             }
 
-            if ($null -ne $latestPipelineStatus -and $latestPipelineStatus.PSObject.Properties['status'] -and [string]$latestPipelineStatus.status -eq 'failed') {
-                Write-ValidationLogLine -Message ("Function execution status blob reported failure: {0}" -f (Get-FunctionExecutionStatusSummaryText -StatusDocument $latestPipelineStatus)) -ForegroundColor Red
+            if ($blobUpdated -and $null -ne $latestPipelineEvidence -and $latestPipelineEvidence.Status -ceq 'succeeded') {
+                Write-ValidationLogLine -Message ("Function App terminal success and dashboard publication verified at {0}." -f $finalBlobUtc.ToString('o')) -ForegroundColor Green
+                $completionSource = if ($terminalStatus -eq 'Completed') { 'trace-status-and-blob' } else { 'status-and-blob' }
+                $terminalStatus = 'Completed'
                 break
             }
 
@@ -1654,7 +1675,7 @@ function Invoke-FunctionExecutionValidation {
             throw 'Function App trace reported pipeline failure.'
         }
 
-        if ($null -ne $latestPipelineStatus -and $latestPipelineStatus.PSObject.Properties['status'] -and [string]$latestPipelineStatus.status -eq 'failed') {
+        if ($null -ne $latestPipelineEvidence -and $latestPipelineEvidence.Status -ceq 'failed') {
             $pipelineStatusText = Get-FunctionExecutionStatusSummaryText -StatusDocument $latestPipelineStatus
             $pipelineErrorText = if ($latestPipelineStatus.PSObject.Properties['error']) { [string]$latestPipelineStatus.error } else { $null }
             if ([string]::IsNullOrWhiteSpace($pipelineErrorText)) {
@@ -1696,13 +1717,17 @@ function Invoke-FunctionExecutionValidation {
             throw ("Function App did not write a fresh dashboard blob before timeout. Latest pipeline status: {0}" -f $pipelineStatusText)
         }
 
+        if ([string]::IsNullOrWhiteSpace($completionSource)) {
+            throw 'Function App did not provide fresh matching version 2 terminal success before timeout. A dashboard write or execution metric alone is not completion; reconcile the invocation before invoking again.'
+        }
+
         return [PSCustomObject]@{
             hostName = $hostName
             invocationStartedUtc = $invokeStartedUtc.ToString('o')
             dashboardBlobLastModifiedUtc = $finalBlobUtc.ToString('o')
             executionMode = if ($UseExistingExportsOnly) { 'existing-exports-only' } else { 'live-export' }
             executionDatasetPath = if ([string]::IsNullOrWhiteSpace($DatasetPath)) { $null } else { $DatasetPath }
-            terminalStatus = if ([string]::IsNullOrWhiteSpace([string]$terminalStatus)) { 'BlobUpdatedWithoutTerminalTrace' } else { $terminalStatus }
+            terminalStatus = $terminalStatus
             completionSource = $completionSource
             traceAccessState = $traceAccessState
             executionCount = if ($null -ne $executionActivity -and $executionActivity.PSObject.Properties['total_count']) { [int]$executionActivity.total_count } else { 0 }
