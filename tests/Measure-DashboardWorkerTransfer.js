@@ -16,6 +16,53 @@ const { isAllowedDashboardRequest } = require('./helpers/offline-request-policy'
 const { readDashboardInput } = require('./helpers/dashboard-artifact-input');
 const { exerciseSavedArtifacts, assertArtifactAcceptance } = require('./helpers/dashboard-artifact-acceptance');
 
+// Fixed-size diagnostics survive an outer stop without retaining rows, DOM text
+// or an ever-growing copy of the browser's phase history.
+function compactReadinessSample(readiness) {
+    if (!readiness) return null;
+    const phaseNames = new Set(['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs', 'cacheReadMs', 'cacheDerivedMs']);
+    const functions = new Set(['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded']);
+    const phases = {};
+    const initialization = {};
+    for (const row of readiness.phases || []) {
+        if (phaseNames.has(row.name) && Number.isFinite(row.durationMs) && row.durationMs >= 0) phases[row.name] = row.durationMs;
+    }
+    for (const row of readiness.initialization || []) {
+        if (functions.has(row.name) && ['running', 'completed', 'failed'].includes(row.status)) initialization[row.name] = row.status;
+    }
+    return { instrumentationPresent: readiness.instrumentationPresent === true, readyEventSeen: readiness.readyEventSeen === true,
+        dashboardReady: readiness.dashboardReady === true, initialization, phases,
+        workerMessageCount: Array.isArray(readiness.workerMessages) ? readiness.workerMessages.length : null,
+        filtersApplied: Number.isSafeInteger(readiness.filtersApplied) && readiness.filtersApplied >= 0 ? readiness.filtersApplied : null,
+        activeReportRenders: Number.isSafeInteger(readiness.activeReportRenders) && readiness.activeReportRenders >= 0 ? readiness.activeReportRenders : null,
+        documentReadyState: ['loading', 'interactive', 'complete'].includes(readiness.documentReadyState) ? readiness.documentReadyState : null };
+}
+
+function harnessMemorySample() {
+    const memory = process.memoryUsage();
+    return { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal,
+        externalBytes: memory.external, arrayBufferBytes: memory.arrayBuffers };
+}
+
+function readDiagnosticCheckpoint(text) {
+    if (typeof text !== 'string' || text.length > 1024 || !text.startsWith('ISSUE70_CHECKPOINT:')) return null;
+    let value;
+    try { value = JSON.parse(text.slice('ISSUE70_CHECKPOINT:'.length)); } catch { return null; }
+    const names = ['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded', 'worker-delivery',
+        'workerInflateMs', 'workerParseMs', 'loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs', 'cacheReadMs', 'cacheDerivedMs',
+        'admin-filter', 'admin-runtime', 'admin-libraries', 'admin-switch', 'admin-detail', 'admin-pdf'];
+    if (!value || !names.includes(value.name) || !['start', 'completed', 'failed'].includes(value.state)
+        || value.report !== null && !REPORTS.includes(value.report)
+        || !Number.isFinite(value.browserMs) || value.browserMs < 0 || !Number.isFinite(value.epochMs)) return null;
+    return { name: value.name, state: value.state, report: value.report, browserMs: value.browserMs, epochMs: value.epochMs,
+        durationMs: Number.isFinite(value.durationMs) && value.durationMs >= 0 ? value.durationMs : null };
+}
+
+function writeBrowserDiagnostic(guard, writer, sample) {
+    try { writer(sample); }
+    catch (error) { guard.abort(error); throw error; }
+}
+
 function safeInventoryDiagnostic(value = {}) {
     const categories = ['timeout', 'aborted', 'execution', 'response', 'InvalidOperation', 'InvalidArgument', 'InvalidData', 'OperationStopped', 'WriteError', 'ObjectNotFound', 'PermissionDenied', 'SecurityError', 'ResourceUnavailable', 'NotSpecified'];
     const types = ['RuntimeException', 'CimException', 'MethodInvocationException', 'PSInvalidOperationException', 'SessionStateUnauthorizedAccessException', 'UnauthorizedAccessException', 'InvalidOperationException', 'ArgumentException', 'Win32Exception'];
@@ -716,10 +763,14 @@ function requireCapturedFingerprint(values) {
     return values[0];
 }
 
-function installInstrumentation() {
+function installInstrumentation({ progressJournal = false } = {}) {
     const phaseNames = ['loadDataMs', 'denormalizeMs', 'applyFiltersMs', 'initTotalMs', 'workerInflateMs', 'workerParseMs', 'workerWaitMs', 'workerDeliveryMs', 'mainInflateMs', 'mainParseMs', 'mainFallbackMs', 'cacheReadMs', 'cacheDerivedMs'];
     const functionNames = ['init', 'loadData', 'denormalizeWithCaching', 'ensureChartJsLoaded'];
     window.__issue70 = { phases: [], workerMessages: [], initialization: [], compressedFingerprints: [] };
+    if (progressJournal) window.__issue70.checkpoint = (name, state, report = null, durationMs = null) => {
+        try { console.debug('ISSUE70_CHECKPOINT:' + JSON.stringify({ name, state, report, durationMs,
+            browserMs: performance.now(), epochMs: performance.timeOrigin + performance.now() })); } catch { /* diagnostic only */ }
+    };
     window.addEventListener('DOMContentLoaded', () => {
         const originalCacheRead = window.getCachedData;
         if (typeof originalCacheRead === 'function') {
@@ -757,12 +808,15 @@ function installInstrumentation() {
             window[name] = async function(...args) {
                 const record = { name, startedBrowserMs: performance.now(), status: 'running' };
                 window.__issue70.initialization.push(record);
+                window.__issue70.checkpoint?.(name, 'start');
                 try {
                     const result = await original.apply(this, args);
                     record.status = 'completed';
+                    window.__issue70.checkpoint?.(name, 'completed');
                     return result;
                 } catch (error) {
                     record.status = 'failed';
+                    window.__issue70.checkpoint?.(name, 'failed');
                     record.errorType = error?.name === 'TypeError' ? 'TypeError' : 'Error';
                     record.errorFrames = String(error?.stack || '').split('\n').slice(1, 7).map(frame => {
                         const match = frame.match(/at ([\w.]+).*?:(\d+):(\d+)\)?$/);
@@ -779,7 +833,10 @@ function installInstrumentation() {
         const previous = window.__issue70.lastPhases || {};
         for (const [name, durationMs] of Object.entries(metrics.phases || {})) {
             if (!phaseNames.includes(name) || !Number.isFinite(durationMs) || durationMs < 0) continue;
-            if (previous[name] !== durationMs) window.__issue70.phases.push({ name, durationMs, observedBrowserMs: performance.now(), observedEpochMs: performance.timeOrigin + performance.now() });
+            if (previous[name] !== durationMs) {
+                window.__issue70.phases.push({ name, durationMs, observedBrowserMs: performance.now(), observedEpochMs: performance.timeOrigin + performance.now() });
+                window.__issue70.checkpoint?.(name, 'completed', null, durationMs);
+            }
         }
         window.__issue70.lastPhases = Object.fromEntries(Object.entries(metrics.phases || {}).filter(([name, durationMs]) => phaseNames.includes(name) && Number.isFinite(durationMs) && durationMs >= 0));
     };
@@ -796,6 +853,8 @@ function installInstrumentation() {
             this.addEventListener('message', event => {
                 const data = event.data || {};
                 const format = data.phase ? 'phase' : Array.isArray(data) ? 'legacy-array' : data.rows === null ? 'lookups-raw-columns' : Array.isArray(data.rows) ? 'row-envelope' : 'unknown';
+                if (phaseNames.includes(data.phase)) window.__issue70.checkpoint?.(data.phase, 'completed', null, data.duration);
+                else if (!data.phase) window.__issue70.checkpoint?.('worker-delivery', 'completed');
                 window.__issue70.workerMessages.push({ format, phase: phaseNames.includes(data.phase) ? data.phase : null, durationMs: Number.isFinite(data.duration) ? data.duration : null, postedAtEpochMs: Number.isFinite(data.postedAt) ? data.postedAt : null, receivedBrowserMs: performance.now(), receivedEpochMs: performance.timeOrigin + performance.now() });
                 capturePhases();
             });
@@ -878,7 +937,7 @@ async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot,
             await state.guard.wait(state.page.setViewportSize({ width: 1440, height: 1000 }));
         }
         await state.guard.wait(context.route('**/*', route => isAllowedDashboardRequest(route.request().url(), origin, fileUrl) ? route.continue() : route.abort()));
-        await state.guard.wait(context.addInitScript(installInstrumentation));
+        await state.guard.wait(context.addInitScript(installInstrumentation, { progressJournal: Boolean(recordSample) }));
         let first;
         for (const load of ['first', 'reload']) {
             const run = { iteration, load, positiveControl, stage: 'navigation', status: 'running', peakMainHeapBytes: 0, externalRequests: 0, pageErrors: 0, failedResources: 0, failedResponses: 0 };
@@ -889,11 +948,21 @@ async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot,
             const onRequest = request => { if (!isAllowedDashboardRequest(request.url(), origin, fileUrl)) run.externalRequests++; };
             const onFailure = () => { run.failedResources++; };
             const onResponse = response => { if (response.status() >= 400) run.failedResponses++; };
+            const onConsole = message => {
+                if (!recordSample) return;
+                const checkpoint = readDiagnosticCheckpoint(message.text());
+                if (!checkpoint) return;
+                try { writeBrowserDiagnostic(state.guard, recordSample, { kind: 'browser-checkpoint', iteration, load, stage: state.guard.stage,
+                    sampledAtEpochMs: Date.now(), ...checkpoint }); }
+                catch { /* The guard is already aborted; event handlers must not throw. */ }
+            };
             state.page.on('pageerror', onError);
             state.page.on('request', onRequest);
             state.page.on('requestfailed', onFailure);
             state.page.on('response', onResponse);
+            state.page.on('console', onConsole);
             let heapSample;
+            let lastHeapJournalAt = -Infinity;
             const sampleHeap = () => {
                 if (heapSample) return;
                 heapSample = Promise.all([state.cdp.send('Performance.getMetrics'), state.page.evaluate(() => ({
@@ -907,6 +976,12 @@ async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot,
                     const heap = metrics.metrics.find(metric => metric.name === 'JSHeapUsedSize');
                     run.peakMainHeapBytes = Math.max(run.peakMainHeapBytes, heap?.value || 0);
                     if (readiness) run.lastReadiness = readiness;
+                    if (recordSample && performance.now() - lastHeapJournalAt >= 500) {
+                        lastHeapJournalAt = performance.now();
+                        writeBrowserDiagnostic(state.guard, recordSample, { kind: 'browser-heap', iteration, load, stage: state.guard.stage,
+                            sampledAtEpochMs: Date.now(), mainHeapUsedBytes: heap?.value ?? null,
+                            readiness: compactReadinessSample(readiness) });
+                    }
                 }).catch(() => { run.failedHeapSamples = (run.failedHeapSamples || 0) + 1; }).finally(() => { heapSample = null; });
             };
             const heapTimer = setInterval(sampleHeap, 100);
@@ -1042,6 +1117,7 @@ async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot,
                 state.page.off('request', onRequest);
                 state.page.off('requestfailed', onFailure);
                 state.page.off('response', onResponse);
+                state.page.off('console', onConsole);
             }
         }
     } catch (error) {
@@ -1114,9 +1190,9 @@ async function main() {
             const journal = path.join(fs.realpathSync.native(path.dirname(requestedJournal)), path.basename(requestedJournal));
             const relative = path.relative(root, journal);
             assert(relative && (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)), 'Progress journal must be outside retained inputs.');
-            fs.writeFileSync(journal, JSON.stringify({ schema: 'dashboard-progress-v1', status: 'diagnostic-only-not-run-acceptance', htmlSha256: evidence.htmlSha256, payloadSha256: evidence.payloadSha256 }) + '\n', { flag: 'wx' });
+            fs.writeFileSync(journal, JSON.stringify({ schema: 'dashboard-progress-v2', status: 'diagnostic-only-not-run-acceptance', htmlSha256: evidence.htmlSha256, payloadSha256: evidence.payloadSha256 }) + '\n', { flag: 'wx' });
             recordSample = sample => {
-                const line = JSON.stringify(sample) + '\n';
+                const line = JSON.stringify({ kind: 'resource', ...sample, harnessNodeMemory: harnessMemorySample() }) + '\n';
                 assert(fs.statSync(journal).size + Buffer.byteLength(line) <= 2 * 1024 ** 2, 'Progress journal exceeded its size bound.');
                 fs.appendFileSync(journal, line);
             };
@@ -1509,6 +1585,45 @@ async function privacyProbes() {
 }
 
 async function measurementControlProbes() {
+    const journalError = new Error('Synthetic one-shot diagnostic write failure');
+    let journalKills = 0;
+    const journalGuard = new ResourceGuard({ inventory: async () => ({ bytes: 0, pids: [] }), terminate: async () => { journalKills++; },
+        freeMemory: () => 3, limits: { browserFamilyBytes: 2, freeMemoryBytes: 2 } });
+    assert.throws(() => writeBrowserDiagnostic(journalGuard, () => { throw journalError; }, { kind: 'browser-heap' }), error => error === journalError);
+    // A later successful append cannot turn a partially failed journal into a pass.
+    writeBrowserDiagnostic(journalGuard, () => {}, { kind: 'browser-heap' });
+    await assert.rejects(journalGuard.wait(Promise.resolve()), error => error === journalError);
+    const journalRun = { status: 'running' };
+    await assert.rejects(completeRun(journalRun, journalGuard, () => {}), error => error === journalError);
+    assert.strictEqual(journalRun.status, 'failed');
+    await journalGuard.stop();
+    assert.strictEqual(journalKills, 1);
+    const diagnosticSentinel = 'synthetic-private-row-content';
+    const compact = compactReadinessSample({ instrumentationPresent: true, readyEventSeen: false, dashboardReady: false,
+        phases: [...Array.from({ length: 1000 }, (_, durationMs) => ({ name: 'workerParseMs', durationMs })),
+            { name: diagnosticSentinel, durationMs: 1 }, { name: 'denormalizeMs', durationMs: NaN }],
+        initialization: [{ name: 'init', status: 'running', error: diagnosticSentinel }, { name: diagnosticSentinel, status: 'completed' }],
+        workerMessages: [{ data: diagnosticSentinel }], filtersApplied: -1, activeReportRenders: 0, documentReadyState: diagnosticSentinel });
+    assert.deepStrictEqual(compact.phases, { workerParseMs: 999 });
+    assert.deepStrictEqual(compact.initialization, { init: 'running' });
+    assert.strictEqual(compact.filtersApplied, null);
+    assert.strictEqual(compact.activeReportRenders, 0);
+    assert.strictEqual(compact.documentReadyState, null);
+    assert.strictEqual(compactReadinessSample(null), null);
+    assert(!JSON.stringify(compact).includes(diagnosticSentinel), 'Partial diagnostics must not copy row content or arbitrary strings.');
+    assert(Buffer.byteLength(JSON.stringify(compact)) < 2048, 'Diagnostic size must not grow with phase history.');
+    assert(Object.values(harnessMemorySample()).every(value => Number.isSafeInteger(value) && value >= 0));
+    const checkpoint = { name: 'admin-pdf', state: 'start', report: REPORTS[0], browserMs: 1, epochMs: 2, privateRow: diagnosticSentinel };
+    const checkpointText = value => 'ISSUE70_CHECKPOINT:' + JSON.stringify(value);
+    assert(!JSON.stringify(readDiagnosticCheckpoint(checkpointText(checkpoint))).includes(diagnosticSentinel));
+    for (const value of [{ ...checkpoint, name: diagnosticSentinel }, { ...checkpoint, state: 'unknown' },
+        { ...checkpoint, report: diagnosticSentinel }, { ...checkpoint, browserMs: -1 }, { ...checkpoint, epochMs: null }]) {
+        assert.strictEqual(readDiagnosticCheckpoint(checkpointText(value)), null);
+    }
+    assert.strictEqual(readDiagnosticCheckpoint('ISSUE70_CHECKPOINT:{'), null);
+    assert.strictEqual(readDiagnosticCheckpoint('x'.repeat(1025)), null);
+    assert.strictEqual(readDiagnosticCheckpoint(diagnosticSentinel), null);
+    console.log('PASS diagnostic write failure prevents acceptance, bounded phases, absent-versus-zero observations, content exclusion and separate Node memory');
     const timingCallbacks = {};
     const timingMetrics = { phases: {} };
     const timingResult = {};
@@ -1559,6 +1674,29 @@ async function measurementControlProbes() {
     assert.strictEqual(timingContext.window.applyDerivedVulnerabilityFields.call(timingReceiver, 'success', timingResult), timingResult);
     assert.throws(() => timingContext.window.applyDerivedVulnerabilityFields.call(timingReceiver, 'failure', timingResult), error => error === timingError);
     console.log('PASS actual cache read/derived instrumentation preserves async/sync results, receiver, arguments, errors and allowlisted phase capture');
+    const checkpointEvents = [];
+    let checkpointReady;
+    let consoleFails = false;
+    const checkpointContext = {
+        console: { debug(text) { if (consoleFails) throw new Error('Synthetic console failure'); checkpointEvents.push(readDiagnosticCheckpoint(text)); } },
+        performance: { now: () => 10, timeOrigin: 100 }, setInterval() {},
+        window: { addEventListener(name, callback) { if (name === 'DOMContentLoaded') checkpointReady = callback; },
+            Worker: class { addEventListener(name, callback) { this.message = callback; } },
+            async init(value) { if (value === 'failure') throw timingError; return timingResult; } }
+    };
+    require('vm').runInNewContext(`(${installInstrumentation.toString()})({ progressJournal: true })`, checkpointContext);
+    checkpointReady();
+    assert.strictEqual(await checkpointContext.window.init('success'), timingResult);
+    await assert.rejects(checkpointContext.window.init('failure'), error => error === timingError);
+    assert.deepStrictEqual(checkpointEvents.map(row => [row.name, row.state]),
+        [['init', 'start'], ['init', 'completed'], ['init', 'start'], ['init', 'failed']]);
+    const diagnosticWorker = new checkpointContext.window.Worker();
+    diagnosticWorker.message({ data: { phase: 'workerParseMs', duration: 5 } });
+    diagnosticWorker.message({ data: { rows: null, lookups: {}, rawVulns: {} } });
+    assert.deepStrictEqual(checkpointEvents.slice(-2).map(row => row.name), ['workerParseMs', 'worker-delivery']);
+    consoleFails = true;
+    assert.strictEqual(await checkpointContext.window.init('success'), timingResult, 'Console diagnostics must not alter initialization.');
+    console.log('PASS opt-in initialization/worker checkpoints survive partial runs without changing return values or errors');
     await require('./Assert-DashboardArtifactAcceptance').run();
     const installed = { ProgramFiles: 'C:/Installed' };
     const edgeChoice = selectInstalledBrowser(installed, candidate => candidate.endsWith('msedge.exe'));
