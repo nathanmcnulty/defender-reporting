@@ -277,7 +277,8 @@ finally {
     Set-Item Function:Split-VulnJsonPartition -Value $originalSplitter
     if (Test-Path -LiteralPath $root) {
         $resolved = [IO.Path]::GetFullPath($root)
-        if (-not $resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Test cleanup escaped its named temp parent.' }
+        $resolvedTempParent = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath([IO.Path]::GetTempPath()))
+        if (-not [string]::Equals([IO.Path]::GetDirectoryName($resolved), $resolvedTempParent, [StringComparison]::Ordinal)) { throw 'Test cleanup escaped its named temp parent.' }
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }
 }
