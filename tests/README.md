@@ -247,6 +247,19 @@ paths, legacy scratch cleanup and materialized detail fields. New rows reserve
 their final environment-first-seen date directly and retain no issue scratch;
 these small controls establish semantic parity, not a browser memory benefit.
 
+Opt-in progress journals also write a host-side `report-switch` start before each
+unfiltered report call, then completion or failure after its existing guarded
+readiness wait. This identifies the in-flight report when the containing owner
+terminates the browser before final results can be written. The fixed record
+contains only allowlisted report/state values and existing numeric snapshots;
+`observationScope` explicitly marks prior counts and sampled run-peak heap, not
+fresh per-report counts or current memory. It performs no extra browser queries,
+row scans, materialization, DOM traversal or native inventories. Action clocks
+exclude journal writes. `Assert-DashboardReportSwitchDiagnostics.js` checks actual
+helper ordering, genuine failures, unchanged call semantics, opt-out, privacy and
+fail-closed journal errors. This diagnostic was added after the campaign; it has
+not identified the full-data bottleneck in a live run.
+
 Run the isolated two-row Hosted dashboard control, generated from synthetic data without root exports, authentication, or cloud writes:
 
 ```powershell

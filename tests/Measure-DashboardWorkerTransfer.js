@@ -71,6 +71,46 @@ function writeBrowserDiagnostic(guard, writer, sample) {
     catch (error) { guard.abort(error); throw error; }
 }
 
+// Host-side breadcrumbs are written before renderer work can stall. They use
+// only existing snapshots; no additional browser queries or row/DOM traversal.
+function reportSwitchCheckpoint({ iteration, load, report, state, run, durationHostWallMs = null }) {
+    assert(Number.isSafeInteger(iteration) && iteration > 0 && iteration <= 2147483647, 'Invalid report-switch iteration.');
+    assert(['first', 'reload'].includes(load) && REPORTS.includes(report)
+        && ['start', 'completed', 'failed'].includes(state), 'Invalid report-switch checkpoint.');
+    const counts = {};
+    const values = { rawRows: run.snapshot?.rawRows, normalizedRows: run.snapshot?.rows,
+        filteredRows: run.snapshot?.activeRows, activeReportRenders: run.lastReadiness?.activeReportRenders };
+    for (const [key, value] of Object.entries(values)) {
+        if (Number.isSafeInteger(value) && value >= 0 && value <= 2147483647) counts[key] = value;
+    }
+    return { kind: 'report-switch', name: 'unfiltered-report-switch', iteration, load, report, state,
+        observationScope: 'prior-snapshot-and-sampled-run-peak',
+        sampledAtEpochMs: Date.now(), observedHostMs: performance.now(), counts,
+        peakMainHeapBytes: Number.isSafeInteger(run.peakMainHeapBytes) && run.peakMainHeapBytes >= 0 ? run.peakMainHeapBytes : null,
+        durationHostWallMs: Number.isFinite(durationHostWallMs) && durationHostWallMs >= 0 ? durationHostWallMs : null };
+}
+
+async function switchUnfilteredReport({ page, guard, report, readinessWallMs, recordSample, iteration, load, run }) {
+    const checkpoint = (state, durationHostWallMs = null) => {
+        if (!recordSample) return;
+        writeBrowserDiagnostic(guard, recordSample, reportSwitchCheckpoint({ iteration, load, report, state, run, durationHostWallMs }));
+    };
+    checkpoint('start');
+    const started = performance.now();
+    let completedHostWallMs;
+    try {
+        await guard.wait(page.evaluate(reportId => selectReportById(reportId), report));
+        await guard.wait(page.waitForFunction(isReportReady, report, { timeout: readinessWallMs }));
+        completedHostWallMs = performance.now() - started;
+    } catch (error) {
+        try { checkpoint('failed', performance.now() - started); }
+        catch { /* Keep the operation's original error; journal failure already aborted the guard. */ }
+        throw error;
+    }
+    checkpoint('completed', completedHostWallMs);
+    return { report, completedHostWallMs };
+}
+
 function safeInventoryDiagnostic(value = {}) {
     const categories = ['timeout', 'aborted', 'execution', 'response', 'InvalidOperation', 'InvalidArgument', 'InvalidData', 'OperationStopped', 'WriteError', 'ObjectNotFound', 'PermissionDenied', 'SecurityError', 'ResourceUnavailable', 'NotSpecified'];
     const types = ['RuntimeException', 'CimException', 'MethodInvocationException', 'PSInvalidOperationException', 'SessionStateUnauthorizedAccessException', 'UnauthorizedAccessException', 'InvalidOperationException', 'ArgumentException', 'Win32Exception'];
@@ -1074,10 +1114,8 @@ async function measureIteration({ chromium, edge, origin, fileUrl, artifactRoot,
                     run.stage = 'reports';
                     state.guard.stage = `${load}:reports`;
                     for (const report of REPORTS.slice(1).concat(REPORTS[0])) {
-                        const switchStarted = performance.now();
-                        await state.guard.wait(state.page.evaluate(reportId => selectReportById(reportId), report));
-                        await state.guard.wait(state.page.waitForFunction(isReportReady, report, { timeout: evidence.limits.readinessWallMs }));
-                        run.reportSwitches.push({ report, completedHostWallMs: performance.now() - switchStarted });
+                        run.reportSwitches.push(await switchUnfilteredReport({ page: state.page, guard: state.guard, report,
+                            readinessWallMs: evidence.limits.readinessWallMs, recordSample, iteration, load, run }));
                     }
                     const reports = await state.guard.wait(state.page.evaluate(() => ({
                         reportIds: Object.keys(getDashboardMetricsSnapshot().reports).sort(), impactRows: impactAnalysisAllData.length,
@@ -2128,5 +2166,5 @@ async function mockProbes() {
     console.log('PASS bounded owned-root termination and already-exited race');
 }
 
-module.exports = { mockProbes, ownershipProbes, privacyProbes, inventoryProbes, safeFailure, measurementControlProbes };
+module.exports = { reportSwitchCheckpoint, switchUnfilteredReport, mockProbes, ownershipProbes, privacyProbes, inventoryProbes, safeFailure, measurementControlProbes };
 if (require.main === module) (process.argv.includes('--privacy') ? privacyProbes() : process.argv.includes('--ownership') ? ownershipProbes() : process.argv.includes('--mock') ? mockProbes() : main()).catch(error => { console.error(JSON.stringify({ status: 'blocked-or-failed', failure: safeFailure(error, process.argv.includes('--mock') || process.argv.includes('--ownership') || process.argv.includes('--privacy') ? 'preflight' : 'arguments') })); process.exitCode = 1; });
