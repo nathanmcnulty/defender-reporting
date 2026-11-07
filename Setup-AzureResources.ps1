@@ -258,8 +258,8 @@ function Test-AutomationAzAccountsPackageImport {
     param($Package, [string]$ExpectedVersion)
 
     $state = $Package.properties.provisioningState
-    if ($ExpectedVersion -and $state -in @('Failed', 'Canceled')) {
-        throw "Pinned Az.Accounts package import ended in state '$state'."
+    if ($state -in @('Failed', 'Canceled')) {
+        throw "Az.Accounts package import ended in state '$state'."
     }
     if ($state -notin @('Succeeded', 'Created')) { return $false }
     if ($ExpectedVersion) {
@@ -1526,8 +1526,8 @@ try {
             Write-Host "    Package state: $state" -ForegroundColor Gray
             return (Test-AutomationAzAccountsPackageImport -Package $pkg -ExpectedVersion $AutomationAzAccountsVersion)
         }
-        if ($AutomationAzAccountsVersion -and -not $packageImported) {
-            throw 'Pinned Az.Accounts package import did not complete within 300 seconds.'
+        if (-not $packageImported) {
+            throw 'Az.Accounts package import did not complete within 300 seconds.'
         }
 
         Write-Host "  Az.Accounts package installed in runtime environment" -ForegroundColor Green

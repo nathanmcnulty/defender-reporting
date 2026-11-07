@@ -250,12 +250,16 @@ if (-not $rejected) { throw 'Function App accepted an Automation-only pin.' }
 foreach ($state in @('Created','Succeeded','Creating','Failed','Canceled')) {
     $package = [PSCustomObject]@{ properties = [PSCustomObject]@{ provisioningState = $state; version = '5.3.1' } }
     $complete = $state -in @('Created','Succeeded')
-    if ((Test-AutomationAzAccountsPackageImport -Package $package) -ne $complete) { throw 'Default package polling behavior changed.' }
     if ($state -in @('Failed','Canceled')) {
-        $rejected = $false
-        try { Test-AutomationAzAccountsPackageImport -Package $package -ExpectedVersion '5.3.1' | Out-Null } catch { $rejected = $true }
-        if (-not $rejected) { throw 'Pinned failed import was accepted.' }
-    } elseif ((Test-AutomationAzAccountsPackageImport -Package $package -ExpectedVersion '5.3.1') -ne $complete) { throw 'Pinned package completion changed.' }
+        foreach ($version in @('', '5.3.1')) {
+            $rejected = $false
+            try { Test-AutomationAzAccountsPackageImport -Package $package -ExpectedVersion $version | Out-Null } catch { $rejected = $true }
+            if (-not $rejected) { throw 'Failed package import was accepted with or without a version pin.' }
+        }
+    } else {
+        if ((Test-AutomationAzAccountsPackageImport -Package $package) -ne $complete -or
+            (Test-AutomationAzAccountsPackageImport -Package $package -ExpectedVersion '5.3.1') -ne $complete) { throw 'Package completion changed.' }
+    }
 }
 foreach ($value in @($null, '5.3.2', 531)) {
     $package = [PSCustomObject]@{ properties = [PSCustomObject]@{ provisioningState = 'Succeeded'; version = $value } }
@@ -264,17 +268,19 @@ foreach ($value in @($null, '5.3.2', 531)) {
     if (-not $rejected) { throw 'Pinned version readback mismatch was accepted.' }
 }
 $package = [PSCustomObject]@{ properties = [PSCustomObject]@{ provisioningState = 'Created' } }
+if (-not (Test-AutomationAzAccountsPackageImport -Package $package)) { throw 'Unpinned successful import must not require version readback.' }
 $rejected = $false
 try { Test-AutomationAzAccountsPackageImport -Package $package -ExpectedVersion '5.3.1' | Out-Null } catch { $rejected = $true }
 if (-not $rejected) { throw 'Missing pinned version readback was accepted.' }
-$timeoutGuard = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text.StartsWith('if ($AutomationAzAccountsVersion -and -not $packageImported)') }, $true))
-if ($timeoutGuard.Count -ne 1) { throw 'Missing pinned timeout failure.' }
+$timeoutGuard = @($ast.FindAll({ param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text.StartsWith('if (-not $packageImported)') }, $true))
+if ($timeoutGuard.Count -ne 1) { throw 'Missing package import timeout failure.' }
 $guard = [scriptblock]::Create("param(`$AutomationAzAccountsVersion,`$packageImported)`n$($timeoutGuard[0].Extent.Text)")
-& $guard '' $false
-& $guard '5.3.1' $true
-$rejected = $false
-try { & $guard '5.3.1' $false } catch { $rejected = $true }
-if (-not $rejected) { throw 'Pinned timed-out import proceeded.' }
+foreach ($version in @('', '5.3.1')) {
+    & $guard $version $true
+    $rejected = $false
+    try { & $guard $version $false } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Timed-out import proceeded with or without a version pin.' }
+}
 Write-Output 'Automation package pin checks passed: actual parameter/URI, compute guard, state/version readback and timeout.'
 
 # Inspect the real deployment payload AST without invoking setup or any cloud command.
