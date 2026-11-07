@@ -213,8 +213,16 @@ they do not launch a browser or establish download/visual acceptance.
 Add `--progress-journal` to retain bounded stage/memory samples beside the
 evidence JSON when an outer supervisor terminates the process before its final
 write. Its parent directory must already exist outside the retained product.
-The fresh journal is capped at 2 MiB and contains input fingerprints and
-existing guard samples. It is partial diagnostic evidence, never proof of run
+The fresh version-2 journal is capped at 2 MiB and contains input fingerprints,
+existing guard samples, separate Node RSS/heap/external counters, and bounded
+browser main-heap/initialization/worker observations. Opt-in console checkpoints
+retain initialization, worker delivery and admin filter/library/detail/PDF
+boundaries even if the final measurement JSON is never written. Only allowlisted
+names, states and numeric observations are retained; row contents and arbitrary
+console text are excluded. Missing observations are not evidence that a phase
+did not execute. Node RSS, browser-family working set and the outer all-descendant
+working-set cap remain distinct; do not subtract asynchronous samples as exact
+per-process attribution. It is partial diagnostic evidence, never proof of run
 completion or cleanup. Use the same setting for both sides of a comparison.
 
 Run the isolated two-row Hosted dashboard control, generated from synthetic data without root exports, authentication, or cloud writes:
