@@ -673,8 +673,9 @@ namespace DefenderReporting.Store
                                 var row = document.RootElement;
                                 if (row.ValueKind != JsonValueKind.Object) continue;
                                 var deviceJson = DeviceJson(row);
-                                var deviceId = String(row, "DeviceId");
-                                var deviceKey = string.IsNullOrWhiteSpace(deviceId) ? Hash(deviceJson) : deviceId;
+                                // The complete projected JSON is an unambiguous ordinal key.
+                                // DeviceId alone cannot represent different per-observation profiles.
+                                var deviceKey = deviceJson;
                                 if (!devices.TryGetValue(deviceKey, out var deviceIndex))
                                 {
                                     deviceIndex = devices.Count;
@@ -4710,23 +4711,9 @@ function Get-VulnDeviceProfileSignature {
         $Row
     )
 
-    $deviceId = [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceId')
-    if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
-        return $deviceId
-    }
-
-    $machineTags = @((Get-VulnPropertyValue -InputObject $Row -Name 'MachineTags'))
-    $valueDelimiter = [string][char]0x001f
-    $listDelimiter = [string][char]0x001e
-    return @(
-        $deviceId
-        [string](Get-VulnPropertyValue -InputObject $Row -Name 'DeviceName')
-        [string](Get-VulnPropertyValue -InputObject $Row -Name 'RbacGroupName')
-        [string](Get-VulnPropertyValue -InputObject $Row -Name 'OSPlatform')
-        [string](Get-VulnPropertyValue -InputObject $Row -Name 'OSVersion')
-        ($machineTags -join $listDelimiter)
-        [string](Get-VulnPropertyValue -InputObject $Row -Name 'IsOnboarded')
-    ) -join $valueDelimiter
+    # Serialize the actual v1 projection: all represented fields participate,
+    # including array boundaries and control characters inside string values.
+    return (ConvertTo-Json -InputObject (ConvertTo-VulnDeviceProfileTemplate -Row $Row) -Compress -Depth 20)
 }
 
 function Get-VulnContentTemplateSignature {
@@ -5607,33 +5594,21 @@ function Publish-VulnContentStoreUnlocked {
                         }
                     }
 
-                    if (-not [string]::IsNullOrWhiteSpace($deviceId)) {
-                        $deviceSignature = $deviceId
-                    }
-                    else {
-                        $deviceSignature = @(
-                            $deviceId
-                            $deviceName
-                            $groupName
-                            $osPlatform
-                            $osVersion
-                            ($machineTags -join $listDelimiter)
-                            [string]$isOnboarded
-                        ) -join $valueDelimiter
-                    }
+                    $deviceTemplateJson = ConvertTo-Json -InputObject ([PSCustomObject]@{
+                        id = $deviceId
+                        n = $deviceName
+                        g = $groupName
+                        o = $osPlatform
+                        ov = $osVersion
+                        t = $machineTags
+                        ob = $isOnboarded
+                    }) -Compress -Depth 20
+                    $deviceSignature = $deviceTemplateJson
                     $deviceIndexValue = 0
                     if (-not $deviceProfileIndex.TryGetValue($deviceSignature, [ref]$deviceIndexValue)) {
                         $deviceIndexValue = [int]$projectionState.DeviceCount
                         $deviceProfileIndex.Add($deviceSignature, $deviceIndexValue)
-                        $deviceTemplateWriter.WriteLine((ConvertTo-Json -InputObject ([PSCustomObject]@{
-                            id = $deviceId
-                            n = $deviceName
-                            g = $groupName
-                            o = $osPlatform
-                            ov = $osVersion
-                            t = $machineTags
-                            ob = $isOnboarded
-                        }) -Compress -Depth 20))
+                        $deviceTemplateWriter.WriteLine($deviceTemplateJson)
                         $projectionState.DeviceCount++
                     }
 
@@ -5887,7 +5862,6 @@ function Publish-VulnContentStorePartitioned {
                     fs = [string](Get-VulnPropertyValue -InputObject $row -Name 'FirstSeenTimestamp')
                     ls = [string](Get-VulnPropertyValue -InputObject $row -Name 'LastSeenTimestamp')
                     ds = $deviceSignature
-                    dj = (ConvertTo-VulnDeviceProfileTemplate -Row $row | ConvertTo-Json -Compress -Depth 20)
                     cs = $contentSignature
                     cj = (ConvertTo-VulnContentTemplate -Row $row | ConvertTo-Json -Compress -Depth 20)
                 }
@@ -5911,14 +5885,14 @@ function Publish-VulnContentStorePartitioned {
             for ($bucket = 0; $bucket -lt $partitionCount; $bucket++) {
                 $partitionPath = Join-Path $devicePartitionRoot ("p{0}.ndjson" -f $bucket)
                 if (-not (Test-Path -LiteralPath $partitionPath -PathType Leaf)) { continue }
-                $deviceIndex = @{}
+                $deviceIndex = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal)
                 foreach ($line in [System.IO.File]::ReadLines($partitionPath, [System.Text.UTF8Encoding]::new($false))) {
                     if ([string]::IsNullOrWhiteSpace($line)) { continue }
                     $envelope = $line | ConvertFrom-Json -Depth 20
                     $signature = [string]$envelope.ds
                     if (-not $deviceIndex.ContainsKey($signature)) {
                         $deviceIndex[$signature] = $deviceCount
-                        $deviceDictionaryWriter.WriteLine([string]$envelope.dj)
+                        $deviceDictionaryWriter.WriteLine($signature)
                         $deviceCount++
                     }
                     $contentSignature = [string]$envelope.cs
@@ -21803,7 +21777,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 5b693f8acac2344d06e80869565aee951268280c0688216e4f3e84f606727890
+# ArtifactFingerprint: 155e9dd37484b2d2509df9b9536b566e14de632799e7531637af3a96f04f3fc8
 
 
 

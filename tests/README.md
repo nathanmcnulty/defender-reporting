@@ -37,6 +37,18 @@ That script is the authoritative deterministic preflight used for local work and
 
 The shared-helper regression lane now logs `START <Test-Name>` and a per-test elapsed time. If the preflight looks slow, use that output to identify the active or expensive test before assuming the suite is hung.
 
+`Test-VulnDeviceProfileProjectionParity` publishes tiny current/history
+stores through the default compiled publisher and the partitioned publisher,
+then compares every represented v1 field, JSON type and property/array order
+against an independent projection. It covers different profiles sharing one
+device ID, missing and nonempty OS versions, case and separator collisions,
+unchanged raw canonical files, and existing dictionaries. Device identity keys
+include the complete projected profile; `RbacGroupId` remains intentionally
+outside the v1 schema. Old dictionaries remain readable but do not recover
+previously discarded values without republication from canonical raw rows.
+More distinct profiles may increase dictionary size and memory; these tiny
+correctness checks establish no performance, full-scale or Azure acceptance.
+
 ## Test lanes at a glance
 
 The first-run/empty-enrichment and Azure export-generation protocol regressions
