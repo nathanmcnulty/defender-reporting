@@ -174,7 +174,10 @@ function Connect-GitHubActionsFederatedAzAccount {
 
 function Assert-AzContextAvailable {
     [CmdletBinding()]
-    param()
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$ExpectedTenantId
+    )
 
     if (-not (Get-Command -Name Get-AzContext -ErrorAction Ignore)) {
         throw 'Get-AzContext is not available. Install Az.Accounts before running this script.'
@@ -184,6 +187,28 @@ function Assert-AzContextAvailable {
     if ($null -eq $context -or $null -eq $context.Account) {
         throw 'No Azure context is available. Run Connect-AzAccount first or use the GitHub OIDC parameter set.'
     }
+
+    if ($ExpectedTenantId -and [string]$context.Tenant.Id -ine $ExpectedTenantId) {
+        throw 'The Azure context does not match the configured owner demo tenant.'
+    }
+}
+
+function Get-OwnerDemoTenantId {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [string]$Repository,
+        [string]$AuthenticationMode,
+        [string]$TenantId
+    )
+
+    if ($Repository -cne 'nathanmcnulty/defender-reporting') { return $null }
+    $tenantGuid = [guid]::Empty
+    if ($AuthenticationMode -ne 'GitHubOidc' -or
+        -not [guid]::TryParse($TenantId, [ref]$tenantGuid) -or $tenantGuid -eq [guid]::Empty) {
+        throw 'Owner demo runs require GitHub OIDC and an explicit configured tenant GUID.'
+    }
+    return $tenantGuid.Guid
 }
 
 function Get-DefenderApiAccessToken {
@@ -193,9 +218,19 @@ function Get-DefenderApiAccessToken {
 
     Write-Verbose 'Getting Microsoft Defender API access token...'
 
+    $tokenParameters = @{ ResourceUrl = 'https://api.securitycenter.microsoft.com'; AsSecureString = $true; ErrorAction = 'Stop' }
+    if ($Script:RequiredDefenderTenantId) {
+        Assert-AzContextAvailable -ExpectedTenantId $Script:RequiredDefenderTenantId
+        $tokenParameters.TenantId = $Script:RequiredDefenderTenantId
+    }
+
     if (Get-Command -Name Get-AzAccessToken -ErrorAction Ignore) {
         try {
-            $tokenResponse = Get-AzAccessToken -ResourceUrl 'https://api.securitycenter.microsoft.com' -AsSecureString -ErrorAction Stop
+            $tokenResponse = Get-AzAccessToken @tokenParameters
+            if ($Script:RequiredDefenderTenantId -and
+                ([string]$tokenResponse.TenantId -ine $Script:RequiredDefenderTenantId -or $tokenResponse.Token.Length -eq 0)) {
+                throw 'The Defender token tenant is unproven or mismatched.'
+            }
             $secureStringPointer = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($tokenResponse.Token)
             try {
                 return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($secureStringPointer)
@@ -205,8 +240,15 @@ function Get-DefenderApiAccessToken {
             }
         }
         catch {
+            if ($Script:RequiredDefenderTenantId) {
+                throw 'Owner demo Defender token acquisition failed; Azure CLI fallback is disabled.'
+            }
             Write-Warning ("Get-AzAccessToken failed for the Defender API. Falling back to Azure CLI token acquisition if available. {0}" -f $_.Exception.Message)
         }
+    }
+
+    if ($Script:RequiredDefenderTenantId) {
+        throw 'Owner demo runs require a tenant-bound Az token; Azure CLI fallback is disabled.'
     }
 
     $azCommand = Get-Command -Name 'az' -ErrorAction Ignore
@@ -248,6 +290,8 @@ function Get-OutputFileDetail {
         lastWriteTimeUtc = $item.LastWriteTimeUtc.ToString('o')
     }
 }
+
+$Script:RequiredDefenderTenantId = Get-OwnerDemoTenantId -Repository $env:GITHUB_REPOSITORY -AuthenticationMode $PSCmdlet.ParameterSetName -TenantId $AzureTenantId
 
 Initialize-ParentDirectory -Path (Join-Path $ExportsPath 'placeholder.txt')
 Initialize-ParentDirectory -Path $DashboardPath

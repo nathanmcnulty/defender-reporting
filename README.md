@@ -4,7 +4,7 @@
 
 Defender for Endpoint vulnerability reporting has always been a pain point, and this felt like a great opportunity to use AI-assisted coding to build a dashboard without a dependency on Power BI or other expensive tools. The result is a PowerShell-built dashboard that defaults to a self-contained HTML artifact for direct-open use, with an opt-in split-assets mode for hosted deployments, along with validation tooling, Azure automation assets, GitHub Actions workflows, and PDF report generation.
 
-Live exports, generated dashboards, and report PDFs are local/private outputs, not checked-in samples. Regression tests use deterministic synthetic datasets in temporary directories and minimal synthetic legacy fixtures under `tests/fixtures/`. Do not commit live data or include it in logs or PR evidence. Public live workflows remain private-repository-only and disabled. Removing current-tree outputs does not remove historical copies; issue #68 remains open for the separate private historical response.
+The dashboard workflow can publish Nathan’s approved demo exports and HTML only from `nathanmcnulty/defender-reporting` on `refs/heads/main`, or from a private repository under its existing rules. Keep the owner workflow disabled until its configured OIDC tenant is verified as the approved demo tenant; source checks alone cannot establish that binding. The PDF workflow remains private-only, unchanged, and disabled for public use, with no publishing steps. Ordinary local outputs stay ignored. Regression tests use deterministic synthetic datasets in temporary directories and minimal synthetic legacy fixtures under `tests/fixtures/`; do not include tenant data in test or PR evidence. Removing current-tree outputs does not remove historical copies; issue #68 remains open for the separate private historical response. See [GitHub Actions setup](docs/github-actions-setup.md) for the admission matrix and exact output allowlist.
 
 ## How it works
 
@@ -140,7 +140,7 @@ For managed identity auth, Azure provisioning, and GitHub workflow setup, use th
 
 Recommended project convention:
 
-- Keep live `VulnerabilityDashboard.html` and exports in access-controlled storage, not in this public repository or workflow artifacts.
+- Outside the verified owner demo, keep live `VulnerabilityDashboard.html` and exports in access-controlled storage. Private repository status does not protect a separate public Pages or external storage destination.
 - When you need both delivery models, generate `VulnerabilityDashboard.Hosted.html` with `-DualPackage` so both outputs share the same normalized payload bytes.
 
 Azure note: `Setup-AzureResources.ps1` resolves this automatically. With `-IncludeContainerApp`, Azure defaults to the hosted split-assets mode. Without a Container App, Azure defaults to the self-contained mode unless you override it.
@@ -202,17 +202,17 @@ The root scripts above are the primary user-facing entrypoints. Maintainer and a
 flowchart TD
     A["Same export and generation scripts"] --> B["Run locally"]
     A --> C["Run in Azure Automation"]
-    A --> D["Run in GitHub Actions (private repositories only)"]
+    A --> D["Run in GitHub Actions (owner main or private repositories)"]
     A --> H["Run in Azure Function App"]
     B --> E["Open HTML directly"]
     C --> F["Publish to blob storage\nand optional Container App"]
-    D --> G["Validate on ephemeral runner\nwithout committing or uploading live outputs"]
+    D --> G["Validate and publish allowlisted dashboard outputs"]
     H --> F
 ```
 
 ## Notes
 
-- The live dashboard update and PDF export workflows run only in private repositories. In public repositories, keep both workflows disabled; their job-level guards skip execution even if triggered. Exporter logs can expose RBAC group IDs and counts, so withholding output files alone is not sufficient.
+- The dashboard workflow admits the exact owner repository on `main`, plus private repositories; unknown visibility elsewhere fails closed. Keep it disabled until the approved demo tenant binding is verified. PDF export remains private-only and does not publish outputs. Exporter logs can expose RBAC group IDs and counts, so owner demo activation also approves those logs.
 - Build sources and build scripts now live under `build/`.
 - `build/generated/shared-helpers.ps1`, `build/generated/validation-helpers.ps1`, and `azure/function-app/ExportAndGenerate/run.ps1` are generated on demand and ignored by git.
 - `azure/Invoke-DashboardPipeline.ps1` is generated from the `build/` sources and can be refreshed locally or by CI.
