@@ -6128,6 +6128,120 @@ function Test-DashboardDualPackagingGenerationAndValidation {
     }
 }
 
+function Test-LiveDashboardTenantBinding {
+    [CmdletBinding()]
+    param()
+
+    # Load only the named function definitions. Never dot-source or invoke the live entrypoint.
+    $sourcePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'build/Invoke-LiveDashboardDryRun.ps1'
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$null, [ref]$parseErrors)
+    Assert-True ($parseErrors.Count -eq 0) 'Expected the live wrapper to parse.'
+    foreach ($name in @('Get-OwnerDemoTenantId', 'Assert-AzContextAvailable', 'Get-DefenderApiAccessToken')) {
+        $definition = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true)
+        Assert-True ($null -ne $definition) "Missing tenant-binding function: $name"
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
+    $source = $ast.Extent.Text
+    $policyPosition = $source.IndexOf('$Script:RequiredDefenderTenantId = Get-OwnerDemoTenantId -Repository $env:GITHUB_REPOSITORY -AuthenticationMode $PSCmdlet.ParameterSetName -TenantId $AzureTenantId')
+    Assert-True ($policyPosition -ge 0 -and $policyPosition -lt $source.IndexOf('switch ($PSCmdlet.ParameterSetName)')) 'Tenant policy must run before authentication.'
+    $expectedTenant = '11111111-1111-1111-1111-111111111111'
+    $otherTenant = '22222222-2222-2222-2222-222222222222'
+    $owner = 'nathanmcnulty/defender-reporting'
+    $state = @{ TokenCalls = 0; CliCalls = 0; TokenAvailable = $true; ContextAvailable = $true; ThrowToken = $false; Tenant = $expectedTenant; LastTenant = $null; TokenText = 'synthetic-offline-token'; Context = $null }
+    function Get-AzContext { return $state.Context }
+    function Get-AzAccessToken {
+        [CmdletBinding()]
+        param([string]$ResourceUrl, [switch]$AsSecureString, [string]$TenantId)
+        Assert-True ($ResourceUrl -ceq 'https://api.securitycenter.microsoft.com' -and $AsSecureString) 'Token resource/type changed.'
+        $state.TokenCalls++
+        $state.LastTenant = $TenantId
+        if ($state.ThrowToken) { throw 'Synthetic token error detail must not escape the owner path.' }
+        $secureToken = [System.Security.SecureString]::new()
+        foreach ($character in $state.TokenText.ToCharArray()) { $secureToken.AppendChar($character) }
+        $secureToken.MakeReadOnly()
+        return [PSCustomObject]@{ TenantId = $state.Tenant; Token = $secureToken }
+    }
+    function Invoke-SyntheticAzCli { $state.CliCalls++; return 'synthetic-cli-token' }
+    function Get-Command {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Test-local command discovery returns only synthetic Az/CLI functions and makes no service calls.')]
+        [CmdletBinding()]
+        param([string]$Name)
+        if ($Name -ceq 'az') { return [PSCustomObject]@{ Source = 'Invoke-SyntheticAzCli' } }
+        if (($Name -ceq 'Get-AzAccessToken' -and -not $state.TokenAvailable) -or
+            ($Name -ceq 'Get-AzContext' -and -not $state.ContextAvailable)) { return $null }
+        return Microsoft.PowerShell.Core\Get-Command @PSBoundParameters
+    }
+    try {
+        foreach ($mode in @('ExistingAzContext', 'GitHubOidc')) {
+            foreach ($tenant in @('', 'example.invalid', [guid]::Empty.Guid)) {
+                $failure = $null
+                try { Get-OwnerDemoTenantId -Repository $owner -AuthenticationMode $mode -TenantId $tenant }
+                catch { $failure = $_ }
+                Assert-True ($null -ne $failure) 'Owner demo must reject missing/domain/empty tenant identifiers without lookup.'
+            }
+        }
+        $failure = $null
+        try { Get-OwnerDemoTenantId -Repository $owner -AuthenticationMode ExistingAzContext -TenantId $expectedTenant }
+        catch { $failure = $_ }
+        Assert-True ($null -ne $failure) 'An ambient existing context cannot select the owner demo tenant.'
+        $Script:RequiredDefenderTenantId = Get-OwnerDemoTenantId -Repository $owner -AuthenticationMode GitHubOidc -TenantId $expectedTenant
+        Assert-True ($Script:RequiredDefenderTenantId -ceq $expectedTenant) 'Expected configured tenant GUID.'
+        Assert-True ($state.TokenCalls -eq 0 -and $state.CliCalls -eq 0) 'Configuration checks must be offline.'
+        foreach ($context in @($null, [PSCustomObject]@{ Account = $null },
+            [PSCustomObject]@{ Account = @{ Id = 'synthetic' }; Tenant = @{ Id = $otherTenant } },
+            [PSCustomObject]@{ Account = @{ Id = 'synthetic' }; Tenant = @{ Id = '' } },
+            [PSCustomObject]@{ Account = @{ Id = 'synthetic' } })) {
+            $state.Context = $context
+            $failure = $null
+            try { Get-DefenderApiAccessToken }
+            catch { $failure = $_ }
+            Assert-True ($null -ne $failure -and $state.TokenCalls -eq 0 -and $state.CliCalls -eq 0) 'Wrong or unproven context must fail before token acquisition.'
+        }
+        $state.Context = [PSCustomObject]@{ Account = @{ Id = 'synthetic' }; Tenant = @{ Id = $expectedTenant } }
+        $state.ContextAvailable = $false
+        $failure = $null
+        try { Get-DefenderApiAccessToken }
+        catch { $failure = $_ }
+        Assert-True ($null -ne $failure -and $state.TokenCalls -eq 0 -and $state.CliCalls -eq 0) 'Missing Az context command must fail before token acquisition.'
+        $state.ContextAvailable = $true
+        foreach ($tokenTenant in @($otherTenant, '', $null)) {
+            $state.Tenant = $tokenTenant
+            $failure = $null
+            try { Get-DefenderApiAccessToken }
+            catch { $failure = $_ }
+            Assert-True ($null -ne $failure -and $state.CliCalls -eq 0) 'Wrong or unproven token tenant must never use ambient CLI.'
+        }
+        $state.Tenant = $expectedTenant
+        $state.ThrowToken = $true
+        $failure = $null
+        try { Get-DefenderApiAccessToken }
+        catch { $failure = $_ }
+        Assert-True ($null -ne $failure -and $failure.Exception.Message -notlike '*Synthetic token error detail*' -and $state.CliCalls -eq 0) 'Owner token failures must be generic and cannot fall back.'
+        $state.TokenAvailable = $false
+        $failure = $null
+        try { Get-DefenderApiAccessToken }
+        catch { $failure = $_ }
+        Assert-True ($null -ne $failure -and $state.CliCalls -eq 0) 'Missing Az token command must fail closed.'
+        $state.TokenAvailable = $true
+        $state.ThrowToken = $false
+        $state.TokenText = ''
+        $failure = $null
+        try { Get-DefenderApiAccessToken }
+        catch { $failure = $_ }
+        Assert-True ($null -ne $failure -and $state.CliCalls -eq 0) 'An empty owner token must fail without fallback.'
+        $state.TokenText = 'synthetic-offline-token'
+        $token = Get-DefenderApiAccessToken
+        Assert-True ($token -ceq 'synthetic-offline-token' -and $state.LastTenant -ceq $expectedTenant -and $state.CliCalls -eq 0) 'Matching context/token must explicitly request the configured tenant.'
+        # Preserve the existing private/local ambient fallback outside the owner repository.
+        $Script:RequiredDefenderTenantId = Get-OwnerDemoTenantId -Repository 'private/example' -AuthenticationMode ExistingAzContext -TenantId ''
+        $state.ThrowToken = $true
+        $token = Get-DefenderApiAccessToken -WarningAction SilentlyContinue
+        Assert-True ($token -ceq 'synthetic-cli-token' -and $state.CliCalls -eq 1) 'Private/local fallback behavior changed.'
+    }
+    finally { Remove-Variable -Name RequiredDefenderTenantId -Scope Script -ErrorAction Ignore }
+}
+
 function Test-VulnDeviceProfileProjectionParity {
     [CmdletBinding()]
     param()
@@ -7882,6 +7996,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-WriteCombinedPayloadGzipCanConsumeColumnLookupData'; SuccessMessage = 'Payload lookup consumption checks passed.' }
     @{ Name = 'Test-GetDashboardEmbeddedPayloadInspectionStreamsSelfContainedPayload'; SuccessMessage = 'Embedded payload inspection checks passed.' }
     @{ Name = 'Test-VulnDeviceProfileProjectionParity'; SuccessMessage = 'Complete collision-safe device profile projection checks passed.' }
+    @{ Name = 'Test-LiveDashboardTenantBinding'; SuccessMessage = 'Offline owner demo tenant binding and private/local fallback checks passed.' }
     @{ Name = 'Test-VulnContentStoreRoundTrip'; SuccessMessage = 'Vulnerability content store round-trip checks passed.' }
     @{ Name = 'Test-ProceduralSyntheticDatasetGeneration'; SuccessMessage = 'Procedural synthetic generation and immutable overlay checks passed.' }
     @{ Name = 'Test-BulkSnapshotFreshImportProfilerParityAndGuards'; SuccessMessage = 'Fresh import profiler store parity, attribution, restoration and source guards passed.' }

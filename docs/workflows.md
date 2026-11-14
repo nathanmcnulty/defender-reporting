@@ -6,14 +6,14 @@ This repo currently ships six GitHub Actions workflows.
 
 | Workflow | File | Purpose |
 |---|---|---|
-| Update Vulnerability Dashboard | `.github/workflows/update-vulnerability-dashboard.yml` | Private repositories only: run live export and dashboard validation on an ephemeral runner without publishing live data |
+| Update Vulnerability Dashboard | `.github/workflows/update-vulnerability-dashboard.yml` | Exact owner repository on main, or private repositories: validate and publish allowlisted dashboard outputs after demo tenant verification |
 | Validate Dashboard | `.github/workflows/validate-dashboard.yml` | Run the deterministic repo preflight used for local and PR validation |
 | Sync Azure Runbook | `.github/workflows/sync-azure-runbook.yml` | Rebuild and commit `azure/Invoke-DashboardPipeline.ps1` when its build sources change |
 | Build Azure Package | `.github/workflows/sync-azure-package.yml` | Build the latest Azure deployment zip and upload it as a downloadable workflow artifact |
 | Release Azure Package | `.github/workflows/release-azure-package.yml` | Build `Azure-YYMMDD.zip` from the published release tag and attach it to the GitHub release |
 | Export Dashboard PDFs | `.github/workflows/export-pdf-reports.yml` | Private repositories only: render PDFs without publishing live reports; remains disabled pending a private source |
 
-Both live-data jobs require `${{ github.event.repository.private == true }}`. Keep these workflows disabled in public repositories; the job-level guards skip execution even if triggered. Exporter logs can expose RBAC group IDs and counts, so omitting commits and artifacts alone is not sufficient.
+The dashboard job admits `(nathanmcnulty/defender-reporting AND refs/heads/main) OR private: true`; other public or unknown repositories skip before checkout or authentication. Keep the owner workflow disabled until the configured OIDC tenant is verified as the approved demo tenant. The PDF job remains private-only, read-only and unchanged, with publishing disabled. Exporter logs can expose RBAC group IDs and counts.
 
 ## Flow
 
@@ -22,7 +22,7 @@ flowchart TD
     A["Update dashboard"] --> B["Live export dry run"]
     B --> C["Generate HTML"]
     C --> D["Validate output on ephemeral runner"]
-    D --> E["Store approved output in private storage separately"]
+    D --> E["Stage allowlisted dashboard outputs; commit and upload HTML"]
 ```
 
 ## Update Vulnerability Dashboard
@@ -35,9 +35,11 @@ Trigger sources:
 Key behavior:
 
 - Uses repo-owned Azure OIDC logic through `build/Invoke-LiveDashboardDryRun.ps1`
-- Runs the live export and dashboard validation path under `.local/` on the ephemeral runner
-- Does not upload artifacts or commit exports, dashboards, or audit data to this public repository
-- Runs only in private repositories; remains disabled/skipped in public repositories
+- Uses repository output paths for HTML and named gzip stores; audit and manifest stay under ignored `.local/`
+- Commits only the dashboard allowlist and uploads only HTML with 30-day retention after validation
+- Manual `dry_run: true` still collects live data, but skips staging, commits and artifacts
+- Owner runs require configured tenant GUID, matching Az context/token tenants, and no ambient CLI fallback; private/local behavior otherwise remains unchanged
+- Preserves the daily `02:00 UTC` schedule; source changes do not enable or dispatch it
 
 ## Validate Dashboard
 
@@ -112,7 +114,7 @@ Key behavior:
 
 ## Suggested operating model
 
-- Use the update workflow for the regular daily refresh only in a private repository
+- Enable the daily dashboard refresh only after the owner demo tenant binding is verified, or use a private repository with reviewed destination access controls
 - Let the validation workflow protect changes to scripts and templates through the same deterministic preflight used locally
 - Let the runbook sync workflow keep the committed Azure Automation artifact aligned with the build sources
 - Use the Azure package workflow when you want a fresh downloadable deployment bundle without committing a binary into the repository

@@ -751,3 +751,9 @@ every job member and birth identity, exact parent topology, root exclusion,
 fanout buffer growth, terminal zero membership, retained-handle exit, both
 stream EOF/error states, repeated completion, neighbor survival and retained
 unknown-owner profiles. Outer cleanup alone never establishes acceptance.
+
+## Dashboard-only owner publication
+
+`node tests/Assert-DashboardWorkflowPrivacy.js` checks the exact owner/main exception, private admission, unknown-visibility rejection, unchanged daily schedule, dashboard filename allowlist, empty-index staging, deletions and nonregular-file rejection using synthetic temporary Git repositories. PDF publication is excluded.
+
+`./tests/Run-SharedHelperRegression.ps1 -TestName Test-LiveDashboardTenantBinding` extracts only named function definitions from the live wrapper and supplies synthetic Az context/token and CLI mocks. It rejects missing, mismatched or unproven owner tenants and prevents ambient owner fallback while retaining private/local fallback. It performs no sign-in, tenant lookup or live collection and needs no service credentials. A passing source test does not verify the actual configured demo tenant. Do not invoke the live `dry_run` as an offline test; see [the activation binding checklist](../docs/github-actions-setup.md).
