@@ -37,6 +37,19 @@ This page covers the Azure-specific parts of the project: permissions, authentic
 - Timer-triggered function running daily at 2:00 AM UTC
 - An optional Azure Container App protected by Entra ID Easy Auth
 
+Automation cloud jobs cannot access Storage secured only through a private
+endpoint; see Microsoft's [Automation Private Link limitations](https://learn.microsoft.com/en-us/azure/automation/how-to/private-link-security#limitations).
+Disabling anonymous blob access does not make the Storage endpoint network-private.
+The Storage firewall's trusted-services exception also [does not admit Automation
+cloud jobs](https://learn.microsoft.com/en-us/azure/automation/troubleshoot/runbooks#scenario-access-blocked-to-azure-storage-or-azure-key-vault-or-azure-sql).
+Private-only Storage therefore needs a separately reviewed host and network plan.
+A Hybrid Runbook Worker runs on a different host: its results do not qualify the
+cloud sandbox's runtime or the project's 400,000,000-byte memory acceptance gate.
+For issue #92, retain separate evidence of actual host startup, loaded package
+identity and workload completion; local builds and PackageOnly results do not
+establish live acceptance. Any network, permission or cost changes for that
+validation need approval of the concrete deployment plan before execution.
+
 ## When to choose each compute type
 
 | Factor | Automation Account | Function App (Flex Consumption) |
