@@ -272,6 +272,9 @@ Reset-LastExitCode
 & (Join-Path $repoRoot 'tests\Invoke-AtomicExportPublicationRegression.ps1')
 if (Test-LastExitCodeFailed) { throw 'Atomic export publication regression failed.' }
 Reset-LastExitCode
+& (Join-Path $repoRoot 'tests\Invoke-StreamedScratchRegression.ps1')
+if (Test-LastExitCodeFailed) { throw 'Streamed scratch regression failed.' }
+Reset-LastExitCode
 & (Join-Path $repoRoot 'tests\Invoke-AtomicDashboardPublicationRegression.ps1')
 
 Write-Output 'Running dashboard JavaScript regression tests...'
