@@ -5862,7 +5862,6 @@ function Publish-VulnContentStorePartitioned {
                     fs = [string](Get-VulnPropertyValue -InputObject $row -Name 'FirstSeenTimestamp')
                     ls = [string](Get-VulnPropertyValue -InputObject $row -Name 'LastSeenTimestamp')
                     ds = $deviceSignature
-                    dj = (ConvertTo-VulnDeviceProfileTemplate -Row $row | ConvertTo-Json -Compress -Depth 20)
                     cs = $contentSignature
                     cj = (ConvertTo-VulnContentTemplate -Row $row | ConvertTo-Json -Compress -Depth 20)
                 }
@@ -5893,7 +5892,7 @@ function Publish-VulnContentStorePartitioned {
                     $signature = [string]$envelope.ds
                     if (-not $deviceIndex.ContainsKey($signature)) {
                         $deviceIndex[$signature] = $deviceCount
-                        $deviceDictionaryWriter.WriteLine([string]$envelope.dj)
+                        $deviceDictionaryWriter.WriteLine($signature)
                         $deviceCount++
                     }
                     $contentSignature = [string]$envelope.cs
@@ -21778,7 +21777,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 0ca37ee5476e6b6d2e692e54180e6b8838d8985015eb185e70cffa55fd112a7d
+# ArtifactFingerprint: 155e9dd37484b2d2509df9b9536b566e14de632799e7531637af3a96f04f3fc8
 
 
 
