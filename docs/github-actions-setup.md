@@ -1,46 +1,63 @@
 # GitHub Actions Setup
 
-Nathan intentionally publishes his real lab exports, dashboard, and PDFs as demos in `nathanmcnulty/defender-reporting`. Live jobs admit that exact repository or a repository whose GitHub event reports `private: true`:
+This revision changes dashboard publication only. The PDF workflow, its trigger and read-only permissions remain unchanged; it has no publishing steps and stays disabled for public use. Local output paths remain ignored.
+
+## Dashboard admission
+
+The dashboard job checks this condition before checkout, authentication, collection or live logging; the staging helper repeats it using `GITHUB_REF`:
 
 ```yaml
-if: ${{ github.repository == 'nathanmcnulty/defender-reporting' || github.event.repository.private == true }}
+if: ${{ (github.repository == 'nathanmcnulty/defender-reporting' && github.ref == 'refs/heads/main') || github.event.repository.private == true }}
 ```
 
-The condition is on each job, before checkout, authentication, collection, or exporter logs. Other public repositories, including public forks and other repositories owned by Nathan, skip both live jobs. Missing privacy metadata fails closed outside the exact owner repository. Fork owners can change their own workflow code; this guard prevents accidental execution with the shipped configuration.
-
-| Repository | Privacy | Live update/PDF jobs | Synthetic validation |
+| Repository | Ref | Privacy | Dashboard job |
 |---|---|---|---|
-| `nathanmcnulty/defender-reporting` | Public or private | Allowed | Available |
-| Any other repository | Private | Allowed | Available |
-| Any other repository | Public or unknown | Skipped | Available |
+| `nathanmcnulty/defender-reporting` | `refs/heads/main` | Public or unknown | Admitted, subject to verified demo tenant binding |
+| Owner repository | Other branch, tag, or missing ref | Public or unknown | Skipped |
+| Any repository | Existing supported ref | Private (`true`) | Admitted under existing private rules |
+| Any other repository | Any | Public or unknown | Skipped |
 
-## Output destinations
+Public forks and other public repositories owned by Nathan are excluded. Missing metadata fails closed outside the exact owner/main exception. The PDF job continues requiring `private: true` and does not commit or upload PDFs.
 
-The update job exports to `exports/` and generates `VulnerabilityDashboard.html` through `build/Invoke-LiveDashboardDryRun.ps1 -UseRepositoryOutputPaths`. After successful validation it commits only canonical Defender gzip stores and the self-contained HTML to the selected branch. The staging helper includes deletions of recognized history files. It excludes raw download responses, legacy downloads, credential/configuration files, locks, caches, temporary staging files, and arbitrary additional files. OIDC tokens stay in the authentication flow; no token response or credential file is an output destination. The exporter's existing URI sanitization remains in place.
+## Tenant binding before owner activation
 
-The HTML is also uploaded as an Actions artifact with 30-day retention. Audit and manifest files remain under ignored `.local/` on the runner and are neither committed nor uploaded. Failed validation does not publish partial results. Manual `dry_run: true` still authenticates and collects live data, but skips commits and uploads; the daily schedule publishes normally.
+**Keep the existing dashboard workflow disabled until the configured tenant is verified as Nathan’s approved demo tenant.** A source check cannot prove which directory is configured in GitHub. Offline tests need no tenant lookup, sign-in, credentials, new permissions or live dry run.
 
-The PDF job reads the committed `VulnerabilityDashboard.html`, renders five named report families, commits only their dated PDFs (including recognized deletions), and uploads those families as a 30-day Actions artifact. It is manual by default and does not authenticate to Azure. Run the update job successfully first to create the HTML; historical demo payloads are not restored by this source change.
+For the owner repository, `build/Invoke-LiveDashboardDryRun.ps1` requires the GitHub OIDC parameter set and an explicit nonempty tenant GUID. It rejects an ambient existing context as an authentication mode. After the existing OIDC connection, it checks that the Az context tenant matches that GUID, requests the Defender token with that explicit tenant, and checks the returned token tenant. Missing/mismatched context or token metadata, failed Az token acquisition, or a missing Az token command stops the run. Owner runs never fall back to the Azure CLI’s ambient account. Other private/local calls retain their existing fallback behavior. The source guard also protects owner-repository runs when that repository is private.
 
-Repository commits and Actions artifacts follow that repository's access controls. In Nathan's public repository these are intentionally public lab demos, and exporter logs can reveal lab group IDs and counts. In a private fork these outputs and logs contain that fork's tenant data. **Private repository status does not make GitHub Pages, Azure blobs, Container Apps, release assets, or any external destination private.** These two workflows do not deploy to those destinations; review separate publishing automation and its access controls before collecting live data. Public forks may inherit Nathan's published demos in Git history, but their shipped live jobs cannot collect and publish their own tenant data.
+Before activation, an authorized maintainer must verify this nonsecret binding metadata through the approved administrative path, without posting secret values or operational data:
 
-Output paths remain ignored for ordinary local work. The CI helper force-stages an explicit filename allowlist, requires an empty Git index, rejects non-regular outputs, and rechecks repository admission. Do not replace it with broad or whole-directory staging. This is output scoping, not general content redaction: review exporter/schema changes for credential-bearing fields before allowing them into demo output.
+- The intended demo directory’s tenant GUID equals the configured `AZURE_TENANT_ID`; use a GUID, not a domain alias.
+- The configured `AZURE_CLIENT_ID` identifies the intended application/service principal in that demo directory.
+- The existing federated credential has issuer `https://token.actions.githubusercontent.com`, subject `repo:nathanmcnulty/defender-reporting:ref:refs/heads/main`, and audience `api://AzureADTokenExchange`.
+- The approved branch, existing Defender access and public demo destination/logging approval refer to that same demo tenant. This revision grants no new Entra rights.
 
-## Setup for the owner repository or a private repository
+No actual binding values were retrieved or verified by the offline tests. `dry_run: true` still reads live Defender data and can emit public logs; it is not an offline activation test.
 
-1. Create the Entra app and federated credential:
+## Dashboard outputs
 
-```powershell
-.\Setup-GitHubActionServicePrincipal.ps1 -GitHubRepo "yourorg/defender-reporting" -IncludeAdvancedHunting
-```
+The job preserves its daily `02:00 UTC` schedule and manual trigger. It runs the existing exporter with Advanced Hunting still included by default; collection is not widened. After validation, the staging helper force-stages only these paths, including recognized deletions:
 
-Use `-Branch` for a branch other than `main`. Add the returned `AZURE_CLIENT_ID` and `AZURE_TENANT_ID` as Actions secrets. OIDC needs no stored client secret. The wrapper includes Advanced Hunting unless explicitly skipped, so grant `AdvancedQuery.Read.All` alongside `Vulnerability.Read.All` and `Machine.Read.All`.
+- `VulnerabilityDashboard.html`
+- `exports/VulnExport_current.json.gz`, `VulnContentDictionary.json.gz`, `VulnCurrentRefs.json.gz`
+- `exports/VulnHistory_YYYY[Q1-Q4].json.gz`, `VulnHistoryRows_YYYY[Q1-Q4].json.gz`, `VulnHistoryRefs_YYYY[Q1-Q4].json.gz` (quarter suffix optional)
+- `exports/Machines_Current.json.gz`, `Machines_History.json.gz`, `Machines_History_YYYYQ[1-4].json.gz`, `Machines_History_YYYYMMDDTHHMMSSZ_abcdefgh.json.gz` (eight lowercase hexadecimal suffix characters)
+- `exports/AdvancedHunting_Current.json.gz`
 
-2. Review branch protection and write permissions. Only guarded live jobs get `contents: write`; only the update job gets `id-token: write`. The PDF job has no OIDC permission. A protected branch can reject the bot push; no bypass or forced push is attempted.
-3. When ready for live work, use Actions → Update Vulnerability Dashboard → Run workflow on the intended branch, or the daily `02:00 UTC` schedule. Use dry-run for live validation without commits or artifacts. This local patch does not enable or dispatch workflows.
+Only the HTML is uploaded as a 30-day Actions artifact. Audit and manifest files remain under ignored `.local/` and are neither committed nor uploaded. Raw responses, legacy downloads, NVD cache files, credentials/configuration, locks, staging directories, arbitrary files and PDFs are excluded. The helper requires an empty index and rejects nonregular outputs before staging any file. Validation failure prevents publication; manual `dry_run: true` skips staging, commits and artifacts.
 
-## Offline validation
+This is a filename allowlist, not content redaction. Approved owner demo outputs and logs are public. Private repository status does not make Pages, blob storage, Container Apps or other external destinations private. These workflows do not deploy to those destinations. History cleanup and issue #68 remain separate.
 
-`Validate Dashboard` remains available on all forks with read-only repository permissions and synthetic fixtures, independent of root demo files. Run `node tests/Assert-DashboardWorkflowPrivacy.js` for the admission matrix and isolated Git staging checks, or `./build/Invoke-RegressionValidation.ps1` for the normal deterministic preflight. Neither needs live collection.
+## Existing private setup
+
+Use `Setup-GitHubActionServicePrincipal.ps1 -GitHubRepo "yourorg/defender-reporting" -IncludeAdvancedHunting` for the existing OIDC setup, and configure the returned client and tenant identifiers as `AZURE_CLIENT_ID` and `AZURE_TENANT_ID`. OIDC uses no stored client secret. This change does not run setup or alter credentials or service permissions. The exporter’s existing Advanced Hunting default still requires its existing `AdvancedQuery.Read.All` access alongside `Vulnerability.Read.All` and `Machine.Read.All`.
+
+Only the guarded dashboard job receives `contents: write` and `id-token: write`; top-level contents remain read-only. Branch protection may reject a bot push; there is no force push or protection bypass. Private forks retain their admission behavior and must review their own destination access controls before live collection.
+
+## Offline and hosted checks
+
+Run `node tests/Assert-DashboardWorkflowPrivacy.js` for admission, allowlist and isolated Git staging checks. Run `./tests/Run-SharedHelperRegression.ps1 -TestName Test-LiveDashboardTenantBinding` for extracted-function tests with synthetic Az/CLI mocks; it never executes the live wrapper or signs in. The normal `./build/Invoke-RegressionValidation.ps1` includes these checks and the repository parser/analyzer checks.
+
+After parent review and an authorized push, require successful `Validate Dashboard` CI for the exact proposed head. Verify the nonsecret demo binding above before merging/activation under the approved procedure. Only then re-enable the existing dashboard workflow and its unchanged `02:00 UTC` schedule. Keep the PDF workflow disabled. This source change enables, dispatches and publishes nothing by itself.
 
 Related: [workflow notes](workflows.md), [Azure setup](azure-setup.md).

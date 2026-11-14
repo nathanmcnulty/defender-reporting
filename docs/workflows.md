@@ -6,23 +6,23 @@ This repo currently ships six GitHub Actions workflows.
 
 | Workflow | File | Purpose |
 |---|---|---|
-| Update Vulnerability Dashboard | `.github/workflows/update-vulnerability-dashboard.yml` | Owner repository or private repositories: validate and publish scoped live demo outputs |
+| Update Vulnerability Dashboard | `.github/workflows/update-vulnerability-dashboard.yml` | Exact owner repository on main, or private repositories: validate and publish allowlisted dashboard outputs after demo tenant verification |
 | Validate Dashboard | `.github/workflows/validate-dashboard.yml` | Run the deterministic repo preflight used for local and PR validation |
 | Sync Azure Runbook | `.github/workflows/sync-azure-runbook.yml` | Rebuild and commit `azure/Invoke-DashboardPipeline.ps1` when its build sources change |
 | Build Azure Package | `.github/workflows/sync-azure-package.yml` | Build the latest Azure deployment zip and upload it as a downloadable workflow artifact |
 | Release Azure Package | `.github/workflows/release-azure-package.yml` | Build `Azure-YYMMDD.zip` from the published release tag and attach it to the GitHub release |
-| Export Dashboard PDFs | `.github/workflows/export-pdf-reports.yml` | Owner repository or private repositories: render and publish five named PDF report families |
+| Export Dashboard PDFs | `.github/workflows/export-pdf-reports.yml` | Private repositories only: render PDFs without publishing live reports; remains disabled pending a private source |
 
-Both live jobs require `${{ github.repository == 'nathanmcnulty/defender-reporting' || github.event.repository.private == true }}` at job level. Nathan intentionally publishes his lab demos; other public repositories skip before authentication, collection, or live logging. Synthetic validation runs independently on all forks. See [destination details and guard matrix](github-actions-setup.md). Private repository status does not protect public Pages or external storage; these workflows do not deploy to them.
+The dashboard job admits `(nathanmcnulty/defender-reporting AND refs/heads/main) OR private: true`; other public or unknown repositories skip before checkout or authentication. Keep the owner workflow disabled until the configured OIDC tenant is verified as the approved demo tenant. The PDF job remains private-only, read-only and unchanged, with publishing disabled. Exporter logs can expose RBAC group IDs and counts.
 
 ## Flow
 
 ```mermaid
 flowchart TD
-    A["Admit owner or private repository"] --> B["Live export"]
+    A["Update dashboard"] --> B["Live export dry run"]
     B --> C["Generate HTML"]
     C --> D["Validate output on ephemeral runner"]
-    D --> E["Commit scoped demo output and upload HTML artifact"]
+    D --> E["Stage allowlisted dashboard outputs; commit and upload HTML"]
 ```
 
 ## Update Vulnerability Dashboard
@@ -35,11 +35,11 @@ Trigger sources:
 Key behavior:
 
 - Uses repo-owned Azure OIDC logic through `build/Invoke-LiveDashboardDryRun.ps1`
-- Runs live export into `exports/` and validates `VulnerabilityDashboard.html`
-- Commits canonical Defender gzip stores and HTML to the selected branch; uploads HTML for 30 days
-- Keeps audit/manifest files under `.local/`, excluded from commits and uploads
-- Manual `dry_run: true` skips commits and uploads while still collecting live data
-- Skips public repositories other than the exact owner repository
+- Uses repository output paths for HTML and named gzip stores; audit and manifest stay under ignored `.local/`
+- Commits only the dashboard allowlist and uploads only HTML with 30-day retention after validation
+- Manual `dry_run: true` still collects live data, but skips staging, commits and artifacts
+- Owner runs require configured tenant GUID, matching Az context/token tenants, and no ambient CLI fallback; private/local behavior otherwise remains unchanged
+- Preserves the daily `02:00 UTC` schedule; source changes do not enable or dispatch it
 
 ## Validate Dashboard
 
@@ -53,7 +53,7 @@ Key behavior:
 
 - Installs `PSScriptAnalyzer` and `Az.Accounts`
 - Calls the repo-owned `build/Invoke-RegressionValidation.ps1` entrypoint
-- Validates generated deployment artifacts, source scripts, regression helpers, workflow admission/staging, the build-layer template publish contract, and synthetic-fixture dashboard generation through one deterministic path
+- Validates generated deployment artifacts, source scripts, regression helpers, the build-layer template publish contract, and committed-export dashboard generation through one deterministic path
 - Builds and extracts the Azure zip, asserts that it contains no `build/` dependency, and smoke-tests the packaged `azure/Upload-Templates.ps1` entrypoint
 
 ## Export Dashboard PDFs
@@ -61,15 +61,15 @@ Key behavior:
 Trigger sources:
 
 - Manual run today
-- Optional scheduled run in an admitted repository if you uncomment the cron entry in the workflow
+- Optional scheduled run in a private repository if you uncomment the cron entry in the workflow
 
 Key behavior:
 
 - Checks whether committed PDF exports are older than `VulnerabilityDashboard.html`
 - Uses Playwright and `.github/scripts/export-pdf-reports.js`
-- Commits five named dated PDF report families and uploads them for 30 days
-- Skips public repositories other than the exact owner repository
-- Requires committed HTML from a successful update; no historical demo files are restored by the source fix
+- Does not commit or upload generated PDFs
+- Runs only in private repositories; remains disabled/skipped in public repositories
+- In private repositories, remains disabled until a private dashboard source replaces the committed HTML
 
 ## Sync Azure Runbook
 
@@ -114,13 +114,13 @@ Key behavior:
 
 ## Suggested operating model
 
-- Use the update workflow for Nathan's intentional public lab demo or a private repository with reviewed destinations
+- Enable the daily dashboard refresh only after the owner demo tenant binding is verified, or use a private repository with reviewed destination access controls
 - Let the validation workflow protect changes to scripts and templates through the same deterministic preflight used locally
 - Let the runbook sync workflow keep the committed Azure Automation artifact aligned with the build sources
 - Use the Azure package workflow when you want a fresh downloadable deployment bundle without committing a binary into the repository
 - Publish a GitHub release when you want the release-specific `Azure-YYMMDD.zip` asset attached automatically
 - Use `tests/Invoke-AzureRunbookValidation.ps1` for guarded, temporary candidate validation against a real Automation account; it requires an explicit subscription and restores the runbook and storage state after the run
-- Run the guarded PDF workflow after committed HTML changes enough to warrant fresh report exports
+- Run the PDF workflow only in a private repository with a private dashboard source, when the HTML dashboard changes enough to warrant fresh report exports
 - Use `build/Invoke-LiveDashboardDryRun.ps1 -UseExistingAzContext` locally when you need exact-path validation for the live export flow before deploying to access-controlled storage
 
 ## Related docs

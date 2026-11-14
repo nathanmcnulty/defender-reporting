@@ -113,6 +113,14 @@ function Get-DashboardRootETag {
 }
 
 function Assert-True([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
+$script:ReadExportSnapshot = [pscustomobject]@{ ETag = $null; Manifest = $null }
+$script:ExportTransactionCalls = 0
+function Publish-ExportGeneration {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'The dedicated atomic-export regression exercises the real protocol; this suite isolates dashboard publication.')]
+    param($AccountName, $StorageToken, $ExportsPath, $Snapshot, $UseGzip)
+    Assert-True ([object]::ReferenceEquals($Snapshot, $script:ReadExportSnapshot)) 'Dashboard publication must forward the snapshot captured before export input reads.'
+    $script:ExportTransactionCalls++
+}
 function Get-BlobList {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Scoped mock uses the production Blob signature.')]
     param($AccountName, $Container, $StorageToken)
@@ -383,7 +391,9 @@ try {
             if ($ExplicitRoot) { $rootParameter.DashboardRootPath = $Root }
             if ($UseBoundedPublicationMetadataReader) { $rootParameter.UseBoundedPublicationMetadataReader = $true }
             $script:BoundedMetadataReads = 0
-            Export-ToBlobStorage -AccountName fixture -StorageToken fixture -ExportsPath $exports -DashboardPath (Join-Path $Root $Script:DashboardBlobName) @rootParameter | Out-Null
+            $script:ExportTransactionCalls = 0
+            Export-ToBlobStorage -AccountName fixture -StorageToken fixture -ExportsPath $exports -ExportSnapshot $script:ReadExportSnapshot -DashboardPath (Join-Path $Root $Script:DashboardBlobName) @rootParameter | Out-Null
+            Assert-True ($script:ExportTransactionCalls -eq 1) 'Expected exactly one independent export-generation transaction.'
             Assert-True (($script:BoundedMetadataReads -gt 0) -eq $UseBoundedPublicationMetadataReader) 'Publisher selected the wrong metadata reader.'
         }
         $script:Uploads.Clear()

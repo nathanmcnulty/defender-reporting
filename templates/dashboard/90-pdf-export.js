@@ -5,6 +5,52 @@
 // Track whether PDF libraries have been loaded
 let pdfLibrariesLoaded = false;
 
+function capturePdfReportSnapshot(selectedReport) {
+    const section = document.getElementById(selectedReport + '-section');
+    if (!section) throw new Error('The selected report is unavailable.');
+    const stats = document.querySelector('.container').querySelector('.stats-summary');
+    const canvas = section.querySelector('.chart-container canvas');
+    if (canvas && typeof Chart !== 'undefined' && typeof Chart.getChart === 'function') {
+        const chart = Chart.getChart(canvas);
+        if (chart) {
+            // Finish the selected chart at its current data, including a first
+            // render whose animation has not reached its final frame yet.
+            chart.stop();
+            chart.update('none');
+        }
+    }
+    return {
+        section: section.cloneNode(true),
+        stats: stats.cloneNode(true),
+        chartImage: canvas ? canvas.toDataURL('image/png') : null
+    };
+}
+
+async function capturePdfHeaderImage(headerDiv) {
+    document.body.appendChild(headerDiv);
+    try {
+        const canvas = await html2canvas(headerDiv, { scale: 2.5, backgroundColor: '#ffffff' });
+        return canvas.toDataURL('image/png');
+    } finally {
+        document.body.removeChild(headerDiv);
+    }
+}
+
+function extractPdfTableRow(cells, columnCount, makeCell) {
+    const row = [];
+    cells.forEach(cell => {
+        const span = Math.max(1, Number(cell.colSpan) || 1);
+        const value = makeCell(cell);
+        if (span > 1) value.colSpan = span;
+        row.push(value);
+        for (let index = 1; index < span; index++) row.push({});
+    });
+    if (row.length && row.length !== columnCount) {
+        throw new Error('The report table has an inconsistent number of columns.');
+    }
+    return row;
+}
+
 function hasPdfLibrariesAvailable() {
     return typeof pdfMake !== 'undefined'
         && typeof pdfMake.createPdf === 'function'
@@ -198,9 +244,8 @@ function restoreReportState(selectedReport, previousState) {
  * @param {string} reportName - Display name for the report
  * @returns {Object} PDF document definition
  */
-async function exportCardBasedReportToPdf(selectedReport, reportName) {
-    const container = document.querySelector('.container');
-    const activeSection = document.querySelector('.report-section.active');
+async function exportCardBasedReportToPdf(selectedReport, reportName, snapshot = capturePdfReportSnapshot(selectedReport)) {
+    const activeSection = snapshot.section;
     
     // Capture title and stats as image
     const headerDiv = document.createElement('div');
@@ -216,16 +261,10 @@ async function exportCardBasedReportToPdf(selectedReport, reportName) {
     title.style.marginBottom = '20px';
     headerDiv.appendChild(title);
     
-    const statsClone = container.querySelector('.stats-summary').cloneNode(true);
+    const statsClone = snapshot.stats;
     headerDiv.appendChild(statsClone);
     
-    document.body.appendChild(headerDiv);
-    const headerCanvas = await html2canvas(headerDiv, {
-        scale: 2.5,
-        backgroundColor: '#ffffff'
-    });
-    const headerImg = headerCanvas.toDataURL('image/png');
-    document.body.removeChild(headerDiv);
+    const headerImg = await capturePdfHeaderImage(headerDiv);
     
     // Extract data from cards instead of capturing as images
     const cardsContainer = activeSection.querySelector('.remediation-cards-container');
@@ -252,17 +291,16 @@ async function exportCardBasedReportToPdf(selectedReport, reportName) {
         // Extract CVE details or device info
         const cveDetails = card.querySelector('.cve-details');
         let deviceInfo = {};
-        let publishedDate = '';
-        let updateInfo = '';
+        const metadataParts = [];
         
         if (cveDetails) {
             const statBadges = cveDetails.querySelectorAll('.stat-badge');
             statBadges.forEach(badge => {
                 const text = badge.textContent.trim();
-                if (text.startsWith('Published:')) {
-                    publishedDate = text.replace('Published:', '').trim();
-                } else if (text.startsWith('Update:')) {
-                    updateInfo = text.replace('Update:', '').trim();
+                if (['Platform:', 'Published:', 'Patch:', 'Update:'].some(prefix => text.startsWith(prefix))) {
+                    // Preserve every visible patch/reference badge, including
+                    // older Update labels and cards with multiple references.
+                    metadataParts.push(text);
                 } else if (text.startsWith('IP:')) {
                     deviceInfo.ip = text.replace('IP:', '').trim();
                 } else if (text.startsWith('Group:')) {
@@ -321,8 +359,7 @@ async function exportCardBasedReportToPdf(selectedReport, reportName) {
                 const rows = table.querySelectorAll('tbody tr');
                 rows.forEach(row => {
                     const cells = row.querySelectorAll('td');
-                    const rowData = [];
-                    cells.forEach(cell => {
+                    const rowData = extractPdfTableRow(cells, tableHeaders.length, cell => {
                         // For severity cells, extract just text, not HTML
                         const severityBadges = cell.querySelectorAll('.severity-badge');
                         let cellText;
@@ -331,7 +368,7 @@ async function exportCardBasedReportToPdf(selectedReport, reportName) {
                         } else {
                             cellText = cell.textContent.trim();
                         }
-                        rowData.push({ text: cellText, fontSize: 9 });
+                        return { text: cellText, fontSize: 9 };
                     });
                     if (rowData.length > 0) {
                         tableBody.push(rowData);
@@ -352,34 +389,19 @@ async function exportCardBasedReportToPdf(selectedReport, reportName) {
             margin: [0, i > 0 ? 12 : 0, 0, 4]
         });
         
-        // Device info (for remediations by device) or CVE details (for devices by remediation)
-        if (deviceInfo.ip) {
-            const deviceInfoParts = [];
-            if (deviceInfo.ip) deviceInfoParts.push(`IP: ${deviceInfo.ip}`);
-            if (deviceInfo.group) deviceInfoParts.push(`Group: ${deviceInfo.group}`);
-            if (deviceInfo.tags) deviceInfoParts.push(`Tags: ${deviceInfo.tags}`);
-            
-            if (deviceInfoParts.length > 0) {
-                cardContent.push({
-                    text: deviceInfoParts.join('  |  '),
-                    fontSize: 9,
-                    color: '#666666',
-                    margin: [0, 0, 0, 3]
-                });
-            }
-        } else {
-            // CVE details line for devices by remediation
-            const detailsParts = [];
-            if (publishedDate) detailsParts.push(`Published: ${publishedDate}`);
-            if (updateInfo) detailsParts.push(`Update: ${updateInfo}`);
-            if (detailsParts.length > 0) {
-                cardContent.push({
-                    text: detailsParts.join('  |  '),
-                    fontSize: 9,
-                    color: '#666666',
-                    margin: [0, 0, 0, 3]
-                });
-            }
+        // Keep metadata for either card family, including device cards that
+        // also expose platform or patch/reference badges.
+        const detailsParts = metadataParts.slice();
+        if (deviceInfo.ip) detailsParts.push(`IP: ${deviceInfo.ip}`);
+        if (deviceInfo.group) detailsParts.push(`Group: ${deviceInfo.group}`);
+        if (deviceInfo.tags) detailsParts.push(`Tags: ${deviceInfo.tags}`);
+        if (detailsParts.length > 0) {
+            cardContent.push({
+                text: detailsParts.join('  |  '),
+                fontSize: 9,
+                color: '#666666',
+                margin: [0, 0, 0, 3]
+            });
         }
         
         // Stats line - ONLY show counts, no severities
@@ -439,6 +461,8 @@ async function exportCardBasedReportToPdf(selectedReport, reportName) {
         
         docContent.push(...cardContent);
     }
+
+    if (cards.length === 0) docContent.push({ text: 'No matching results.' });
     
     return {
         pageSize: 'A4',
@@ -454,9 +478,8 @@ async function exportCardBasedReportToPdf(selectedReport, reportName) {
  * @param {string} reportName - Display name for the report
  * @returns {Object} PDF document definition
  */
-async function exportTableBasedReportToPdf(selectedReport, reportName) {
-    const container = document.querySelector('.container');
-    const activeSection = document.querySelector('.report-section.active');
+async function exportTableBasedReportToPdf(selectedReport, reportName, snapshot = capturePdfReportSnapshot(selectedReport)) {
+    const activeSection = snapshot.section;
     
     // Capture title and stats as image
     const headerDiv = document.createElement('div');
@@ -472,26 +495,13 @@ async function exportTableBasedReportToPdf(selectedReport, reportName) {
     title.style.marginBottom = '20px';
     headerDiv.appendChild(title);
     
-    const statsClone = container.querySelector('.stats-summary').cloneNode(true);
+    const statsClone = snapshot.stats;
     headerDiv.appendChild(statsClone);
     
-    document.body.appendChild(headerDiv);
-    const headerCanvas = await html2canvas(headerDiv, {
-        scale: 2.5,
-        backgroundColor: '#ffffff'
-    });
-    const headerImg = headerCanvas.toDataURL('image/png');
-    document.body.removeChild(headerDiv);
+    const headerImg = await capturePdfHeaderImage(headerDiv);
     
     // Capture chart as image
-    let chartImg = null;
-    const chartContainer = activeSection.querySelector('.chart-container');
-    if (chartContainer) {
-        const canvas = chartContainer.querySelector('canvas');
-        if (canvas) {
-            chartImg = canvas.toDataURL('image/png');
-        }
-    }
+    const chartImg = snapshot.chartImage;
     
     // Extract table data
     const table = activeSection.querySelector('table');
@@ -512,12 +522,11 @@ async function exportTableBasedReportToPdf(selectedReport, reportName) {
         const rows = table.querySelectorAll('tbody tr');
         rows.forEach((row, idx) => {
             const cells = row.querySelectorAll('td');
-            const rowData = [];
-            cells.forEach(td => {
-                rowData.push({
+            const rowData = extractPdfTableRow(cells, tableHeaders.length, td => {
+                return {
                     text: td.textContent.trim(),
                     fillColor: idx % 2 === 0 ? '#f9f9f9' : '#ffffff'
-                });
+                };
             });
             if (rowData.length > 0 && rowData[0].text !== 'Loading data...') {
                 tableBody.push(rowData);
@@ -815,11 +824,16 @@ async function downloadPdfDocument(pdfDoc, fileName) {
 async function exportToPDF() {
     const button = document.querySelector('.export-pdf-btn');
     if (!button || button.disabled) return;
+    if (document.getElementById('reportSelector')?.value !== activeReportId) {
+        setDashboardStatus('Wait for the selected report to finish loading before exporting PDF.', 'info');
+        return;
+    }
     const originalButtonText = button.textContent;
     let progressDiv;
     let selectedReport;
     let previousState;
     let expansionStarted = false;
+    let unlockDashboard;
 
     const updateProgress = (percent, text) => {
         const fill = progressDiv.querySelector('.pdf-progress-fill');
@@ -830,6 +844,18 @@ async function exportToPDF() {
 
     try {
         button.disabled = true;
+        // A just-applied filter may still be waiting for its debounce timer.
+        // Flush it before taking ownership; queued report renders then see the
+        // same filter state as the export and cannot restore an older scope.
+        if (applyFiltersTimer) {
+            clearTimeout(applyFiltersTimer);
+            applyFiltersTimer = null;
+            applyFilters();
+        }
+        unlockDashboard = lockDashboardForPdf();
+        const selector = document.getElementById('reportSelector');
+        selectedReport = selector.value;
+        const reportName = selector.options[selector.selectedIndex].text;
         progressDiv = document.createElement('div');
         progressDiv.className = 'pdf-export-progress';
         progressDiv.innerHTML = '<div class="pdf-progress-container"><div class="pdf-progress-fill" style="width: 0%"></div></div><div class="pdf-progress-text">Loading libraries... 0%</div>';
@@ -837,12 +863,20 @@ async function exportToPDF() {
         updateProgress(5, 'Loading libraries...');
         button.textContent = '📄 Loading libraries...';
         setDashboardStatus('Preparing PDF export...');
+        const startDate = filterState.startDate;
+        const endDate = filterState.endDate;
+        const dateRangeText = formatDateLabel(filterState);
+        const deviceGroupsText = getExportFilterText('filterRbacGroup', 'All Groups');
+        const deviceTagsText = getExportFilterText('filterDeviceTags', 'All Tags');
+        const deviceNamesText = getExportFilterText('filterDeviceName', 'All Devices');
+        const osPlatformsText = getExportFilterText('filterOSPlatform', 'All Platforms');
+        const severitiesText = getExportFilterText('filterSeverity', 'All Severities');
+        const capturedRemediationMode = remediationReportMode;
+        const remediationModeSummary = isRemediationScopeReport(selectedReport)
+            ? getRemediationReportModeSummaryText(filterState) : null;
         await loadPdfLibraries();
         updateProgress(20, 'Libraries loaded.');
 
-        const selector = document.getElementById('reportSelector');
-        selectedReport = selector.value;
-        const reportName = selector.options[selector.selectedIndex].text;
         previousState = getReportExpansionState(selectedReport);
     
         updateProgress(25, 'Checking export size...');
@@ -858,6 +892,7 @@ async function exportToPDF() {
         button.textContent = '📄 Expanding data...';
         expansionStarted = true;
         expandReportForPdf(selectedReport);
+        const snapshot = capturePdfReportSnapshot(selectedReport);
         await new Promise(resolve => setTimeout(resolve, 100));
         updateProgress(35, 'Generating PDF...');
         button.textContent = '📄 Generating PDF...';
@@ -867,22 +902,14 @@ async function exportToPDF() {
         // Choose export strategy based on report type
         let docDefinition;
         if (selectedReport === 'devices-by-remediation' || selectedReport === 'remediations-by-device') {
-            docDefinition = await exportCardBasedReportToPdf(selectedReport, reportName);
+            docDefinition = await exportCardBasedReportToPdf(selectedReport, reportName, snapshot);
         } else {
-            docDefinition = await exportTableBasedReportToPdf(selectedReport, reportName);
+            docDefinition = await exportTableBasedReportToPdf(selectedReport, reportName, snapshot);
         }
         
         updateProgress(70, 'Adding filters...');
         
         // Add filter information  
-        const startDate = filterState.startDate;
-        const endDate = filterState.endDate;
-        const dateRangeText = formatDateLabel(filterState);
-        const deviceGroupsText = getExportFilterText('filterRbacGroup', 'All Groups');
-        const deviceTagsText = getExportFilterText('filterDeviceTags', 'All Tags');
-        const deviceNamesText = getExportFilterText('filterDeviceName', 'All Devices');
-        const osPlatformsText = getExportFilterText('filterOSPlatform', 'All Platforms');
-        const severitiesText = getExportFilterText('filterSeverity', 'All Severities');
         
         const filterContent = [];
         
@@ -914,6 +941,21 @@ async function exportToPDF() {
             });
         }
         
+        if (remediationModeSummary !== null) {
+            filterContent.push({
+                text: [
+                    { text: 'Include resolved vulnerabilities: ', bold: true },
+                    { text: capturedRemediationMode === REMEDIATION_REPORT_MODE_RANGE ? 'Yes' : 'No' }
+                ],
+                margin: [0, 2, 0, 2],
+                fontSize: 10
+            }, {
+                text: remediationModeSummary,
+                margin: [0, 2, 0, 2],
+                fontSize: 10
+            });
+        }
+
         filterContent.push({
             text: [
                 { text: 'Groups: ', bold: true },
@@ -978,6 +1020,7 @@ async function exportToPDF() {
             console.error('PDF report restoration failed:', error);
             setDashboardStatus('Failed to restore report after PDF export: ' + error.message, 'error');
         } finally {
+            if (unlockDashboard) unlockDashboard();
             document.body.classList.remove('pdf-export-active');
             button.disabled = false;
             button.textContent = originalButtonText;

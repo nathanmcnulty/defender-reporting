@@ -4,7 +4,7 @@
 
 Defender for Endpoint vulnerability reporting has always been a pain point, and this felt like a great opportunity to use AI-assisted coding to build a dashboard without a dependency on Power BI or other expensive tools. The result is a PowerShell-built dashboard that defaults to a self-contained HTML artifact for direct-open use, with an opt-in split-assets mode for hosted deployments, along with validation tooling, Azure automation assets, GitHub Actions workflows, and PDF report generation.
 
-Nathan intentionally publishes his real lab exports, dashboard, and PDFs as demos in `nathanmcnulty/defender-reporting`. Live workflows allow only that exact repository or private repositories; other public forks skip before authentication, collection, or live logging. Regression tests remain independent, using deterministic synthetic datasets and `tests/fixtures/`. Ordinary local output paths stay ignored. See [GitHub Actions setup](docs/github-actions-setup.md) for the guard matrix, publication paths, and destination access controls.
+The dashboard workflow can publish Nathan’s approved demo exports and HTML only from `nathanmcnulty/defender-reporting` on `refs/heads/main`, or from a private repository under its existing rules. Keep the owner workflow disabled until its configured OIDC tenant is verified as the approved demo tenant; source checks alone cannot establish that binding. The PDF workflow remains private-only, unchanged, and disabled for public use, with no publishing steps. Ordinary local outputs stay ignored. Regression tests use deterministic synthetic datasets in temporary directories and minimal synthetic legacy fixtures under `tests/fixtures/`; do not include tenant data in test or PR evidence. Removing current-tree outputs does not remove historical copies; issue #68 remains open for the separate private historical response. See [GitHub Actions setup](docs/github-actions-setup.md) for the admission matrix and exact output allowlist.
 
 ## How it works
 
@@ -41,6 +41,8 @@ $secret = Read-Host -AsSecureString -Prompt 'Enter client secret'
     -OutputPath .\exports `
     -IncludeAdvancedHunting
 ```
+
+The exporter creates the requested output directory before authentication, including on a clean checkout. An empty optional Advanced Hunting query does not discard other enrichment; if all three queries are empty, the prior enrichment store remains unchanged.
 
 2. Generate and validate the default self-contained dashboard.
 
@@ -138,7 +140,7 @@ For managed identity auth, Azure provisioning, and GitHub workflow setup, use th
 
 Recommended project convention:
 
-- Outside Nathan's intentional public lab demo, keep tenant dashboards and exports in storage with appropriate access controls. Private repository status does not protect a separate public Pages or external storage destination.
+- Outside the verified owner demo, keep live `VulnerabilityDashboard.html` and exports in access-controlled storage. Private repository status does not protect a separate public Pages or external storage destination.
 - When you need both delivery models, generate `VulnerabilityDashboard.Hosted.html` with `-DualPackage` so both outputs share the same normalized payload bytes.
 
 Azure note: `Setup-AzureResources.ps1` resolves this automatically. With `-IncludeContainerApp`, Azure defaults to the hosted split-assets mode. Without a Container App, Azure defaults to the self-contained mode unless you override it.
@@ -151,6 +153,7 @@ For local testing of the split-assets build, use a local HTTP server instead of 
 
 | Topic | What it covers |
 |---|---|
+| [Roadmap](docs/roadmap.md) | Product priorities, future work, and the decisions that remain open |
 | [Azure setup](docs/azure-setup.md) | API permissions, authentication options, Azure Automation provisioning, and Container App publishing |
 | [Build guide](build/README.md) | Maintainer-facing build, validation, and packaging entrypoints |
 | [GitHub Actions setup](docs/github-actions-setup.md) | OIDC service principal setup, required repository secrets, and branch protection guidance |
@@ -199,17 +202,17 @@ The root scripts above are the primary user-facing entrypoints. Maintainer and a
 flowchart TD
     A["Same export and generation scripts"] --> B["Run locally"]
     A --> C["Run in Azure Automation"]
-    A --> D["Run in GitHub Actions (owner repository or private repositories)"]
+    A --> D["Run in GitHub Actions (owner main or private repositories)"]
     A --> H["Run in Azure Function App"]
     B --> E["Open HTML directly"]
     C --> F["Publish to blob storage\nand optional Container App"]
-    D --> G["Validate and publish scoped demo outputs\nto repository and Actions artifacts"]
+    D --> G["Validate and publish allowlisted dashboard outputs"]
     H --> F
 ```
 
 ## Notes
 
-- The live dashboard update and PDF jobs allow only `nathanmcnulty/defender-reporting` or private repositories. Other public repositories skip before live work. Owner demo logs and outputs intentionally contain lab data; synthetic PR evidence should use fixtures.
+- The dashboard workflow admits the exact owner repository on `main`, plus private repositories; unknown visibility elsewhere fails closed. Keep it disabled until the approved demo tenant binding is verified. PDF export remains private-only and does not publish outputs. Exporter logs can expose RBAC group IDs and counts, so owner demo activation also approves those logs.
 - Build sources and build scripts now live under `build/`.
 - `build/generated/shared-helpers.ps1`, `build/generated/validation-helpers.ps1`, and `azure/function-app/ExportAndGenerate/run.ps1` are generated on demand and ignored by git.
 - `azure/Invoke-DashboardPipeline.ps1` is generated from the `build/` sources and can be refreshed locally or by CI.
@@ -229,7 +232,7 @@ flowchart TD
 - Run `./build/Build-AzureReleasePackage.ps1` when you want the exact local packaging path used by both workflows.
 - Run `./Invoke-NvdCveExport.ps1` to build or refresh the optional `NvdCve_Current.json.gz` enrichment cache consumed by dashboard generation; see `docs/nvd-enrichment.md` for usage details.
 - Legacy `VulnExport_<group>_<date>.json(.gz)` compatibility remains temporary through `2026-07-01`.
-- The guarded PDF workflow publishes five named report families under `reports/` and as Actions artifacts. This source change does not restore historical payloads or run live jobs.
+- Existing PDF outputs under `reports/` remain tracked pending private history review; keep new live PDFs in access-controlled storage, not this public repository or workflow artifacts.
 - `.dashboard-cache/` directories are derived local caches and are intentionally ignored by git.
 - Manual troubleshooting harnesses live under `tests/manual/` and default to ignored local output paths.
 - Recorded benchmark baselines are summarized in `docs/performance-baselines.md`; raw benchmark JSON stays local-only.

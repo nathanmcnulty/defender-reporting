@@ -39,6 +39,26 @@ The shared-helper regression lane now logs `START <Test-Name>` and a per-test el
 
 ## Test lanes at a glance
 
+The first-run/empty-enrichment and Azure export-generation protocol regressions
+run in deterministic preflight:
+
+```powershell
+pwsh -NoProfile -File ./tests/Invoke-FirstExportRegression.ps1
+pwsh -NoProfile -File ./tests/Invoke-AtomicExportPublicationRegression.ps1
+node ./tests/Assert-DashboardScopePdfConsistency.js
+```
+
+The PDF scope test always checks the production extraction/snapshot paths. For
+actual pdfmake layout and PDF-byte generation, set `PDFMAKE_TEST_LIBRARY` and
+`PDFMAKE_TEST_FONTS` to the existing pinned `pdfmake` and `vfs_fonts` JavaScript
+files before running it. Without those files it explicitly reports that real
+PDF generation was not run. Image capture in this Node test is stubbed; browser
+canvas rendering, visual readability and the final user download remain separate.
+
+See [the generation protocol](../docs/export-generation-publication.md) for
+legacy cutover, failure recovery and retention boundaries. The in-memory storage
+test does not establish actual Azure conditional requests or runtime acceptance.
+
 | Lane | Primary entrypoint | Use it for |
 | --- | --- | --- |
 | Deterministic regression gate | `build/Invoke-RegressionValidation.ps1` | Every PR and before heavier validation |
@@ -85,6 +105,117 @@ Profile ownership uses native Windows argument parsing, a single exact profile s
 Owned termination orders descendants before their roots and requires fresh process/root identity before a kill. An item with incomplete fresh creation-time or root-command-line evidence is skipped without calling `Get-Process` or `Kill`; only sanitized `processIdentity`, `rootCommandLine`, and `rootCreationDate` attempt counters are retained in `termination.skippedUnverified`. Every selected identity, including a child first discovered during termination, remains accountable until its own absence or PID reuse is verified. Final inventory accounts for same-identity children independently of root disappearance or root PID reuse; this accounting can conservatively retain descendants, but it never authorizes a kill. Unknown final owned identity fails closed and retains the profile. The ownership mocks cover both incomplete fields, no unverified kill, integrated orphan/root-reuse survivors failing cleanup, actual disappearance and own-PID reuse passing final inventory, descendant-before-root order, unexpected native kill failures, unknown live identities, and PID reuse. A failed termination leaves accounting incomplete for that owner instance: later inventory cannot claim zero or remove the profile. Final zero processes never erases an earlier operation failure. Actual acceptance requires a non-mock native cold/reload control with Node exit zero, no cleanup failures, profile removal, server closure, unchanged fixture hashes, and preserved unrelated process identities. These checks establish the exercised lifecycle and readiness/cache behavior only; they do not establish historical large-data performance.
 
 ## Hosted smoke diagnostics
+
+The worker-transfer harness can also exercise the admin flow in its existing
+owned browser. Set `DASHBOARD_BROWSER_ENGINE=chrome` for the installed Chrome
+engine; the default remains Edge and a missing selected engine fails without
+fallback. Engine executable SHA-256 and actual version are recorded. Use
+`--generated-runtime` to measure the exact newly generated hosted runtime and
+optional chunks, rather than the default source overlay.
+
+Add `--admin-exercise` to measure filter completion, all five report switches,
+all three report detail dialogs, PDF runtime/library loading and real PDF
+preparation for representative and empty scopes. This uses one selected device
+with at most 250 source rows for bounded PDFs while loading/filtering the full
+input. It checks ten real PDF buffers and restores the original scope. It does
+not establish visual readability or the final OS
+download. Normal native ownership, resource, admission and outer-supervision
+requirements still apply; do not run this option as an unguarded stress test.
+Detail dialogs are opened through the actual delegated table-row click handlers.
+Missing matching rows are labelled explicitly rather than assigned a latency.
+The two device reports show details inline; that cost is included in report
+switching and is not reported again as a separate dialog-opening measurement.
+The representative filter must settle and pass the existing row cap before PDF
+runtime/library loading starts; their separate timings record that selected
+scope. Runtime/library failures still restore the original filter, report, mode
+and warning state without assuming a download hook was loaded.
+
+By default, both exercise lanes first tour all five reports at the original,
+unfiltered scope. Add `--scoped-admin-first` with either `--admin-exercise` or
+`--saved-artifacts` to run load → filter → scoped reports/detail/PDF → restore
+immediately after the readiness snapshot, omitting that unfiltered tour. The
+option cannot run alone. The workload label distinguishes the two sequences;
+scoped-first runs retain `reportSwitches: []` and `readinessCacheDigest: null`,
+and do not qualify unfiltered report switching. Their `reportIds`, `reportRows`
+and representative `impactRows` come from the actual helper receipts. A separate
+`scopedWorkloadSummary`/`scopedWorkloadDigest` compares source rows, grouped rows
+and severity cards for every captured scope/report across cold/reload; it also
+includes saved-artifact range modes and any admitted long-table scope. Existing
+all-five representative/empty coverage, scope restoration, cache, native owner,
+resource and cleanup checks remain required. This is a bounded scoped workflow,
+not evidence that the unfiltered-tour stress workload passes.
+
+For genuine self-contained acceptance, add `--self-contained --generated-runtime`
+and supply a directory containing `VulnerabilityDashboard.html`. The harness
+navigates to the exact retained `file://` URL, executes its actual inline runtime
+and embedded libraries, and fingerprints its embedded compressed payload. It
+does not substitute the source overlay or serve the page over HTTP. File requests
+are restricted to that exact HTML file, optionally with its single persisted
+`view` parameter; neighboring files, external URLs and arbitrary queries fail.
+Hosted mode keeps its existing same-origin policy. Compare the payload identity
+and DOM scope receipts across delivery modes; the embedded product has no
+separate hosted summary asset.
+
+Use `--date-range=2025-01-01/2026-10-22` for the retained 19,677-row synthetic
+fixture, or `--positive-control` for the two-row January 1-2, 2026 fixture. The
+chosen range is applied through the real date popover and recorded explicitly.
+Do not infer a valid empty input or supported tenant maximum from these fixtures.
+
+`--saved-artifacts` is a separate acceptance lane and cannot be combined with
+`--admin-exercise` getBuffer timing. It retains the real `downloadPdfDocument`,
+observes the browser download event, and saves actual PDFs with `saveAs` for
+all five reports in representative and empty scopes, with snapshot mode selected
+for the two device reports. Two additional representative PDFs select observed
+range mode through the real device-report mode buttons. Each load captures twelve
+PDFs plus viewport screenshots and JSON receipts of the exact expanded DOM,
+table cells, report/filter/mode, source/grouped counts, cards and restoration.
+Card receipts retain every title, visible metadata and stat badge, including
+Platform, Patch and legacy Update references. Device receipts include the exact
+UI mode summary and resolved-inclusion label; mode-button transitions are
+recorded separately from already-selected controls. Compare all these fields
+against actual PDF text; matching receipts alone do not establish PDF parity.
+The saved-artifact lane prepares the PDF runtime only after the selected device
+scope passes the same row cap. PDF libraries load through the actual Export PDF
+button; there is no eager unfiltered library preload in this lane.
+One additional Active Vulnerabilities PDF is captured only when a selected
+subset of at most 250 source rows actually yields more than 100 grouped report
+rows. Unavailable long-table coverage is labelled; no row or resource bound is
+raised. Screenshots use a fixed 1440 by 1000 viewport. Each artifact is capped
+at 64 MiB and each expanded report text receipt at 500,000 characters.
+
+Use a fresh evidence JSON path outside the retained product directory. Artifacts
+are saved beside it under `<evidence-path>.artifacts/iteration-<n>-<first|reload>`.
+Individual files are **pending** until the containing run passes all scope,
+resource, download, restoration and native cleanup checks. Hashes and PDF
+header/EOF validation establish file identity/completeness, not semantic or
+visual acceptance: extract PDF text and compare the selected filters, table
+content and totals with the receipts, then render and inspect the PDF pages.
+Viewport screenshots alone do not establish long-table PDF pagination quality.
+The saved-artifact lane also exercises real facet pill/checkbox/Apply events,
+explicit severity selection and individual deselection to None. It checks the
+group/platform hidden-selection intersection using two existing devices with
+distinct groups and platforms when available, or the existing global facets;
+otherwise that case is labelled unavailable. Report changes use the visible
+report popover and PDFs use the actual Export PDF button. Fixture planning and
+final restoration still use read-only inspection and the saved state API; this
+bounded event exercise does not claim coverage of every UI interaction.
+Keep these synthetic artifacts private; do not use the content-capture option
+with live tenant data. Use one pinned common harness for both product revisions
+and identical engine/runtime/input/library bytes for comparisons. The existing
+outer supervisor, admission samples and native ownership gates remain required.
+
+Browser-free controls run as part of the existing measurement/telemetry mock
+lane, and can be run alone with `node tests/Assert-DashboardArtifactAcceptance.js`.
+They exercise exact file URL scope, retained inline identity, operation deadlines,
+download-event ordering/failure, truncated PDF rejection and invalid receipts;
+they do not launch a browser or establish download/visual acceptance.
+
+Add `--progress-journal` to retain bounded stage/memory samples beside the
+evidence JSON when an outer supervisor terminates the process before its final
+write. Its parent directory must already exist outside the retained product.
+The fresh journal is capped at 2 MiB and contains input fingerprints and
+existing guard samples. It is partial diagnostic evidence, never proof of run
+completion or cleanup. Use the same setting for both sides of a comparison.
 
 Run the isolated two-row Hosted dashboard control, generated from synthetic data without root exports, authentication, or cloud writes:
 
@@ -608,3 +739,9 @@ every job member and birth identity, exact parent topology, root exclusion,
 fanout buffer growth, terminal zero membership, retained-handle exit, both
 stream EOF/error states, repeated completion, neighbor survival and retained
 unknown-owner profiles. Outer cleanup alone never establishes acceptance.
+
+## Dashboard-only owner publication
+
+`node tests/Assert-DashboardWorkflowPrivacy.js` checks the exact owner/main exception, private admission, unknown-visibility rejection, unchanged daily schedule, dashboard filename allowlist, empty-index staging, deletions and nonregular-file rejection using synthetic temporary Git repositories. PDF publication is excluded.
+
+`./tests/Run-SharedHelperRegression.ps1 -TestName Test-LiveDashboardTenantBinding` extracts only named function definitions from the live wrapper and supplies synthetic Az context/token and CLI mocks. It rejects missing, mismatched or unproven owner tenants and prevents ambient owner fallback while retaining private/local fallback. It performs no sign-in, tenant lookup or live collection and needs no service credentials. A passing source test does not verify the actual configured demo tenant. Do not invoke the live `dry_run` as an offline test; see [the activation binding checklist](../docs/github-actions-setup.md).

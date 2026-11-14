@@ -1,6 +1,81 @@
 ﻿const assert = require('assert');
 const { createDocumentStub, loadDashboardHarness } = require('./helpers/dashboard-test-harness');
 
+function assertDerivedDateParity() {
+    const dashboard = loadDashboardHarness(`module.exports = {
+        formatDateYMD, applyDerivedVulnerabilityFields, getFirstSeenDate, getLastSeenDate,
+        getMachineLastSeenDate, getRowLatestActivityDate, hasKnownPatchEvidence,
+        getEffectiveOpenEndDate, getRemediationDate, buildRemediationString,
+        quality: () => dataQualitySummary, latest: () => mostRecentLastSeenDate
+    };`);
+    for (const [input, expected] of [
+        [null, '-'], [undefined, '-'], ['', '-'], [0, '-'], [0n, '-'], [false, '-'], [NaN, '-'],
+        ['2026-01-02', '2026-01-02'], ['2026-99-99', '2026-99-99'],
+        ['2026-01-02T12:34:56Z', '2026-01-02'], ['2026-01-02 12:34:56', '2026-01-02'],
+        ['1/2/2026', '2026-01-02'], ['01/02/2026', '2026-01-02'], ['2/30/2026', '2026-02-30'],
+        ['not-a-date', 'not-a-date'], [' 2026-01-02', ''], ['2026-01-02\n', '2026-01-02\n'],
+        [new String('2026-01-02'), '2026-01-02']
+    ]) assert.strictEqual(dashboard.formatDateYMD(input), expected, 'Preserve date formatter fallback semantics.');
+    for (const input of [1, 1n, true, {}, [], new Date('2026-01-02'), Symbol('date')]) {
+        assert.throws(() => dashboard.formatDateYMD(input), error => error.name === 'TypeError', 'Truthy non-string inputs must retain the existing split type error.');
+    }
+    let splitCalls = 0;
+    assert.strictEqual(dashboard.formatDateYMD({ get length() { throw new Error('Object length must remain unread.'); }, split() { splitCalls++; return ['2026-01-02']; } }), '2026-01-02');
+    assert.strictEqual(splitCalls, 1, 'Object split behavior must not be bypassed by the string fast path.');
+
+    const row = (id, overrides = {}) => ({
+        DeviceId: id, DeviceName: id, CveId: 'CVE-shared', SoftwareVendor: 'Contoso',
+        SoftwareName: 'Widget', SoftwareVersion: '1', FirstSeenTimestamp: '2026-03-10',
+        LastSeenTimestamp: '2026-03-20', MachineInfo: { ls: '2026-03-20' },
+        PublishedDate: '2026-01-01', CveBatchTitle: 'March update', RecommendedSecurityUpdateId: '123',
+        ...overrides
+    });
+    const shared = row('shared');
+    const rows = [shared, row('earlier', { FirstSeenTimestamp: '2026-02-01' }), shared,
+        row('other-version', { SoftwareVersion: '2', FirstSeenTimestamp: '2026-01-01' }),
+        row('other-vendor', { SoftwareVendor: 'Other', FirstSeenTimestamp: '2025-01-01' }),
+        row('other-software', { SoftwareName: 'Other', FirstSeenTimestamp: '2024-01-01' }),
+        row('other-cve', { CveId: 'CVE-other', FirstSeenTimestamp: '2023-01-01' }),
+        row('patched', { LastSeenTimestamp: '1/10/2026 00:00', MachineInfo: { ls: '2026-01-11T01:00:00Z' }, PublishedDate: '' }),
+        row('machine-older', { LastSeenTimestamp: '2026-01-31', MachineInfo: { ls: '2026-01-30' }, PublishedDate: '1/1/2026' }),
+        row('no-machine', { LastSeenTimestamp: '2024-02-01', MachineInfo: null }),
+        row('no-last', { LastSeenTimestamp: '', MachineInfo: { ls: '2026-04-01' } }),
+        row('invalid-last', { LastSeenTimestamp: 'invalid', MachineInfo: { ls: 'invalid' } }),
+        row('cached-date', { _firstSeenDate: '2026-02-15', _lastSeenDate: '2026-02-16', MachineInfo: { lastSeen: '2026-02-17' } })];
+    const temporal = rows.map(value => ({
+        first: dashboard.getFirstSeenDate(value), machine: dashboard.getMachineLastSeenDate(value),
+        latest: dashboard.getRowLatestActivityDate(value), patch: dashboard.hasKnownPatchEvidence(value),
+        end: dashboard.getEffectiveOpenEndDate(value), remediation: dashboard.getRemediationDate(value),
+        text: dashboard.buildRemediationString(value)
+    }));
+    const source = JSON.stringify(rows.map(value => [value.FirstSeenTimestamp, value.LastSeenTimestamp, value.MachineInfo, value.CveId, value.SoftwareVendor, value.SoftwareName, value.SoftwareVersion]));
+    for (let pass = 0; pass < 2; pass++) {
+        dashboard.applyDerivedVulnerabilityFields(rows);
+        assert.strictEqual(shared._environmentFirstSeenDate, '2026-02-01', 'Repeated references must retain the earliest matching issue date on both occurrences.');
+        assert.strictEqual(rows[3]._environmentFirstSeenDate, '2026-01-01', 'Version identity must remain separate.');
+        assert.strictEqual(rows[4]._environmentFirstSeenDate, '2025-01-01', 'Vendor identity must remain separate.');
+        assert.strictEqual(rows[5]._environmentFirstSeenDate, '2024-01-01', 'Software identity must remain separate.');
+        assert.strictEqual(rows[6]._environmentFirstSeenDate, '2023-01-01', 'CVE identity must remain separate.');
+        rows.forEach((value, index) => {
+            assert.deepStrictEqual([value._firstSeenDate, value._machineLastSeenDate, value._latestActivityDate, value._hasPatchEvidence,
+                value._effectiveOpenEndDate, value._remediationDate, value._remediationString], Object.values(temporal[index]));
+            assert.strictEqual(value._issueKey, null);
+            for (const field of ['DiskPaths', 'RegistryPaths', 'VulnerabilityDescription', '_mat']) assert(!Object.prototype.hasOwnProperty.call(value, field), 'Derived refresh must keep detail evidence lazy.');
+        });
+        assert.strictEqual(JSON.stringify(rows.map(value => [value.FirstSeenTimestamp, value.LastSeenTimestamp, value.MachineInfo, value.CveId, value.SoftwareVendor, value.SoftwareName, value.SoftwareVersion])), source);
+        const quality = dashboard.quality();
+        assert.strictEqual(quality.totalRecords, rows.length, 'Count duplicate array entries independently.');
+        assert.strictEqual(quality.uniqueDevices, rows.length - 1);
+        assert.strictEqual(quality.uniqueCves, 2);
+        assert.strictEqual(quality.missingPublished, 1);
+        assert.strictEqual(quality.nonYmdPublished, 1);
+        assert.strictEqual(quality.invertedRanges, 3);
+        assert.strictEqual(dashboard.latest(), 'invalid', 'Retain legacy malformed-date ordering rather than silently changing its semantics.');
+    }
+    assert.strictEqual(rows[8]._effectiveOpenEndDate, '2026-03-02', 'Preserve month rollover at the inactivity cutoff.');
+    assert.strictEqual(rows[9]._effectiveOpenEndDate, '2024-03-02', 'Preserve leap-year inactivity arithmetic.');
+}
+
 function createCacheDatabase() {
     const entries = new Map();
     const state = { entries, closes: 0, bodyScans: 0, deleted: [], puts: 0, schema: null, mode: 'normal' };
@@ -212,6 +287,7 @@ module.exports = { denormalizeInWorker };
 }
 
 async function main() {
+    assertDerivedDateParity();
     const dashboard = loadDashboardHarness(`
 const payload = {
     lookups: {

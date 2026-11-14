@@ -244,6 +244,9 @@ if (Test-LastExitCodeFailed) {
 Write-Output 'Running shared-helper regression tests...'
 & (Join-Path $repoRoot 'tests\Run-SharedHelperRegression.ps1')
 
+Write-Output 'Running store transaction recovery regression tests...'
+& (Join-Path $repoRoot 'tests\Test-StoreTransactionRecovery.ps1')
+
 Write-Output 'Running hosted smoke diagnostics regression tests (no Edge required)...'
 & (Join-Path $repoRoot 'tests\Invoke-HostedSmokeDiagnosticsRegression.ps1')
 
@@ -263,6 +266,12 @@ Write-Output 'Running Setup generation-scoped artifact validation regression tes
 & (Join-Path $repoRoot 'tests\Invoke-SetupArtifactValidationRegression.ps1') -AssetGeneration '11111111111111111111111111111111'
 
 Write-Output 'Running atomic dashboard publication regression tests...'
+& (Join-Path $repoRoot 'tests\Invoke-FirstExportRegression.ps1')
+if (Test-LastExitCodeFailed) { throw 'First-export regression failed.' }
+Reset-LastExitCode
+& (Join-Path $repoRoot 'tests\Invoke-AtomicExportPublicationRegression.ps1')
+if (Test-LastExitCodeFailed) { throw 'Atomic export publication regression failed.' }
+Reset-LastExitCode
 & (Join-Path $repoRoot 'tests\Invoke-AtomicDashboardPublicationRegression.ps1')
 
 Write-Output 'Running dashboard JavaScript regression tests...'
