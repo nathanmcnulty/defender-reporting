@@ -53,6 +53,12 @@
     Required when ComputeType is FunctionApp.
     Must be 2-60 characters: alphanumeric and hyphens.
 
+.PARAMETER AutomationAzAccountsVersion
+    Optional stable major.minor.patch version of Az.Accounts for Automation.
+    Uses the exact versioned PowerShell Gallery URI and requires matching package
+    version readback. Omit to retain latest-version behavior. This is not a
+    package hash check and does not select Function App bundled modules.
+
 .PARAMETER StorageAccountName
     Name of the Azure Storage account. Created if it does not exist.
     Must be 3-24 characters: lowercase letters and numbers only.
@@ -175,6 +181,11 @@ param(
     [Parameter(Mandatory = $false, HelpMessage = "Automation account name (required for AutomationAccount compute type; optional migration source for FunctionApp)")]
     [string]$AutomationAccountName,
 
+    [Parameter(Mandatory = $false, HelpMessage = "Exact stable Az.Accounts version for Automation (omit for latest)")]
+    [ValidateLength(5, 32)]
+    [ValidatePattern('\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z')]
+    [string]$AutomationAzAccountsVersion,
+
     [Parameter(Mandatory = $false, HelpMessage = "Function App name (required for FunctionApp compute type)")]
     [string]$FunctionAppName,
 
@@ -223,6 +234,42 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($PSBoundParameters.ContainsKey('AutomationAzAccountsVersion') -and $ComputeType -ne 'AutomationAccount') {
+    throw '-AutomationAzAccountsVersion applies only to AutomationAccount; Function App modules are bundled separately.'
+}
+
+function Get-AutomationAzAccountsPackageUri {
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([string]$Version)
+
+    $uri = 'https://www.powershellgallery.com/api/v2/package/Az.Accounts'
+    if ([string]::IsNullOrEmpty($Version)) { return $uri }
+    if ($Version.Length -gt 32 -or $Version -cnotmatch '\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z') {
+        throw 'Az.Accounts version must be a stable major.minor.patch value.'
+    }
+    return "$uri/$Version"
+}
+
+function Test-AutomationAzAccountsPackageImport {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param($Package, [string]$ExpectedVersion)
+
+    $state = $Package.properties.provisioningState
+    if ($state -in @('Failed', 'Canceled')) {
+        throw "Az.Accounts package import ended in state '$state'."
+    }
+    if ($state -notin @('Succeeded', 'Created')) { return $false }
+    if ($ExpectedVersion) {
+        $version = $Package.properties.PSObject.Properties['version']
+        if ($null -eq $version -or $version.Value -isnot [string] -or $version.Value -cne $ExpectedVersion) {
+            throw "Imported Az.Accounts package version does not match requested '$ExpectedVersion'."
+        }
+    }
+    return $true
+}
 
 function Resolve-ValidationDatasetPath {
     [CmdletBinding()]
@@ -1465,7 +1512,7 @@ try {
             location   = $Location
             properties = @{
                 contentLink = @{
-                    uri = 'https://www.powershellgallery.com/api/v2/package/Az.Accounts'
+                    uri = Get-AutomationAzAccountsPackageUri -Version $AutomationAzAccountsVersion
                 }
             }
         } | ConvertTo-Json -Depth 5
@@ -1473,12 +1520,15 @@ try {
         Invoke-ArmApi -Path $pkgPath -Method PUT -Payload $pkgPayload -Description "Add Az.Accounts package" | Out-Null
 
         # Poll for package import completion
-        Wait-WithPolling -Description "Az.Accounts package import" -IntervalSeconds 10 -TimeoutSeconds 300 -Condition {
+        $packageImported = Wait-WithPolling -Description "Az.Accounts package import" -IntervalSeconds 10 -TimeoutSeconds 300 -Condition {
             $pkg = Invoke-ArmApi -Path $pkgPath -Method GET -Description "Check package status"
             $state = $pkg.properties.provisioningState
             Write-Host "    Package state: $state" -ForegroundColor Gray
-            return ($state -eq 'Succeeded' -or $state -eq 'Created')
-        } | Out-Null
+            return (Test-AutomationAzAccountsPackageImport -Package $pkg -ExpectedVersion $AutomationAzAccountsVersion)
+        }
+        if (-not $packageImported) {
+            throw 'Az.Accounts package import did not complete within 300 seconds.'
+        }
 
         Write-Host "  Az.Accounts package installed in runtime environment" -ForegroundColor Green
     }
