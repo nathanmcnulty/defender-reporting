@@ -29,6 +29,7 @@ async function exerciseAdmin(page, guard, timeout) {
         const originalSkipWarning = window.__skipPdfExportPageWarning;
         const results = [];
         const need = (value, reason) => { if (!value) throw new Error(reason); };
+        const checkpoint = (name, state, report = null) => window.__issue70?.checkpoint?.(name, state, report);
         const settle = async predicate => {
             const start = performance.now();
             while (!predicate()) {
@@ -42,9 +43,11 @@ async function exerciseAdmin(page, guard, timeout) {
             && document.getElementById(report + '-section')?.getAttribute('aria-busy') !== 'true';
         const apply = async state => {
             const start = performance.now();
+            checkpoint('admin-filter', 'start', activeReportId);
             filterState = finalizeFilterState(cloneFilterState(state));
             applyFilters();
             await settle(() => ready(activeReportId));
+            checkpoint('admin-filter', 'completed', activeReportId);
             return performance.now() - start;
         };
         try {
@@ -58,10 +61,14 @@ async function exerciseAdmin(page, guard, timeout) {
             need(filteredData.length > 0 && filteredData.length <= 250, 'Selected device PDF scope must have 1-250 source rows.');
             const representativeRows = filteredData.length;
             const runtimeStart = performance.now();
+            checkpoint('admin-runtime', 'start');
             await ensurePdfExportRuntimeLoaded();
+            checkpoint('admin-runtime', 'completed');
             const pdfRuntimeLoadMs = performance.now() - runtimeStart;
             const librariesStart = performance.now();
+            checkpoint('admin-libraries', 'start');
             await loadPdfLibraries();
+            checkpoint('admin-libraries', 'completed');
             const pdfLibrariesLoadMs = performance.now() - librariesStart;
             originalDownload = downloadPdfDocument;
             downloadHookCaptured = true;
@@ -74,8 +81,10 @@ async function exerciseAdmin(page, guard, timeout) {
                 need(scope !== 'empty' || filteredData.length === 0, 'Empty filter broadened scope.');
                 for (const report of reports) {
                     const switchStart = performance.now();
+                    checkpoint('admin-switch', 'start', report);
                     selectReportById(report);
                     await settle(() => ready(report));
+                    checkpoint('admin-switch', 'completed', report);
                     const switchMs = performance.now() - switchStart;
                     let detailMs = null;
                     let detailKind = scope === 'empty' ? 'empty-scope' : 'no-matching-data';
@@ -92,12 +101,14 @@ async function exerciseAdmin(page, guard, timeout) {
                     const detailRow = usesModal ? section.querySelector('tbody tr[data-row-index]') : null;
                     if (scope === 'representative' && detailRow) {
                         const detailStart = performance.now();
+                        checkpoint('admin-detail', 'start', report);
                         // Exercise the real delegated row handler, including its
                         // report-specific payload mapping and deferred rendering.
                         detailRow.click();
                         await settle(() => document.getElementById('detailModal').classList.contains('active')
                             && !document.getElementById('modalBody').querySelector('.loading'));
                         detailMs = performance.now() - detailStart;
+                        checkpoint('admin-detail', 'completed', report);
                         detailKind = 'modal';
                         closeModal();
                     } else if (scope === 'representative' && !usesModal) {
@@ -119,7 +130,9 @@ async function exerciseAdmin(page, guard, timeout) {
                         pdf = { bytes: bytes.length, sha256: Array.from(new Uint8Array(hash), value => value.toString(16).padStart(2, '0')).join('') };
                     };
                     const pdfStart = performance.now();
+                    checkpoint('admin-pdf', 'start', report);
                     await exportToPDF();
+                    checkpoint('admin-pdf', 'completed', report);
                     need(pdf && !pdfExportInProgress, 'Real PDF export failed or did not restore controls.');
                     need(before === JSON.stringify(cloneFilterState(filterState)) && activeReportId === report, 'PDF changed selected scope.');
                     const summaryCards = JSON.parse(JSON.stringify(buildDashboardValidationSnapshot().summaryCards));
