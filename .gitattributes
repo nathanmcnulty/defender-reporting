@@ -1,0 +1,16 @@
+# Generated Azure artifacts embed fingerprints computed from source file bytes.
+# Pin LF in every checkout so Windows and Linux builds produce identical output.
+* text=auto eol=lf
+
+*.gz binary
+*.zip binary
+*.png binary
+*.jpg binary
+*.pdf binary
+
+# Keep existing bytes for files whose current line endings are not plain LF.
+/VulnerabilityDashboard.html -text
+/tests/README.md -text
+/tests/Invoke-LaunchBoundFixtureContracts.ps1 -text
+/tests/helpers/LaunchBoundFixture.ps1 -text
+/tests/helpers/LaunchBoundNativeControls.cs -text
