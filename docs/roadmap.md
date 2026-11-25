@@ -96,7 +96,7 @@ issues retain their own acceptance criteria.
 
 **Code and repository reduction**
 
-- The daily demo now force-pushes one orphan snapshot to `demo-data`; outputs are untracked on `main`. With owner approval, `main` and all retained non-demo branches were moved onto cleaned histories, and 40 merged or superseded branches were deleted. A fresh `main`-only clone without tags is 9.69 MiB versus about 364 MiB before the rewrite.
+- The daily demo now force-pushes one orphan snapshot to `demo-data`; outputs are untracked on `main`. With owner approval, `main` and all retained non-demo branches were moved onto cleaned histories, and merged or superseded branches were deleted. A fresh `main`-only clone without tags is 9.69 MiB versus about 364 MiB before the rewrite.
 - The eight existing release tags were not rewritten and still retain old history, so ordinary clones that fetch tags may remain large. GitHub pull-request references and forks can also retain copies. The public demo snapshot is not sanitized; #68 remains open.
 - *Done:* dated evidence moved to `docs/archive/` and the chat replay removed. `docs/performance-baselines.md` stays because the PR template links it.
 - *Done:* the runner now dot-sources seven `tests/SharedHelperRegression.<Area>.ps1` fragments. Both `Measure-*` scripts stay for now: `Invoke-BenchmarkSeries.ps1` and the performance playbook still use the branch benchmark, and #69/#70 remain open.
