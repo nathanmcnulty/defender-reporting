@@ -12,7 +12,7 @@ This repository now treats generated helper bundles as build artifacts, not as t
 
 ## Current domains
 
-- `src/powershell/Shared/Core`: shared primitives, store utilities, cache helpers, serialization helpers, and the narrowly scoped embedded C# streaming projector used by high-cardinality content normalization.
+- `src/powershell/Shared/Core`: shared primitives, store utilities, cache helpers, serialization helpers, and the embedded C# streaming projector used for eligible content-store payload normalization.
 - `src/powershell/Shared/Stores`: canonical storage readers, migration helpers, and snapshot import/publish logic.
 - `src/powershell/Shared/DefenderApi`: Microsoft Defender API export and refresh workflows.
 - `src/powershell/Shared/Enrichment`: Advanced Hunting and NVD readers plus shared enrichment/source-row projection helpers.
@@ -35,7 +35,7 @@ This repository now treats generated helper bundles as build artifacts, not as t
 3. Rebuild with `./build/Build-SharedHelpers.ps1` or `./build/Build-ValidationHelpers.ps1` as needed.
 4. Run `./build/Invoke-RegressionValidation.ps1` before merge.
 
-For changes to the compiled projector or content-store publisher, also run the bounded high-cardinality local lane and the checked-in `exports` compatibility lane. The compiled path is eligible only when the preflight confirms high content cardinality without machine or enrichment inputs; compatibility inputs must remain fully represented in normalization.
+For changes to the compiled projector or content-store publisher, also run the bounded high-cardinality local lane and the original `exports` compatibility lane. The cleaned `main` branch no longer includes those exports; if an approved matching copy is unavailable locally, record the gate as blocked. Eligible smaller direct-payload output can use the compiled path with machine and enrichment inputs only through explicit experimental opt-in; those inputs must remain fully represented in normalization. Follow the [performance playbook](performance-gate-playbook.md) for the applicable parity and Automation gates.
 
 ## Agent-safe change guardrails
 

@@ -76,7 +76,7 @@ If NVD omits optional properties, the exporter now treats them as absent instead
 
 When Generate-VulnerabilityDashboard.ps1 runs, the NVD cache is read into a CVE-keyed map and merged during normalization.
 
-The Azure Automation compatibility path receives this map alongside Advanced Hunting CVE, device-user, and inventory data. High-cardinality content-only workloads may use the compiled bounded projector, but a workload with a present NVD cache is deliberately kept on the enrichment-capable compatibility path until a compiled enrichment join is available. This preserves the optional NVD fields instead of trading correctness for memory.
+Both the PowerShell compatibility normalizer and the compiled bounded projector can join this map alongside Advanced Hunting CVE, device-user, and inventory data. Smaller workloads use the compatibility normalizer by default; their compiled path is an explicit experiment. NVD data alone does not force high-cardinality workloads onto the compatibility path. Normalization changes still require the parity and Automation acceptance gates described in the [performance playbook](performance-gate-playbook.md).
 
 Merge behavior:
 

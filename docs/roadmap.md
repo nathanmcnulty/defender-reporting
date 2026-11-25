@@ -104,7 +104,7 @@ issues retain their own acceptance criteria.
 **Performance (structural options for #67/#69/#70)**
 
 - *Browser:* a 1.2M-row report tour exceeded the 2 GiB whole-process-family guard; client-side row materialization is a plausible contributor, but the measurements do not establish it as the sole cause. Evaluate precomputed report aggregates and on-demand detail partitions against filtering, PDF, offline behavior, load time and the same family-memory limit.
-- *Normalization:* the 19,677-row replay allocates about 4.1 GB cumulatively, which points to PowerShell object churn. The existing compiled projector already includes the enrichment join; routing smaller eligible inputs through it is under parity and performance evaluation for #69.
+- *Normalization:* the 19,677-row replay allocates about 4.1 GB cumulatively, which points to PowerShell object churn. The existing compiled projector already includes the enrichment join; routing smaller eligible inputs through it is a default-off, cache-isolated experiment under parity and performance evaluation for #69.
 - *Runtime:* the deployed Flex Consumption Function has 2 GiB configured, with a supported maximum of 4 GiB. The 400 MB sandbox constraint applies to the optional Automation host, not that Function. Keep the two hosts' operational and acceptance evidence separate.
 
 ## Keeping this useful
