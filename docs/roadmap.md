@@ -83,7 +83,7 @@ Based on main `535eafb`. Recommendations only; each merge, close or live run rem
 | PR #115 | Based on main, merges cleanly, CI green. Fixes a non-idempotent POST retry and early success in Function validation. | Mark ready and merge with a non-closing reference to #92. The live #92 gate does not need to block a source-only fix. |
 | PR #109 | Diagnostics only, merges cleanly, CI green. Base of #110/#111. | Merge, or fold into #110. |
 | PR #110 | Mixed results: median family peak lower, warm init about 2% slower, full scale still exceeds 2 GiB. PDF header-clone isolation is an independent robustness win. | Split out the PDF header isolation plus parity tests and merge those. Accept or drop the worker byte transfer on its measurements. Avoid committing the 3,094-line fixture if it can be generated. |
-| PR #111 | Default-off experiment with no measured benefit. Conflicts only in the generated runbook. | Close and keep `docs/streamed-scratch-candidate.md` as the record. Reopen only with a measured candidate. |
+| PR #111 | Default-off experiment with no measured benefit. Has a content conflict with `main` in `azure/Invoke-DashboardPipeline.ps1` (the only conflicted file; it is the generated runbook built by `build/azure/Build-Runbook.ps1`, so regenerating it after rebasing resolves the conflict). | Close and keep `docs/streamed-scratch-candidate.md` as the record. Reopen only with a measured candidate. |
 | #92 | .NET 8 support ended November 10, 2026. Source already targets PowerShell 7.6. | Highest priority: hosts deployed on 7.4 are now unsupported. Schedule the live gate. |
 | #68 | Workflow containment is done. The historical-retention decision is pending. | Decide together with the repository-size item below, then close. |
 | #67 / #69 / #70 | Many measurement rounds; still blocked by fixed 400 MB (Automation) and 2 GiB (browser) ceilings. | Record a supported-scale envelope and the architecture options below before more campaigns. |
@@ -94,7 +94,7 @@ Based on main `535eafb`. Recommendations only; each merge, close or live run rem
 
 - *Done on this branch:* generated-artifact fingerprints used `StringBuilder.AppendLine`, whose newline is platform-specific, and the repository had no `.gitattributes`. Windows builds therefore disagreed with the CI sync job. Fingerprints now use explicit LF and checkouts pin LF. Linux values are unchanged.
 - Pin `PSScriptAnalyzer` and `Az.Accounts` versions in workflows, and cache them, instead of installing the latest on every run. `jq` is already on `ubuntu-latest`, so the `apt-get` step can go.
-- Stop committing the generated 1 MB runbook from a bot push. It causes conflicts in every stacked branch (for example #111). Build it in the release package and have setup consume the package, or at least check for drift in CI instead of auto-committing.
+- Stop committing the generated 1 MB runbook (`azure/Invoke-DashboardPipeline.ps1`) from a bot push. It causes conflicts in every stacked branch (for example #111). Build it in the release package and have setup consume the package, or at least check for drift in CI instead of auto-committing.
 
 **Code and repository reduction**
 
