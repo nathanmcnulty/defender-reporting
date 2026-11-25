@@ -234,9 +234,9 @@ function Get-DashboardTemplatePublishState {
             $file.FullName
         }
 
-        [void]$fingerprintBuilder.AppendLine("path:$relativePath")
-        [void]$fingerprintBuilder.AppendLine("sha256:$contentSha256")
-        [void]$fingerprintBuilder.AppendLine("contentType:$contentType")
+        [void]$fingerprintBuilder.Append("path:$relativePath`n")
+        [void]$fingerprintBuilder.Append("sha256:$contentSha256`n")
+        [void]$fingerprintBuilder.Append("contentType:$contentType`n")
 
         [PSCustomObject]@{
             Path = $relativePath
@@ -447,4 +447,4 @@ foreach ($templateFile in $publishState.Files) {
 Write-Output ("Published dashboard templates to: https://{0}.blob.core.windows.net/{1}/" -f $StorageAccountName, $ContainerName)
 Write-Output 'The dashboard pipeline runbook and Function App will download these templates at generation time.'
 
-# ArtifactFingerprint: e474f118573f2ac91e533e37abfaa09ff643a8f45732d50c14d8b4a2ab2d5d4e
+# ArtifactFingerprint: 8d91a4eca0a350be723ec561573f019e35bfccd3c41aab6c444f31973a00c11f
