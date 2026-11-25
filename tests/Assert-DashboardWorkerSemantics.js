@@ -14,7 +14,7 @@ async function main() {
                 if (this.terminated) return null;
                 const worker = this.worker = new NodeWorker(`
                     const { parentPort } = require('worker_threads');
-                    global.self = { postMessage: data => parentPort.postMessage(data) };
+                    global.self = { postMessage: (data, transfer) => parentPort.postMessage(data, transfer) };
                     ${source}
                     parentPort.on('message', data => self.onmessage({ data }).catch(error => { throw error; }));
                 `, { eval: true });
