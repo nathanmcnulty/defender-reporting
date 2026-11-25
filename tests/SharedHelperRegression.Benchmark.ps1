@@ -566,6 +566,16 @@ function Test-BenchmarkComparisonUsesProcessHighWater {
         catch { $failed = $true }
         Assert-True $failed 'A configured memory limit must fail when its evidence is unavailable.'
 
+        foreach ($parameterName in @('MaximumWorkingSetMB', 'MaximumPrivateMemoryMB', 'MaximumGcHeapMB', 'MaximumElapsedRegressionPercent')) {
+            foreach ($invalidLimit in @([double]::NaN, [double]::PositiveInfinity, [double]::NegativeInfinity, -1)) {
+                $parameters = @{ $parameterName = $invalidLimit }
+                $failed = $false
+                try { $null = & $compareScript -CurrentPath $resultPath @parameters }
+                catch { $failed = $true }
+                Assert-True $failed "$parameterName must reject non-finite and negative limits rather than silently disabling a gate."
+            }
+        }
+
         $baselinePath = Join-Path $tempRoot 'baseline.json'
         $baseline = @{ evidence_schema_version = 1; execution = @{ summary = @{ elapsed_seconds = 100 } } }
         [System.IO.File]::WriteAllText($baselinePath, ($baseline | ConvertTo-Json -Depth 10))
@@ -600,6 +610,67 @@ function Test-BenchmarkComparisonUsesProcessHighWater {
             catch { $failed = $true }
             Assert-True $failed "Missing or zero $missingSide elapsed evidence must not pass a baseline comparison."
         }
+
+        $runEvidence = @{
+            evidence_schema_version = 1
+            kind = 'azure-runbook-only'
+            execution = @{ summary = @{ status = 'Completed'; elapsed_seconds = 100 }; job = @{ terminal_status = 'Completed' } }
+            validation = @{ terminal_status = 'Completed' }
+        }
+        [System.IO.File]::WriteAllText($resultPath, ($runEvidence | ConvertTo-Json -Depth 10))
+        [System.IO.File]::WriteAllText($baselinePath, ($runEvidence | ConvertTo-Json -Depth 10))
+        $comparison = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -RequireSuccessfulExecution
+        Assert-True $comparison.passed 'Completed Azure jobs with matching completion evidence must pass the execution check.'
+
+        foreach ($statusSource in @('job', 'summary', 'validation')) {
+            $target = switch ($statusSource) {
+                'job' { $runEvidence.execution.job }
+                'summary' { $runEvidence.execution.summary }
+                'validation' { $runEvidence.validation }
+            }
+            $statusKey = if ($statusSource -eq 'summary') { 'status' } else { 'terminal_status' }
+            $target[$statusKey] = 'Failed'
+            [System.IO.File]::WriteAllText($resultPath, ($runEvidence | ConvertTo-Json -Depth 10))
+            $failed = $false
+            try { $null = & $compareScript -CurrentPath $resultPath }
+            catch { $failed = $true }
+            Assert-True $failed "A failed Azure $statusSource must not produce a passing comparison."
+            [void]$target.Remove($statusKey)
+            [System.IO.File]::WriteAllText($resultPath, ($runEvidence | ConvertTo-Json -Depth 10))
+            $failed = $false
+            try { $null = & $compareScript -CurrentPath $resultPath -RequireSuccessfulExecution }
+            catch { $failed = $true }
+            Assert-True $failed "Strict execution checks must reject missing Azure $statusSource status."
+            $target[$statusKey] = 'Completed'
+        }
+
+        $runEvidence.execution.job.terminal_status = 'Stopped'
+        [System.IO.File]::WriteAllText($baselinePath, ($runEvidence | ConvertTo-Json -Depth 10))
+        $runEvidence.execution.job.terminal_status = 'Completed'
+        [System.IO.File]::WriteAllText($resultPath, ($runEvidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -RequireSuccessfulExecution }
+        catch { $failed = $true }
+        Assert-True $failed 'A stopped baseline job must not establish an elapsed comparison.'
+
+        $localEvidence = @{ evidence_schema_version = 1; kind = 'local-stress-run'; execution = @{ return_code = 0 } }
+        [System.IO.File]::WriteAllText($resultPath, ($localEvidence | ConvertTo-Json -Depth 10))
+        $comparison = & $compareScript -CurrentPath $resultPath -RequireSuccessfulExecution
+        Assert-True $comparison.passed 'A successful local execution must pass the execution check.'
+        foreach ($returnCode in @(1, '0', $null)) {
+            $localEvidence.execution.return_code = $returnCode
+            [System.IO.File]::WriteAllText($resultPath, ($localEvidence | ConvertTo-Json -Depth 10))
+            $failed = $false
+            try { $null = & $compareScript -CurrentPath $resultPath -RequireSuccessfulExecution }
+            catch { $failed = $true }
+            Assert-True $failed 'A failed, invalid, or missing local return code must not pass the execution check.'
+        }
+        $localEvidence.kind = 'unknown-benchmark'
+        [System.IO.File]::WriteAllText($resultPath, ($localEvidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -RequireSuccessfulExecution }
+        catch { $failed = $true }
+        Assert-True $failed 'Strict execution checks must reject unknown benchmark kinds.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }

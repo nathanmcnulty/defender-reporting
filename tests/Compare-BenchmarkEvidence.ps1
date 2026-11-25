@@ -9,6 +9,7 @@ param(
     [Parameter(Mandatory = $false)][double]$MaximumGcHeapMB = 0,
     [Parameter(Mandatory = $false)][switch]$RequireProcessWorkingSetPeak,
     [Parameter(Mandatory = $false)][switch]$StrictWorkingSetLimit,
+    [Parameter(Mandatory = $false)][switch]$RequireSuccessfulExecution,
     [Parameter(Mandatory = $false)][ValidateRange(0, 1000)][double]$MaximumElapsedRegressionPercent = 20,
     [Parameter(Mandatory = $false)][string]$OutputPath
 )
@@ -16,6 +17,17 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'helpers\BenchmarkEvidenceTools.ps1')
+
+foreach ($limit in @(
+        @{ Name = 'MaximumWorkingSetMB'; Value = $MaximumWorkingSetMB },
+        @{ Name = 'MaximumPrivateMemoryMB'; Value = $MaximumPrivateMemoryMB },
+        @{ Name = 'MaximumGcHeapMB'; Value = $MaximumGcHeapMB },
+        @{ Name = 'MaximumElapsedRegressionPercent'; Value = $MaximumElapsedRegressionPercent }
+    )) {
+    if (-not [double]::IsFinite($limit.Value) -or $limit.Value -lt 0) {
+        throw ("{0} must be a finite nonnegative number." -f $limit.Name)
+    }
+}
 
 if ($StrictWorkingSetLimit -and $MaximumWorkingSetMB -le 0) {
     throw 'StrictWorkingSetLimit requires a positive MaximumWorkingSetMB.'
@@ -75,11 +87,57 @@ function Get-BenchmarkMetric($record) {
     }
 }
 
+function Get-EvidenceProperty($Object, [string]$Name) {
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Add-ExecutionFailure($Record, [string]$Role, [System.Collections.Generic.List[string]]$Failures, [bool]$RequireCompletion) {
+    $kind = [string](Get-EvidenceProperty $Record.Evidence 'kind')
+    $execution = Get-EvidenceProperty $Record.Evidence 'execution'
+    switch ($kind) {
+        'azure-runbook-only' {
+            $job = Get-EvidenceProperty $execution 'job'
+            $summary = Get-EvidenceProperty $execution 'summary'
+            $validation = Get-EvidenceProperty $Record.Evidence 'validation'
+            foreach ($status in @(
+                    @{ Name = 'job'; Value = (Get-EvidenceProperty $job 'terminal_status') },
+                    @{ Name = 'summary'; Value = (Get-EvidenceProperty $summary 'status') },
+                    @{ Name = 'validation'; Value = (Get-EvidenceProperty $validation 'terminal_status') }
+                )) {
+                if ([string]::IsNullOrWhiteSpace([string]$status.Value)) {
+                    if ($RequireCompletion) { $Failures.Add(("$Role Azure {0} completion evidence is unavailable." -f $status.Name)) }
+                }
+                elseif ([string]$status.Value -ine 'Completed') {
+                    $Failures.Add(("$Role Azure {0} did not complete successfully." -f $status.Name))
+                }
+            }
+        }
+        'local-stress-run' {
+            $returnCode = Get-EvidenceProperty $execution 'return_code'
+            if ($null -eq $returnCode) {
+                if ($RequireCompletion) { $Failures.Add("$Role local execution return code is unavailable.") }
+            }
+            elseif ($returnCode -isnot [ValueType] -or $returnCode -is [bool] -or [double]$returnCode -ne 0) {
+                $Failures.Add("$Role local execution did not complete successfully.")
+            }
+        }
+        default {
+            if ($RequireCompletion) { $Failures.Add("$Role evidence does not have a supported execution kind.") }
+        }
+    }
+}
+
 $current = Read-EvidenceResult $CurrentPath
 $currentMetrics = Get-BenchmarkMetric $current
 $baseline = if ([string]::IsNullOrWhiteSpace($BaselinePath)) { $null } else { Read-EvidenceResult $BaselinePath }
 $baselineMetrics = if ($null -eq $baseline) { $null } else { Get-BenchmarkMetric $baseline }
 $failures = [System.Collections.Generic.List[string]]::new()
+
+Add-ExecutionFailure -Record $current -Role 'Current' -Failures $failures -RequireCompletion $RequireSuccessfulExecution.IsPresent
+if ($null -ne $baseline) { Add-ExecutionFailure -Record $baseline -Role 'Baseline' -Failures $failures -RequireCompletion $RequireSuccessfulExecution.IsPresent }
 
 if ($RequireProcessWorkingSetPeak -and ($null -eq $currentMetrics.process_peak_working_set_mb -or $currentMetrics.process_peak_working_set_mb -le 0)) {
     $failures.Add('Process working-set high-water evidence is unavailable.')
