@@ -472,17 +472,83 @@ function Test-RunbookBenchmarkPublicationReaderOptIn {
     $script:UseDirectMergeDeviceLookup = $true
     foreach ($enabled in @($false, $true)) {
         $script:UseBoundedPublicationMetadataReader = $enabled
+        $script:UseExperimentalCompiledSmallPayload = $enabled
         $null = Start-RunbookBenchmark -Confirm:$false
         Assert-True (($script:ReaderBenchmarkArguments -contains 'UseBoundedPublicationMetadataReader=true') -eq $enabled) 'Benchmark job reader selection differs from requested treatment.'
+        Assert-True (($script:ReaderBenchmarkArguments -contains 'UseExperimentalCompiledSmallPayload=true') -eq $enabled) 'Benchmark job compiled-small-payload selection differs from requested treatment.'
         Assert-True ($script:ReaderBenchmarkArguments -contains 'UseExistingExportsOnly=true' -and $script:ReaderBenchmarkArguments -contains 'UseDirectMergeDeviceLookup=true') 'Benchmark omitted replay/direct-merge trial flags.'
     }
     Assert-True ($benchmarkAst.Extent.Text.Contains('use_bounded_publication_metadata_reader = $script:UseBoundedPublicationMetadataReader')) 'Benchmark must record its reader selection.'
+    Assert-True ($benchmarkAst.Extent.Text.Contains('use_experimental_compiled_small_payload = $script:UseExperimentalCompiledSmallPayload')) 'Benchmark must record its compiled-small-payload selection.'
     $validationAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Invoke-AzureRunbookValidation.ps1'), [ref]$null, [ref]$null)
     $validationParameter = $validationAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'UseBoundedPublicationMetadataReader' }
     Assert-True ($validationParameter.DefaultValue.Extent.Text -eq '$false') 'Guarded wrapper must default to legacy reading.'
     Assert-True ($validationAst.Extent.Text.Contains('-UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader -UseDirectMergeDeviceLookup:$UseDirectMergeDeviceLookup')) 'Guarded wrapper must forward trial treatment flags.'
+    Assert-True ($validationAst.Extent.Text.Contains('-UseExperimentalCompiledSmallPayload:$UseExperimentalCompiledSmallPayload')) 'Guarded wrapper must forward the compiled-small-payload trial flag.'
     $functionBuilder = Get-Content (Join-Path $repoRoot 'build/azure/Build-FunctionApp.ps1') -Raw
     Assert-True ($functionBuilder.Contains('$UseBoundedPublicationMetadataReader = $false') -and -not $functionBuilder.Contains('$env:USE_BOUNDED_PUBLICATION_METADATA_READER')) 'Function must stay legacy without a new setting.'
+    Assert-True ($functionBuilder.Contains('$UseExperimentalCompiledSmallPayload = $false') -and -not $functionBuilder.Contains('$env:USE_EXPERIMENTAL_COMPILED_SMALL_PAYLOAD')) 'Function must keep the experimental compiled-small-payload path disabled.'
+}
+
+function Test-RunbookExperimentalNormalizationCacheIsolation {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path $PSScriptRoot -Parent
+    $runbookPath = Join-Path $repoRoot 'build\azure\runbook-source.ps1'
+    $runbookAst = [System.Management.Automation.Language.Parser]::ParseFile($runbookPath, [ref]$null, [ref]$null)
+    $parameter = $runbookAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'UseExperimentalCompiledSmallPayload' }
+    Assert-True ($parameter.DefaultValue.Extent.Text -eq '$false') 'Runbook compiled-small-payload flag must default false.'
+
+    $lookupAssignments = @($runbookAst.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -eq 'payloadCacheEntry'
+            }, $true))
+    $publicationAssignments = @($runbookAst.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -eq 'cacheEntry'
+            }, $true))
+    Assert-True ($lookupAssignments.Count -eq 1 -and $publicationAssignments.Count -eq 1) 'Expected one runbook cache lookup and one publication decision.'
+
+    function Get-NormalizedPayloadCacheEntry {
+        param($BasePath, [switch]$SkipObservedWindowMerge)
+        if ($BasePath -ne $tempExports -or [bool]$SkipObservedWindowMerge -ne $skipObservedWindowMerge) { throw 'Unexpected cache lookup arguments.' }
+        $script:ExperimentalCacheLookupCalls++
+        return [PSCustomObject]@{ Kind = 'lookup' }
+    }
+    function Publish-NormalizedPayloadCache {
+        param($BasePath, $PayloadPath, $VulnCount, $DeviceCount, $CveCount, $Quality, $SourceMetadata, [switch]$SkipObservedWindowMerge)
+        if ($BasePath -ne $tempExports -or $PayloadPath -ne $tempPayloadPath -or $VulnCount -ne 1 -or $DeviceCount -ne 1 -or $CveCount -ne 1 -or $Quality -ne $normalizedQuality -or $null -ne $SourceMetadata -or [bool]$SkipObservedWindowMerge -ne $skipObservedWindowMerge) { throw 'Unexpected cache publication arguments.' }
+        $script:ExperimentalCachePublishCalls++
+        return [PSCustomObject]@{ Kind = 'publication' }
+    }
+    $tempExports = 'fixture'
+    $tempPayloadPath = 'fixture.json.gz'
+    $skipObservedWindowMerge = $false
+    $vulnCount = 1
+    $deviceCount = 1
+    $cveCount = 1
+    $normalizedQuality = $null
+    $sourceMetadata = $null
+    foreach ($UseExperimentalCompiledSmallPayload in @($false, $true)) {
+        $script:ExperimentalCacheLookupCalls = 0
+        $script:ExperimentalCachePublishCalls = 0
+        . ([scriptblock]::Create($lookupAssignments[0].Extent.Text))
+        . ([scriptblock]::Create($publicationAssignments[0].Extent.Text))
+        if ($UseExperimentalCompiledSmallPayload) {
+            Assert-True ($script:ExperimentalCacheLookupCalls -eq 0 -and $null -eq $payloadCacheEntry) 'Experimental runs must not read the normal payload cache.'
+            Assert-True ($script:ExperimentalCachePublishCalls -eq 0 -and $null -eq $cacheEntry) 'Experimental runs must not publish into the normal payload cache.'
+        }
+        else {
+            Assert-True ($script:ExperimentalCacheLookupCalls -eq 1 -and $payloadCacheEntry.Kind -eq 'lookup') 'Default runs must retain payload cache lookup.'
+            Assert-True ($script:ExperimentalCachePublishCalls -eq 1 -and $cacheEntry.Kind -eq 'publication') 'Default runs must retain payload cache publication.'
+        }
+    }
+    Assert-True ($runbookAst.Extent.Text.Contains('-UseExperimentalCompiledSmallPayload:$UseExperimentalCompiledSmallPayload')) 'Runbook must forward the experimental flag.'
 }
 
 function Test-BenchmarkWorkloadProfilesArePinned {

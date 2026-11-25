@@ -1380,7 +1380,7 @@ function Test-NormalizedPayloadPreservesSingletonLookupArray {
             Assert-True ($cve.as -is [array] -and $cve.as.Count -eq 1) 'Serialized singleton affected-software indices must remain an array.'
             Assert-True ($payload.lookups.affSoftware[$cve.as[0]] -ceq 'Contoso: Legacy Agent') 'Serialized affected software must retain its source content.'
         }
-        Assert-True ((Get-DashboardPayloadCacheVersion) -eq 'dashboard-payload-cache-v8') 'Invalidate normalized payloads with collapsed lookup arrays.'
+        Assert-True ((Get-DashboardPayloadCacheVersion) -eq 'dashboard-payload-cache-v9') 'Invalidate normalized payloads after compiled normalization semantic fixes.'
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
@@ -2071,7 +2071,7 @@ function Test-NormalizedPayloadCacheVersionPreservesSourceData {
 
         $expectedVersion = Get-DashboardPayloadCacheVersion
         $expectedFingerprint = Get-FileSetFingerprint -Version $expectedVersion -Files @(Get-VulnerabilityPayloadFingerprintSourceFileSet -BasePath $tempRoot) -MetadataLines @('SkipObservedWindowMerge=False')
-        Assert-True ($expectedVersion -eq 'dashboard-payload-cache-v8') 'Expected the normalization semantics change to advance the payload cache version.'
+        Assert-True ($expectedVersion -eq 'dashboard-payload-cache-v9') 'Expected the normalization semantics change to advance the payload cache version.'
         Assert-True ($cacheEntry.Manifest.Version -eq $expectedVersion) 'Expected the payload manifest and cache fingerprint to share one version source.'
         Assert-True ($cacheEntry.Fingerprint -eq $expectedFingerprint) 'Expected the payload cache fingerprint to incorporate the current cache version.'
         Assert-True ((Test-Path -LiteralPath $currentPath -PathType Leaf) -and ((Get-FileSha256Hex -Path $currentPath) -eq $sourceSha256Before)) 'Expected replacing a stale payload cache to preserve source export bytes.'
@@ -2159,14 +2159,44 @@ function Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback {
         Assert-True ($legacy.SafeToExecute -eq $true -and $legacy.DeviceProfileCount -eq 1 -and $legacy.ContentTemplateCount -eq 1) 'Expected exact dictionary cardinalities without procedural metadata.'
         Assert-True ($legacy.ContentNormalizationMode -eq 'in-process-streaming' -and $legacy.CompiledPayloadSupported -eq $false) 'Expected callers without direct payload output to keep the in-process streaming fallback.'
         $compiledCapable = Get-NormalizationExecutionPlan -Path $tempRoot -CompiledPayloadSupported
-        Assert-True ($compiledCapable.SafeToExecute -eq $true -and $compiledCapable.ContentNormalizationMode -eq 'compiled-bounded-standard-payload' -and $compiledCapable.CompiledPayloadSupported) 'Expected direct-payload callers to select the compiled bounded normalizer below the in-process cardinality ceiling.'
-        Assert-True ($compiledCapable.EstimatedPrivateMemoryMb -eq 160 -and $compiledCapable.EstimatedWorkingSetMb -eq 260) 'Expected compiled low-cardinality estimates to use the compiled envelope.'
-        Assert-True ($compiledCapable.CompiledPayloadContract -eq 'in-process-compatible' -and $null -eq $legacy.CompiledPayloadContract) 'Expected low-cardinality compiled plans to request the in-process-compatible payload contract and in-process plans to request none.'
+        Assert-True ($compiledCapable.SafeToExecute -eq $true -and $compiledCapable.ContentNormalizationMode -eq 'in-process-streaming' -and $compiledCapable.CompiledPayloadSupported -and -not $compiledCapable.UseExperimentalCompiledSmallPayload) 'Expected direct-payload callers to keep in-process normalization by default below the cardinality ceiling.'
+        $compiledOptIn = Get-NormalizationExecutionPlan -Path $tempRoot -CompiledPayloadSupported -UseExperimentalCompiledSmallPayload
+        Assert-True ($compiledOptIn.SafeToExecute -eq $true -and $compiledOptIn.ContentNormalizationMode -eq 'compiled-bounded-standard-payload' -and $compiledOptIn.UseExperimentalCompiledSmallPayload) 'Expected explicit experimental opt-in to select the compiled bounded normalizer below the cardinality ceiling.'
+        Assert-True ($compiledOptIn.EstimatedPrivateMemoryMb -eq 160 -and $compiledOptIn.EstimatedWorkingSetMb -eq 260) 'Expected compiled low-cardinality estimates to use the compiled envelope.'
+        Assert-True ($compiledOptIn.CompiledPayloadContract -eq 'in-process-compatible' -and $null -eq $legacy.CompiledPayloadContract) 'Expected low-cardinality compiled plans to request the in-process-compatible payload contract and in-process plans to request none.'
     }
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 }
 
-function Test-CompiledBoundedContentNormalizationDeduplicatesDeviceProfiles {
+function Test-CompiledBoundedContentNormalizationRejectsIncompatibleMode {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-mode-guard-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'synthetic-manifest.json'), '{"actualDeviceCount":1,"contentTemplateCount":10001}', [System.Text.UTF8Encoding]::new($false))
+        $payloadPath = Join-Path $tempRoot 'payload.json.gz'
+        $directMergeError = $null
+        try {
+            [void](ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'vulns.json') -PayloadOutputPath $payloadPath -Machines @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DirectMergeDeviceLookup)
+        }
+        catch { $directMergeError = $_.Exception.Message }
+        Assert-True ($directMergeError -like 'Experimental direct-merge device lookup requires*preloaded machine lookup*') 'Expected high-cardinality direct merge to fail with the runbook fallback guard instead of dropping machine enrichment.'
+        Assert-True (-not (Test-Path -LiteralPath $payloadPath)) 'Expected incompatible direct merge to fail before publishing a payload.'
+
+        $disabledError = $null
+        try {
+            [void](ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'vulns.json') -PayloadOutputPath $payloadPath -Machines @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization)
+        }
+        catch { $disabledError = $_.Exception.Message }
+        Assert-True ($disabledError -like '*cannot be disabled for high-cardinality content*') 'Expected explicit compiled-path disablement to fail rather than be silently ignored.'
+        Assert-True (-not (Test-Path -LiteralPath $payloadPath)) 'Expected incompatible normalization disablement to fail before publishing a payload.'
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
+function Test-CompiledBoundedContentNormalizationDeduplicatesDeviceProfile {
     [CmdletBinding()]
     param()
     $repoRoot = Split-Path -Path $PSScriptRoot -Parent
@@ -2197,8 +2227,8 @@ function Test-CompiledBoundedContentNormalizationDeduplicatesDeviceProfiles {
         $legacyPath = Join-Path $tempRoot 'legacy.json.gz'
         $legacy = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'legacy.json') -PayloadOutputPath $legacyPath -Machines (& $newMachines) -AdvancedHuntingData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization
         $compiledPath = Join-Path $tempRoot 'compiled.json.gz'
-        $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines (& $newMachines) -AdvancedHuntingData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
-        Assert-True ($compiled -is [hashtable] -and $null -ne $compiled.CompiledMemoryTelemetry) 'Expected the default direct-payload run to use the compiled bounded normalizer.'
+        $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines (& $newMachines) -AdvancedHuntingData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -UseExperimentalCompiledSmallPayload
+        Assert-True ($compiled -is [hashtable] -and $null -ne $compiled.CompiledMemoryTelemetry) 'Expected the opted-in direct-payload run to use the compiled bounded normalizer.'
         Assert-True ($legacy.VulnCount -eq 6 -and $compiled.VulnCount -eq 6) "Expected both paths to keep onboarded rows from duplicate profiles and drop the non-onboarded profile, got legacy=$($legacy.VulnCount) compiled=$($compiled.VulnCount)."
         Assert-True ($legacy.DeviceCount -eq 4 -and $compiled.DeviceCount -eq 4) "Expected both paths to deduplicate device lookups by device ID or empty-ID fallback key, got legacy=$($legacy.DeviceCount) compiled=$($compiled.DeviceCount)."
 
@@ -2235,7 +2265,7 @@ function Invoke-CompiledVersusInProcessNormalization {
     $legacyPath = Join-Path $DataPath "$Label-legacy.json.gz"
     $legacy = ConvertTo-NormalizedData -DataPath $DataPath -VulnOutputPath (Join-Path $DataPath "$Label-legacy.json") -PayloadOutputPath $legacyPath -Machines @{} -AdvancedHuntingData (& $NewAdvancedHunting) -NvdCveData (& $NewNvd) -AdvancedHuntingInventoryData (& $NewInventory) -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization
     $compiledPath = Join-Path $DataPath "$Label-compiled.json.gz"
-    $compiled = ConvertTo-NormalizedData -DataPath $DataPath -VulnOutputPath (Join-Path $DataPath "$Label-compiled.json") -PayloadOutputPath $compiledPath -Machines @{} -AdvancedHuntingData (& $NewAdvancedHunting) -NvdCveData (& $NewNvd) -AdvancedHuntingInventoryData (& $NewInventory) -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+    $compiled = ConvertTo-NormalizedData -DataPath $DataPath -VulnOutputPath (Join-Path $DataPath "$Label-compiled.json") -PayloadOutputPath $compiledPath -Machines @{} -AdvancedHuntingData (& $NewAdvancedHunting) -NvdCveData (& $NewNvd) -AdvancedHuntingInventoryData (& $NewInventory) -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -UseExperimentalCompiledSmallPayload
     & node (Join-Path $repoRoot 'tests\helpers\Assert-ExpandedPayloadParity.js') $legacyPath $compiledPath | Out-Host
     Assert-True ($LASTEXITCODE -eq 0) "Expected $Label compiled and in-process payloads to have expanded row parity."
     return [PSCustomObject]@{
@@ -2262,6 +2292,7 @@ function Get-NormalizedPayloadRowSummary {
 }
 
 function Test-CompiledBoundedContentNormalizationKeyComparerParity {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseLiteralInitializerForHashtable', '', Justification = 'The tests require hashtables with explicit key comparers.')]
     [CmdletBinding()]
     param()
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-comparer-parity-' + [guid]::NewGuid().ToString('N'))
@@ -2310,9 +2341,18 @@ function Test-CompiledBoundedContentNormalizationKeyComparerParity {
         try { [void](Get-NormalizationKeyComparerDescriptor -Table $unsupportedInventory -Name 'inventory') } catch { $unsupportedError = $_.Exception }
         Assert-True ($unsupportedError -is [System.NotSupportedException]) 'Expected an unrecognized inventory key comparer to fail explicitly instead of assuming default semantics.'
         $fallbackPath = Join-Path $tempRoot 'fallback.json.gz'
-        $fallback = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'fallback.json') -PayloadOutputPath $fallbackPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingInventoryData $unsupportedInventory -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -InformationAction SilentlyContinue
+        $fallback = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'fallback.json') -PayloadOutputPath $fallbackPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingInventoryData $unsupportedInventory -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -UseExperimentalCompiledSmallPayload -InformationAction SilentlyContinue
         $fallbackTelemetry = if ($fallback -is [hashtable]) { $fallback['CompiledMemoryTelemetry'] } else { $fallback.PSObject.Properties['CompiledMemoryTelemetry']?.Value }
         Assert-True ($null -eq $fallbackTelemetry -and $fallback.VulnCount -eq 6) ("Expected an unsupported inventory comparer to fall back to the in-process normalizer, got {0} with VulnCount={1}." -f $fallback.GetType().FullName, $fallback.VulnCount)
+        [System.IO.File]::WriteAllText((Join-Path $tempRoot 'synthetic-manifest.json'), '{"actualDeviceCount":1,"contentTemplateCount":10001}', [System.Text.UTF8Encoding]::new($false))
+        $highCardinalityError = $null
+        $highCardinalityPath = Join-Path $tempRoot 'unsupported-high-cardinality.json.gz'
+        try {
+            [void](ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'unsupported-high-cardinality.json') -PayloadOutputPath $highCardinalityPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingInventoryData $unsupportedInventory -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose)
+        }
+        catch { $highCardinalityError = $_.Exception }
+        Assert-True ($highCardinalityError -is [System.NotSupportedException] -and $highCardinalityError.Message -like '*requires compiled normalization*inventory key comparer*') 'Expected high-cardinality normalization to report the unsupported comparer instead of claiming an in-process fallback.'
+        Assert-True (-not (Test-Path -LiteralPath $highCardinalityPath)) 'Expected the unsupported high-cardinality comparer to fail before publishing a payload.'
     }
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 }
@@ -2328,6 +2368,7 @@ function Get-NormalizedPayloadCveSummary {
 }
 
 function Test-CompiledBoundedContentNormalizationCveEnrichmentComparerParity {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseLiteralInitializerForHashtable', '', Justification = 'The tests require hashtables with explicit key comparers.')]
     [CmdletBinding()]
     param()
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-cve-comparer-parity-' + [guid]::NewGuid().ToString('N'))
@@ -2410,7 +2451,7 @@ function Test-CompiledBoundedContentNormalizationPipeDelimitedKeyParity {
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 }
 
-function Test-CompiledBoundedContentNormalizationRequiresStagedFragments {
+function Test-CompiledBoundedContentNormalizationRequiresStagedFragment {
     [CmdletBinding()]
     param()
     Initialize-CompiledVulnContentProjector
@@ -2430,7 +2471,7 @@ function Test-CompiledBoundedContentNormalizationRequiresStagedFragments {
             $stage = Join-Path $tempRoot $Name
             [void](New-Item -Path $stage -ItemType Directory -Force)
             foreach ($fragment in @('deviceProfiles.ndjson', 'contentTemplates.ndjson', 'machines.ndjson', 'cveEnrichment.ndjson', 'inventory.ndjson')) { [System.IO.File]::WriteAllText((Join-Path $stage $fragment), '') }
-            Write-BoundedNormalizationOptions -StagePath $stage -AdvancedHuntingInventoryData @{} -PayloadContract 'in-process-compatible'
+            Write-BoundedNormalizationConfiguration -StagePath $stage -AdvancedHuntingInventoryData @{} -PayloadContract 'in-process-compatible'
             return $stage
         }
 
@@ -2462,28 +2503,41 @@ function Initialize-CompiledRawPayloadParityStore {
     $rows += $whitespaceUpdate
     $rows[0].SoftwareName = "Ag$([char]0xEB)nt <b>&'`"\x"; $rows[0].SoftwareVendor = "Contoso$([char]0x2122)"
     $rows[0].DiskPaths = @('C:\A', 'c:\a', 'C:\A', '  ', '', "C:\$([char]0x1F)tab`t"); $rows[0].RegistryPaths = @("HK$([char]0x2028)LM", 'HK')
-    $rows[1].CvssScore = 9; $rows[1].SoftwareName = "Emoji $([char]::ConvertFromUtf32(0x1F600))"; $rows[1].RecommendedSecurityUpdate = 'KB<1>&'
+    $rows[1].CvssScore = 9.0; $rows[1].SoftwareName = "Emoji $([char]::ConvertFromUtf32(0x1F600))"; $rows[1].RecommendedSecurityUpdate = 'KB<1>&'
     $rows[2].CvssScore = 7.25; $rows[2].DeviceName = "d$([char]0xE9)v"; $rows[2].MachineTags = @('P<r>od', "T$([char]0x7F)")
     Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $DataPath) -Records $rows
     Publish-VulnContentStoreUnlocked -BasePath $DataPath
 }
 
-function New-CompiledRawPayloadParityAdvancedHunting {
+function Get-CompiledRawPayloadParityAdvancedHunting {
     [CmdletBinding()]
     param()
     return @{ 'CVE-2026-9301' = @{ PublishedDate = '2026-01-01'; VulnerabilityDescription = "d <x> & $([char]0x1F) $([char]0x2028) $([char]::ConvertFromUtf32(0x1F600)) \u `t"; EpssScore = 0.1; AffectedSoftware = @('Contoso Legacy Agent', '  ', ''); IsExploitAvailable = $false } }
 }
 
-function New-CompiledRawPayloadParityNvd {
+function Get-CompiledRawPayloadParityNvd {
     [CmdletBinding()]
     param()
     return @{ 'CVE-2026-9302' = @{ PublishedDate = '2026-01-02'; VulnerabilityDescription = 'n'; LastModifiedDate = '2026-02-02'; BaseScore = 5; BaseSeverity = 'MEDIUM'; Vector = 'v'; CisaExploitAdd = $null; CisaActionDue = $null; CisaRequiredAction = $null; Weaknesses = @('CWE-1', ' ', '') } }
 }
 
-function Get-TextSha256 {
+function Read-GzipBytesFile {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
-    return [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([System.Text.UTF8Encoding]::new($false).GetBytes($Text)))
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $file = [System.IO.File]::OpenRead($Path)
+    try {
+        $gzip = [System.IO.Compression.GZipStream]::new($file, [System.IO.Compression.CompressionMode]::Decompress)
+        try {
+            $buffer = [System.IO.MemoryStream]::new()
+            try {
+                $gzip.CopyTo($buffer)
+                return ,$buffer.ToArray()
+            }
+            finally { $buffer.Dispose() }
+        }
+        finally { $gzip.Dispose() }
+    }
+    finally { $file.Dispose() }
 }
 
 function Test-CompiledBoundedContentNormalizationRawPayloadParity {
@@ -2494,9 +2548,9 @@ function Test-CompiledBoundedContentNormalizationRawPayloadParity {
         [void](New-Item -Path $tempRoot -ItemType Directory -Force)
         Initialize-CompiledRawPayloadParityStore -DataPath $tempRoot
         $legacyPath = Join-Path $tempRoot 'legacy.json.gz'
-        $null = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'legacy.json') -PayloadOutputPath $legacyPath -Machines @{} -AdvancedHuntingData (New-CompiledRawPayloadParityAdvancedHunting) -NvdCveData (New-CompiledRawPayloadParityNvd) -AdvancedHuntingInventoryData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization
+        $null = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'legacy.json') -PayloadOutputPath $legacyPath -Machines @{} -AdvancedHuntingData (Get-CompiledRawPayloadParityAdvancedHunting) -NvdCveData (Get-CompiledRawPayloadParityNvd) -AdvancedHuntingInventoryData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization
         $compiledPath = Join-Path $tempRoot 'compiled.json.gz'
-        $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines @{} -AdvancedHuntingData (New-CompiledRawPayloadParityAdvancedHunting) -NvdCveData (New-CompiledRawPayloadParityNvd) -AdvancedHuntingInventoryData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+        $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines @{} -AdvancedHuntingData (Get-CompiledRawPayloadParityAdvancedHunting) -NvdCveData (Get-CompiledRawPayloadParityNvd) -AdvancedHuntingInventoryData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -UseExperimentalCompiledSmallPayload
         Assert-True ($compiled -is [hashtable] -and $null -ne $compiled.CompiledMemoryTelemetry) 'Expected the small direct-payload run to use the compiled bounded normalizer.'
         $legacyText = Read-GzipTextFile -Path $legacyPath
         $compiledText = Read-GzipTextFile -Path $compiledPath
@@ -2520,9 +2574,94 @@ function Test-CompiledBoundedContentNormalizationRawPayloadParity {
         Assert-True (@($compiledPayload.lookups.affSoftware).Count -eq 2 -and @($compiledPayload.lookups.affSoftware) -contains '  ') 'Expected whitespace AH affected-software entries to be retained like the in-process path.'
         $nvdCve = @($compiledPayload.lookups.cves | Where-Object { $_.id -eq 'CVE-2026-9302' })[0]
         Assert-True ((@($nvdCve.nw) -join '|') -ceq 'CWE-1| |') 'Expected NVD weakness entries, including whitespace and empty strings, to be retained like the in-process path.'
-        $legacyHash = Get-TextSha256 -Text $legacyText
-        $compiledHash = Get-TextSha256 -Text $compiledText
-        Assert-True ($legacyText -ceq $compiledText) ("Expected decompressed compiled payload bytes to equal the in-process payload on this small fixture (legacy SHA-256 {0}, compiled {1})." -f $legacyHash, $compiledHash)
+        [byte[]]$legacyBytes = Read-GzipBytesFile -Path $legacyPath
+        [byte[]]$compiledBytes = Read-GzipBytesFile -Path $compiledPath
+        $legacyHash = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($legacyBytes))
+        $compiledHash = [System.Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($compiledBytes))
+        Assert-True ([System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($legacyBytes, $compiledBytes)) ("Expected decompressed compiled payload bytes to equal the in-process payload on this small fixture (legacy SHA-256 {0}, compiled {1})." -f $legacyHash, $compiledHash)
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
+function Test-CompiledBoundedContentNormalizationScoreParity {
+    [CmdletBinding()]
+    param()
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-score-parity-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $cases = @(
+            @{ Name = 'float'; Cve = 'CVE-2026-9701'; Score = [double]9.0 }
+            @{ Name = 'integer'; Cve = 'CVE-2026-9701'; Score = [long]9 }
+            @{ Name = 'numeric-string'; Cve = 'CVE-2026-9701'; Score = '9.0' }
+            @{ Name = 'text'; Cve = 'CVE-2026-9702'; Score = 'unscored' }
+            @{ Name = 'null'; Cve = 'CVE-2026-9703'; Score = $null }
+            @{ Name = 'exponent'; Cve = 'CVE-2026-9704'; Score = [double]0.0000001 }
+            @{ Name = 'boolean'; Cve = 'CVE-2026-9705'; Score = $true }
+            @{ Name = 'large-integer'; Cve = 'CVE-2026-9706'; Score = [bigint]::Parse('123456789012345678901234567890') }
+        )
+        $rows = foreach ($case in $cases) {
+            $row = Get-TestVulnRow -Id ("score-" + $case.Name) -CveId $case.Cve -SnapshotDate '2026-07-10' -Version '1.0.0'
+            $row.DeviceId = "device-$($case.Name)"
+            $row.SoftwareName = "software-$($case.Name)"
+            $row.CvssScore = $case.Score
+            $row
+        }
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records $rows
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+        $result = Invoke-CompiledVersusInProcessNormalization -DataPath $tempRoot -Label 'scores' -NewInventory { @{} }
+        Assert-True ($null -ne $result.Compiled.CompiledMemoryTelemetry) 'Expected score parity to exercise the compiled bounded normalizer.'
+        Assert-True (@($result.CompiledPayload.lookups.cves | Where-Object { $_.id -eq 'CVE-2026-9701' }).Count -eq 2) 'Expected numeric 9.0 and 9 to share a CVE lookup while the string "9.0" remains distinct.'
+        [byte[]]$legacyBytes = Read-GzipBytesFile -Path (Join-Path $tempRoot 'scores-legacy.json.gz')
+        [byte[]]$compiledBytes = Read-GzipBytesFile -Path (Join-Path $tempRoot 'scores-compiled.json.gz')
+        Assert-True ([System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($legacyBytes, $compiledBytes)) 'Expected numeric, string, null, Boolean, and large-integer scores to preserve exact in-process payload bytes.'
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
+function Test-CompiledBoundedContentNormalizationMachineInfoParity {
+    [CmdletBinding()]
+    param()
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-machine-info-parity-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $rows = foreach ($deviceId in @('machine-with-users', 'machine-without-users', 'users-without-machine', 'machine-tuple', 'no-enrichment')) {
+            $row = Get-TestVulnRow -Id ("row-" + $deviceId) -CveId 'CVE-2026-9801' -SnapshotDate '2026-07-10' -Version '1.0.0'
+            $row.DeviceId = $deviceId
+            if ($deviceId -eq 'no-enrichment') { $row.MachineTags = @('Prod', ' ', '', 'Other') }
+            $row
+        }
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records $rows
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+        $newMachines = {
+            $withUsers = Get-TestMachineRecord -Id 'machine-with-users'
+            $withUsers.machineTags = @('Zeta', 'Alpha', 'Zeta', ' ')
+            $tuple = [object[]]::new(15)
+            $tuple[0] = '10.0.0.42'
+            $tuple[14] = @('Tuple Z', ' ', 'Tuple A', 'Tuple Z')
+            @{ 'machine-with-users' = $withUsers; 'machine-without-users' = (Get-TestMachineRecord -Id 'machine-without-users'); 'machine-tuple' = $tuple }
+        }
+        $newUsers = { @{ 'machine-with-users' = @('alice@example.test', 42); 'users-without-machine' = @('bob@example.test') } }
+        $newInventory = {
+            $key = Get-AdvancedHuntingInventoryMatchKey -DeviceId 'machine-with-users' -SoftwareVendor 'Contoso' -SoftwareName 'Legacy Agent' -SoftwareVersion '1.0.0'
+            @{ $key = @{ ProductCodeCpe = 'cpe:/a:contoso:legacy_agent'; EndOfSupportStatus = 'Active'; EndOfSupportDate = '2027-01-01' } }
+        }
+        $legacyPath = Join-Path $tempRoot 'legacy.json.gz'
+        $compiledPath = Join-Path $tempRoot 'compiled.json.gz'
+        $legacyMachines = & $newMachines; $legacyInventory = & $newInventory
+        $compiledMachines = & $newMachines; $compiledInventory = & $newInventory
+        $null = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'legacy.json') -PayloadOutputPath $legacyPath -Machines $legacyMachines -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers (& $newUsers) -AdvancedHuntingInventoryData $legacyInventory -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization
+        $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines $compiledMachines -AdvancedHuntingData @{} -AdvancedHuntingDeviceUsers (& $newUsers) -AdvancedHuntingInventoryData $compiledInventory -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -UseExperimentalCompiledSmallPayload
+        Assert-True ($null -ne $compiled.CompiledMemoryTelemetry) 'Expected machine-info parity to exercise the compiled bounded normalizer.'
+        Assert-True ($compiledMachines.Count -eq $legacyMachines.Count -and $compiledMachines.Count -eq 3 -and $compiledInventory.Count -eq $legacyInventory.Count -and $compiledInventory.Count -eq 1) 'Expected the in-process-compatible path to preserve caller-owned machine and inventory tables.'
+        $payload = Read-GzipTextFile -Path $compiledPath | ConvertFrom-Json -Depth 30
+        foreach ($device in @($payload.lookups.devices | Where-Object { $_.id -ne 'no-enrichment' })) {
+            Assert-True ((@($device.m.PSObject.Properties.Name) -join ',') -eq 'ip,eip,u,hs,rs,el,dv,mb,aad,ls,fs') "Expected complete, ordered machine information for '$($device.id)'."
+        }
+        $userOnly = @($payload.lookups.devices | Where-Object { $_.id -eq 'users-without-machine' })[0]
+        Assert-True ($null -eq $userOnly.m.ip -and $userOnly.m.u -eq 'bob@example.test') 'Expected users without a machine record to retain the full null-filled machine-info shape.'
+        [byte[]]$legacyBytes = Read-GzipBytesFile -Path $legacyPath
+        [byte[]]$compiledBytes = Read-GzipBytesFile -Path $compiledPath
+        Assert-True ([System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals($legacyBytes, $compiledBytes)) ("Expected machine and device-user enrichment to preserve exact in-process payload bytes.`nlegacy: {0}`ncompiled: {1}" -f (Read-GzipTextFile -Path $legacyPath), (Read-GzipTextFile -Path $compiledPath))
     }
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 }
@@ -2536,13 +2675,15 @@ function Test-CompiledBoundedContentNormalizationHighCardinalityContract {
         [void](New-Item -Path $tempRoot -ItemType Directory -Force)
         Initialize-CompiledRawPayloadParityStore -DataPath $tempRoot
         $compactPath = Join-Path $tempRoot 'compact.json.gz'
-        $null = Invoke-BoundedContentStorePayloadProjection -DataPath $tempRoot -PayloadOutputPath $compactPath -Machines @{} -AdvancedHuntingData (New-CompiledRawPayloadParityAdvancedHunting) -NvdCveData (New-CompiledRawPayloadParityNvd) -AdvancedHuntingInventoryData @{} -PayloadContract 'high-cardinality-compact'
+        $null = Invoke-BoundedContentStorePayloadProjection -DataPath $tempRoot -PayloadOutputPath $compactPath -Machines @{} -AdvancedHuntingData (Get-CompiledRawPayloadParityAdvancedHunting) -NvdCveData (Get-CompiledRawPayloadParityNvd) -AdvancedHuntingInventoryData @{} -PayloadContract 'high-cardinality-compact'
         $compactText = Read-GzipTextFile -Path $compactPath
         $compact = $compactText | ConvertFrom-Json -Depth 30
         Assert-True ((@($compact.PSObject.Properties.Name) -join ',') -eq 'vulnsFormat,lookups,vulns') 'Expected the high-cardinality contract to keep lookups before vulns.'
         Assert-True (@($compact.lookups.updates).Count -eq 2 -and (@($compact.vulns | ForEach-Object { [int]$_[7] }) -join ',') -eq '0,1,0,-1') 'Expected the high-cardinality contract to keep global update interning and skip whitespace-only update names.'
         Assert-True (@($compact.lookups.diskPaths).Count -eq 5 -and @($compact.lookups.regPaths).Count -eq 3 -and (@($compact.vulns | Select-Object -Skip 1 | ForEach-Object { ConvertTo-Json -InputObject $_[8] -Compress } | Select-Object -Unique)).Count -eq 1) 'Expected the high-cardinality contract to keep global disk/registry path interning.'
         Assert-True (@($compact.lookups.affSoftware).Count -eq 1) 'Expected the high-cardinality contract to keep filtering whitespace affected-software entries.'
+        $compactCve = @($compact.lookups.cves | Where-Object { $_.id -eq 'CVE-2026-9301' })[0]
+        Assert-True ((ConvertTo-Json -InputObject $compactCve.as -Compress) -eq '[0]') 'Expected the high-cardinality contract to preserve unfiltered affected-software references.'
         Assert-True ($compactText.Contains('Ag\u00EBnt \u003Cb\u003E\u0026') -and $compactText.Contains('\uD83D\uDE00')) 'Expected the high-cardinality contract to keep default System.Text.Json escaping.'
 
         $stagingParent = Join-Path $tempRoot 'staging'
@@ -2551,7 +2692,7 @@ function Test-CompiledBoundedContentNormalizationHighCardinalityContract {
             $stage = Join-Path $tempRoot ('contract-' + $case.Name)
             [void](New-Item -Path $stage -ItemType Directory -Force)
             foreach ($fragment in @('deviceProfiles.ndjson', 'contentTemplates.ndjson', 'machines.ndjson', 'cveEnrichment.ndjson', 'inventory.ndjson')) { [System.IO.File]::WriteAllText((Join-Path $stage $fragment), '') }
-            Write-BoundedNormalizationOptions -StagePath $stage -AdvancedHuntingInventoryData @{} -PayloadContract 'in-process-compatible'
+            Write-BoundedNormalizationConfiguration -StagePath $stage -AdvancedHuntingInventoryData @{} -PayloadContract 'in-process-compatible'
             $optionsPath = Join-Path $stage 'normalizationOptions.json'
             $options = [System.IO.File]::ReadAllText($optionsPath) | ConvertFrom-Json -AsHashtable -Depth 10
             if ($null -eq $case.Value) { $options.Remove('payloadContract') } else { $options['payloadContract'] = $case.Value }
@@ -2633,7 +2774,7 @@ function Test-CompiledBoundedContentNormalizationInvalidCalendarDateParity {
             param([string]$StorePath, [string]$Label, [switch]$InProcess)
             $failure = $null
             try {
-                [void](ConvertTo-NormalizedData -DataPath $StorePath -VulnOutputPath (Join-Path $StorePath "$Label.json") -PayloadOutputPath (Join-Path $StorePath "$Label.json.gz") -Machines @{} -AdvancedHuntingData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization:$InProcess)
+                [void](ConvertTo-NormalizedData -DataPath $StorePath -VulnOutputPath (Join-Path $StorePath "$Label.json") -PayloadOutputPath (Join-Path $StorePath "$Label.json.gz") -Machines @{} -AdvancedHuntingData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization:$InProcess -UseExperimentalCompiledSmallPayload:(-not $InProcess))
             }
             catch { $failure = $_.Exception }
             Assert-True ($null -ne $failure) "Expected the $Label normalization of an invalid calendar seen date to fail instead of accepting it."
@@ -2746,7 +2887,7 @@ function Test-CompiledBoundedContentNormalizationCleansStagingOnFailure {
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
-function Test-CompiledBoundedStagingCleanupSurfacesDisposalAndProbeFailures {
+function Test-CompiledBoundedStagingCleanupSurfacesDisposalAndProbeFailure {
     [CmdletBinding()]
     param()
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-staging-hardening-' + [guid]::NewGuid().ToString('N'))
@@ -2841,11 +2982,22 @@ function Test-CompiledBoundedContentNormalizationExpandedParity {
         $defaultInputs = & $newEnrichmentInputs
         $defaultPath = Join-Path $tempRoot 'default.json.gz'
         $default = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'default.json') -PayloadOutputPath $defaultPath -Machines $defaultInputs.Machines -AdvancedHuntingData $defaultInputs.AdvancedHuntingData -AdvancedHuntingDeviceUsers $defaultInputs.DeviceUsers -AdvancedHuntingInventoryData $defaultInputs.InventoryData -NvdCveData $defaultInputs.NvdCveData -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
-        Assert-True ($default -is [hashtable] -and $default.ContainsKey('CompiledMemoryTelemetry') -and $null -ne $default.CompiledMemoryTelemetry -and $default.VulnCount -eq 2) 'Expected low-cardinality direct payload output to select the compiled bounded normalizer by default.'
-        & node (Join-Path $repoRoot 'tests\helpers\Assert-ExpandedPayloadParity.js') $baselinePath $defaultPath
-        Assert-True ($LASTEXITCODE -eq 0) 'Expected default compiled and in-process payloads to have expanded enrichment parity.'
+        Assert-True (-not $default.ContainsKey('CompiledMemoryTelemetry') -and $default.VulnCount -eq 2) 'Expected low-cardinality direct payload output to retain the in-process normalizer by default.'
+        Assert-True ([System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals((Read-GzipBytesFile -Path $baselinePath), (Read-GzipBytesFile -Path $defaultPath))) 'Expected default and explicit in-process payloads to have identical bytes.'
+        $experimentalInputs = & $newEnrichmentInputs
+        $experimentalPath = Join-Path $tempRoot 'experimental.json.gz'
+        $experimental = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'experimental.json') -PayloadOutputPath $experimentalPath -Machines $experimentalInputs.Machines -AdvancedHuntingData $experimentalInputs.AdvancedHuntingData -AdvancedHuntingDeviceUsers $experimentalInputs.DeviceUsers -AdvancedHuntingInventoryData $experimentalInputs.InventoryData -NvdCveData $experimentalInputs.NvdCveData -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -UseExperimentalCompiledSmallPayload
+        Assert-True ($experimental.ContainsKey('CompiledMemoryTelemetry') -and $null -ne $experimental.CompiledMemoryTelemetry -and $experimental.VulnCount -eq 2) 'Expected explicit opt-in to select the low-cardinality compiled normalizer.'
+        & node (Join-Path $repoRoot 'tests\helpers\Assert-ExpandedPayloadParity.js') $baselinePath $experimentalPath
+        Assert-True ($LASTEXITCODE -eq 0) 'Expected experimental compiled and in-process payloads to have expanded enrichment parity.'
+        Assert-True ([System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals((Read-GzipBytesFile -Path $baselinePath), (Read-GzipBytesFile -Path $experimentalPath))) 'Expected combined machine, device-user, inventory, AH, and NVD enrichment to preserve exact in-process payload bytes.'
+        $matchingBaselineInputs = & $newEnrichmentInputs
+        $matchingBaselineInputs.AdvancedHuntingData['CVE-2026-7001'].AffectedSoftware = @('contoso:legacy_agent', ' Contoso :other')
+        $matchingBaselinePath = Join-Path $tempRoot 'matching-baseline.json.gz'
+        $null = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'matching-baseline.json') -PayloadOutputPath $matchingBaselinePath -Machines $matchingBaselineInputs.Machines -AdvancedHuntingData $matchingBaselineInputs.AdvancedHuntingData -AdvancedHuntingDeviceUsers $matchingBaselineInputs.DeviceUsers -AdvancedHuntingInventoryData $matchingBaselineInputs.InventoryData -NvdCveData $matchingBaselineInputs.NvdCveData -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization
         [System.IO.File]::WriteAllText((Join-Path $tempRoot 'synthetic-manifest.json'), '{"actualDeviceCount":1,"contentTemplateCount":10001}', [System.Text.UTF8Encoding]::new($false))
         $compiledInputs = & $newEnrichmentInputs
+        $compiledInputs.AdvancedHuntingData['CVE-2026-7001'].AffectedSoftware = @('contoso:legacy_agent', ' Contoso :other')
         $compiledPath = Join-Path $tempRoot 'compiled.json.gz'
         $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines $compiledInputs.Machines -AdvancedHuntingData $compiledInputs.AdvancedHuntingData -AdvancedHuntingDeviceUsers $compiledInputs.DeviceUsers -AdvancedHuntingInventoryData $compiledInputs.InventoryData -NvdCveData $compiledInputs.NvdCveData -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
         Assert-True ($compiled.VulnCount -eq 2 -and $compiled.LookupsConsumed) 'Expected the compiled bounded path to publish both rows directly to the standard payload.'
@@ -2853,13 +3005,13 @@ function Test-CompiledBoundedContentNormalizationExpandedParity {
         Assert-True ($compiled.CompiledMemoryTelemetry.peakWorkingSetMb -gt 0 -and $compiled.CompiledMemoryTelemetry.peakPrivateMemoryMb -gt 0 -and $compiled.CompiledMemoryTelemetry.peakGcHeapMb -gt 0) 'Expected compiled telemetry to capture positive pre-trim peaks.'
         Assert-True ($compiled.CompiledMemoryTelemetry.postTrimWorkingSetMb -le $compiled.CompiledMemoryTelemetry.preTrimWorkingSetMb) 'Expected post-trim working set not to exceed the pre-trim reading.'
         Assert-True ($compiled.CompiledMemoryTelemetry.sampleIntervalMilliseconds -eq 0) 'Expected compiled telemetry to record phase-checkpoint sampling without a contending background timer.'
-        & node (Join-Path $repoRoot 'tests\helpers\Assert-ExpandedPayloadParity.js') $baselinePath $compiledPath
-        Assert-True ($LASTEXITCODE -eq 0) 'Expected compiled and compatibility payloads to have expanded semantic parity.'
+        & node (Join-Path $repoRoot 'tests\helpers\Assert-ExpandedPayloadParity.js') $matchingBaselinePath $compiledPath
+        Assert-True ($LASTEXITCODE -eq 0) 'Expected compact and in-process payloads to have expanded semantic parity when affected software already matches the dataset vendors.'
         $compiledPayload = Read-GzipTextFile -Path $compiledPath | ConvertFrom-Json -Depth 30
         Assert-True ($compiledPayload.lookups.devices[0].m.ip -eq '10.20.30.40' -and $compiledPayload.lookups.devices[0].m.u[0] -eq 'user@example.test') 'Expected compiled normalization to preserve machine and device-user enrichment.'
         Assert-True ($compiledPayload.lookups.cves[0].pd -eq '2026-02-03' -and $compiledPayload.lookups.cves[0].nlm -eq '2026-07-01' -and $compiledPayload.lookups.cves[0].nw[0] -eq 'CWE-79') 'Expected compiled normalization to preserve Advanced Hunting and NVD enrichment.'
         $expandedAffectedSoftware = @($compiledPayload.lookups.cves[0].as | ForEach-Object { $compiledPayload.lookups.affSoftware[[int]$_] })
-        Assert-True (($expandedAffectedSoftware -join '|') -eq 'contoso:legacy_agent| Contoso :other') 'Expected compiled normalization to filter affected software to dataset vendors like the in-process normalizer.'
+        Assert-True (($expandedAffectedSoftware -join '|') -eq 'contoso:legacy_agent| Contoso :other') 'Expected compact normalization to retain the supplied matching affected software.'
         $baselinePayload = Read-GzipTextFile -Path $baselinePath | ConvertFrom-Json -Depth 30
         Assert-True ((@($baselinePayload.lookups.cves[0].as | ForEach-Object { $baselinePayload.lookups.affSoftware[[int]$_] }) -join '|') -eq ($expandedAffectedSoftware -join '|')) 'Expected compiled and in-process affected-software filters to agree.'
         Assert-True (@($compiledPayload.lookups.inventory).Count -eq 1 -and $compiledPayload.vulns[0][10] -eq 0) 'Expected compiled normalization to preserve inventory enrichment and row references.'

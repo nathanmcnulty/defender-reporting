@@ -19,6 +19,7 @@ param(
     [Parameter(Mandatory = $false)][switch]$UseExistingExportsOnly,
     [Parameter(Mandatory = $false)][bool]$UseBoundedPublicationMetadataReader = $false,
     [Parameter(Mandatory = $false)][switch]$UseDirectMergeDeviceLookup,
+    [Parameter(Mandatory = $false)][switch]$UseExperimentalCompiledSmallPayload,
     [Parameter(Mandatory = $false)][switch]$ValidatePublishedSemanticParity,
     [Parameter(Mandatory = $false)][ValidateSet('None', 'AfterBackup', 'AfterDeploy', 'AfterSeed')][string]$FailureInjectionPoint = 'None',
     [Parameter(Mandatory = $false)][switch]$Execute
@@ -173,6 +174,7 @@ try {
         -RunbookName $RunbookName -StorageAccountName $StorageAccountName -UseExistingExportsOnly:$UseExistingExportsOnly `
         -DashboardDeliveryMode $DashboardDeliveryMode `
         -UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader -UseDirectMergeDeviceLookup:$UseDirectMergeDeviceLookup `
+        -UseExperimentalCompiledSmallPayload:$UseExperimentalCompiledSmallPayload `
         -ExpectedTotalRows $resolvedExpectedTotalRows `
         -PollIntervalSeconds $PollIntervalSeconds -StallWarningSeconds $StallWarningSeconds -StallFailureSeconds $StallFailureSeconds `
         -SkipDeployRunbook -SkipTemplateUpload -ResultsOutputPath $resultPath

@@ -32,6 +32,10 @@
     Include Advanced Hunting data for CVE enrichment (PublishedDate, Description, EPSS).
     Requires AdvancedQuery.Read.All permission on the Managed Identity. Default: true
 
+.PARAMETER UseExperimentalCompiledSmallPayload
+    Opt in to the compiled normalizer for smaller direct-payload workloads during
+    controlled validation. Defaults to false; normalized payload caching is bypassed.
+
 .PARAMETER Export
     Export target for the generated dashboard. Default: BlobStorage
     Options: BlobStorage, SharePoint, StaticWebApp
@@ -67,6 +71,9 @@ param(
     [Parameter(Mandatory = $false)]
     [bool]$UseDirectMergeDeviceLookup = $false,
     [bool]$UseBoundedPublicationMetadataReader = $false,
+
+    [Parameter(Mandatory = $false)]
+    [bool]$UseExperimentalCompiledSmallPayload = $false,
 
     [Parameter(Mandatory = $false)]
     [ValidateSet('BlobStorage', 'SharePoint', 'StaticWebApp')]
@@ -389,7 +396,7 @@ public static class BoundedContentNormalizer
         private sealed class Software { public int Vendor; public string Name, Reference, InventoryIdentity; }
         private sealed class Update { public string Name, Id, Url; }
         private sealed class CveEnrichment { /* String-like enrichment fields hold staged raw JSON so supplied empty or whitespace values are preserved. */ public string PublishedDate, Description, EpssJson, ExploitAvailableJson, NvdLastModified, NvdBaseScoreJson, NvdBaseSeverity, NvdVector, NvdKevDate, NvdActionDue, NvdRequiredAction, WeaknessesJson; public string[] AffectedSoftware, Weaknesses; }
-        private sealed class Cve { public string Id, Url; public double? Score; public int Severity, Exploit, BatchTitle; public CveEnrichment Enrichment; public int[] AffectedSoftware; }
+        private sealed class Cve { public string Id, Url, ScoreJson; public double? Score; public int Severity, Exploit, BatchTitle; public CveEnrichment Enrichment; public int[] AffectedSoftware; }
         private sealed class InventoryRecord { public string Cpe, EndOfSupportStatus, EndOfSupportDate; }
         private sealed class NormalizationOptions { public StringComparer InventoryKeyComparer, SeverityKeyComparer; public Dictionary<string, int> SeverityIndexes; public bool InProcessCompatible; }
         private struct Template { public int Software, Cve, Version, Update, UpdateAvailable, DiskStart, DiskCount, RegistryStart, RegistryCount; }
@@ -475,9 +482,9 @@ public static class BoundedContentNormalizer
         {
             telemetry.SetStage("template-interning");
             var expectedTemplates = Directory.Exists(dictionaryPath) ? File.ReadLines(Path.Combine(dictionaryPath, "contentTemplates.ndjson"), Utf8).Count() : 1024;
-            var machineOverlays = ReadMachineOverlays(Path.Combine(dictionaryPath, "machines.ndjson"));
             var normalizationOptions = ReadNormalizationOptions(Path.Combine(dictionaryPath, "normalizationOptions.json"));
             var inProcessCompatible = normalizationOptions.InProcessCompatible; inProcessCompatibleEscaping = inProcessCompatible;
+            var machineOverlays = ReadMachineOverlays(Path.Combine(dictionaryPath, "machines.ndjson"), inProcessCompatible);
             var cveEnrichment = ReadCveEnrichment(Path.Combine(dictionaryPath, "cveEnrichment.ndjson"), inProcessCompatible);
             var inventorySource = ReadInventory(Path.Combine(dictionaryPath, "inventory.ndjson"), normalizationOptions.InventoryKeyComparer);
             var vendors = new List<string>(); var vendorMap = Map();
@@ -499,8 +506,8 @@ public static class BoundedContentNormalizer
             var profileDeviceIndexes = new List<int>();
             var deviceKeyMap = new Dictionary<string, int>(StringComparer.Ordinal);
             var softwareIdentities = new List<string>();
-            var softwareVendorIndexes = new List<int>();
-            var usedVendorIndexes = new HashSet<int>();
+            var softwareVendorIndexes = inProcessCompatible ? new List<int>() : null;
+            var usedVendorIndexes = inProcessCompatible ? new HashSet<int>() : null;
             var inventoryValues = new List<InventoryRecord>(); var inventoryValueMap = Map();
             var templateList = new List<Template>();
             var templateDiskIndexes = new List<int>(); var templateRegistryIndexes = new List<int>();
@@ -525,7 +532,7 @@ public static class BoundedContentNormalizer
                     if (hasOverlay && overlay.Tags != null && overlay.Tags.Length > 0)
                         foreach (var value in overlay.Tags) { var index = Intern(value, tags, tagMap); if (index >= 0) tagIndexes.Add(index); }
                     else if (item.TryGetProperty("t", out tagValues) && tagValues.ValueKind == JsonValueKind.Array)
-                        foreach (var tag in tagValues.EnumerateArray()) { var value = ScalarString(tag); var index = Intern(value, tags, tagMap); if (index >= 0) tagIndexes.Add(index); }
+                        foreach (var tag in tagValues.EnumerateArray()) { var value = ScalarString(tag); if (inProcessCompatible && String.IsNullOrWhiteSpace(value)) continue; var index = Intern(value, tags, tagMap); if (index >= 0) tagIndexes.Add(index); }
                     var group = hasOverlay && !String.IsNullOrWhiteSpace(overlay.Group) ? overlay.Group : Value(item, "g"); if (String.IsNullOrWhiteSpace(group)) group = "(none)";
                     var platform = hasOverlay && !String.IsNullOrWhiteSpace(overlay.Platform) ? overlay.Platform : Value(item, "o");
                     var name = hasOverlay && !String.IsNullOrWhiteSpace(overlay.Name) ? overlay.Name : Value(item, "n");
@@ -547,10 +554,10 @@ public static class BoundedContentNormalizer
                     if (!softwareMap.TryGetValue(softwareKey, out softwareIndex)) {
                         softwareIndex = softwareCount++; softwareMap.Add(softwareKey, softwareIndex);
                         var software = new Software { Vendor = vendorIndex, Name = name, Reference = reference, InventoryIdentity = vendor + "|" + name };
-                        softwareIdentities.Add(software.InventoryIdentity); softwareVendorIndexes.Add(vendorIndex); WriteSoftwareFragment(softwareOutput, software);
+                        softwareIdentities.Add(software.InventoryIdentity); if (inProcessCompatible) softwareVendorIndexes.Add(vendorIndex); WriteSoftwareFragment(softwareOutput, software);
                     }
 
-                    var cveId = Value(item, "c"); var scoreText = Value(item, "sc"); var severity = Value(item, "sev"); var exploit = Value(item, "ex"); var url = ConvertCveUrl(Value(item, "bu")); var batch = Value(item, "bt");
+                    var cveId = Value(item, "c"); var scoreText = inProcessCompatible ? CompatibleScoreKey(item) : Value(item, "sc"); var severity = Value(item, "sev"); var exploit = Value(item, "ex"); var url = ConvertCveUrl(Value(item, "bu")); var batch = Value(item, "bt");
                     var cveKey = GetHashKey(cveId, scoreText, severity, exploit, url, batch);
                     int cveIndex;
                     if (!cveMap.TryGetValue(cveKey, out cveIndex)) {
@@ -559,7 +566,7 @@ public static class BoundedContentNormalizer
                         CveEnrichment enrichment; cveEnrichment.TryGetValue(cveId, out enrichment);
                         var affectedIndexes = new List<int>();
                         if (enrichment != null && enrichment.AffectedSoftware != null) foreach (var affected in enrichment.AffectedSoftware) { var affectedIndex = Intern(affected, affectedSoftware, affectedSoftwareMap); if (affectedIndex >= 0) affectedIndexes.Add(affectedIndex); }
-                        WriteCveFragment(cveOutput, new Cve { Id = cveId, Score = score, Severity = SeverityIndex(severity, normalizationOptions.SeverityIndexes), Exploit = Intern(exploit, exploits, exploitMap), Url = url, BatchTitle = Intern(batch, batchTitles, batchMap), Enrichment = enrichment, AffectedSoftware = affectedIndexes.Count > 0 ? affectedIndexes.ToArray() : null });
+                        WriteCveFragment(cveOutput, new Cve { Id = cveId, Score = score, ScoreJson = inProcessCompatible ? CompatibleScoreJson(item) : null, Severity = SeverityIndex(severity, normalizationOptions.SeverityIndexes), Exploit = Intern(exploit, exploits, exploitMap), Url = url, BatchTitle = Intern(batch, batchTitles, batchMap), Enrichment = enrichment, AffectedSoftware = affectedIndexes.Count > 0 ? affectedIndexes.ToArray() : null });
                     }
 
                     var updateName = Value(item, "ru"); var updateIndex = -1;
@@ -612,7 +619,7 @@ public static class BoundedContentNormalizer
                                 var first = NormalizeDate(ScalarString(values[3])); var last = NormalizeDate(ScalarString(values[4]));
                                 if (!String.IsNullOrEmpty(first) && !String.IsNullOrEmpty(last) && CompareSeenDates(first, last) > 0) { var swap = first; first = last; last = swap; swappedCount++; }
                                 var template = templateList[templateIndex];
-                                if (template.Software >= 0 && template.Software < softwareVendorIndexes.Count) { var usedVendorIndex = softwareVendorIndexes[template.Software]; if (usedVendorIndex >= 0) usedVendorIndexes.Add(usedVendorIndex); }
+                                if (inProcessCompatible && template.Software >= 0 && template.Software < softwareVendorIndexes.Count) { var usedVendorIndex = softwareVendorIndexes[template.Software]; if (usedVendorIndex >= 0) usedVendorIndexes.Add(usedVendorIndex); }
                                 var firstIndex = Intern(first, dates, dateMap); var lastIndex = Intern(last, dates, dateMap);
                                 var inventoryIndex = -1;
                                 if (inventorySource != null && inventorySource.Count > 0 && deviceIds != null && softwareIdentities != null && deviceIndex < deviceIds.Count && template.Software >= 0 && template.Software < softwareIdentities.Count) {
@@ -637,7 +644,7 @@ public static class BoundedContentNormalizer
             telemetry.SetStage("pre-assembly-cleanup");
             var resultDeviceCount = deviceKeyMap.Count;
             var resultVendorCount = vendors.Count;
-            var allowedAffectedSoftware = BuildAllowedAffectedSoftware(vendors, usedVendorIndexes, affectedSoftware);
+            var allowedAffectedSoftware = inProcessCompatible ? BuildAllowedAffectedSoftware(vendors, usedVendorIndexes, affectedSoftware) : null;
             usedVendorIndexes = null; softwareVendorIndexes = null;
             templateList = null; deviceOnboarded = null; deviceIds = null; profileDeviceIndexes = null; deviceKeyMap = null; softwareIdentities = null; inventorySource.Clear(); inventoryValueMap.Clear(); templateDiskIndexes = null; templateRegistryIndexes = null; dateMap.Clear();
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
@@ -662,7 +669,10 @@ public static class BoundedContentNormalizer
                 writer.WritePropertyName("devices"); CopyJsonLines(writer, deviceFragment);
                 writer.WritePropertyName("inventory"); writer.WriteStartArray(); foreach (var inventory in inventoryValues) { writer.WriteStartObject(); WriteNullableString(writer, "cpe", inventory.Cpe); WriteNullableString(writer, "eos", inventory.EndOfSupportStatus); WriteNullableString(writer, "eod", inventory.EndOfSupportDate); writer.WriteEndObject(); } writer.WriteEndArray(); inventoryValues = null;
                 writer.WritePropertyName("software"); CopyJsonLines(writer, softwareFragment);
-                writer.WritePropertyName("cves"); CopyCveLinesWithAffectedSoftwareFilter(writer, cveFragment, allowedAffectedSoftware); allowedAffectedSoftware = null;
+                writer.WritePropertyName("cves");
+                if (inProcessCompatible) CopyCveLinesWithAffectedSoftwareFilter(writer, cveFragment, allowedAffectedSoftware);
+                else CopyJsonLines(writer, cveFragment);
+                allowedAffectedSoftware = null;
                 writer.WriteNull("noTagsIdx"); writer.WriteEndObject();
                 if (!inProcessCompatible) {
                     telemetry.SetStage("pre-vulnerability-assembly-cleanup");
@@ -733,10 +743,10 @@ public static class BoundedContentNormalizer
             try { return File.ReadAllText(path, Utf8); }
             catch (Exception exception) when (exception is FileNotFoundException || exception is DirectoryNotFoundException) { throw new InvalidDataException("Bounded normalization requires the staged fragment '" + Path.GetFileName(path) + "'.", exception); }
         }
-        private static Dictionary<string, MachineOverlay> ReadMachineOverlays(string path)
+        private static Dictionary<string, MachineOverlay> ReadMachineOverlays(string path, bool inProcessCompatible)
         {
             var result = new Dictionary<string, MachineOverlay>(StringComparer.Ordinal);
-            foreach (var line in ReadRequiredFragmentLines(path)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var id = Value(item, "id"); if (String.IsNullOrWhiteSpace(id)) continue; result[id] = new MachineOverlay { Name = Value(item, "n"), Group = Value(item, "g"), Platform = Value(item, "o"), OsVersion = Value(item, "ov"), Tags = StringArray(item, "t"), MachineInfoJson = RawValue(item, "m") }; } }
+            foreach (var line in ReadRequiredFragmentLines(path)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var id = Value(item, "id"); if (String.IsNullOrWhiteSpace(id)) continue; result[id] = new MachineOverlay { Name = Value(item, "n"), Group = Value(item, "g"), Platform = Value(item, "o"), OsVersion = Value(item, "ov"), Tags = inProcessCompatible ? ScalarStringArray(item, "t") : StringArray(item, "t"), MachineInfoJson = RawValue(item, "m") }; } }
             return result;
         }
         private static Dictionary<string, CveEnrichment> ReadCveEnrichment(string path, bool inProcessCompatible)
@@ -758,6 +768,25 @@ public static class BoundedContentNormalizer
         private static Stream OpenInput(string path) { var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan); return path.EndsWith(".gz", StringComparison.OrdinalIgnoreCase) ? (Stream)new GZipStream(file, CompressionMode.Decompress, false) : file; }
         private static string Value(JsonElement item, string name) { JsonElement value; return item.TryGetProperty(name, out value) ? ScalarString(value) : String.Empty; }
         private static string ScalarString(JsonElement value) { if (value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined) return String.Empty; return value.ValueKind == JsonValueKind.String ? value.GetString() ?? String.Empty : value.GetRawText().Trim('"'); }
+        private static bool IsFloatingPointJsonNumber(string value) { return value.IndexOf('.') >= 0 || value.IndexOf('e') >= 0 || value.IndexOf('E') >= 0; }
+        private static string CompatibleScoreKey(JsonElement item)
+        {
+            JsonElement value;
+            if (!item.TryGetProperty("sc", out value) || value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined) return String.Empty;
+            if (value.ValueKind == JsonValueKind.Number && IsFloatingPointJsonNumber(value.GetRawText())) return System.Management.Automation.LanguagePrimitives.ConvertTo<string>(value.GetDouble());
+            if (value.ValueKind == JsonValueKind.True) return "True";
+            if (value.ValueKind == JsonValueKind.False) return "False";
+            return ScalarString(value);
+        }
+        private static string CompatibleScoreJson(JsonElement item)
+        {
+            JsonElement value;
+            if (!item.TryGetProperty("sc", out value) || value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined) return null;
+            var raw = value.GetRawText();
+            long integer;
+            if (value.ValueKind == JsonValueKind.Number && !IsFloatingPointJsonNumber(raw) && !Int64.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out integer)) return "\"" + raw + "\"";
+            return raw;
+        }
         private static bool Boolean(JsonElement item, string name) { JsonElement value; if (!item.TryGetProperty(name, out value)) return false; return value.ValueKind == JsonValueKind.True || (value.ValueKind == JsonValueKind.String && String.Equals(value.GetString(), "true", StringComparison.OrdinalIgnoreCase)); }
         private static int Intern(string value, List<string> values, Dictionary<string, int> map) { if (String.IsNullOrEmpty(value)) return -1; int index; if (!map.TryGetValue(value, out index)) { index = values.Count; map.Add(value, index); values.Add(value); } return index; }
         private static void InternFlatArray(JsonElement item, string name, List<string> values, Dictionary<string, int> map, List<int> flattened, out int start, out int count) { start = flattened.Count; JsonElement array; if (item.TryGetProperty(name, out array)) { if (array.ValueKind == JsonValueKind.Array) foreach (var element in array.EnumerateArray()) { var index = Intern(ScalarString(element), values, map); if (index >= 0) flattened.Add(index); } else { var index = Intern(ScalarString(array), values, map); if (index >= 0) flattened.Add(index); } } count = flattened.Count - start; }
@@ -843,7 +872,7 @@ public static class BoundedContentNormalizer
         private static void WriteDeviceFragment(StreamWriter output, Device value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); writer.WriteString("n", value.Name); writer.WriteNumber("g", value.Group); writer.WriteNumber("o", value.Platform); if (value.OsVersion == null) writer.WriteNull("ov"); else writer.WriteString("ov", value.OsVersion); writer.WritePropertyName("t"); WriteIntArray(writer, value.Tags); writer.WritePropertyName("m"); WriteRawNullable(writer, value.MachineInfoJson); writer.WriteEndObject(); }); }
         private static void WriteSoftwareFragment(StreamWriter output, Software value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteNumber("v", value.Vendor); writer.WriteString("n", value.Name); writer.WriteString("r", value.Reference); writer.WriteEndObject(); }); }
         private static void WriteUpdateFragment(StreamWriter output, Update value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("n", value.Name); writer.WriteString("id", value.Id); writer.WriteString("url", value.Url); writer.WriteEndObject(); }); }
-        private static void WriteCveFragment(StreamWriter output, Cve value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); if (value.Score.HasValue) writer.WriteNumber("sc", value.Score.Value); else writer.WriteNull("sc"); writer.WriteNumber("sv", value.Severity); writer.WriteNumber("ex", value.Exploit); writer.WriteString("u", value.Url); writer.WriteNumber("bt", value.BatchTitle); var e = value.Enrichment; writer.WritePropertyName("pd"); WriteRawNullable(writer, e == null ? null : e.PublishedDate); writer.WritePropertyName("desc"); WriteRawNullable(writer, e == null ? null : e.Description); writer.WritePropertyName("ep"); WriteRawNullable(writer, e == null ? null : e.EpssJson); writer.WritePropertyName("as"); WriteNullableIntArray(writer, value.AffectedSoftware); writer.WritePropertyName("ea"); WriteRawNullable(writer, e == null ? null : e.ExploitAvailableJson); writer.WritePropertyName("nlm"); WriteRawNullable(writer, e == null ? null : e.NvdLastModified); writer.WritePropertyName("nbs"); WriteRawNullable(writer, e == null ? null : e.NvdBaseScoreJson); writer.WritePropertyName("nsv"); WriteRawNullable(writer, e == null ? null : e.NvdBaseSeverity); writer.WritePropertyName("nvec"); WriteRawNullable(writer, e == null ? null : e.NvdVector); writer.WritePropertyName("nkev"); WriteRawNullable(writer, e == null ? null : e.NvdKevDate); writer.WritePropertyName("ndu"); WriteRawNullable(writer, e == null ? null : e.NvdActionDue); writer.WritePropertyName("nact"); WriteRawNullable(writer, e == null ? null : e.NvdRequiredAction); writer.WritePropertyName("nw"); if (e != null && e.WeaknessesJson != null) WriteRawNullable(writer, e.WeaknessesJson); else WriteNullableStringArray(writer, e == null ? null : e.Weaknesses); writer.WriteEndObject(); }); }
+        private static void WriteCveFragment(StreamWriter output, Cve value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); writer.WritePropertyName("sc"); if (inProcessCompatibleEscaping) WriteRawNullable(writer, value.ScoreJson); else if (value.Score.HasValue) writer.WriteNumberValue(value.Score.Value); else writer.WriteNullValue(); writer.WriteNumber("sv", value.Severity); writer.WriteNumber("ex", value.Exploit); writer.WriteString("u", value.Url); writer.WriteNumber("bt", value.BatchTitle); var e = value.Enrichment; writer.WritePropertyName("pd"); WriteRawNullable(writer, e == null ? null : e.PublishedDate); writer.WritePropertyName("desc"); WriteRawNullable(writer, e == null ? null : e.Description); writer.WritePropertyName("ep"); WriteRawNullable(writer, e == null ? null : e.EpssJson); writer.WritePropertyName("as"); WriteNullableIntArray(writer, value.AffectedSoftware); writer.WritePropertyName("ea"); WriteRawNullable(writer, e == null ? null : e.ExploitAvailableJson); writer.WritePropertyName("nlm"); WriteRawNullable(writer, e == null ? null : e.NvdLastModified); writer.WritePropertyName("nbs"); WriteRawNullable(writer, e == null ? null : e.NvdBaseScoreJson); writer.WritePropertyName("nsv"); WriteRawNullable(writer, e == null ? null : e.NvdBaseSeverity); writer.WritePropertyName("nvec"); WriteRawNullable(writer, e == null ? null : e.NvdVector); writer.WritePropertyName("nkev"); WriteRawNullable(writer, e == null ? null : e.NvdKevDate); writer.WritePropertyName("ndu"); WriteRawNullable(writer, e == null ? null : e.NvdActionDue); writer.WritePropertyName("nact"); WriteRawNullable(writer, e == null ? null : e.NvdRequiredAction); writer.WritePropertyName("nw"); if (e != null && e.WeaknessesJson != null) WriteRawNullable(writer, e.WeaknessesJson); else WriteNullableStringArray(writer, e == null ? null : e.Weaknesses); writer.WriteEndObject(); }); }
         private static void WriteVulnFragment(StreamWriter output, int deviceIndex, Template template, int firstIndex, int lastIndex, int inventoryIndex, List<int> diskIndexes, List<int> registryIndexes)
         {
             output.Write('['); WriteInteger(output, deviceIndex); output.Write(','); WriteInteger(output, template.Cve); output.Write(','); WriteInteger(output, template.Software); output.Write(','); WriteInteger(output, template.Version);
@@ -16584,9 +16613,9 @@ function Get-NormalizationExecutionPlan {
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $false)][string]$DeliveryMode = 'SelfContained',
         [Parameter(Mandatory = $false)][ValidateRange(1000, 1000000)][int]$MaximumInProcessContentTemplates = 10000,
-        # Set when the caller writes the payload directly (PayloadOutputPath + ConsumeLookupsOnPayloadClose) without
-        # direct-merge device lookups, so the compiled bounded normalizer can be used regardless of cardinality.
-        [Parameter(Mandatory = $false)][switch]$CompiledPayloadSupported
+        # Set when the caller writes the payload directly without direct-merge device lookups.
+        [Parameter(Mandatory = $false)][switch]$CompiledPayloadSupported,
+        [Parameter(Mandatory = $false)][switch]$UseExperimentalCompiledSmallPayload
     )
 
     $manifestPath = Join-Path $Path 'synthetic-manifest.json'
@@ -16612,7 +16641,7 @@ function Get-NormalizationExecutionPlan {
     $machineInputFile = @(Get-ChildItem -LiteralPath $Path -Filter 'Machines_Current.json*' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
     $hasMachineInput = if ($machineInputFile.Count -eq 0) { $false } else { $null -ne (Read-VulnNdjsonLinesFromPath -Path $machineInputFile[0].FullName | Select-Object -First 1) }
     $hasEnrichmentInput = @(Get-ChildItem -LiteralPath $Path -Filter 'AdvancedHunting_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0 -or @(Get-ChildItem -LiteralPath $Path -Filter 'NvdCve_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0
-    $compiledContentEligible = $requiresPartitionedContent -or ($CompiledPayloadSupported -and (Test-Path -LiteralPath $dictionaryPath -PathType Leaf))
+    $compiledContentEligible = $requiresPartitionedContent -or ($CompiledPayloadSupported -and $UseExperimentalCompiledSmallPayload -and (Test-Path -LiteralPath $dictionaryPath -PathType Leaf))
     $estimatedPrivateMemoryMb = if ($compiledContentEligible) {
         [math]::Round((160 + ($deviceProfileCount * 0.001) + ($contentTemplateCount * 0.0012)), 1)
     }
@@ -16639,6 +16668,7 @@ function Get-NormalizationExecutionPlan {
         EstimatedWorkingSetMb = $estimatedWorkingSetMb
         MaximumInProcessContentTemplates = $MaximumInProcessContentTemplates
         CompiledPayloadSupported = [bool]$CompiledPayloadSupported
+        UseExperimentalCompiledSmallPayload = [bool]$UseExperimentalCompiledSmallPayload
         HasMachineInput = $hasMachineInput
         HasEnrichmentInput = $hasEnrichmentInput
         SafeToExecute = (-not $requiresPartitionedContent -or $compiledContentEligible)
@@ -16655,7 +16685,8 @@ function Write-BoundedNormalizationEnrichmentFragment {
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingDeviceUsers = @{},
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingInventoryData = @{},
         [Parameter(Mandatory = $false)][hashtable]$NvdCveData = @{},
-        [Parameter(Mandatory = $false)][AllowNull()][System.Collections.Generic.IEnumerable[string]]$TemplateCveIds
+        [Parameter(Mandatory = $false)][AllowNull()][System.Collections.Generic.IEnumerable[string]]$TemplateCveIds,
+        [Parameter(Mandatory = $true)][ValidateSet('in-process-compatible', 'high-cardinality-compact')][string]$PayloadContract
     )
 
     $utf8 = [System.Text.UTF8Encoding]::new($false)
@@ -16678,12 +16709,38 @@ function Write-BoundedNormalizationEnrichmentFragment {
             $projection = Get-MachineProjection -Machine $machine
             $users = @($AdvancedHuntingDeviceUsers[$machineId] | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
             if ($null -eq $projection -and $users.Count -eq 0) { continue }
+            $machineTags = @()
+            if ($null -ne $projection) {
+                if ($PayloadContract -eq 'in-process-compatible' -and $machine -is [array] -and $machine.Length -ge 10) {
+                    if ($machine.Length -ge 15) { $machineTags = @($machine[14]) }
+                }
+                elseif ($PayloadContract -eq 'in-process-compatible') {
+                    $machineTags = @(Get-NormalizedMachineTag -Tags $machine.PSObject.Properties['machineTags']?.Value)
+                }
+                else { $machineTags = @($projection.MachineTags) }
+            }
             $machineInfo = if ($null -ne $projection) { $projection.MachineInfo } else { [PSCustomObject]@{} }
-            if ($users.Count -gt 0) { Add-Member -InputObject $machineInfo -NotePropertyName u -NotePropertyValue $users -Force }
+            if ($PayloadContract -eq 'in-process-compatible') {
+                $users = [string[]]$users
+                $machineInfo = [ordered]@{
+                    ip = $machineInfo.PSObject.Properties['ip']?.Value
+                    eip = $machineInfo.PSObject.Properties['eip']?.Value
+                    u = if ($users.Count -gt 0) { $users } else { $null }
+                    hs = $machineInfo.PSObject.Properties['hs']?.Value
+                    rs = $machineInfo.PSObject.Properties['rs']?.Value
+                    el = $machineInfo.PSObject.Properties['el']?.Value
+                    dv = $machineInfo.PSObject.Properties['dv']?.Value
+                    mb = $machineInfo.PSObject.Properties['mb']?.Value
+                    aad = $machineInfo.PSObject.Properties['aad']?.Value
+                    ls = $machineInfo.PSObject.Properties['ls']?.Value
+                    fs = $machineInfo.PSObject.Properties['fs']?.Value
+                }
+            }
+            elseif ($users.Count -gt 0) { Add-Member -InputObject $machineInfo -NotePropertyName u -NotePropertyValue $users -Force }
             $machineWriter.WriteLine((ConvertTo-Json -InputObject ([ordered]@{
                 id = $machineId; n = if ($projection) { $projection.ComputerDnsName } else { $null }; g = if ($projection) { $projection.RbacGroupName } else { $null }
                 o = if ($projection) { $projection.OSPlatform } else { $null }; ov = if ($projection) { $projection.OSVersion } else { $null }
-                t = if ($projection) { @($projection.MachineTags) } else { @() }; m = $machineInfo
+                t = $machineTags; m = $machineInfo
             }) -Compress -Depth 10))
         }
     }
@@ -16727,7 +16784,7 @@ function Write-BoundedNormalizationEnrichmentFragment {
     finally { $inventoryWriter.Dispose() }
 }
 
-function New-NormalizationSeverityIndexMap {
+function Get-NormalizationSeverityIndexMap {
     # Single source for severity indexes; the compiled normalizer receives these entries and this map's key comparer.
     [CmdletBinding()]
     [OutputType([hashtable])]
@@ -16777,7 +16834,7 @@ function Test-CompiledNormalizationKeyComparerSupport {
     catch [System.NotSupportedException] { return $false }
 }
 
-function Write-BoundedNormalizationOptions {
+function Write-BoundedNormalizationConfiguration {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$StagePath,
@@ -16785,7 +16842,7 @@ function Write-BoundedNormalizationOptions {
         [Parameter(Mandatory = $true)][ValidateSet('in-process-compatible', 'high-cardinality-compact')][string]$PayloadContract
     )
 
-    $severityIndexByName = New-NormalizationSeverityIndexMap
+    $severityIndexByName = Get-NormalizationSeverityIndexMap
     $severityIndexes = [ordered]@{}
     foreach ($severityName in @($severityIndexByName.Keys | Sort-Object { [int]$severityIndexByName[$_] })) { $severityIndexes[[string]$severityName] = [int]$severityIndexByName[$severityName] }
     $options = [ordered]@{
@@ -16857,8 +16914,8 @@ function Invoke-BoundedContentStorePayloadProjection {
             }
             finally { $writer.Dispose() }
         }
-        Write-BoundedNormalizationOptions -StagePath $stagePath -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -PayloadContract $PayloadContract
-        Write-BoundedNormalizationEnrichmentFragment -StagePath $stagePath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -TemplateCveIds $templateCveIds
+        Write-BoundedNormalizationConfiguration -StagePath $stagePath -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -PayloadContract $PayloadContract
+        Write-BoundedNormalizationEnrichmentFragment -StagePath $stagePath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -TemplateCveIds $templateCveIds -PayloadContract $PayloadContract
         if ($null -eq $effectiveRefPaths -or $effectiveRefPaths.Count -eq 0) { throw 'Bounded normalization did not resolve any vulnerability reference inputs.' }
         $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $effectiveRefPaths, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry, $StagingParent)
     }
@@ -17823,7 +17880,7 @@ function Get-DashboardPayloadCacheVersion {
     [OutputType([string])]
     param()
 
-    return 'dashboard-payload-cache-v8'
+    return 'dashboard-payload-cache-v9'
 }
 
 function Get-DashboardPayloadCacheFingerprint {
@@ -18457,7 +18514,7 @@ function Get-NormalizationContext {
     [OutputType([pscustomobject])]
     param()
 
-    $severityIndexByName = New-NormalizationSeverityIndexMap
+    $severityIndexByName = Get-NormalizationSeverityIndexMap
 
     return [PSCustomObject]@{
         Lookups = @{
@@ -21936,7 +21993,10 @@ function ConvertTo-NormalizedData {
 
         # Forces the in-process streaming normalizer when the content cardinality allows it (compatibility/diagnostics).
         [Parameter(Mandatory = $false)]
-        [switch]$DisableCompiledContentNormalization
+        [switch]$DisableCompiledContentNormalization,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$UseExperimentalCompiledSmallPayload
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
@@ -21947,23 +22007,28 @@ function ConvertTo-NormalizedData {
         $preSyncedContentStoreExists = [bool](Sync-VulnContentStoreSidecar -BasePath $DataPath)
         $compiledPayloadSupported = $preSyncedContentStoreExists
     }
-    if ($compiledPayloadSupported -and -not (Test-CompiledNormalizationKeyComparerSupport -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData)) {
-        Write-Information '  Compiled content normalization skipped: the inventory lookup uses a key comparer it cannot reproduce.' -InformationAction Continue
+    $unsupportedCompiledInventoryComparer = ($compiledPayloadSupported -and -not (Test-CompiledNormalizationKeyComparerSupport -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData))
+    if ($unsupportedCompiledInventoryComparer) {
         $compiledPayloadSupported = $false
     }
-    $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath -CompiledPayloadSupported:$compiledPayloadSupported
+    $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath -CompiledPayloadSupported:$compiledPayloadSupported -UseExperimentalCompiledSmallPayload:$UseExperimentalCompiledSmallPayload
     if ($executionPlan.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') {
         if ([string]::IsNullOrWhiteSpace($PayloadOutputPath) -or -not $ConsumeLookupsOnPayloadClose) { throw 'Compiled bounded content normalization requires direct payload output and lookup consumption.' }
+        if ($DirectMergeDeviceLookup) { throw 'Experimental direct-merge device lookup requires in-process normalization; high-cardinality content requires a preloaded machine lookup.' }
+        if ($DisableCompiledContentNormalization) { throw 'Compiled content normalization cannot be disabled for high-cardinality content.' }
+        if ($unsupportedCompiledInventoryComparer) { throw [System.NotSupportedException]::new('High-cardinality content requires compiled normalization, which cannot reproduce the inventory key comparer.') }
         $compiledRefPaths = $null
         if (-not $SkipObservedWindowMerge -and -not (Test-IsSyntheticDataset -BasePath $DataPath)) {
             Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{ Kind = 'phase'; Phase = 'CompiledObservedWindowMerge'; Message = 'Building the merged observation-window stream for bounded normalization.' })
             $mergedRefPath = Publish-VulnObservedWindowCache -BasePath $DataPath -AllowedGapDays 1
             if (-not [string]::IsNullOrWhiteSpace($mergedRefPath) -and (Test-Path -LiteralPath $mergedRefPath -PathType Leaf)) { $compiledRefPaths = @($mergedRefPath) }
         }
-        Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{ Kind = 'phase'; Phase = 'CompiledBoundedContentNormalization'; Message = 'Streaming high-cardinality content and enrichment inputs through the compiled bounded projector.' })
+        Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{ Kind = 'phase'; Phase = 'CompiledBoundedContentNormalization'; Message = 'Streaming content and enrichment inputs through the compiled bounded projector.' })
         $compiledResult = Invoke-BoundedContentStorePayloadProjection -DataPath $DataPath -PayloadOutputPath $PayloadOutputPath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -RefPaths $compiledRefPaths -PayloadContract $executionPlan.CompiledPayloadContract
-        if (Test-FileBackedNormalizationMachineLookup -Machines $Machines) { Remove-FileBackedNormalizationMachineLookup -Machines $Machines } else { $Machines.Clear() }
-        $AdvancedHuntingData.Clear(); $AdvancedHuntingDeviceUsers.Clear(); $AdvancedHuntingInventoryData.Clear(); $NvdCveData.Clear()
+        if (Test-FileBackedNormalizationMachineLookup -Machines $Machines) { Remove-FileBackedNormalizationMachineLookup -Machines $Machines }
+        elseif ($executionPlan.CompiledPayloadContract -eq 'high-cardinality-compact') { $Machines.Clear() }
+        $AdvancedHuntingData.Clear(); $AdvancedHuntingDeviceUsers.Clear(); $NvdCveData.Clear()
+        if ($executionPlan.CompiledPayloadContract -eq 'high-cardinality-compact') { $AdvancedHuntingInventoryData.Clear() }
         Invoke-FullGarbageCollection
         [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
         if ([long]$compiledResult.ProcessedCount -eq 0) {
@@ -21996,6 +22061,9 @@ function ConvertTo-NormalizedData {
             Lookups = $null; LookupsConsumed = $true; DeviceCount = [int]$compiledResult.DeviceCount; CveCount = [int]$compiledResult.CveCount; SoftwareCount = [int]$compiledResult.SoftwareCount; VendorCount = [int]$compiledResult.VendorCount
             Quality = [PSCustomObject]@{ FirstLastSwappedCount = [int]$compiledResult.FirstLastSwappedCount }; VulnCount = [long]$compiledResult.ProcessedCount; VulnsPath = $null; VulnColumnPaths = $null; PayloadPath = $PayloadOutputPath; CompiledMemoryTelemetry = $compiledTelemetry
         }
+    }
+    if ($unsupportedCompiledInventoryComparer) {
+        Write-Information '  Compiled content normalization skipped: the inventory lookup uses a key comparer it cannot reproduce.' -InformationAction Continue
     }
     Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
     $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
@@ -22200,7 +22268,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: cbdb2848a8c38b505bc708ef9d44902ce7d9cc0e9be2cbf3594747940ecf6f38
+# ArtifactFingerprint: 1404f20dcd7e18f21cbfa824d60e0d49c7d44a299780d712f445cb989d4f25db
 
 
 
@@ -23790,7 +23858,8 @@ try {
     $skipObservedWindowMerge = (Test-Path -LiteralPath $syntheticManifestPath -PathType Leaf)
     Set-PipelineExecutionStage -Stage 'CheckDashboardPayloadCache' -Message 'Checking for a reusable normalized payload cache.'
     [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
-    $payloadCacheEntry = Get-NormalizedPayloadCacheEntry -BasePath $tempExports -SkipObservedWindowMerge:$skipObservedWindowMerge
+    $payloadCacheEntry = if ($UseExperimentalCompiledSmallPayload) { $null } else { Get-NormalizedPayloadCacheEntry -BasePath $tempExports -SkipObservedWindowMerge:$skipObservedWindowMerge }
+    if ($UseExperimentalCompiledSmallPayload) { Write-Output '  Experimental compiled normalization enabled; bypassing the normalized payload cache.' }
     $Script:PipelineNormalizedPayloadCacheHit = ($null -ne $payloadCacheEntry)
     Invoke-FullGarbageCollection
     Write-MemoryUsage -Label "Post-PayloadCacheCheck"
@@ -23821,7 +23890,7 @@ try {
             (Sync-VulnContentStoreSidecar -BasePath $tempExports) -and
             (Test-VulnContentStoreSupportsDirectMerge -BasePath $tempExports)
         )
-        $normalizationExecutionPlan = Get-NormalizationExecutionPlan -Path $tempExports -DeliveryMode $DashboardDeliveryMode -CompiledPayloadSupported:(-not $useDirectMergeDeviceLookupForRun -and (Sync-VulnContentStoreSidecar -BasePath $tempExports))
+        $normalizationExecutionPlan = Get-NormalizationExecutionPlan -Path $tempExports -DeliveryMode $DashboardDeliveryMode -CompiledPayloadSupported:(-not $useDirectMergeDeviceLookupForRun -and (Sync-VulnContentStoreSidecar -BasePath $tempExports)) -UseExperimentalCompiledSmallPayload:$UseExperimentalCompiledSmallPayload
         Write-Output ("  Normalization plan: devices={0}; contentTemplates={1}; machineLookup={2}; contentMode={3}; estimatedPrivate={4}MB; estimatedWorkingSet={5}MB" -f $normalizationExecutionPlan.DeviceProfileCount, $normalizationExecutionPlan.ContentTemplateCount, $normalizationExecutionPlan.DeviceLookupMode, $normalizationExecutionPlan.ContentNormalizationMode, $normalizationExecutionPlan.EstimatedPrivateMemoryMb, $normalizationExecutionPlan.EstimatedWorkingSetMb)
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties @{ normalizationExecutionPlan = $normalizationExecutionPlan })
         if (-not $normalizationExecutionPlan.SafeToExecute) {
@@ -23895,7 +23964,7 @@ try {
                 [bool]$UseDirectMergeDeviceLookupForAttempt
             )
 
-            ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -AdvancedHuntingInventoryData $advancedHuntingInventoryData -NvdCveData $nvdCveData -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DirectMergeDeviceLookup:$UseDirectMergeDeviceLookupForAttempt -NormalizationProgressCallback {
+            ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -AdvancedHuntingInventoryData $advancedHuntingInventoryData -NvdCveData $nvdCveData -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DirectMergeDeviceLookup:$UseDirectMergeDeviceLookupForAttempt -UseExperimentalCompiledSmallPayload:$UseExperimentalCompiledSmallPayload -NormalizationProgressCallback {
             param($NormalizationEvent)
 
             if ($null -eq $NormalizationEvent) {
@@ -24097,7 +24166,7 @@ try {
         }
         Invoke-FullGarbageCollection
 
-        $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempExports -PayloadPath $tempPayloadPath -VulnCount $vulnCount -DeviceCount $deviceCount -CveCount $cveCount -Quality $normalizedQuality -SourceMetadata $sourceMetadata -SkipObservedWindowMerge:$skipObservedWindowMerge
+        $cacheEntry = if ($UseExperimentalCompiledSmallPayload) { $null } else { Publish-NormalizedPayloadCache -BasePath $tempExports -PayloadPath $tempPayloadPath -VulnCount $vulnCount -DeviceCount $deviceCount -CveCount $cveCount -Quality $normalizedQuality -SourceMetadata $sourceMetadata -SkipObservedWindowMerge:$skipObservedWindowMerge }
         if ($cacheEntry) {
             Write-Output ("  Cached normalized payload as {0}" -f $cacheEntry.Fingerprint.Substring(0, 12))
             $payloadManifest = $cacheEntry.Manifest
