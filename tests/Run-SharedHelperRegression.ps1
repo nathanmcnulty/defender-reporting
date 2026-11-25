@@ -117,6 +117,9 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose'; SuccessMessage = 'Consuming payload-close lookup checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader'; SuccessMessage = 'Content-store streaming normalization checks passed.' }
     @{ Name = 'Test-RunbookBenchmarkPublicationReaderOptIn'; SuccessMessage = 'Runbook benchmark reader opt-in/default and trial flag forwarding checks passed.' }
+    @{ Name = 'Test-BenchmarkComparisonUsesProcessHighWater'; SuccessMessage = 'Benchmark process high-water and limit checks passed.' }
+    @{ Name = 'Test-RunbookBenchmarkProcessHighWaterSummary'; SuccessMessage = 'Runbook sampled and process high-water summary checks passed.' }
+    @{ Name = 'Test-RunbookBenchmarkStatusJobIdentity'; SuccessMessage = 'Runbook status job-identity checks passed.' }
     @{ Name = 'Test-RunbookExperimentalNormalizationCacheIsolation'; SuccessMessage = 'Experimental normalization cache isolation checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationRejectsIncompatibleMode'; SuccessMessage = 'Compiled normalization incompatible-mode guards passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataSupportsDirectMergeDeviceLookup'; SuccessMessage = 'Direct-merge device lookup success-path checks passed.' }

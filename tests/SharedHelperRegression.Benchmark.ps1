@@ -492,6 +492,120 @@ function Test-RunbookBenchmarkPublicationReaderOptIn {
     Assert-True ($functionBuilder.Contains('$UseExperimentalCompiledSmallPayload = $false') -and -not $functionBuilder.Contains('$env:USE_EXPERIMENTAL_COMPILED_SMALL_PAYLOAD')) 'Function must keep the experimental compiled-small-payload path disabled.'
 }
 
+function Test-BenchmarkComparisonUsesProcessHighWater {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('benchmark-high-water-' + [guid]::NewGuid().ToString('N'))
+    $resultPath = Join-Path $tempRoot 'result.json'
+    $comparisonPath = Join-Path $tempRoot 'comparison.json'
+    $compareScript = Join-Path $PSScriptRoot 'Compare-BenchmarkEvidence.ps1'
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    try {
+        $evidence = [ordered]@{
+            evidence_schema_version = 1
+            execution = [ordered]@{
+                summary = @{ peak_working_set_mb = 302.1 }
+                status = @{ memory = @{ processPeakWorkingSetMb = 400.1 } }
+            }
+        }
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try {
+            $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 -RequireProcessWorkingSetPeak -StrictWorkingSetLimit -OutputPath $comparisonPath
+        }
+        catch { $failed = $true }
+        Assert-True $failed 'A sampled peak below the limit must not hide a process high-water above it.'
+        $comparison = Get-Content -LiteralPath $comparisonPath -Raw | ConvertFrom-Json
+        Assert-True (-not $comparison.passed -and $comparison.current.peak_working_set_mb -eq 400.1 -and $comparison.current.process_peak_working_set_mb -eq 400.1) 'Comparison must report and enforce the process high-water.'
+
+        $evidence.execution.status.memory.processPeakWorkingSetMb = 381.4
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 -StrictWorkingSetLimit }
+        catch { $failed = $true }
+        Assert-True $failed 'A strict working-set limit must reject equality.'
+        $comparison = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4
+        Assert-True $comparison.passed 'The existing inclusive maximum must still accept equality by default.'
+
+        $evidence.execution.status = @{}
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 -RequireProcessWorkingSetPeak }
+        catch { $failed = $true }
+        Assert-True $failed 'A required process high-water must not be inferred from a sampled peak.'
+        $comparison = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4
+        Assert-True ($comparison.passed -and $null -eq $comparison.current.process_peak_working_set_mb) 'Legacy sampled evidence must remain usable without the high-water requirement.'
+
+        $evidence.execution.status = @{ memory = @{ processPeakWorkingSetMb = 0 } }
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 -RequireProcessWorkingSetPeak }
+        catch { $failed = $true }
+        Assert-True $failed 'A zero process high-water must not establish memory acceptance.'
+
+        $evidence.execution.status.memory.processPeakWorkingSetMb = 'NaN'
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 }
+        catch { $failed = $true }
+        Assert-True $failed 'A non-finite metric must not pass a memory limit.'
+
+        $evidence.execution.status = @{}
+        $evidence.execution.summary = @{}
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 }
+        catch { $failed = $true }
+        Assert-True $failed 'A configured memory limit must fail when its evidence is unavailable.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+    }
+}
+
+function Test-RunbookBenchmarkProcessHighWaterSummary {
+    [CmdletBinding()]
+    param()
+
+    $benchmarkAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Measure-RunbookOnlyAzureBenchmark.ps1'), [ref]$null, [ref]$null)
+    $definition = $benchmarkAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RunbookProcessPeakWorkingSet' }, $true)
+    Assert-True ($null -ne $definition) 'Expected a testable process high-water summary.'
+    . ([scriptblock]::Create($definition.Extent.Text))
+    $status = [PSCustomObject]@{
+        memory = [PSCustomObject]@{ processPeakWorkingSetMb = 400.1 }
+        memoryTimelineTail = @([PSCustomObject]@{ processPeakWorkingSetMb = 380.0 })
+    }
+    $timeline = @([PSCustomObject]@{ memory = [PSCustomObject]@{ processPeakWorkingSetMb = 405.3 } })
+    Assert-True ((Get-RunbookProcessPeakWorkingSet -Status $status -StatusTimeline $timeline) -eq 405.3) 'Expected the largest process high-water from final, embedded, and polling samples.'
+    Assert-True ($null -eq (Get-RunbookProcessPeakWorkingSet -Status ([PSCustomObject]@{ memory = [PSCustomObject]@{ workingSetMb = 302.1 } }))) 'A sampled working set must not stand in for a process high-water.'
+    Assert-True ($null -eq (Get-RunbookProcessPeakWorkingSet -Status $null)) 'Missing status must not produce a success-shaped high-water.'
+    $failed = $false
+    try { $null = Get-RunbookProcessPeakWorkingSet -Status ([PSCustomObject]@{ memory = [PSCustomObject]@{ processPeakWorkingSetMb = -1 } }) }
+    catch { $failed = $true }
+    Assert-True $failed 'Invalid process high-water values must be rejected.'
+}
+
+function Test-RunbookBenchmarkStatusJobIdentity {
+    [CmdletBinding()]
+    param()
+
+    . (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
+    $benchmarkAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Measure-RunbookOnlyAzureBenchmark.ps1'), [ref]$null, [ref]$null)
+    $definition = $benchmarkAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-RunbookStatusMatchesJob' }, $true)
+    Assert-True ($null -ne $definition) 'Expected a testable runbook status identity check.'
+    . ([scriptblock]::Create($definition.Extent.Text))
+    $created = [datetime]::Parse('2026-11-25T18:00:00Z').ToUniversalTime()
+    $matching = [PSCustomObject]@{ startedOnUtc = '2026-11-25T18:00:30Z'; automationJobId = 'job-a' }
+    Assert-True (Test-RunbookStatusMatchesJob -Status $matching -JobId 'JOB-A' -JobCreationUtc $created) 'Expected a matching Automation job status.'
+    Assert-True (-not (Test-RunbookStatusMatchesJob -Status $matching -JobId 'job-b' -JobCreationUtc $created)) 'A concurrent job status must not be attributed to this job.'
+    $old = [PSCustomObject]@{ startedOnUtc = '2026-11-25T17:58:00Z'; automationJobId = 'job-a' }
+    Assert-True (-not (Test-RunbookStatusMatchesJob -Status $old -JobId 'job-a' -JobCreationUtc $created)) 'An old status must not be attributed to a new job.'
+    Assert-True (-not (Test-RunbookStatusMatchesJob -Status $null -JobId 'job-a' -JobCreationUtc $created)) 'Missing status must be rejected.'
+    $legacy = [PSCustomObject]@{ startedOnUtc = '2026-11-25T18:00:30Z' }
+    Assert-True (Test-RunbookStatusMatchesJob -Status $legacy -JobId 'job-a' -JobCreationUtc $created) 'Legacy status without job ID retains timestamp-only compatibility.'
+}
+
 function Test-AzureValidationSeedSelection {
     [CmdletBinding()]
     param()

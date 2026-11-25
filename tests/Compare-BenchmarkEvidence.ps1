@@ -7,6 +7,8 @@ param(
     [Parameter(Mandatory = $false)][double]$MaximumWorkingSetMB = 0,
     [Parameter(Mandatory = $false)][double]$MaximumPrivateMemoryMB = 0,
     [Parameter(Mandatory = $false)][double]$MaximumGcHeapMB = 0,
+    [Parameter(Mandatory = $false)][switch]$RequireProcessWorkingSetPeak,
+    [Parameter(Mandatory = $false)][switch]$StrictWorkingSetLimit,
     [Parameter(Mandatory = $false)][ValidateRange(0, 1000)][double]$MaximumElapsedRegressionPercent = 20,
     [Parameter(Mandatory = $false)][string]$OutputPath
 )
@@ -15,19 +17,31 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'helpers\BenchmarkEvidenceTools.ps1')
 
+if ($StrictWorkingSetLimit -and $MaximumWorkingSetMB -le 0) {
+    throw 'StrictWorkingSetLimit requires a positive MaximumWorkingSetMB.'
+}
+
+function Add-ValidatedNumericPropertyValue {
+    param($Value, [string]$Name, [System.Collections.Generic.List[double]]$Accumulator)
+    if ($null -eq $Value) { return }
+    $number = [double]$Value
+    if (-not [double]::IsFinite($number) -or $number -lt 0) { throw "Benchmark metric '$Name' must be a finite nonnegative number." }
+    $Accumulator.Add($number)
+}
+
 function Add-NumericPropertyValue {
     param($Item, [string[]]$PropertyNames, [System.Collections.Generic.List[double]]$Accumulator)
     if ($null -eq $Item -or $Item -is [string] -or $Item -is [ValueType]) { return }
     if ($Item -is [System.Collections.IDictionary]) {
         foreach ($key in $Item.Keys) {
-            if ($PropertyNames -contains [string]$key -and $null -ne $Item[$key]) { $Accumulator.Add([double]$Item[$key]) }
+            if ($PropertyNames -contains [string]$key) { Add-ValidatedNumericPropertyValue -Value $Item[$key] -Name ([string]$key) -Accumulator $Accumulator }
             Add-NumericPropertyValue -Item $Item[$key] -PropertyNames $PropertyNames -Accumulator $Accumulator
         }
         return
     }
     if ($Item -is [System.Collections.IEnumerable]) { foreach ($entry in $Item) { Add-NumericPropertyValue -Item $entry -PropertyNames $PropertyNames -Accumulator $Accumulator }; return }
     foreach ($property in $Item.PSObject.Properties) {
-        if ($PropertyNames -contains $property.Name -and $null -ne $property.Value) { $Accumulator.Add([double]$property.Value) }
+        if ($PropertyNames -contains $property.Name) { Add-ValidatedNumericPropertyValue -Value $property.Value -Name $property.Name -Accumulator $Accumulator }
         Add-NumericPropertyValue -Item $property.Value -PropertyNames $PropertyNames -Accumulator $Accumulator
     }
 }
@@ -53,7 +67,8 @@ function Read-EvidenceResult([string]$Path) {
 
 function Get-BenchmarkMetric($record) {
     return [PSCustomObject]@{
-        peak_working_set_mb = Get-NumericPropertyMaximum $record.Evidence.execution @('peak_working_set_mb', 'peakWorkingSetMb', 'working_set_mb')
+        peak_working_set_mb = Get-NumericPropertyMaximum $record.Evidence.execution @('peak_working_set_mb', 'peakWorkingSetMb', 'working_set_mb', 'processPeakWorkingSetMb', 'process_peak_working_set_mb')
+        process_peak_working_set_mb = Get-NumericPropertyMaximum $record.Evidence.execution @('processPeakWorkingSetMb', 'process_peak_working_set_mb')
         peak_private_memory_mb = Get-NumericPropertyMaximum $record.Evidence.execution @('peak_private_memory_mb', 'peakPrivateMemoryMb', 'private_memory_mb')
         peak_gc_heap_mb = Get-NumericPropertyMaximum $record.Evidence.execution @('peak_gc_heap_mb', 'peakGcHeapMb', 'gc_heap_mb')
         elapsed_seconds = Get-NumericPropertyMaximum $record.Evidence.execution @('elapsed_seconds')
@@ -66,14 +81,22 @@ $baseline = if ([string]::IsNullOrWhiteSpace($BaselinePath)) { $null } else { Re
 $baselineMetrics = if ($null -eq $baseline) { $null } else { Get-BenchmarkMetric $baseline }
 $failures = [System.Collections.Generic.List[string]]::new()
 
+if ($RequireProcessWorkingSetPeak -and ($null -eq $currentMetrics.process_peak_working_set_mb -or $currentMetrics.process_peak_working_set_mb -le 0)) {
+    $failures.Add('Process working-set high-water evidence is unavailable.')
+}
+
 foreach ($limit in @(
         @{ Name = 'working set'; Property = 'peak_working_set_mb'; Maximum = $MaximumWorkingSetMB },
         @{ Name = 'private memory'; Property = 'peak_private_memory_mb'; Maximum = $MaximumPrivateMemoryMB },
         @{ Name = 'GC heap'; Property = 'peak_gc_heap_mb'; Maximum = $MaximumGcHeapMB }
     )) {
     $value = $currentMetrics.($limit.Property)
-    if ($limit.Maximum -gt 0 -and $null -ne $value -and $value -gt $limit.Maximum) {
-        $failures.Add(("Peak {0} {1}MB exceeded {2}MB." -f $limit.Name, $value, $limit.Maximum))
+    if ($limit.Maximum -gt 0 -and $null -eq $value) {
+        $failures.Add(("Peak {0} evidence is unavailable." -f $limit.Name))
+    }
+    elseif ($limit.Maximum -gt 0 -and ($value -gt $limit.Maximum -or ($StrictWorkingSetLimit -and $limit.Property -eq 'peak_working_set_mb' -and $value -eq $limit.Maximum))) {
+        $comparison = if ($StrictWorkingSetLimit -and $limit.Property -eq 'peak_working_set_mb') { 'must be below' } else { 'exceeded' }
+        $failures.Add(("Peak {0} {1} MiB {2} {3} MiB." -f $limit.Name, $value, $comparison, $limit.Maximum))
     }
 }
 
