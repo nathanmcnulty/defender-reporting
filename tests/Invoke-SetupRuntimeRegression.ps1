@@ -105,6 +105,13 @@ $inheritedFragments = @(
     'tests/helpers/TestScriptSupport.ps1'
     'tests/helpers/ValidationReviewSupport.ps1'
     'tests/helpers/controlled-fixture/InstalledInventory.ps1'
+    'tests/SharedHelperRegression.Artifact.ps1'
+    'tests/SharedHelperRegression.Benchmark.ps1'
+    'tests/SharedHelperRegression.Normalization.ps1'
+    'tests/SharedHelperRegression.Other.ps1'
+    'tests/SharedHelperRegression.Store.ps1'
+    'tests/SharedHelperRegression.Support.ps1'
+    'tests/SharedHelperRegression.Validation.ps1'
 )
 $dataFiles = @(
     'azure/function-app/requirements.psd1'

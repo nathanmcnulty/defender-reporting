@@ -95,12 +95,16 @@ Based on main `535eafb`. Recommendations only; each merge, close or live run rem
 - *Done on this branch:* generated-artifact fingerprints used `StringBuilder.AppendLine`, whose newline is platform-specific, and the repository had no `.gitattributes`. Windows builds therefore disagreed with the CI sync job. Fingerprints now use explicit LF and checkouts pin LF. Linux values are unchanged.
 - Pin `PSScriptAnalyzer` and `Az.Accounts` versions in workflows, and cache them, instead of installing the latest on every run. `jq` is already on `ubuntu-latest`, so the `apt-get` step can go.
 - Stop committing the generated 1 MB runbook (`azure/Invoke-DashboardPipeline.ps1`) from a bot push. It causes conflicts in every stacked branch (for example #111). Build it in the release package and have setup consume the package, or at least check for drift in CI instead of auto-committing.
+- *Done:* versions pinned and cached, `apt-get` removed, the runbook bot workflow retired, and CI now fails on generated-artifact drift.
 
 **Code and repository reduction**
 
 - About 320 of the repository's 364 MiB of history is the daily demo commit (`exports/*.gz` and `VulnerabilityDashboard.html`). Publish the demo to GitHub Pages or a force-pushed orphan branch instead of `main`. Purging history (part of the #68 decision) would shrink clones by roughly 90%.
+- *Done:* the daily demo now force-pushes a single orphan commit to the `demo-data` branch and outputs are untracked on `main`. The history purge still needs owner sign-off.
 - Move dated evidence (`docs/handoffs/`, `docs/performance-baselines.md` at 142 KB, dated reviews) to `docs/archive/` or release assets. Also move the root chat-replay JSON. Current guidance should stay short.
+- *Done:* dated evidence moved to `docs/archive/` and the chat replay removed. `docs/performance-baselines.md` stays because the PR template links it.
 - Split `tests/Run-SharedHelperRegression.ps1` (495 KB) by area. Retire one-off campaign scripts such as `Measure-BranchVsMainBenchmark.ps1` and `Measure-RunbookInputLoadExperiment.ps1` once their issues close.
+- *Done:* the runner now dot-sources seven `tests/SharedHelperRegression.<Area>.ps1` fragments. Both `Measure-*` scripts stay for now: `Invoke-BenchmarkSeries.ps1` and the performance playbook still use the branch benchmark, and #67 is open.
 
 **Performance (structural options for #67/#69/#70)**
 

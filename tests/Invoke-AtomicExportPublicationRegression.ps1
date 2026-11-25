@@ -14,7 +14,7 @@ foreach ($name in @('Assert-ExportGenerationManifest', 'Get-ExportPublicationSna
     if (-not $definition) { throw "Missing production function $name" }
     . ([scriptblock]::Create($definition.Extent.Text))
 }
-$fixtureAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Run-SharedHelperRegression.ps1'), [ref]$null, [ref]$null)
+$fixtureAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'SharedHelperRegression.Support.ps1'), [ref]$null, [ref]$null)
 $fixtureDefinition = $fixtureAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-TestVulnRow' }, $true)
 . ([scriptblock]::Create($fixtureDefinition.Extent.Text))
 
