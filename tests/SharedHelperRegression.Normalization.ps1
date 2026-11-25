@@ -2225,13 +2225,15 @@ function Invoke-CompiledVersusInProcessNormalization {
     param(
         [Parameter(Mandatory = $true)][string]$DataPath,
         [Parameter(Mandatory = $true)][string]$Label,
-        [Parameter(Mandatory = $true)][scriptblock]$NewInventory
+        [Parameter(Mandatory = $true)][scriptblock]$NewInventory,
+        [Parameter(Mandatory = $false)][scriptblock]$NewAdvancedHunting = { @{} },
+        [Parameter(Mandatory = $false)][scriptblock]$NewNvd = { @{} }
     )
     $repoRoot = Split-Path -Path $PSScriptRoot -Parent
     $legacyPath = Join-Path $DataPath "$Label-legacy.json.gz"
-    $legacy = ConvertTo-NormalizedData -DataPath $DataPath -VulnOutputPath (Join-Path $DataPath "$Label-legacy.json") -PayloadOutputPath $legacyPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingInventoryData (& $NewInventory) -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization
+    $legacy = ConvertTo-NormalizedData -DataPath $DataPath -VulnOutputPath (Join-Path $DataPath "$Label-legacy.json") -PayloadOutputPath $legacyPath -Machines @{} -AdvancedHuntingData (& $NewAdvancedHunting) -NvdCveData (& $NewNvd) -AdvancedHuntingInventoryData (& $NewInventory) -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization
     $compiledPath = Join-Path $DataPath "$Label-compiled.json.gz"
-    $compiled = ConvertTo-NormalizedData -DataPath $DataPath -VulnOutputPath (Join-Path $DataPath "$Label-compiled.json") -PayloadOutputPath $compiledPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingInventoryData (& $NewInventory) -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+    $compiled = ConvertTo-NormalizedData -DataPath $DataPath -VulnOutputPath (Join-Path $DataPath "$Label-compiled.json") -PayloadOutputPath $compiledPath -Machines @{} -AdvancedHuntingData (& $NewAdvancedHunting) -NvdCveData (& $NewNvd) -AdvancedHuntingInventoryData (& $NewInventory) -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
     & node (Join-Path $repoRoot 'tests\helpers\Assert-ExpandedPayloadParity.js') $legacyPath $compiledPath | Out-Host
     Assert-True ($LASTEXITCODE -eq 0) "Expected $Label compiled and in-process payloads to have expanded row parity."
     return [PSCustomObject]@{
@@ -2309,6 +2311,140 @@ function Test-CompiledBoundedContentNormalizationKeyComparerParity {
         $fallback = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'fallback.json') -PayloadOutputPath $fallbackPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingInventoryData $unsupportedInventory -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -InformationAction SilentlyContinue
         $fallbackTelemetry = if ($fallback -is [hashtable]) { $fallback['CompiledMemoryTelemetry'] } else { $fallback.PSObject.Properties['CompiledMemoryTelemetry']?.Value }
         Assert-True ($null -eq $fallbackTelemetry -and $fallback.VulnCount -eq 6) ("Expected an unsupported inventory comparer to fall back to the in-process normalizer, got {0} with VulnCount={1}." -f $fallback.GetType().FullName, $fallback.VulnCount)
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
+function Get-NormalizedPayloadCveSummary {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Payload)
+    return @($Payload.lookups.cves | ForEach-Object {
+            $cve = $_
+            $fields = foreach ($name in @('id', 'pd', 'desc', 'ep', 'ea', 'nlm', 'nbs', 'nsv', 'nvec', 'nact')) { $property = $cve.PSObject.Properties[$name]; if ($null -ne $property -and $null -ne $property.Value) { [string]$property.Value } else { '<null>' } }
+            $fields -join '|'
+        } | Sort-Object)
+}
+
+function Test-CompiledBoundedContentNormalizationCveEnrichmentComparerParity {
+    [CmdletBinding()]
+    param()
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-cve-comparer-parity-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $rows = @(
+            (Get-TestVulnRow -Id 'cve-upper' -CveId 'CVE-2026-8001' -SnapshotDate '2026-07-10' -Version '1.0.0')
+            (Get-TestVulnRow -Id 'cve-lower' -CveId 'cve-2026-8001' -SnapshotDate '2026-07-10' -Version '1.0.0')
+            (Get-TestVulnRow -Id 'cve-whitespace' -CveId 'CVE-2026-8002' -SnapshotDate '2026-07-10' -Version '1.0.0')
+            (Get-TestVulnRow -Id 'cve-nvd-only' -CveId 'CVE-2026-8003' -SnapshotDate '2026-07-10' -Version '1.0.0')
+            (Get-TestVulnRow -Id 'cve-ordinal-miss' -CveId 'cve-2026-8004' -SnapshotDate '2026-07-10' -Version '1.0.0')
+            (Get-TestVulnRow -Id 'cve-ah-blank' -CveId 'CVE-2026-8005' -SnapshotDate '2026-07-10' -Version '1.0.0')
+            (Get-TestVulnRow -Id 'cve-nvd-blank' -CveId 'CVE-2026-8006' -SnapshotDate '2026-07-10' -Version '1.0.0')
+        )
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records $rows
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+        $newAh = { param([string]$PublishedDate, [string]$Description) @{ PublishedDate = $PublishedDate; VulnerabilityDescription = $Description; EpssScore = 0.25; AffectedSoftware = @(); IsExploitAvailable = $true } }
+        $newNvd = { param([string]$PublishedDate, [string]$Description) @{ PublishedDate = $PublishedDate; VulnerabilityDescription = $Description; LastModifiedDate = '2026-04-04'; BaseScore = 7.5; BaseSeverity = 'HIGH'; Vector = 'CVSS:3.1/AV:N'; CisaExploitAdd = $null; CisaActionDue = $null; CisaRequiredAction = $null; Weaknesses = @('CWE-79') } }
+
+        $ordinalAh = {
+            $table = [hashtable]::new([System.StringComparer]::Ordinal)
+            $table['CVE-2026-8001'] = (& $newAh '2026-01-01' 'upper-ah'); $table['cve-2026-8001'] = (& $newAh '2026-01-02' 'lower-ah')
+            $table['CVE-2026-8002'] = (& $newAh '   ' ' '); $table['CVE-2026-8004'] = (& $newAh '2026-01-04' 'must-not-match'); $table['CVE-2026-8005'] = (& $newAh '' '  ')
+            $table
+        }.GetNewClosure()
+        $defaultNvd = { @{ 'CVE-2026-8002' = (& $newNvd '2026-03-03' 'nvd-fallback'); 'cve-2026-8003' = (& $newNvd '2026-03-04' 'nvd-only'); 'CVE-2026-8006' = @{ PublishedDate = ' '; VulnerabilityDescription = ''; LastModifiedDate = ' '; BaseScore = 7.5; BaseSeverity = ''; Vector = '  '; CisaExploitAdd = $null; CisaActionDue = $null; CisaRequiredAction = ' '; Weaknesses = @() } } }.GetNewClosure()
+        $ordinal = Invoke-CompiledVersusInProcessNormalization -DataPath $tempRoot -Label 'cve-ordinal' -NewInventory { @{} } -NewAdvancedHunting $ordinalAh -NewNvd $defaultNvd
+        Assert-True ($null -ne $ordinal.Compiled.CompiledMemoryTelemetry) 'Expected the ordinal CVE enrichment run to use the compiled bounded normalizer.'
+        $legacyCves = Get-NormalizedPayloadCveSummary -Payload $ordinal.LegacyPayload
+        $compiledCves = Get-NormalizedPayloadCveSummary -Payload $ordinal.CompiledPayload
+        Assert-True (($legacyCves -join "`n") -eq ($compiledCves -join "`n")) ("Expected compiled CVE enrichment to honor each caller comparer like the in-process path.`nlegacy:`n{0}`ncompiled:`n{1}" -f ($legacyCves -join "`n"), ($compiledCves -join "`n"))
+        Assert-True ($compiledCves.Count -eq 7) 'Expected differently cased CVE IDs to remain distinct CVE lookups.'
+        foreach ($expected in @('CVE-2026-8001|2026-01-01|upper-ah|', 'cve-2026-8001|2026-01-02|lower-ah|', 'CVE-2026-8002|2026-03-03|nvd-fallback|', 'CVE-2026-8003|2026-03-04|nvd-only|', 'cve-2026-8004|<null>|<null>|<null>|<null>|<null>', 'CVE-2026-8005||  |0.25|True|<null>|<null>|<null>|<null>|<null>', 'CVE-2026-8006| ||<null>|<null>| |7.5||  | ')) {
+            Assert-True (@($compiledCves | Where-Object { $_.StartsWith($expected, [System.StringComparison]::Ordinal) }).Count -eq 1) ("Expected compiled CVE enrichment '{0}'; got:`n{1}" -f $expected, (($compiledCves | ForEach-Object { '[' + $_ + ']' }) -join "`n"))
+        }
+
+        $defaultAh = { @{ 'CVE-2026-8004' = (& $newAh '2026-01-05' 'default-ah') } }.GetNewClosure()
+        $ordinalNvd = { $table = [hashtable]::new([System.StringComparer]::Ordinal); $table['cve-2026-8001'] = (& $newNvd '2026-03-05' 'lower-nvd'); $table['cve-2026-8003'] = (& $newNvd '2026-03-06' 'must-not-match'); $table }.GetNewClosure()
+        $mixed = Invoke-CompiledVersusInProcessNormalization -DataPath $tempRoot -Label 'cve-mixed' -NewInventory { @{} } -NewAdvancedHunting $defaultAh -NewNvd $ordinalNvd
+        $legacyMixed = Get-NormalizedPayloadCveSummary -Payload $mixed.LegacyPayload
+        $compiledMixed = Get-NormalizedPayloadCveSummary -Payload $mixed.CompiledPayload
+        Assert-True (($legacyMixed -join "`n") -eq ($compiledMixed -join "`n")) ("Expected mixed AH/NVD comparers to be preserved independently.`nlegacy:`n{0}`ncompiled:`n{1}" -f ($legacyMixed -join "`n"), ($compiledMixed -join "`n"))
+        foreach ($expected in @('cve-2026-8004|2026-01-05|default-ah|', 'cve-2026-8001|2026-03-05|lower-nvd|', 'CVE-2026-8001|<null>|<null>|', 'CVE-2026-8003|<null>|<null>|')) {
+            Assert-True (@($compiledMixed | Where-Object { $_.StartsWith($expected, [System.StringComparison]::Ordinal) }).Count -eq 1) ("Expected mixed-comparer CVE enrichment '{0}'; got:`n{1}" -f $expected, ($compiledMixed -join "`n"))
+        }
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
+function Test-CompiledBoundedContentNormalizationPipeDelimitedKeyParity {
+    [CmdletBinding()]
+    param()
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-pipe-key-parity-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $first = Get-TestVulnRow -Id 'pipe-1' -CveId 'CVE-2026-8101' -SnapshotDate '2026-07-10' -Version '1.0.0'
+        $first.SoftwareVendor = 'A|B'; $first.SoftwareName = 'C'
+        $first.CveBatchUrl = 'https://example.invalid/u|x'; $first.CveBatchTitle = 'y'
+        $first.RecommendedSecurityUpdate = 'KB|1'; $first.RecommendedSecurityUpdateId = '2'
+        $second = Get-TestVulnRow -Id 'pipe-2' -CveId 'CVE-2026-8101' -SnapshotDate '2026-07-10' -Version '1.0.0'
+        $second.DeviceId = 'device-002'; $second.SoftwareVendor = 'A'; $second.SoftwareName = 'B|C'
+        $second.CveBatchUrl = 'https://example.invalid/u'; $second.CveBatchTitle = 'x|y'
+        $second.RecommendedSecurityUpdate = 'KB'; $second.RecommendedSecurityUpdateId = '1|2'
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records @($first, $second)
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+        $result = Invoke-CompiledVersusInProcessNormalization -DataPath $tempRoot -Label 'pipe' -NewInventory { @{} }
+        Assert-True ($null -ne $result.Compiled.CompiledMemoryTelemetry) 'Expected the pipe-key run to use the compiled bounded normalizer.'
+        foreach ($lookupName in @('software', 'cves', 'vendors')) {
+            $legacyCount = @($result.LegacyPayload.lookups.$lookupName).Count
+            $compiledCount = @($result.CompiledPayload.lookups.$lookupName).Count
+            Assert-True ($legacyCount -eq $compiledCount) ("Expected compiled {0} lookup count {1} to match the in-process pipe-joined key count {2}." -f $lookupName, $compiledCount, $legacyCount)
+        }
+        Assert-True (@($result.CompiledPayload.lookups.software).Count -eq 1 -and @($result.CompiledPayload.lookups.cves).Count -eq 1) 'Expected pipe-joined software and CVE keys to collapse exactly like the in-process string keys.'
+        # The in-process update index never deduplicates across templates, so expanded parity requires exact per-field update keys.
+        Assert-True (@($result.CompiledPayload.lookups.updates).Count -eq 2) 'Expected pipe-containing update fields to keep their exact per-row values.'
+        $legacyRows = @($result.LegacyPayload.vulns | ForEach-Object { '{0}|{1}|{2}' -f $_[0], $_[1], $_[2] })
+        $compiledRows = @($result.CompiledPayload.vulns | ForEach-Object { '{0}|{1}|{2}' -f $_[0], $_[1], $_[2] })
+        Assert-True ((($legacyRows | Sort-Object) -join ';') -eq (($compiledRows | Sort-Object) -join ';')) 'Expected pipe-key rows to reference the same lookup indexes in both paths.'
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
+function Test-CompiledBoundedContentNormalizationRequiresStagedFragments {
+    [CmdletBinding()]
+    param()
+    Initialize-CompiledVulnContentProjector
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-required-fragments-' + [guid]::NewGuid().ToString('N'))
+    try {
+        $stagingParent = Join-Path $tempRoot 'staging'
+        [void](New-Item -Path $stagingParent -ItemType Directory -Force)
+        $invoke = {
+            param([string]$StagePath)
+            $telemetry = [DefenderReporting.Store.MemoryTelemetrySession]::new(0)
+            try { [void][DefenderReporting.Store.BoundedContentNormalizer]::Project($StagePath, [string[]]@((Join-Path $StagePath 'refs.json.gz')), (Join-Path $StagePath 'out.json.gz'), $telemetry, $stagingParent); return $null }
+            catch { $exception = $_.Exception; while ($exception -is [System.Management.Automation.MethodInvocationException] -and $null -ne $exception.InnerException) { $exception = $exception.InnerException }; return $exception }
+            finally { $telemetry.Dispose() }
+        }
+        $newStage = {
+            param([string]$Name)
+            $stage = Join-Path $tempRoot $Name
+            [void](New-Item -Path $stage -ItemType Directory -Force)
+            foreach ($fragment in @('deviceProfiles.ndjson', 'contentTemplates.ndjson', 'machines.ndjson', 'cveEnrichment.ndjson', 'inventory.ndjson')) { [System.IO.File]::WriteAllText((Join-Path $stage $fragment), '') }
+            Write-BoundedNormalizationOptions -StagePath $stage -AdvancedHuntingInventoryData @{}
+            return $stage
+        }
+
+        foreach ($fragment in @('machines.ndjson', 'cveEnrichment.ndjson', 'normalizationOptions.json', 'inventory.ndjson')) {
+            $stage = & $newStage ('missing-' + $fragment)
+            Remove-Item -LiteralPath (Join-Path $stage $fragment) -Force
+            $failure = & $invoke $stage
+            Assert-True ($failure -is [System.IO.InvalidDataException] -and $failure.Message.Contains("'$fragment'") -and $failure.InnerException -is [System.IO.FileNotFoundException]) ("Expected a missing staged '{0}' to fail explicitly instead of yielding empty enrichment, got: {1}" -f $fragment, $(if ($failure) { "$($failure.GetType().FullName): $($failure.Message)" } else { 'no error' }))
+        }
+
+        $lockedStage = & $newStage 'locked-machines'
+        $lock = [System.IO.File]::Open((Join-Path $lockedStage 'machines.ndjson'), [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        try { $lockedFailure = & $invoke $lockedStage }
+        finally { $lock.Dispose() }
+        Assert-True ($lockedFailure -is [System.IO.IOException] -and $lockedFailure -isnot [System.IO.FileNotFoundException]) ("Expected an unreadable staged machines fragment to surface its read failure, got: {0}" -f $(if ($lockedFailure) { $lockedFailure.GetType().FullName } else { 'no error' }))
+        Assert-True (@(Get-ChildItem -LiteralPath $stagingParent -Force).Count -eq 0) 'Expected failed projections to remove their bounded-normalizer staging directories.'
     }
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 }

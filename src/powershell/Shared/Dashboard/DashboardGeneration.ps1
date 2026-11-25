@@ -4398,7 +4398,8 @@ function Write-BoundedNormalizationEnrichmentFragment {
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingData = @{},
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingDeviceUsers = @{},
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingInventoryData = @{},
-        [Parameter(Mandatory = $false)][hashtable]$NvdCveData = @{}
+        [Parameter(Mandatory = $false)][hashtable]$NvdCveData = @{},
+        [Parameter(Mandatory = $false)][AllowNull()][System.Collections.Generic.IEnumerable[string]]$TemplateCveIds
     )
 
     $utf8 = [System.Text.UTF8Encoding]::new($false)
@@ -4434,13 +4435,22 @@ function Write-BoundedNormalizationEnrichmentFragment {
 
     $cveWriter = [System.IO.StreamWriter]::new((Join-Path $StagePath 'cveEnrichment.ndjson'), $false, $utf8, 65536)
     try {
-        $cveIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($cveId in @($AdvancedHuntingData.Keys) + @($NvdCveData.Keys)) { if (-not [string]::IsNullOrWhiteSpace([string]$cveId)) { [void]$cveIds.Add([string]$cveId) } }
+        # Records are keyed by the exact template CVE ID and resolved through each caller table's own comparer, mirroring Add-NormalizedCve.
+        $cveIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        $candidateIds = if ($null -ne $TemplateCveIds) { $TemplateCveIds } else { @($AdvancedHuntingData.Keys) + @($NvdCveData.Keys) }
+        foreach ($cveId in $candidateIds) { if (-not [string]::IsNullOrWhiteSpace([string]$cveId)) { [void]$cveIds.Add([string]$cveId) } }
         foreach ($cveId in $cveIds) {
             $ah = $AdvancedHuntingData[$cveId]; $nvd = $NvdCveData[$cveId]
+            if (-not $ah -and -not $nvd) { continue }
+            $publishedDate = if ($ah) { $ah.PublishedDate } else { $null }
+            $description = if ($ah) { $ah.VulnerabilityDescription } else { $null }
+            if ($nvd) {
+                if ([string]::IsNullOrWhiteSpace([string]$publishedDate)) { $publishedDate = $nvd.PublishedDate }
+                if ([string]::IsNullOrWhiteSpace([string]$description)) { $description = $nvd.VulnerabilityDescription }
+            }
             $cveWriter.WriteLine((ConvertTo-Json -InputObject ([ordered]@{
-                id = $cveId; pd = if ($ah -and $ah.PublishedDate) { $ah.PublishedDate } elseif ($nvd) { $nvd.PublishedDate } else { $null }
-                desc = if ($ah -and $ah.VulnerabilityDescription) { $ah.VulnerabilityDescription } elseif ($nvd) { $nvd.VulnerabilityDescription } else { $null }
+                id = $cveId; pd = $publishedDate
+                desc = $description
                 ep = if ($ah) { $ah.EpssScore } else { $null }; as = if ($ah -and $ah.AffectedSoftware) { @($ah.AffectedSoftware) } else { $null }
                 ea = if ($ah -and $ah.ContainsKey('IsExploitAvailable')) { $ah.IsExploitAvailable } else { $null }
                 nlm = if ($nvd) { $nvd.LastModifiedDate } else { $null }; nbs = if ($nvd) { $nvd.BaseScore } else { $null }; nsv = if ($nvd) { $nvd.BaseSeverity } else { $null }
@@ -4576,13 +4586,19 @@ function Invoke-BoundedContentStorePayloadProjection {
     try {
         $telemetry.SetStage('dictionary-staging')
         [void](New-Item -Path $stagePath -ItemType Directory -Force)
+        $templateCveIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
         foreach ($propertyName in @('deviceProfiles', 'contentTemplates')) {
             $writer = [System.IO.StreamWriter]::new((Join-Path $stagePath ($propertyName + '.ndjson')), $false, [System.Text.UTF8Encoding]::new($false), 65536)
-            try { Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName $propertyName | ForEach-Object { $writer.WriteLine($_.ToString([Newtonsoft.Json.Formatting]::None)) } }
+            try {
+                Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName $propertyName | ForEach-Object {
+                    if ($propertyName -eq 'contentTemplates') { $templateCveId = [string]$_['c']; if (-not [string]::IsNullOrWhiteSpace($templateCveId)) { [void]$templateCveIds.Add($templateCveId) } }
+                    $writer.WriteLine($_.ToString([Newtonsoft.Json.Formatting]::None))
+                }
+            }
             finally { $writer.Dispose() }
         }
         Write-BoundedNormalizationOptions -StagePath $stagePath -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData
-        Write-BoundedNormalizationEnrichmentFragment -StagePath $stagePath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData
+        Write-BoundedNormalizationEnrichmentFragment -StagePath $stagePath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -TemplateCveIds $templateCveIds
         if ($null -eq $effectiveRefPaths -or $effectiveRefPaths.Count -eq 0) { throw 'Bounded normalization did not resolve any vulnerability reference inputs.' }
         $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $effectiveRefPaths, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry, $StagingParent)
     }
