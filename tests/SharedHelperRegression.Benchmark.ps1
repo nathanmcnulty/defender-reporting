@@ -628,6 +628,33 @@ function Test-RunbookBenchmarkProcessHighWaterSummary {
     Assert-True $failed 'Invalid process high-water values must be rejected.'
 }
 
+function Test-BenchmarkPortableMemoryCountersRefresh {
+    [CmdletBinding()]
+    param()
+
+    Initialize-CompiledVulnContentProjector
+    $telemetry = [DefenderReporting.Store.MemoryTelemetrySession]::new(0)
+    $portableReader = $telemetry.GetType().GetMethod('ReadPortableMemory', [System.Reflection.BindingFlags]'Instance,NonPublic')
+    $allocation = [IntPtr]::Zero
+    try {
+        Assert-True ($null -ne $portableReader) 'Expected a testable portable process-memory reader.'
+        $before = [object[]]@(0L, 0L)
+        [void]$portableReader.Invoke($telemetry, $before)
+        $allocation = [System.Runtime.InteropServices.Marshal]::AllocHGlobal(32MB)
+        for ($offset = 0; $offset -lt 32MB; $offset += 4096) {
+            [System.Runtime.InteropServices.Marshal]::WriteByte($allocation, $offset, 1)
+        }
+        $after = [object[]]@(0L, 0L)
+        [void]$portableReader.Invoke($telemetry, $after)
+        Assert-True ([long]$before[0] -gt 0 -and [long]$before[1] -gt 0) 'Portable memory counters must report positive values.'
+        Assert-True (([long]$after[1] - [long]$before[1]) -ge 8MB) 'Portable private memory must refresh after the process commits additional memory.'
+    }
+    finally {
+        if ($allocation -ne [IntPtr]::Zero) { [System.Runtime.InteropServices.Marshal]::FreeHGlobal($allocation) }
+        $telemetry.Dispose()
+    }
+}
+
 function Test-RunbookBenchmarkStatusJobIdentity {
     [CmdletBinding()]
     param()

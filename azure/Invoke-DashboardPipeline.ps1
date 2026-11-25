@@ -311,10 +311,10 @@ namespace DefenderReporting.Store
             trimWorkingSet();
             long postTrimWorkingSet, postTrimPrivateMemory; ReadMemory(out postTrimWorkingSet, out postTrimPrivateMemory);
             result.PostTrimWorkingSetBytes = postTrimWorkingSet; result.PostTrimPrivateMemoryBytes = postTrimPrivateMemory; result.PostTrimGcHeapBytes = GC.GetTotalMemory(false); result.ElapsedMilliseconds = stopwatch.ElapsedMilliseconds;
-            if (timer != null) timer.Dispose(); process.Dispose(); return result;
+            if (timer != null) timer.Dispose(); lock (process) process.Dispose(); return result;
         }
 
-        public void Dispose() { if (Interlocked.Exchange(ref completed, 1) == 0) { if (timer != null) timer.Dispose(); process.Dispose(); } }
+        public void Dispose() { if (Interlocked.Exchange(ref completed, 1) == 0) { if (timer != null) timer.Dispose(); lock (process) process.Dispose(); } }
         private static void UpdatePeak(ref long peak, long value, ref string peakStage, string currentStage)
         {
             long observed;
@@ -330,14 +330,21 @@ namespace DefenderReporting.Store
             // counters on Unix, so keep private-memory telemetry useful in Linux CI and
             // Azure-hosted PowerShell as well.
             try {
-                workingSet = process.WorkingSet64;
-                privateMemory = process.PrivateMemorySize64;
+                ReadPortableMemory(out workingSet, out privateMemory);
             }
             catch {
                 workingSet = 0; privateMemory = 0;
             }
             if (workingSet <= 0) workingSet = Environment.WorkingSet;
             if (privateMemory <= 0) privateMemory = workingSet;
+        }
+        private void ReadPortableMemory(out long workingSet, out long privateMemory)
+        {
+            lock (process) {
+                process.Refresh();
+                workingSet = process.WorkingSet64;
+                privateMemory = process.PrivateMemorySize64;
+            }
         }
     }
 
@@ -22285,7 +22292,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 46dc20e2adeee3ed466f9b2982bad200f6bbefa4c2a3723725d00385d672d0e1
+# ArtifactFingerprint: 1a506e5882b64a19d7975222c6d388bc5fd41396fd324d77395ddb4c98aa817e
 
 
 
