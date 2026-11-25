@@ -173,6 +173,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-VulnPropertyHelpersSupportSupportedRowShapes'; SuccessMessage = 'Vulnerability property helper shape checks passed.' }
     @{ Name = 'Test-VulnObservedWindowCacheRoundTrip'; SuccessMessage = 'Observed-window cache round-trip checks passed.' }
     @{ Name = 'Test-FunctionAppWriteOutputNoEnumeratePreservesJObject'; SuccessMessage = 'Function App Write-Output -NoEnumerate checks passed.' }
+    @{ Name = 'Test-FunctionExecutionInvocationDoesNotReplay'; SuccessMessage = 'Function non-idempotent invocation checks passed.' }
+    @{ Name = 'Test-FunctionExecutionValidationRequiresTerminalEvidence'; SuccessMessage = 'Function terminal status and publication validation checks passed.' }
     @{ Name = 'Test-FunctionExecutionStatusSummaryIncludesNormalizationProgressInfo'; SuccessMessage = 'Function execution status summary metadata checks passed.' }
     @{ Name = 'Test-BenchmarkEvidenceEnvelopeWritesTransactionally'; SuccessMessage = 'Benchmark evidence schema and transactional publication checks passed.' }
     @{ Name = 'Test-GetBlobListPagination'; SuccessMessage = 'Blob listing pagination, encoding, empty-page, and cycle checks passed.' }
