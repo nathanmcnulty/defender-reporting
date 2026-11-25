@@ -12,7 +12,7 @@ This repo currently ships five GitHub Actions workflows.
 | Release Azure Package | `.github/workflows/release-azure-package.yml` | Build `Azure-YYMMDD.zip` from the published release tag and attach it to the GitHub release |
 | Export Dashboard PDFs | `.github/workflows/export-pdf-reports.yml` | Private repositories only: render PDFs without publishing live reports; remains disabled pending a private source |
 
-The dashboard job admits `(nathanmcnulty/defender-reporting AND refs/heads/main) OR private: true`; other public or unknown repositories skip before checkout or authentication. The public owner workflow is manually disabled while its demo-data publication policy is unresolved. Existing public snapshots remain accessible. The PDF job remains private-only, read-only and unchanged, with publishing disabled. Exporter logs can expose RBAC group IDs and counts.
+The dashboard job admits `(nathanmcnulty/defender-reporting AND refs/heads/main) OR private: true`; other public or unknown repositories skip before checkout or authentication. The owner approved the lab tenant's data for the public demo and confirmed the GitHub Actions tenant and client settings point to that lab; the owner workflow is enabled. Existing public snapshots remain accessible. The PDF job remains private-only, read-only and unchanged, with publishing disabled. Exporter logs can expose RBAC group IDs and counts.
 
 ## Flow
 
@@ -38,7 +38,7 @@ Key behavior:
 - Stages only the dashboard allowlist into an orphan worktree, force-pushes it as the single commit on `demo-data` (never `main`), and uploads only HTML with 30-day retention after validation
 - Manual `dry_run: true` still collects live data, but skips staging, commits and artifacts
 - Owner runs require configured tenant GUID, matching Az context/token tenants, and no ambient CLI fallback; private/local behavior otherwise remains unchanged
-- The workflow definition retains the daily `02:00 UTC` schedule; the public owner workflow is currently manually disabled, so neither scheduled nor manual runs start
+- The public owner workflow is enabled with the daily `02:00 UTC` schedule and manual trigger
 
 ## Validate Dashboard
 
@@ -101,7 +101,7 @@ Key behavior:
 
 ## Suggested operating model
 
-- Enable the public dashboard refresh only after approving a safe data and log publication policy and, if using live data, verifying the owner demo tenant binding; private repositories must also review their destination access controls
+- Reassess the public demo policy and tenant binding before changing the approved lab tenant, client or publication destination; private repositories must review their destination access controls
 - Let the validation workflow protect changes to scripts and templates through the same deterministic preflight used locally
 - Regenerate `azure/Invoke-DashboardPipeline.ps1` and `azure/Upload-Templates.ps1` in the PR that changes their sources; the validation workflow rejects stale artifacts
 - Use the Azure package workflow when you want a fresh downloadable deployment bundle without committing a binary into the repository

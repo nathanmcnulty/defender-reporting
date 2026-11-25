@@ -20,7 +20,7 @@ This is a priority order, not a release schedule. Finish the current work and it
 - Complete separate pipeline and dashboard reviews. Open issues for reproducible defects with the affected revision, expected and actual behavior, and a bounded reproduction. Review topics remain questions until verified.
 - Reconcile the existing performance issues [#67](https://github.com/nathanmcnulty/defender-reporting/issues/67), [#69](https://github.com/nathanmcnulty/defender-reporting/issues/69), and [#70](https://github.com/nathanmcnulty/defender-reporting/issues/70) against the latest evidence. Keep fresh import, completed-store replay, packaging, and browser work separate.
 - Keep the successful live Function-host acceptance for [#92](https://github.com/nathanmcnulty/defender-reporting/issues/92) separate from the unverified Automation-host path. Offline checks and package validation do not establish live Azure behavior.
-- Build on the merged owner-demo work in [PR #98](https://github.com/nathanmcnulty/defender-reporting/pull/98) and resolve the remaining publication decision in [#68](https://github.com/nathanmcnulty/defender-reporting/issues/68). Do not extend the owner's demo exception to other public forks.
+- Build on the merged owner-demo work in [PR #98](https://github.com/nathanmcnulty/defender-reporting/pull/98) and the owner decision in [#68](https://github.com/nathanmcnulty/defender-reporting/issues/68). Do not extend the owner's demo exception to other public forks.
 
 **Completion check:** Each current item has a verified result or an explicit remaining gate. Merging, deploying, and running live acceptance remain separate decisions.
 
@@ -84,7 +84,7 @@ issues retain their own acceptance criteria.
 | PRs #109, #110 and #115 | Merged. #110 retained the measured worker-transfer and PDF changes. | Keep their measurement limits with the evidence; full-scale browser acceptance is still open. |
 | PR #111 | Closed; the default-off experiment had no measured benefit. | The [design record](https://github.com/nathanmcnulty/defender-reporting/blob/dc6afaf9c2427ea257f36a546f9885d57a022ff3/docs/streamed-scratch-candidate.md) remains on the retained experiment branch; revisit only with a measured candidate. |
 | #92 | Closed after a successful live Function-host export and dashboard generation on PowerShell 7.6. | Automation-host validation remains separate; no live Automation receipt was obtained. |
-| #68 | The public demo workflow is manually disabled; existing `demo-data` and release-tag history remain public. | Decide whether to rewrite release tags and whether the demo should use approved demo-tenant data, synthetic data or private storage. |
+| #68 | Closed as not planned: the owner approved the lab data for the public demo, confirmed the Actions tenant/client binding, and chose to keep the eight release tags unchanged. The public workflow is enabled; existing `demo-data` and release-tag history remain public. | Retain synthetic test fixtures and limit the public owner exception to the approved lab tenant. Historical copies and ordinary-clone size remain unchanged. |
 | #67 / #69 / #70 | #67 is closed; #69 and #70 remain open. | Preserve their separate Automation and full-scale browser acceptance gates. |
 
 ### Recommendations
@@ -96,8 +96,8 @@ issues retain their own acceptance criteria.
 
 **Code and repository reduction**
 
-- The demo workflow, currently manually disabled, is configured to force-push one orphan snapshot to `demo-data`; outputs are untracked on `main`. With owner approval, `main` and all retained non-demo branches were moved onto cleaned histories, and merged or superseded branches were deleted. A fresh `main`-only clone without tags is 9.69 MiB versus about 364 MiB before the rewrite.
-- The eight existing release tags were not rewritten and still retain old history, so ordinary clones that fetch tags may remain large. GitHub pull-request references and forks can also retain copies. The public demo snapshot is not sanitized; #68 remains open.
+- The demo workflow is enabled and configured to force-push one orphan snapshot to `demo-data`; outputs are untracked on `main`. With owner approval, `main` and all retained non-demo branches were moved onto cleaned histories, and merged or superseded branches were deleted. A fresh `main`-only clone without tags is 9.69 MiB versus about 364 MiB before the rewrite.
+- The eight existing release tags were not rewritten and still retain old history, so ordinary clones that fetch tags may remain large. GitHub pull-request references and forks can also retain copies. The public demo snapshot is not sanitized; #68 was closed as not planned under the owner's lab-data policy.
 - *Done:* dated evidence moved to `docs/archive/` and the chat replay removed. `docs/performance-baselines.md` stays because the PR template links it.
 - *Done:* the runner now dot-sources seven `tests/SharedHelperRegression.<Area>.ps1` fragments. Both `Measure-*` scripts stay for now: `Invoke-BenchmarkSeries.ps1` and the performance playbook still use the branch benchmark, and #69/#70 remain open.
 
@@ -125,4 +125,4 @@ interruption remain separate from browser acceptance.
 
 Use issues for concrete work and this document for order and product direction. Link verified review findings as they arrive; do not turn every idea into a promised feature. Update the roadmap when a decision or accepted result changes the next useful step.
 
-Planning snapshot: #68, #69 and #70 are open. The [October import/Dual measurements](archive/import-dual-measurements-2026-10-28.md), [dashboard review](dashboard-performance-review.md), and [test guide](../tests/README.md) provide context with their own evidence limits. Older observations are not current performance guarantees, and this roadmap does not close any issue.
+Planning snapshot: #69 and #70 remain open; #68 was closed as not planned after the owner approved the lab-data demo. The [October import/Dual measurements](archive/import-dual-measurements-2026-10-28.md), [dashboard review](dashboard-performance-review.md), and [test guide](../tests/README.md) provide context with their own evidence limits. Older observations are not current performance guarantees.

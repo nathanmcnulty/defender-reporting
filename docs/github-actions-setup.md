@@ -2,7 +2,7 @@
 
 This revision changes dashboard publication only. The PDF workflow, its trigger and read-only permissions remain unchanged; it has no publishing steps and stays disabled for public use. Local output paths remain ignored.
 
-As of November 25, 2026, the public owner's dashboard workflow is manually disabled while its unsanitized demo-data policy is unresolved. Scheduled and manual runs are paused, but the existing public `demo-data` snapshot and historical copies remain accessible. This GitHub workflow setting does not affect the deployed Azure Function or the state of workflows in private repositories.
+On November 25, 2026, the owner approved public demo use of the lab-tenant data and confirmed that the GitHub Actions tenant and client settings refer to that lab. The public workflow was re-enabled after a temporary pause. The existing public `demo-data` snapshot and historical copies remain accessible. This approval does not extend to other tenants or public forks, and the workflow setting does not affect the deployed Azure Function or workflows in private repositories.
 
 ## Dashboard admission
 
@@ -23,7 +23,7 @@ Public forks and other public repositories owned by Nathan are excluded. Missing
 
 ## Tenant binding before owner activation
 
-**Keep the public dashboard workflow disabled until the owner has approved a safe publication policy.** If the chosen policy uses live demo data, also verify the configured tenant as the approved demo tenant. A source check cannot prove which directory is configured in GitHub or that its output is safe to publish. Offline tests need no tenant lookup, sign-in, credentials, new permissions or live dry run.
+The owner approved live demo data from the lab tenant and confirmed the configured tenant and client settings refer to that lab. A source check cannot independently prove which directory is configured in GitHub or that its output is safe to publish. Offline tests need no tenant lookup, sign-in, credentials, new permissions or live dry run.
 
 For the owner repository, `build/Invoke-LiveDashboardDryRun.ps1` requires the GitHub OIDC parameter set and an explicit nonempty tenant GUID. It rejects an ambient existing context as an authentication mode. After the existing OIDC connection, it checks that the Az context tenant matches that GUID, requests the Defender token with that explicit tenant, and checks the returned token tenant. Missing/mismatched context or token metadata, failed Az token acquisition, or a missing Az token command stops the run. Owner runs never fall back to the Azure CLI’s ambient account. Other private/local calls retain their existing fallback behavior. The source guard also protects owner-repository runs when that repository is private.
 
@@ -48,7 +48,7 @@ The workflow definition retains its daily `02:00 UTC` schedule and manual trigge
 
 Only the HTML is uploaded as a 30-day Actions artifact. Audit and manifest files remain under ignored `.local/` and are neither committed nor uploaded. Raw responses, legacy downloads, NVD cache files, credentials/configuration, locks, staging directories, arbitrary files and PDFs are excluded. The source export directory must be a real directory, copies do not dereference links, and the helper requires an empty index and rejects nonregular outputs, including dangling links, before staging any file. The snapshot is committed and force-pushed to `refs/heads/demo-data`, so that branch always holds exactly one commit and `main` no longer grows with daily data. Validation failure prevents publication; manual `dry_run: true` skips staging, commits and artifacts.
 
-This is a filename allowlist, not content redaction. Owner demo outputs and logs are public if published. Private repository status does not make Pages, blob storage, Container Apps or other external destinations private. These workflows do not deploy to those destinations. History cleanup and issue #68 remain separate.
+This is a filename allowlist, not content redaction. Owner demo outputs and logs are public if published. Private repository status does not make Pages, blob storage, Container Apps or other external destinations private. These workflows do not deploy to those destinations. The owner chose to retain the release tags and their historical copies; #68 was closed as not planned under the lab-data policy.
 
 ## Existing private setup
 
@@ -60,6 +60,6 @@ Only the guarded dashboard job receives `contents: write` and `id-token: write`;
 
 Run `node tests/Assert-DashboardWorkflowPrivacy.js` for admission, allowlist and isolated Git staging checks. Run `./tests/Run-SharedHelperRegression.ps1 -TestName Test-LiveDashboardTenantBinding` for extracted-function tests with synthetic Az/CLI mocks; it never executes the live wrapper or signs in. The normal `./build/Invoke-RegressionValidation.ps1` includes these checks and the repository parser/analyzer checks.
 
-Before re-enabling the public workflow, decide how demo outputs and logs can be published safely. If using live data, verify the nonsecret demo binding above and explicitly approve the public destination. Re-enabling restores the unchanged `02:00 UTC` schedule and manual trigger; it does not remove past snapshots or history. Keep the PDF workflow disabled for public use.
+The owner has approved the configured lab tenant for the public demo. Reassess the binding and publication policy before changing tenant, client or destination. The `02:00 UTC` schedule and manual trigger are enabled; this does not remove past snapshots or history. Keep the PDF workflow disabled for public use.
 
 Related: [workflow notes](workflows.md), [Azure setup](azure-setup.md).
