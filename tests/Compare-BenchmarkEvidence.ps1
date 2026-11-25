@@ -67,6 +67,11 @@ function Get-NumericPropertyMaximum {
     return ($values | Measure-Object -Maximum).Maximum
 }
 
+function ConvertTo-RoundTripDecimal([double]$Value) {
+    $text = $Value.ToString('R', [System.Globalization.CultureInfo]::InvariantCulture)
+    return [decimal]::Parse($text, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Read-EvidenceResult([string]$Path) {
     $resolved = [System.IO.Path]::GetFullPath($Path)
     if (-not (Test-Path -LiteralPath $resolved -PathType Leaf)) { throw "Benchmark result '$resolved' was not found." }
@@ -164,10 +169,10 @@ if ($null -ne $baselineMetrics) {
         $failures.Add('Elapsed-time comparison requires positive baseline and current elapsed-time evidence.')
     }
     else {
-        $baselineElapsed = [decimal]$baselineMetrics.elapsed_seconds
-        $currentElapsed = [decimal]$currentMetrics.elapsed_seconds
+        $baselineElapsed = ConvertTo-RoundTripDecimal $baselineMetrics.elapsed_seconds
+        $currentElapsed = ConvertTo-RoundTripDecimal $currentMetrics.elapsed_seconds
         $elapsedRegressionPercent = (($currentElapsed - $baselineElapsed) / $baselineElapsed) * 100
-        if ($elapsedRegressionPercent -gt [decimal]$MaximumElapsedRegressionPercent) {
+        if ($elapsedRegressionPercent -gt (ConvertTo-RoundTripDecimal $MaximumElapsedRegressionPercent)) {
             $failures.Add(("Elapsed time regressed by {0}% (maximum {1}%)." -f $elapsedRegressionPercent, $MaximumElapsedRegressionPercent))
         }
     }

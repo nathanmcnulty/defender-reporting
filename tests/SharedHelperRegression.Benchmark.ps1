@@ -591,6 +591,13 @@ function Test-BenchmarkComparisonUsesProcessHighWater {
         catch { $failed = $true }
         Assert-True $failed 'Elapsed evidence above the limit must not be rounded down into a pass.'
 
+        $evidence.execution.summary.elapsed_seconds = 110.00000000000001
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -MaximumElapsedRegressionPercent 10 }
+        catch { $failed = $true }
+        Assert-True $failed 'Converting elapsed evidence to decimal must preserve a representable value just above the limit.'
+
         foreach ($boundary in @(@{ baseline = 0.03; current = 0.033 }, @{ baseline = 1.13; current = 1.243 })) {
             $baseline.execution.summary.elapsed_seconds = $boundary.baseline
             $evidence.execution.summary.elapsed_seconds = $boundary.current
