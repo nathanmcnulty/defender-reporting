@@ -528,6 +528,13 @@ function Test-BenchmarkComparisonUsesProcessHighWater {
         $comparison = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4
         Assert-True $comparison.passed 'The existing inclusive maximum must still accept equality by default.'
 
+        $evidence.execution.status.memory.processPeakWorkingSetMb = 381.4001
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 }
+        catch { $failed = $true }
+        Assert-True $failed 'Memory evidence above the maximum must not be rounded down into a pass.'
+
         $evidence.execution.status = @{}
         [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
         $failed = $false
@@ -558,6 +565,41 @@ function Test-BenchmarkComparisonUsesProcessHighWater {
         try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 }
         catch { $failed = $true }
         Assert-True $failed 'A configured memory limit must fail when its evidence is unavailable.'
+
+        $baselinePath = Join-Path $tempRoot 'baseline.json'
+        $baseline = @{ evidence_schema_version = 1; execution = @{ summary = @{ elapsed_seconds = 100 } } }
+        [System.IO.File]::WriteAllText($baselinePath, ($baseline | ConvertTo-Json -Depth 10))
+        $evidence.execution.summary = @{ elapsed_seconds = 110 }
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $comparison = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -MaximumElapsedRegressionPercent 10
+        Assert-True $comparison.passed 'The elapsed limit must accept its inclusive boundary.'
+
+        $evidence.execution.summary.elapsed_seconds = 110.004
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -MaximumElapsedRegressionPercent 10 }
+        catch { $failed = $true }
+        Assert-True $failed 'Elapsed evidence above the limit must not be rounded down into a pass.'
+
+        foreach ($boundary in @(@{ baseline = 0.03; current = 0.033 }, @{ baseline = 1.13; current = 1.243 })) {
+            $baseline.execution.summary.elapsed_seconds = $boundary.baseline
+            $evidence.execution.summary.elapsed_seconds = $boundary.current
+            [System.IO.File]::WriteAllText($baselinePath, ($baseline | ConvertTo-Json -Depth 10))
+            [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+            $comparison = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -MaximumElapsedRegressionPercent 10
+            Assert-True $comparison.passed 'Decimal elapsed evidence at the inclusive boundary must not fail due to binary floating-point error.'
+        }
+
+        foreach ($missingSide in @('current', 'baseline')) {
+            $evidence.execution.summary = if ($missingSide -eq 'current') { @{} } else { @{ elapsed_seconds = 100 } }
+            $baseline.execution.summary = if ($missingSide -eq 'baseline') { @{ elapsed_seconds = 0 } } else { @{ elapsed_seconds = 100 } }
+            [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+            [System.IO.File]::WriteAllText($baselinePath, ($baseline | ConvertTo-Json -Depth 10))
+            $failed = $false
+            try { $null = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath }
+            catch { $failed = $true }
+            Assert-True $failed "Missing or zero $missingSide elapsed evidence must not pass a baseline comparison."
+        }
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }

@@ -52,7 +52,7 @@ function Get-NumericPropertyMaximum {
     $values = [System.Collections.Generic.List[double]]::new()
     Add-NumericPropertyValue -Item $Value -PropertyNames $Names -Accumulator $values
     if ($values.Count -eq 0) { return $null }
-    return [math]::Round(($values | Measure-Object -Maximum).Maximum, 2)
+    return ($values | Measure-Object -Maximum).Maximum
 }
 
 function Read-EvidenceResult([string]$Path) {
@@ -101,10 +101,17 @@ foreach ($limit in @(
 }
 
 $elapsedRegressionPercent = $null
-if ($null -ne $baselineMetrics -and $null -ne $baselineMetrics.elapsed_seconds -and $baselineMetrics.elapsed_seconds -gt 0 -and $null -ne $currentMetrics.elapsed_seconds) {
-    $elapsedRegressionPercent = [math]::Round((($currentMetrics.elapsed_seconds - $baselineMetrics.elapsed_seconds) / $baselineMetrics.elapsed_seconds) * 100, 2)
-    if ($elapsedRegressionPercent -gt $MaximumElapsedRegressionPercent) {
-        $failures.Add(("Elapsed time regressed by {0}% (maximum {1}%)." -f $elapsedRegressionPercent, $MaximumElapsedRegressionPercent))
+if ($null -ne $baselineMetrics) {
+    if ($null -eq $baselineMetrics.elapsed_seconds -or $baselineMetrics.elapsed_seconds -le 0 -or $null -eq $currentMetrics.elapsed_seconds -or $currentMetrics.elapsed_seconds -le 0) {
+        $failures.Add('Elapsed-time comparison requires positive baseline and current elapsed-time evidence.')
+    }
+    else {
+        $baselineElapsed = [decimal]$baselineMetrics.elapsed_seconds
+        $currentElapsed = [decimal]$currentMetrics.elapsed_seconds
+        $elapsedRegressionPercent = (($currentElapsed - $baselineElapsed) / $baselineElapsed) * 100
+        if ($elapsedRegressionPercent -gt [decimal]$MaximumElapsedRegressionPercent) {
+            $failures.Add(("Elapsed time regressed by {0}% (maximum {1}%)." -f $elapsedRegressionPercent, $MaximumElapsedRegressionPercent))
+        }
     }
 }
 
