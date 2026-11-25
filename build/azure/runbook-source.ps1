@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Unified Azure Automation runbook for the Defender vulnerability dashboard pipeline.
 
