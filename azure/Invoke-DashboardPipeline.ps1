@@ -376,8 +376,50 @@ namespace DefenderReporting.Store
 
         public static CompiledNormalizationResult Project(string dictionaryPath, string[] refPaths, string outputPath, MemoryTelemetrySession telemetry)
         {
+            return Project(dictionaryPath, refPaths, outputPath, telemetry, Path.GetTempPath());
+        }
+
+        public static CompiledNormalizationResult Project(string dictionaryPath, string[] refPaths, string outputPath, MemoryTelemetrySession telemetry, string stagingParent)
+        {
             if (refPaths == null) throw new ArgumentNullException("refPaths");
             if (telemetry == null) throw new ArgumentNullException("telemetry");
+            if (String.IsNullOrWhiteSpace(stagingParent)) throw new ArgumentNullException("stagingParent");
+            var stageRoot = Path.Combine(stagingParent, "bounded-normalizer-" + Guid.NewGuid().ToString("N"));
+            return (CompiledNormalizationResult)RunWithStagingCleanup(stageRoot, () => ProjectStaged(dictionaryPath, refPaths, outputPath, telemetry, stageRoot));
+        }
+
+        // Staged fragments contain plaintext tenant data, so the staging directory is removed on success and failure;
+        // cleanup failures are surfaced, and a failed projection keeps its original exception as the first inner exception.
+        public static object RunWithStagingCleanup(string stageRoot, Func<object> body)
+        {
+            if (String.IsNullOrWhiteSpace(stageRoot)) throw new ArgumentNullException("stageRoot");
+            if (body == null) throw new ArgumentNullException("body");
+            object result;
+            try { result = body(); }
+            catch (Exception original)
+            {
+                var failedCleanupError = TryDeleteStagingDirectory(stageRoot);
+                if (failedCleanupError != null) throw new AggregateException("Bounded normalization failed (" + original.Message + ") and its plaintext staging directory '" + stageRoot + "' could not be removed (" + failedCleanupError.Message + ").", original, failedCleanupError);
+                throw;
+            }
+            var cleanupError = TryDeleteStagingDirectory(stageRoot);
+            if (cleanupError != null) throw new IOException("Bounded normalization completed but its plaintext staging directory '" + stageRoot + "' could not be removed: " + cleanupError.Message, cleanupError);
+            return result;
+        }
+
+        public static Exception TryDeleteStagingDirectory(string path)
+        {
+            Exception lastError = null;
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                try { if (Directory.Exists(path)) Directory.Delete(path, true); return null; }
+                catch (Exception error) when (error is IOException || error is UnauthorizedAccessException) { lastError = error; Thread.Sleep(100 * (attempt + 1)); }
+            }
+            return Directory.Exists(path) ? lastError : null;
+        }
+
+        private static CompiledNormalizationResult ProjectStaged(string dictionaryPath, string[] refPaths, string outputPath, MemoryTelemetrySession telemetry, string stageRoot)
+        {
             telemetry.SetStage("template-interning");
             var expectedTemplates = Directory.Exists(dictionaryPath) ? File.ReadLines(Path.Combine(dictionaryPath, "contentTemplates.ndjson"), Utf8).Count() : 1024;
             var machineOverlays = ReadMachineOverlays(Path.Combine(dictionaryPath, "machines.ndjson"));
@@ -399,13 +441,15 @@ namespace DefenderReporting.Store
             var cveMap = HashMap(expectedTemplates); var cveCount = 0;
             var deviceOnboarded = new List<bool>();
             var deviceIds = new List<string>();
+            var profileDeviceIndexes = new List<int>();
+            var deviceKeyMap = new Dictionary<string, int>(StringComparer.Ordinal);
             var softwareIdentities = new List<string>();
             var softwareVendorIndexes = new List<int>();
             var usedVendorIndexes = new HashSet<int>();
             var inventoryValues = new List<InventoryRecord>(); var inventoryValueMap = Map();
             var templateList = new List<Template>();
             var templateDiskIndexes = new List<int>(); var templateRegistryIndexes = new List<int>();
-            var stageRoot = Path.Combine(Path.GetTempPath(), "bounded-normalizer-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(stageRoot);
+            Directory.CreateDirectory(stageRoot);
             var deviceFragment = Path.Combine(stageRoot, "devices.ndjson"); var softwareFragment = Path.Combine(stageRoot, "software.ndjson"); var updateFragment = Path.Combine(stageRoot, "updates.ndjson"); var cveFragment = Path.Combine(stageRoot, "cves.ndjson"); var vulnFragment = Path.Combine(stageRoot, "vulns.ndjson");
             using (var deviceOutput = new StreamWriter(deviceFragment, false, Utf8, 65536))
             using (var softwareOutput = new StreamWriter(softwareFragment, false, Utf8, 65536))
@@ -415,8 +459,12 @@ namespace DefenderReporting.Store
 
             ReadDictionaryArray(dictionaryPath, "deviceProfiles", item =>
                 {
+                    var deviceId = Value(item, "id");
+                    var deviceKey = String.IsNullOrWhiteSpace(deviceId) ? String.Join("|", Value(item, "n"), Value(item, "g"), Value(item, "o"), Value(item, "ov")) : deviceId;
+                    int existingDeviceIndex;
+                    if (deviceKeyMap.TryGetValue(deviceKey, out existingDeviceIndex)) { deviceIds.Add(deviceId); deviceOnboarded.Add(Boolean(item, "ob")); profileDeviceIndexes.Add(existingDeviceIndex); return; }
                     var tagIndexes = new List<int>();
-                    var deviceId = Value(item, "id"); MachineOverlay overlay = null;
+                    MachineOverlay overlay = null;
                     var hasOverlay = !String.IsNullOrWhiteSpace(deviceId) && machineOverlays.TryGetValue(deviceId, out overlay);
                     JsonElement tagValues;
                     if (hasOverlay && overlay.Tags != null && overlay.Tags.Length > 0)
@@ -431,7 +479,8 @@ namespace DefenderReporting.Store
                         Id = deviceId, Name = EmptyFallback(name, "(no machine data)"), OsVersion = NullIfEmpty(osVersion), MachineInfoJson = hasOverlay ? overlay.MachineInfoJson : null,
                         Group = Intern(group, groups, groupMap), Platform = Intern(platform, platforms, platformMap), Tags = tagIndexes.ToArray(), Onboarded = Boolean(item, "ob")
                     };
-                    deviceIds.Add(device.Id); deviceOnboarded.Add(device.Onboarded); WriteDeviceFragment(deviceOutput, device);
+                    var lookupIndex = deviceKeyMap.Count; deviceKeyMap.Add(deviceKey, lookupIndex);
+                    deviceIds.Add(device.Id); deviceOnboarded.Add(device.Onboarded); profileDeviceIndexes.Add(lookupIndex); WriteDeviceFragment(deviceOutput, device);
                 });
 
             ReadDictionaryArray(dictionaryPath, "contentTemplates", item =>
@@ -509,7 +558,7 @@ namespace DefenderReporting.Store
                                         if (!inventoryValueMap.TryGetValue(inventoryValueKey, out inventoryIndex)) { inventoryIndex = inventoryValues.Count; inventoryValueMap.Add(inventoryValueKey, inventoryIndex); inventoryValues.Add(inventoryRecord); }
                                     }
                                 }
-                                try { WriteVulnFragment(vulnOutput, deviceIndex, template, firstIndex, lastIndex, inventoryIndex, templateDiskIndexes, templateRegistryIndexes); }
+                                try { WriteVulnFragment(vulnOutput, profileDeviceIndexes[deviceIndex], template, firstIndex, lastIndex, inventoryIndex, templateDiskIndexes, templateRegistryIndexes); }
                                 catch (Exception error) { throw new InvalidDataException("Bounded vulnerability projection failed at ref " + processed.ToString(CultureInfo.InvariantCulture) + ", device " + deviceIndex.ToString(CultureInfo.InvariantCulture) + ", template " + templateIndex.ToString(CultureInfo.InvariantCulture) + ".", error); }
                                 processed++;
                                 if (processed % 250000 == 0) telemetry.Sample();
@@ -521,11 +570,11 @@ namespace DefenderReporting.Store
                 }
             }
             telemetry.SetStage("pre-assembly-cleanup");
-            var resultDeviceCount = deviceOnboarded.Count;
+            var resultDeviceCount = deviceKeyMap.Count;
             var resultVendorCount = vendors.Count;
             var allowedAffectedSoftware = BuildAllowedAffectedSoftware(vendors, usedVendorIndexes, affectedSoftware);
             usedVendorIndexes = null; softwareVendorIndexes = null;
-            templateList = null; deviceOnboarded = null; deviceIds = null; softwareIdentities = null; inventorySource.Clear(); inventoryValueMap.Clear(); templateDiskIndexes = null; templateRegistryIndexes = null; dateMap.Clear();
+            templateList = null; deviceOnboarded = null; deviceIds = null; profileDeviceIndexes = null; deviceKeyMap = null; softwareIdentities = null; inventorySource.Clear(); inventoryValueMap.Clear(); templateDiskIndexes = null; templateRegistryIndexes = null; dateMap.Clear();
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers(); TrimCurrentProcessWorkingSet();
             telemetry.SetStage("lookup-and-payload-assembly");
@@ -550,7 +599,6 @@ namespace DefenderReporting.Store
                 telemetry.SetStage("vulnerability-assembly");
                 writer.WritePropertyName("vulns"); CopyJsonLines(writer, vulnFragment); writer.WriteEndObject();
             }
-            try { Directory.Delete(stageRoot, true); } catch { }
             var result = new CompiledNormalizationResult { ProcessedCount = processed, DeviceCount = resultDeviceCount, CveCount = cveCount, SoftwareCount = softwareCount, VendorCount = resultVendorCount, FirstLastSwappedCount = swappedCount };
             telemetry.SetStage("cleanup"); telemetry.Sample();
             vendors = null; exploits = null; groups = null; platforms = null; tags = null; versions = null; dates = null; diskPaths = null; registryPaths = null; batchTitles = null; affectedSoftware = null; inventoryValues = null;
@@ -16508,7 +16556,8 @@ function Invoke-BoundedContentStorePayloadProjection {
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingDeviceUsers = @{},
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingInventoryData = @{},
         [Parameter(Mandatory = $false)][hashtable]$NvdCveData = @{},
-        [Parameter(Mandatory = $false)][string[]]$RefPaths
+        [Parameter(Mandatory = $false)][string[]]$RefPaths,
+        [Parameter(Mandatory = $false)][string]$StagingParent
     )
     Initialize-CompiledVulnContentProjector
     $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $DataPath
@@ -16516,7 +16565,8 @@ function Invoke-BoundedContentStorePayloadProjection {
     if ($effectiveRefPaths.Count -eq 0) {
         $effectiveRefPaths = [string[]](@((Get-VulnCurrentRefsPath -BasePath $DataPath)) + @(Get-ChildItem -LiteralPath $DataPath -Filter 'VulnHistoryRefs_*.json.gz' -File | Sort-Object Name | ForEach-Object FullName))
     }
-    $stagePath = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-dictionary-' + [guid]::NewGuid().ToString('N'))
+    if ([string]::IsNullOrWhiteSpace($StagingParent)) { $StagingParent = [System.IO.Path]::GetTempPath() }
+    $stagePath = Join-Path $StagingParent ('compiled-dictionary-' + [guid]::NewGuid().ToString('N'))
     $projectionResult = $null
     $telemetry = [DefenderReporting.Store.MemoryTelemetrySession]::new(0)
     try {
@@ -16529,11 +16579,22 @@ function Invoke-BoundedContentStorePayloadProjection {
         }
         Write-BoundedNormalizationEnrichmentFragment -StagePath $stagePath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData
         if ($null -eq $effectiveRefPaths -or $effectiveRefPaths.Count -eq 0) { throw 'Bounded normalization did not resolve any vulnerability reference inputs.' }
-        $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $effectiveRefPaths, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry)
+        $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $effectiveRefPaths, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry, $StagingParent)
+    }
+    catch {
+        # Staged dictionary/enrichment fragments are plaintext tenant data; remove them on failure without masking the original error.
+        $failedCleanupError = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($stagePath)
+        if ($null -ne $failedCleanupError) {
+            throw [System.AggregateException]::new(("Bounded normalization failed ({0}) and its plaintext staging directory '{1}' could not be removed ({2})." -f $_.Exception.Message, $stagePath, $failedCleanupError.Message), [System.Exception[]]@($_.Exception, $failedCleanupError))
+        }
+        throw
     }
     finally {
         $telemetry.Dispose()
-        if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    $cleanupError = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($stagePath)
+    if ($null -ne $cleanupError) {
+        throw [System.IO.IOException]::new(("Bounded normalization completed but its plaintext staging directory '{0}' could not be removed: {1}" -f $stagePath, $cleanupError.Message), $cleanupError)
     }
     Invoke-FullGarbageCollection
     [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
@@ -21862,7 +21923,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 658fb8f2cc77a39f5e2083a279fef6f9e9ec41299baae161c0acd3d9338b540d
+# ArtifactFingerprint: fd4100963f96c0d1d6fdd770a880d8d3ac62d2f261f16fd6d546f063c187571d
 
 
 

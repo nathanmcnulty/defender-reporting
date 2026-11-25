@@ -188,6 +188,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-BenchmarkWorkloadProfilesArePinned'; SuccessMessage = 'Versioned benchmark workload profile checks passed.' }
     @{ Name = 'Test-VulnPartitionStreamingParity'; SuccessMessage = 'Partition streaming interleaving, row/error parity and cleanup checks passed.' }
     @{ Name = 'Test-CompiledContentStringArrayRoundTrip'; SuccessMessage = 'Compiled content scalar and array round-trip checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationDeduplicatesDeviceProfiles'; SuccessMessage = 'Compiled bounded duplicate device-profile parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationCleansStagingOnFailure'; SuccessMessage = 'Compiled bounded staging cleanup checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationExpandedParity'; SuccessMessage = 'Compiled bounded content normalization expanded-parity checks passed.' }
     @{ Name = 'Test-SyntheticUploadManifestSelectsRawReplayArtifact'; SuccessMessage = 'Synthetic raw replay upload-manifest checks passed.' }
     @{ Name = 'Test-AtomicDashboardExecutableDiscovery'; SuccessMessage = 'Atomic executable discovery duplicate PATH, caller mock, and non-Windows fallback checks passed.' }

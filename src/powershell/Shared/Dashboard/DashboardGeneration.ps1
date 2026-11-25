@@ -1,4 +1,4 @@
-﻿# Shared generator/runbook helpers used for dashboard normalization and HTML assembly.
+# Shared generator/runbook helpers used for dashboard normalization and HTML assembly.
 
 function Join-DashboardTemplateRelativePath {
     [CmdletBinding()]
@@ -4471,7 +4471,8 @@ function Invoke-BoundedContentStorePayloadProjection {
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingDeviceUsers = @{},
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingInventoryData = @{},
         [Parameter(Mandatory = $false)][hashtable]$NvdCveData = @{},
-        [Parameter(Mandatory = $false)][string[]]$RefPaths
+        [Parameter(Mandatory = $false)][string[]]$RefPaths,
+        [Parameter(Mandatory = $false)][string]$StagingParent
     )
     Initialize-CompiledVulnContentProjector
     $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $DataPath
@@ -4479,7 +4480,8 @@ function Invoke-BoundedContentStorePayloadProjection {
     if ($effectiveRefPaths.Count -eq 0) {
         $effectiveRefPaths = [string[]](@((Get-VulnCurrentRefsPath -BasePath $DataPath)) + @(Get-ChildItem -LiteralPath $DataPath -Filter 'VulnHistoryRefs_*.json.gz' -File | Sort-Object Name | ForEach-Object FullName))
     }
-    $stagePath = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-dictionary-' + [guid]::NewGuid().ToString('N'))
+    if ([string]::IsNullOrWhiteSpace($StagingParent)) { $StagingParent = [System.IO.Path]::GetTempPath() }
+    $stagePath = Join-Path $StagingParent ('compiled-dictionary-' + [guid]::NewGuid().ToString('N'))
     $projectionResult = $null
     $telemetry = [DefenderReporting.Store.MemoryTelemetrySession]::new(0)
     try {
@@ -4492,11 +4494,22 @@ function Invoke-BoundedContentStorePayloadProjection {
         }
         Write-BoundedNormalizationEnrichmentFragment -StagePath $stagePath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData
         if ($null -eq $effectiveRefPaths -or $effectiveRefPaths.Count -eq 0) { throw 'Bounded normalization did not resolve any vulnerability reference inputs.' }
-        $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $effectiveRefPaths, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry)
+        $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $effectiveRefPaths, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry, $StagingParent)
+    }
+    catch {
+        # Staged dictionary/enrichment fragments are plaintext tenant data; remove them on failure without masking the original error.
+        $failedCleanupError = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($stagePath)
+        if ($null -ne $failedCleanupError) {
+            throw [System.AggregateException]::new(("Bounded normalization failed ({0}) and its plaintext staging directory '{1}' could not be removed ({2})." -f $_.Exception.Message, $stagePath, $failedCleanupError.Message), [System.Exception[]]@($_.Exception, $failedCleanupError))
+        }
+        throw
     }
     finally {
         $telemetry.Dispose()
-        if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    $cleanupError = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($stagePath)
+    if ($null -ne $cleanupError) {
+        throw [System.IO.IOException]::new(("Bounded normalization completed but its plaintext staging directory '{0}' could not be removed: {1}" -f $stagePath, $cleanupError.Message), $cleanupError)
     }
     Invoke-FullGarbageCollection
     [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()

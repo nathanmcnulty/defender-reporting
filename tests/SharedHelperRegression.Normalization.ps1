@@ -2164,6 +2164,134 @@ function Test-NormalizationExecutionPlanUsesCardinalityAndLegacyFallback {
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 }
 
+function Test-CompiledBoundedContentNormalizationDeduplicatesDeviceProfiles {
+    [CmdletBinding()]
+    param()
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-device-dedupe-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $newRow = {
+            param([string]$Id, [string]$CveId, [string]$DeviceId, [string]$DeviceName, [string]$Group, [string]$OsVersion, [string[]]$Tags, [bool]$Onboarded)
+            $row = Get-TestVulnRow -Id $Id -CveId $CveId -SnapshotDate '2026-07-10' -Version '1.0.0'
+            $row.DeviceId = $DeviceId; $row.DeviceName = $DeviceName; $row.RbacGroupName = $Group; $row.OSVersion = $OsVersion; $row.MachineTags = @($Tags); $row.IsOnboarded = $Onboarded
+            return $row
+        }
+        $rows = @(
+            (& $newRow 'dedupe-1' 'CVE-2026-7101' 'device-dup' 'dup-first.contoso.com' 'Group A' '10.0.1' @('Prod') $true)
+            (& $newRow 'dedupe-2' 'CVE-2026-7102' 'device-dup' 'dup-second.contoso.com' 'Group B' '10.0.2' @('Lab') $true)
+            (& $newRow 'dedupe-3' 'CVE-2026-7103' 'device-dup' 'dup-third.contoso.com' 'Group C' '10.0.3' @('Retired') $false)
+            (& $newRow 'dedupe-4' 'CVE-2026-7104' 'device-other' 'other.contoso.com' 'Group D' '10.0.4' @('Prod') $true)
+            (& $newRow 'dedupe-5' 'CVE-2026-7105' '' 'no-id.contoso.com' 'Group E' '10.0.5' @('First') $true)
+            (& $newRow 'dedupe-6' 'CVE-2026-7106' '' 'no-id.contoso.com' 'Group E' '10.0.5' @('Second') $true)
+            (& $newRow 'dedupe-7' 'CVE-2026-7107' '' 'no-id-other.contoso.com' 'Group E' '10.0.5' @('First') $true)
+        )
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records $rows
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+        $profileCount = @(Read-VulnContentDictionaryArrayEntries -Path (Get-VulnContentDictionaryPath -BasePath $tempRoot) -PropertyName 'deviceProfiles').Count
+        Assert-True ($profileCount -eq 7) "Expected the synthetic content store to keep distinct device profiles for duplicate device IDs and empty-ID fallbacks, found $profileCount."
+        $newMachines = { @{ 'device-dup' = [PSCustomObject]@{ computerDnsName = 'dup-machine.contoso.com'; lastIpAddress = '10.1.2.3'; lastSeen = '2026-07-12'; firstSeen = '2026-01-02' } } }
+
+        $legacyPath = Join-Path $tempRoot 'legacy.json.gz'
+        $legacy = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'legacy.json') -PayloadOutputPath $legacyPath -Machines (& $newMachines) -AdvancedHuntingData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization
+        $compiledPath = Join-Path $tempRoot 'compiled.json.gz'
+        $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines (& $newMachines) -AdvancedHuntingData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+        Assert-True ($compiled -is [hashtable] -and $null -ne $compiled.CompiledMemoryTelemetry) 'Expected the default direct-payload run to use the compiled bounded normalizer.'
+        Assert-True ($legacy.VulnCount -eq 6 -and $compiled.VulnCount -eq 6) "Expected both paths to keep onboarded rows from duplicate profiles and drop the non-onboarded profile, got legacy=$($legacy.VulnCount) compiled=$($compiled.VulnCount)."
+        Assert-True ($legacy.DeviceCount -eq 4 -and $compiled.DeviceCount -eq 4) "Expected both paths to deduplicate device lookups by device ID or empty-ID fallback key, got legacy=$($legacy.DeviceCount) compiled=$($compiled.DeviceCount)."
+
+        & node (Join-Path $repoRoot 'tests\helpers\Assert-ExpandedPayloadParity.js') $legacyPath $compiledPath
+        Assert-True ($LASTEXITCODE -eq 0) 'Expected duplicate-profile compiled and in-process payloads to have expanded row parity.'
+        $legacyPayload = Read-GzipTextFile -Path $legacyPath | ConvertFrom-Json -Depth 30
+        $compiledPayload = Read-GzipTextFile -Path $compiledPath | ConvertFrom-Json -Depth 30
+        Assert-True (@($compiledPayload.lookups.devices).Count -eq 4 -and @($legacyPayload.lookups.devices).Count -eq 4) 'Expected four device lookup entries in both payloads.'
+        Assert-True ((@($legacyPayload.vulns | ForEach-Object { $_[0] }) -join ',') -eq (@($compiledPayload.vulns | ForEach-Object { $_[0] }) -join ',')) 'Expected compiled rows to reference the same deduplicated device lookup indices as in-process rows.'
+        foreach ($property in @('id', 'n', 'ov')) {
+            Assert-True ((@($legacyPayload.lookups.devices | ForEach-Object { [string]$_.$property }) -join '|') -eq (@($compiledPayload.lookups.devices | ForEach-Object { [string]$_.$property }) -join '|')) "Expected first-profile-wins device lookup '$property' values to match."
+        }
+        foreach ($lookup in @('groups', 'platforms', 'tags')) {
+            Assert-True ((@($legacyPayload.lookups.$lookup) -join '|') -eq (@($compiledPayload.lookups.$lookup) -join '|')) "Expected duplicate profiles not to intern extra '$lookup' lookup values."
+        }
+        $dupRows = @($compiledPayload.vulns | Where-Object { [string]$compiledPayload.lookups.devices[[int]$_[0]].id -eq 'device-dup' })
+        Assert-True ($dupRows.Count -eq 2 -and @($dupRows | ForEach-Object { $_[0] } | Select-Object -Unique).Count -eq 1) 'Expected both onboarded duplicate-ID profiles to share the first device lookup.'
+        Assert-True ($compiledPayload.lookups.devices[[int]$dupRows[0][0]].n -eq 'dup-machine.contoso.com' -and $compiledPayload.lookups.devices[[int]$dupRows[0][0]].m.ip -eq '10.1.2.3') 'Expected the shared duplicate-ID device lookup to keep machine enrichment.'
+        $emptyIdLookups = @($compiledPayload.lookups.devices | Where-Object { [string]::IsNullOrEmpty([string]$_.id) })
+        Assert-True ($emptyIdLookups.Count -eq 2) 'Expected empty-ID profiles to deduplicate by their name/group/platform/version fallback key.'
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+function Test-CompiledBoundedContentNormalizationCleansStagingOnFailure {
+    [CmdletBinding()]
+    param()
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-staging-cleanup-' + [guid]::NewGuid().ToString('N'))
+    $lockedStream = $null
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $dataRoot = Join-Path $tempRoot 'data'
+        $stagingParent = Join-Path $tempRoot 'staging'
+        [void](New-Item -Path $dataRoot -ItemType Directory -Force)
+        [void](New-Item -Path $stagingParent -ItemType Directory -Force)
+        $row = Get-TestVulnRow -Id 'staging-cleanup-1' -CveId 'CVE-2026-7201' -SnapshotDate '2026-07-10' -Version '1.0.0'
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $dataRoot) -Records @($row)
+        Publish-VulnContentStoreUnlocked -BasePath $dataRoot
+        $invalidRefPath = Join-Path $tempRoot 'invalid-refs.ndjson'
+        [System.IO.File]::WriteAllText($invalidRefPath, "{not-json`n", [System.Text.UTF8Encoding]::new($false))
+
+        $projectionError = $null
+        try {
+            $null = Invoke-BoundedContentStorePayloadProjection -DataPath $dataRoot -PayloadOutputPath (Join-Path $tempRoot 'payload.json.gz') -Machines @{ ([string]$row.DeviceId) = [PSCustomObject]@{ computerDnsName = 'staged-secret.contoso.com' } } -AdvancedHuntingDeviceUsers @{ ([string]$row.DeviceId) = @('staged-user@example.test') } -RefPaths @($invalidRefPath) -StagingParent $stagingParent
+        }
+        catch { $projectionError = $_.Exception }
+        Assert-True ($null -ne $projectionError) 'Expected an invalid ref stream to fail the compiled bounded projection.'
+        $errorMessages = @(); $hasJsonError = $false; $current = $projectionError; while ($null -ne $current) { $errorMessages += $current.Message; if ($current -is [System.Text.Json.JsonException]) { $hasJsonError = $true }; $current = $current.InnerException }
+        Assert-True $hasJsonError ("Expected the original projection error to propagate, got: {0}" -f ($errorMessages -join ' | '))
+        Assert-True (@($errorMessages | Where-Object { $_ -like '*staging directory*' }).Count -eq 0) 'Expected successful failure-path cleanup not to replace the original error.'
+        $leftovers = @(Get-ChildItem -LiteralPath $stagingParent -Force)
+        Assert-True ($leftovers.Count -eq 0) ("Expected failed projection to remove plaintext staging directories, found: {0}" -f (@($leftovers | ForEach-Object Name) -join ', '))
+
+        $successStage = Join-Path $stagingParent 'success-stage'
+        [void](New-Item -Path $successStage -ItemType Directory -Force)
+        $successResult = [DefenderReporting.Store.BoundedContentNormalizer]::RunWithStagingCleanup($successStage, [Func[object]]{ 'ok' })
+        Assert-True ($successResult -eq 'ok' -and -not (Test-Path -LiteralPath $successStage)) 'Expected successful projection to return its result and remove the staging directory.'
+
+        $lockedStage = Join-Path $stagingParent 'locked-stage'
+        [void](New-Item -Path $lockedStage -ItemType Directory -Force)
+        $lockedFile = Join-Path $lockedStage 'fragment.ndjson'
+        [System.IO.File]::WriteAllText($lockedFile, '{"secret":true}')
+        if ($IsWindows) {
+            $lockedStream = [System.IO.FileStream]::new($lockedFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+        }
+        else {
+            [System.IO.File]::SetUnixFileMode($lockedStage, [System.IO.UnixFileMode]'UserRead, UserExecute')
+        }
+        $cleanupProbe = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($lockedStage)
+        if ($null -eq $cleanupProbe -and (Test-Path -LiteralPath $lockedStage)) { throw 'Expected a lingering staging directory to report a cleanup error.' }
+        if ($null -ne $cleanupProbe) {
+            $combinedError = $null
+            try { $null = [DefenderReporting.Store.BoundedContentNormalizer]::RunWithStagingCleanup($lockedStage, [Func[object]]{ throw [System.InvalidOperationException]::new('original projection failure') }) }
+            catch { $combinedError = $_.Exception }
+            while ($null -ne $combinedError -and $combinedError -isnot [System.AggregateException]) { $combinedError = $combinedError.InnerException }
+            Assert-True ($null -ne $combinedError -and $combinedError.InnerExceptions.Count -eq 2) 'Expected failure-path cleanup errors to be surfaced together with the projection error.'
+            $originalMessages = @(); $current = $combinedError.InnerExceptions[0]; while ($null -ne $current) { $originalMessages += $current.Message; $current = $current.InnerException }
+            Assert-True (@($originalMessages | Where-Object { $_ -like '*original projection failure*' }).Count -gt 0 -and $combinedError.Message -like '*could not be removed*') 'Expected the original projection error to remain the first inner exception with a visible cleanup failure.'
+
+            $successCleanupError = $null
+            try { $null = [DefenderReporting.Store.BoundedContentNormalizer]::RunWithStagingCleanup($lockedStage, [Func[object]]{ 'done' }) }
+            catch { $successCleanupError = $_.Exception }
+            while ($null -ne $successCleanupError -and $successCleanupError -isnot [System.IO.IOException]) { $successCleanupError = $successCleanupError.InnerException }
+            Assert-True ($null -ne $successCleanupError -and $successCleanupError.Message -like '*could not be removed*') 'Expected success-path staging cleanup failures to be surfaced instead of ignored.'
+        }
+        else {
+            Write-Information '  Staging cleanup-failure simulation skipped because this platform/user can delete the protected stage.' -InformationAction Continue
+        }
+    }
+    finally {
+        if ($null -ne $lockedStream) { $lockedStream.Dispose() }
+        $lockedStage = Join-Path $tempRoot 'staging\locked-stage'
+        if (-not $IsWindows -and (Test-Path -LiteralPath $lockedStage)) { [System.IO.File]::SetUnixFileMode($lockedStage, [System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute') }
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
 function Test-CompiledBoundedContentNormalizationExpandedParity {
     [CmdletBinding()]
     param()
