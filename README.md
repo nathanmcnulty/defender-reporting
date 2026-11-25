@@ -215,7 +215,7 @@ flowchart TD
 - The dashboard workflow admits the exact owner repository on `main`, plus private repositories; unknown visibility elsewhere fails closed. Keep it disabled until the approved demo tenant binding is verified. PDF export remains private-only and does not publish outputs. Exporter logs can expose RBAC group IDs and counts, so owner demo activation also approves those logs.
 - Build sources and build scripts now live under `build/`.
 - `build/generated/shared-helpers.ps1`, `build/generated/validation-helpers.ps1`, and `azure/function-app/ExportAndGenerate/run.ps1` are generated on demand and ignored by git.
-- `azure/Invoke-DashboardPipeline.ps1` is generated from the `build/` sources and can be refreshed locally or by CI.
+- `azure/Invoke-DashboardPipeline.ps1` is generated from the `build/` sources. Regenerate it with `build/azure/Build-Runbook.ps1` in the same PR; CI fails when it is stale.
 - Edit `src/powershell/Shared/**/*.ps1`, `src/powershell/Validation/**/*.ps1`, and `build/azure/runbook-source.ps1`; the generated helper bundles are driven by `build/manifests/*.json`, so update the relevant manifest when you add or reorder source files.
 - Run `node .\tests\Assert-DashboardActiveChartSeries.js`, `node .\tests\Assert-DashboardHistoricalRangeSemantics.js`, `node .\tests\Assert-DashboardImpactChartSeries.js`, and `node .\tests\Assert-DashboardRemediationViews.js` when you want the fast dashboard-JavaScript smoke path before the heavier maintainer preflight.
 - Run `./build/Invoke-RegressionValidation.ps1` for the deterministic local and PR-aligned preflight path.
