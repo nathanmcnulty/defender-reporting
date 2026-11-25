@@ -4,7 +4,7 @@
 
 Defender for Endpoint vulnerability reporting has always been a pain point, and this felt like a great opportunity to use AI-assisted coding to build a dashboard without a dependency on Power BI or other expensive tools. The result is a PowerShell-built dashboard that defaults to a self-contained HTML artifact for direct-open use, with an opt-in split-assets mode for hosted deployments, along with validation tooling, Azure automation assets, GitHub Actions workflows, and PDF report generation.
 
-The dashboard workflow can publish Nathan’s approved demo exports and HTML only from `nathanmcnulty/defender-reporting` on `refs/heads/main`, or from a private repository under its existing rules. Keep the owner workflow disabled until its configured OIDC tenant is verified as the approved demo tenant; source checks alone cannot establish that binding. The PDF workflow remains private-only, unchanged, and disabled for public use, with no publishing steps. Ordinary local outputs stay ignored. Regression tests use deterministic synthetic datasets in temporary directories and minimal synthetic legacy fixtures under `tests/fixtures/`; do not include tenant data in test or PR evidence. Removing current-tree outputs does not remove historical copies; issue #68 remains open for the separate private historical response. See [GitHub Actions setup](docs/github-actions-setup.md) for the admission matrix and exact output allowlist.
+The dashboard workflow can publish Nathan’s approved demo exports and HTML to the single-commit `demo-data` branch (never `main`) only from `nathanmcnulty/defender-reporting` on `refs/heads/main`, or from a private repository under its existing rules. Keep the owner workflow disabled until its configured OIDC tenant is verified as the approved demo tenant; source checks alone cannot establish that binding. The PDF workflow remains private-only, unchanged, and disabled for public use, with no publishing steps. Ordinary local outputs stay ignored. Regression tests use deterministic synthetic datasets in temporary directories and minimal synthetic legacy fixtures under `tests/fixtures/`; do not include tenant data in test or PR evidence. Removing current-tree outputs does not remove historical copies; issue #68 remains open for the separate private historical response. See [GitHub Actions setup](docs/github-actions-setup.md) for the admission matrix and exact output allowlist.
 
 ## How it works
 
@@ -169,7 +169,7 @@ For local testing of the split-assets build, use a local HTTP server instead of 
 |---|---|
 | `Invoke-VulnerabilityExport.ps1` | Downloads Defender exports and writes the canonical gzip data store |
 | `Generate-VulnerabilityDashboard.ps1` | Builds the dashboard in self-contained or split-assets form and can validate the result |
-| `build/Validate-DashboardReports.ps1` | Validates an existing dashboard HTML against committed exports |
+| `build/Validate-DashboardReports.ps1` | Validates an existing dashboard HTML against local exports |
 | `Setup-AzureResources.ps1` | Provisions Azure compute (Automation Account or Function App), storage, scheduling, and optional Container App hosting |
 | `Setup-GitHubActionServicePrincipal.ps1` | Creates the Entra app and federated credential for GitHub Actions OIDC |
 

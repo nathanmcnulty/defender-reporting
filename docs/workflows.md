@@ -21,7 +21,7 @@ flowchart TD
     A["Update dashboard"] --> B["Live export dry run"]
     B --> C["Generate HTML"]
     C --> D["Validate output on ephemeral runner"]
-    D --> E["Stage allowlisted dashboard outputs; commit and upload HTML"]
+    D --> E["Force-replace single-commit demo-data snapshot; upload HTML"]
 ```
 
 ## Update Vulnerability Dashboard
@@ -34,8 +34,8 @@ Trigger sources:
 Key behavior:
 
 - Uses repo-owned Azure OIDC logic through `build/Invoke-LiveDashboardDryRun.ps1`
-- Uses repository output paths for HTML and named gzip stores; audit and manifest stay under ignored `.local/`
-- Commits only the dashboard allowlist and uploads only HTML with 30-day retention after validation
+- Restores incremental export state from the `demo-data` branch, then uses repository output paths for HTML and named gzip stores; audit and manifest stay under ignored `.local/`
+- Stages only the dashboard allowlist into an orphan worktree, force-pushes it as the single commit on `demo-data` (never `main`), and uploads only HTML with 30-day retention after validation
 - Manual `dry_run: true` still collects live data, but skips staging, commits and artifacts
 - Owner runs require configured tenant GUID, matching Az context/token tenants, and no ambient CLI fallback; private/local behavior otherwise remains unchanged
 - Preserves the daily `02:00 UTC` schedule; source changes do not enable or dispatch it
@@ -44,7 +44,7 @@ Key behavior:
 
 Trigger sources:
 
-- Pull requests that touch scripts, templates, exports, or workflow files
+- Pull requests that touch scripts, templates, or workflow files
 - Pushes to `main` for the same paths
 - Manual run
 
@@ -52,7 +52,7 @@ Key behavior:
 
 - Installs pinned `PSScriptAnalyzer` and `Az.Accounts` versions (workflow `env`) and caches them
 - Calls the repo-owned `build/Invoke-RegressionValidation.ps1` entrypoint
-- Validates generated deployment artifacts, source scripts, regression helpers, the build-layer template publish contract, and committed-export dashboard generation through one deterministic path
+- Validates generated deployment artifacts, source scripts, regression helpers, the build-layer template publish contract, and fixture-based dashboard generation through one deterministic path
 - Fails when the committed `azure/Invoke-DashboardPipeline.ps1` or `azure/Upload-Templates.ps1` differs from what the preflight regenerates; regenerate them in the same PR instead of relying on a bot commit
 - Builds and extracts the Azure zip, asserts that it contains no `build/` dependency, and smoke-tests the packaged `azure/Upload-Templates.ps1` entrypoint
 
@@ -65,11 +65,11 @@ Trigger sources:
 
 Key behavior:
 
-- Checks whether committed PDF exports are older than `VulnerabilityDashboard.html`
+- Checks whether committed PDF exports are older than `VulnerabilityDashboard.html` on the `demo-data` branch, and restores that HTML before export
 - Uses Playwright and `.github/scripts/export-pdf-reports.js`
 - Does not commit or upload generated PDFs
 - Runs only in private repositories; remains disabled/skipped in public repositories
-- In private repositories, remains disabled until a private dashboard source replaces the committed HTML
+- In private repositories, remains disabled until a private dashboard source replaces the demo HTML
 
 ## Build Azure Package
 
