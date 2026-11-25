@@ -565,7 +565,7 @@ namespace DefenderReporting.Store
                                 var deviceIndex = values[1].GetInt32(); var templateIndex = values[2].GetInt32();
                                 if (deviceIndex < 0 || deviceIndex >= deviceOnboarded.Count || templateIndex < 0 || templateIndex >= templateList.Count || !deviceOnboarded[deviceIndex]) continue;
                                 var first = NormalizeDate(ScalarString(values[3])); var last = NormalizeDate(ScalarString(values[4]));
-                                if (!String.IsNullOrEmpty(first) && !String.IsNullOrEmpty(last) && String.CompareOrdinal(first, last) > 0) { var swap = first; first = last; last = swap; swappedCount++; }
+                                if (!String.IsNullOrEmpty(first) && !String.IsNullOrEmpty(last) && CompareSeenDates(first, last) > 0) { var swap = first; first = last; last = swap; swappedCount++; }
                                 var template = templateList[templateIndex];
                                 if (template.Software >= 0 && template.Software < softwareVendorIndexes.Count) { var usedVendorIndex = softwareVendorIndexes[template.Software]; if (usedVendorIndex >= 0) usedVendorIndexes.Add(usedVendorIndex); }
                                 var firstIndex = Intern(first, dates, dateMap); var lastIndex = Intern(last, dates, dateMap);
@@ -683,6 +683,15 @@ namespace DefenderReporting.Store
         private static bool Boolean(JsonElement item, string name) { JsonElement value; if (!item.TryGetProperty(name, out value)) return false; return value.ValueKind == JsonValueKind.True || (value.ValueKind == JsonValueKind.String && String.Equals(value.GetString(), "true", StringComparison.OrdinalIgnoreCase)); }
         private static int Intern(string value, List<string> values, Dictionary<string, int> map) { if (String.IsNullOrEmpty(value)) return -1; int index; if (!map.TryGetValue(value, out index)) { index = values.Count; map.Add(value, index); values.Add(value); } return index; }
         private static void InternFlatArray(JsonElement item, string name, List<string> values, Dictionary<string, int> map, List<int> flattened, out int start, out int count) { start = flattened.Count; JsonElement array; if (item.TryGetProperty(name, out array)) { if (array.ValueKind == JsonValueKind.Array) foreach (var element in array.EnumerateArray()) { var index = Intern(ScalarString(element), values, map); if (index >= 0) flattened.Add(index); } else { var index = Intern(ScalarString(array), values, map); if (index >= 0) flattened.Add(index); } } count = flattened.Count - start; }
+        // Mirrors the in-process `[datetime]$firstSeen -gt [datetime]$lastSeen` swap check, including its failure (first value
+        // converted first) when a permissively normalized M/D/YYYY value such as 2026-02-30 is not a calendar date.
+        private static int CompareSeenDates(string first, string last) { var firstDate = ConvertSeenDate(first); return firstDate.CompareTo(ConvertSeenDate(last)); }
+        private static DateTime ConvertSeenDate(string value)
+        {
+            DateTime parsed;
+            if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed)) return parsed;
+            throw new InvalidCastException("Cannot convert value \"" + value + "\" to type \"System.DateTime\". Error: \"String '" + value + "' was not recognized as a valid DateTime.\"");
+        }
         private static readonly Regex MonthDayYearPrefix = new Regex(@"^(\d{1,2})/(\d{1,2})/(\d{4})", RegexOptions.CultureInvariant);
         // Mirrors Convert-FastToYmdDate/Convert-ToYmdDate: blank or unparseable values normalize to no date (never the raw text).
         private static string NormalizeDate(string value)
@@ -16704,7 +16713,8 @@ function Complete-BoundedProjectionStaging {
     foreach ($errorItem in $errors) { $errorItem }
 }
 
-function Invoke-BoundedContentStorePayloadProjection {    [CmdletBinding()]
+function Invoke-BoundedContentStorePayloadProjection {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$DataPath,
         [Parameter(Mandatory = $true)][string]$PayloadOutputPath,
@@ -18335,7 +18345,6 @@ function Get-NormalizationContext {
     param()
 
     $severityIndexByName = New-NormalizationSeverityIndexMap
-
 
     return [PSCustomObject]@{
         Lookups = @{
@@ -22078,7 +22087,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: bec0fc679e05dbcea0ea71415008a561f469eb8244d7f36adab30a759eec642e
+# ArtifactFingerprint: 2011a7b4c1442883518e1bb56995d1ea32e6536220f188a19c41eb056a5c7bf2
 
 
 

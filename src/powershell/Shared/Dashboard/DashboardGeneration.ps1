@@ -4550,7 +4550,8 @@ function Complete-BoundedProjectionStaging {
     foreach ($errorItem in $errors) { $errorItem }
 }
 
-function Invoke-BoundedContentStorePayloadProjection {    [CmdletBinding()]
+function Invoke-BoundedContentStorePayloadProjection {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$DataPath,
         [Parameter(Mandatory = $true)][string]$PayloadOutputPath,
@@ -6181,7 +6182,6 @@ function Get-NormalizationContext {
     param()
 
     $severityIndexByName = New-NormalizationSeverityIndexMap
-
 
     return [PSCustomObject]@{
         Lookups = @{

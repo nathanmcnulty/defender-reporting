@@ -191,6 +191,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-CompiledBoundedContentNormalizationDeduplicatesDeviceProfiles'; SuccessMessage = 'Compiled bounded duplicate device-profile parity checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationKeyComparerParity'; SuccessMessage = 'Compiled bounded severity and inventory comparer parity checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationDateParity'; SuccessMessage = 'Compiled bounded date normalization parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationInvalidCalendarDateParity'; SuccessMessage = 'Compiled bounded invalid calendar date parity checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationCleansStagingOnFailure'; SuccessMessage = 'Compiled bounded staging cleanup checks passed.' }
     @{ Name = 'Test-CompiledBoundedStagingCleanupSurfacesDisposalAndProbeFailures'; SuccessMessage = 'Compiled bounded staging disposal and probe hardening checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationExpandedParity'; SuccessMessage = 'Compiled bounded content normalization expanded-parity checks passed.' }

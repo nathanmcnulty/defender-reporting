@@ -2360,6 +2360,67 @@ function Test-CompiledBoundedContentNormalizationDateParity {
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 }
 
+function Test-CompiledBoundedContentNormalizationInvalidCalendarDateParity {
+    [CmdletBinding()]
+    param()
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-calendar-date-parity-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $newStore = {
+            param([string]$Name, [string]$FirstSeen, [string]$LastSeen)
+            $storePath = Join-Path $tempRoot $Name
+            [void](New-Item -Path $storePath -ItemType Directory -Force)
+            $row = Get-TestVulnRow -Id "$Name-1" -CveId 'CVE-2026-7401' -SnapshotDate '2026-07-10' -Version '1.0.0'
+            $row.FirstSeenTimestamp = $FirstSeen; $row.LastSeenTimestamp = $LastSeen
+            Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $storePath) -Records @($row)
+            Publish-VulnContentStoreUnlocked -BasePath $storePath
+            return $storePath
+        }
+        $getErrorText = {
+            param([string]$StorePath, [string]$Label, [switch]$InProcess)
+            $failure = $null
+            try {
+                [void](ConvertTo-NormalizedData -DataPath $StorePath -VulnOutputPath (Join-Path $StorePath "$Label.json") -PayloadOutputPath (Join-Path $StorePath "$Label.json.gz") -Machines @{} -AdvancedHuntingData @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization:$InProcess)
+            }
+            catch { $failure = $_.Exception }
+            Assert-True ($null -ne $failure) "Expected the $Label normalization of an invalid calendar seen date to fail instead of accepting it."
+            $messages = [System.Collections.Generic.List[string]]::new()
+            $pending = [System.Collections.Generic.Queue[System.Exception]]::new(); $pending.Enqueue($failure)
+            while ($pending.Count -gt 0) {
+                $current = $pending.Dequeue(); $messages.Add($current.Message)
+                if ($current -is [System.AggregateException]) { foreach ($inner in $current.InnerExceptions) { $pending.Enqueue($inner) } }
+                elseif ($null -ne $current.InnerException) { $pending.Enqueue($current.InnerException) }
+            }
+            return ($messages -join ' | ')
+        }
+
+        foreach ($case in @(
+                @{ Name = 'invalid-first'; First = '2/30/2026'; Last = '2026-07-05'; Invalid = '2026-02-30' }
+                @{ Name = 'invalid-last'; First = '2026-07-01'; Last = '2/31/2026 10:00 PM'; Invalid = '2026-02-31' }
+                @{ Name = 'invalid-iso-first'; First = '2026-13-01T00:00:00Z'; Last = '2026-07-05'; Invalid = '2026-13-01' }
+                @{ Name = 'invalid-iso-last'; First = '2026-07-01'; Last = '2026-02-30T08:00:00Z'; Invalid = '2026-02-30' }
+                @{ Name = 'malformed-iso-first'; First = 'abcd-ef-ghTjunk'; Last = '2026-07-05'; Invalid = 'abcd-ef-gh' }
+            )) {
+            $storePath = & $newStore $case.Name $case.First $case.Last
+            $legacyError = & $getErrorText $storePath 'legacy' -InProcess
+            $compiledError = & $getErrorText $storePath 'compiled'
+            $expected = 'Cannot convert value "{0}" to type "System.DateTime"' -f $case.Invalid
+            Assert-True ($legacyError.Contains($expected)) "Expected the in-process $($case.Name) failure to name '$($case.Invalid)', got: $legacyError"
+            Assert-True ($compiledError.Contains($expected)) "Expected the compiled $($case.Name) failure to match the in-process conversion failure for '$($case.Invalid)', got: $compiledError"
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $storePath 'compiled.json.gz'))) "Expected the compiled $($case.Name) failure not to publish a payload."
+        }
+
+        $validPath = & $newStore 'valid' '2/28/2026 10:00 AM' '2026-02-01'
+        $result = Invoke-CompiledVersusInProcessNormalization -DataPath $validPath -Label 'valid-calendar' -NewInventory { @{} }
+        Assert-True ($result.Compiled -is [hashtable] -and $null -ne $result.Compiled.CompiledMemoryTelemetry) 'Expected the valid calendar date run to use the compiled bounded normalizer.'
+        $legacyRows = Get-NormalizedPayloadRowSummary -Payload $result.LegacyPayload
+        $compiledRows = Get-NormalizedPayloadRowSummary -Payload $result.CompiledPayload
+        Assert-True (($legacyRows -join "`n") -eq ($compiledRows -join "`n") -and $compiledRows -contains 'CVE-2026-7401|High|2026-02-01|2026-02-28|') ("Expected valid M/D/YYYY seen dates to normalize and swap identically, got legacy={0} compiled={1}" -f ($legacyRows -join ';'), ($compiledRows -join ';'))
+        Assert-True ([int]$result.Legacy.Quality.FirstLastSwappedCount -eq 1 -and [int]$result.Compiled.Quality.FirstLastSwappedCount -eq 1) 'Expected one swapped valid calendar date pair in both paths.'
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
 function Test-CompiledBoundedContentNormalizationCleansStagingOnFailure {
     [CmdletBinding()]
     param()
