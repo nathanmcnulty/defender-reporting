@@ -1,4 +1,4 @@
-﻿name: Validate Dashboard
+name: Validate Dashboard
 
 concurrency:
   group: validate-dashboard-${{ github.workflow }}-${{ github.ref }}
@@ -20,7 +20,6 @@ on:
       - '.github/workflows/validate-dashboard.yml'
       - '.github/workflows/update-vulnerability-dashboard.yml'
       - '.github/scripts/stage-demo-outputs.js'
-      - '.github/workflows/sync-azure-runbook.yml'
       - '.github/workflows/sync-azure-package.yml'
       - '.github/workflows/release-azure-package.yml'
   push:
@@ -40,7 +39,6 @@ on:
       - '.github/workflows/validate-dashboard.yml'
       - '.github/workflows/update-vulnerability-dashboard.yml'
       - '.github/scripts/stage-demo-outputs.js'
-      - '.github/workflows/sync-azure-runbook.yml'
       - '.github/workflows/sync-azure-package.yml'
       - '.github/workflows/release-azure-package.yml'
   workflow_dispatch:
@@ -50,6 +48,8 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PSSCRIPTANALYZER_VERSION: '1.25.0'
+  AZ_ACCOUNTS_VERSION: '5.5.5'
 
 jobs:
   validate-dashboard:
@@ -59,24 +59,41 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Cache validation modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/share/powershell/Modules
+          key: pwsh-modules-${{ runner.os }}-pssa-${{ env.PSSCRIPTANALYZER_VERSION }}-azaccounts-${{ env.AZ_ACCOUNTS_VERSION }}
+
       - name: Install validation modules
         shell: pwsh
         run: |
-          Install-Module -Name PSScriptAnalyzer -Force -AllowClobber -Scope CurrentUser
-          Install-Module -Name Az.Accounts -Force -AllowClobber -Scope CurrentUser
+          foreach ($module in @(
+              @{ Name = 'PSScriptAnalyzer'; Version = $env:PSSCRIPTANALYZER_VERSION },
+              @{ Name = 'Az.Accounts'; Version = $env:AZ_ACCOUNTS_VERSION })) {
+            if (-not (Get-Module -ListAvailable -Name $module.Name | Where-Object { $_.Version -eq [version]$module.Version })) {
+              Install-Module -Name $module.Name -RequiredVersion $module.Version -Force -AllowClobber -Scope CurrentUser
+            }
+          }
 
-      - name: Install shell regression dependencies
+      - name: Report shell regression dependencies
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends jq
-          bash --version
+          bash --version | head -n 1
           jq --version
 
       - name: Run deterministic preflight
         shell: pwsh
         run: |
           .\build\Invoke-RegressionValidation.ps1
+
+      - name: Check generated Azure artifacts are current
+        shell: bash
+        run: |
+          if ! git diff --exit-code --stat -- azure/Invoke-DashboardPipeline.ps1 azure/Upload-Templates.ps1; then
+            echo "::error::Generated Azure artifacts are stale. Run 'pwsh ./build/azure/Build-Runbook.ps1' and 'pwsh ./build/azure/Build-TemplatePublisher.ps1' and commit the results."
+            exit 1
+          fi
 
       - name: Smoke test Azure package
         shell: pwsh
