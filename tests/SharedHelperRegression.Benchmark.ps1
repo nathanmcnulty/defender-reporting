@@ -467,6 +467,7 @@ function Test-RunbookBenchmarkPublicationReaderOptIn {
     $script:AutomationAccountName = 'fixture'
     $script:AutomationResourceGroup = 'fixture'
     $script:RunbookName = 'fixture'
+    $script:StorageAccountName = 'fixturestorage'
     $script:DashboardDeliveryMode = 'Dual'
     $script:UseExistingExportsOnly = $true
     $script:UseDirectMergeDeviceLookup = $true
@@ -477,6 +478,7 @@ function Test-RunbookBenchmarkPublicationReaderOptIn {
         Assert-True (($script:ReaderBenchmarkArguments -contains 'UseBoundedPublicationMetadataReader=true') -eq $enabled) 'Benchmark job reader selection differs from requested treatment.'
         Assert-True (($script:ReaderBenchmarkArguments -contains 'UseExperimentalCompiledSmallPayload=true') -eq $enabled) 'Benchmark job compiled-small-payload selection differs from requested treatment.'
         Assert-True ($script:ReaderBenchmarkArguments -contains 'UseExistingExportsOnly=true' -and $script:ReaderBenchmarkArguments -contains 'UseDirectMergeDeviceLookup=true') 'Benchmark omitted replay/direct-merge trial flags.'
+        Assert-True ($script:ReaderBenchmarkArguments -contains 'StorageAccountName=fixturestorage') 'Benchmark job must use the storage account selected for seeding and evidence.'
     }
     Assert-True ($benchmarkAst.Extent.Text.Contains('use_bounded_publication_metadata_reader = $script:UseBoundedPublicationMetadataReader')) 'Benchmark must record its reader selection.'
     Assert-True ($benchmarkAst.Extent.Text.Contains('use_experimental_compiled_small_payload = $script:UseExperimentalCompiledSmallPayload')) 'Benchmark must record its compiled-small-payload selection.'
@@ -488,6 +490,27 @@ function Test-RunbookBenchmarkPublicationReaderOptIn {
     $functionBuilder = Get-Content (Join-Path $repoRoot 'build/azure/Build-FunctionApp.ps1') -Raw
     Assert-True ($functionBuilder.Contains('$UseBoundedPublicationMetadataReader = $false') -and -not $functionBuilder.Contains('$env:USE_BOUNDED_PUBLICATION_METADATA_READER')) 'Function must stay legacy without a new setting.'
     Assert-True ($functionBuilder.Contains('$UseExperimentalCompiledSmallPayload = $false') -and -not $functionBuilder.Contains('$env:USE_EXPERIMENTAL_COMPILED_SMALL_PAYLOAD')) 'Function must keep the experimental compiled-small-payload path disabled.'
+}
+
+function Test-AzureValidationSeedSelection {
+    [CmdletBinding()]
+    param()
+
+    $validationAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Invoke-AzureRunbookValidation.ps1'), [ref]$null, [ref]$null)
+    $definition = $validationAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-AzureValidationSeedFile' }, $true)
+    Assert-True ($null -ne $definition) 'Expected a testable Azure replay seed selection function.'
+    . ([scriptblock]::Create($definition.Extent.Text))
+    foreach ($name in @('Machines_Current.json.gz', 'AdvancedHunting_Current.json.gz', 'NvdCve_Current.json.gz', 'synthetic-manifest.json', 'benchmark-dataset.json')) {
+        Assert-True (Test-AzureValidationSeedFile -Name $name -Mode 'ContentReplay') "Expected content replay to include $name."
+        Assert-True (Test-AzureValidationSeedFile -Name $name -Mode 'RawReplay') "Expected raw replay to include $name."
+    }
+    Assert-True (Test-AzureValidationSeedFile -Name 'VulnCurrentRefs.json.gz' -Mode 'ContentReplay') 'Expected content replay refs.'
+    Assert-True (Test-AzureValidationSeedFile -Name 'VulnHistoryRefs_2026Q1.json.gz' -Mode 'ContentReplay') 'Expected content replay history refs.'
+    Assert-True (-not (Test-AzureValidationSeedFile -Name 'VulnCurrentRefs.json.gz' -Mode 'RawReplay')) 'Raw replay must not seed content refs.'
+    Assert-True (Test-AzureValidationSeedFile -Name 'VulnExport_2026-01-01.json.gz' -Mode 'RawReplay') 'Expected raw replay export.'
+    Assert-True (-not (Test-AzureValidationSeedFile -Name 'VulnExport_current.json.gz' -Mode 'RawReplay')) 'Raw replay must not seed the current-store artifact.'
+    Assert-True (-not (Test-AzureValidationSeedFile -Name 'unrelated.txt' -Mode 'ContentReplay')) 'Content replay must exclude unrelated files.'
+    Assert-True (Test-AzureValidationSeedFile -Name 'unrelated.txt' -Mode 'Exact') 'Exact replay must include all root files.'
 }
 
 function Test-RunbookExperimentalNormalizationCacheIsolation {

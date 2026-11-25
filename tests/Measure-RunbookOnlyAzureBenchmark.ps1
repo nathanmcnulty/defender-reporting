@@ -246,7 +246,7 @@ function Start-RunbookBenchmark {
         return $null
     }
 
-    $parameterPairs = @("DashboardDeliveryMode=$script:DashboardDeliveryMode")
+    $parameterPairs = @("DashboardDeliveryMode=$script:DashboardDeliveryMode", "StorageAccountName=$script:StorageAccountName")
     if ($script:UseExistingExportsOnly) {
         $parameterPairs += 'UseExistingExportsOnly=true'
     }

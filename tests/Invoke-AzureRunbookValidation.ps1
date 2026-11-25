@@ -57,6 +57,20 @@ function Get-ValidationFileManifest([string]$Path) {
     )
 }
 
+function Test-AzureValidationSeedFile {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][ValidateSet('Exact', 'RawReplay', 'ContentReplay')][string]$Mode
+    )
+
+    if ($Mode -eq 'Exact') { return $true }
+    if ($Name -in @('AdvancedHunting_Current.json.gz', 'NvdCve_Current.json.gz', 'Machines_Current.json.gz', 'benchmark-dataset.json', 'synthetic-manifest.json')) { return $true }
+    if ($Mode -eq 'ContentReplay') { return $Name -in @('VulnContentDictionary.json.gz', 'VulnCurrentRefs.json.gz') -or $Name -like 'VulnHistoryRefs_*.json.gz' }
+    return $Name -like 'VulnExport_*.json*' -and $Name -notlike 'VulnExport_current*'
+}
+
 function Save-PublishedRunbookContent([string]$Path) {
     try {
         $token = Invoke-AzValidationCli @('account','get-access-token','--resource','https://management.azure.com/','--query','accessToken','--output','tsv')
@@ -144,11 +158,7 @@ try {
     if ($FailureInjectionPoint -eq 'AfterDeploy') { throw 'Injected Azure validation failure after candidate deployment.' }
 
     Invoke-AzValidationCli @('storage','blob','delete-batch','--account-name',$StorageAccountName,'--source','exports','--auth-mode','login','--only-show-errors') -AllowEmpty | Out-Null
-    $seedFiles = @(Get-ChildItem -LiteralPath $DatasetPath -File | Where-Object {
-        if ($SeedMode -eq 'Exact') { return $true }
-        if ($SeedMode -eq 'ContentReplay') { return $_.Name -in @('VulnContentDictionary.json.gz','VulnCurrentRefs.json.gz','Machines_Current.json.gz','benchmark-dataset.json','synthetic-manifest.json') -or $_.Name -like 'VulnHistoryRefs_*.json.gz' }
-        return ($_.Name -in @('AdvancedHunting_Current.json.gz','Machines_Current.json.gz','benchmark-dataset.json','synthetic-manifest.json')) -or ($_.Name -like 'VulnExport_*.json*' -and $_.Name -notlike 'VulnExport_current*')
-        })
+    $seedFiles = @(Get-ChildItem -LiteralPath $DatasetPath -File | Where-Object { Test-AzureValidationSeedFile -Name $_.Name -Mode $SeedMode })
     if ($seedFiles.Count -eq 0) { throw "Seed mode '$SeedMode' selected no files from '$DatasetPath'." }
     foreach ($file in $seedFiles) {
         $uploadError = $null

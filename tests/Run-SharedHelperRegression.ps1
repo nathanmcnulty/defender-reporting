@@ -206,6 +206,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-CompiledBoundedStagingCleanupSurfacesDisposalAndProbeFailure'; SuccessMessage = 'Compiled bounded staging disposal and probe hardening checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationExpandedParity'; SuccessMessage = 'Compiled bounded content normalization expanded-parity checks passed.' }
     @{ Name = 'Test-SyntheticUploadManifestSelectsRawReplayArtifact'; SuccessMessage = 'Synthetic raw replay upload-manifest checks passed.' }
+    @{ Name = 'Test-AzureValidationSeedSelection'; SuccessMessage = 'Azure replay seed selection checks passed.' }
     @{ Name = 'Test-AtomicDashboardExecutableDiscovery'; SuccessMessage = 'Atomic executable discovery duplicate PATH, caller mock, and non-Windows fallback checks passed.' }
 )
 
