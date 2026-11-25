@@ -110,13 +110,13 @@ Based on main `535eafb`. Recommendations only; each merge, close or live run rem
 
 ## Keeping this useful
 
-The [November 6 reliability reconciliation](reliability-review-2026-11-06.md)
+The [November 6 reliability reconciliation](archive/reliability-review-2026-11-06.md)
 starts from main after #105, records the distinct #99–#104 correctness gaps,
 preserves #98's demo/fork-protection ownership, and separates accepted full-scale
 PackageOnly evidence from the remaining #67/#69 import/replay and #92 live gates.
 Its source checks do not close those acceptance gates.
 
-The [subsequent browser/admin validation](browser-admin-validation-2026-11-06.md)
+The [subsequent browser/admin validation](archive/browser-admin-validation-2026-11-06.md)
 records corrected Hosted/self-contained PDF checks, the 19,677-row scoped admin
 experience and the measured cached-row refresh improvement. It retains mixed
 switch timings and full-scale memory failures. The next performance work must
@@ -126,4 +126,4 @@ and #92 runtime acceptance remain separate work with their existing gates.
 
 Use issues for concrete work and this document for order and product direction. Link verified review findings as they arrive; do not turn every idea into a promised feature. Update the roadmap when a decision or accepted result changes the next useful step.
 
-Planning snapshot: current main `69e5cfd53e5f1e6c8b762c86cb5b3967b3359e98`, open issues #67/#68/#69/#70/#92, and draft PR #98. The [October import/Dual measurements](import-dual-measurements-2026-10-28.md), [dashboard review](dashboard-performance-review.md), and [test guide](../tests/README.md) provide context with their own evidence limits. Older observations are not current performance guarantees, and this roadmap does not close any issue.
+Planning snapshot: current main `69e5cfd53e5f1e6c8b762c86cb5b3967b3359e98`, open issues #67/#68/#69/#70/#92, and draft PR #98. The [October import/Dual measurements](archive/import-dual-measurements-2026-10-28.md), [dashboard review](dashboard-performance-review.md), and [test guide](../tests/README.md) provide context with their own evidence limits. Older observations are not current performance guarantees, and this roadmap does not close any issue.
