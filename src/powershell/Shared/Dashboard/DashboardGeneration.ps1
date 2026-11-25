@@ -4330,7 +4330,10 @@ function Get-NormalizationExecutionPlan {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $false)][string]$DeliveryMode = 'SelfContained',
-        [Parameter(Mandatory = $false)][ValidateRange(1000, 1000000)][int]$MaximumInProcessContentTemplates = 10000
+        [Parameter(Mandatory = $false)][ValidateRange(1000, 1000000)][int]$MaximumInProcessContentTemplates = 10000,
+        # Set when the caller writes the payload directly (PayloadOutputPath + ConsumeLookupsOnPayloadClose) without
+        # direct-merge device lookups, so the compiled bounded normalizer can be used regardless of cardinality.
+        [Parameter(Mandatory = $false)][switch]$CompiledPayloadSupported
     )
 
     $manifestPath = Join-Path $Path 'synthetic-manifest.json'
@@ -4356,7 +4359,7 @@ function Get-NormalizationExecutionPlan {
     $machineInputFile = @(Get-ChildItem -LiteralPath $Path -Filter 'Machines_Current.json*' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
     $hasMachineInput = if ($machineInputFile.Count -eq 0) { $false } else { $null -ne (Read-VulnNdjsonLinesFromPath -Path $machineInputFile[0].FullName | Select-Object -First 1) }
     $hasEnrichmentInput = @(Get-ChildItem -LiteralPath $Path -Filter 'AdvancedHunting_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0 -or @(Get-ChildItem -LiteralPath $Path -Filter 'NvdCve_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0
-    $compiledContentEligible = $requiresPartitionedContent
+    $compiledContentEligible = $requiresPartitionedContent -or ($CompiledPayloadSupported -and (Test-Path -LiteralPath $dictionaryPath -PathType Leaf))
     $estimatedPrivateMemoryMb = if ($compiledContentEligible) {
         [math]::Round((160 + ($deviceProfileCount * 0.001) + ($contentTemplateCount * 0.0012)), 1)
     }
@@ -4379,6 +4382,7 @@ function Get-NormalizationExecutionPlan {
         EstimatedPrivateMemoryMb = $estimatedPrivateMemoryMb
         EstimatedWorkingSetMb = $estimatedWorkingSetMb
         MaximumInProcessContentTemplates = $MaximumInProcessContentTemplates
+        CompiledPayloadSupported = [bool]$CompiledPayloadSupported
         HasMachineInput = $hasMachineInput
         HasEnrichmentInput = $hasEnrichmentInput
         SafeToExecute = (-not $requiresPartitionedContent -or $compiledContentEligible)
@@ -9557,12 +9561,22 @@ function ConvertTo-NormalizedData {
         [scriptblock]$NormalizationProgressCallback,
 
         [Parameter(Mandatory = $false)]
-        [switch]$DirectMergeDeviceLookup
+        [switch]$DirectMergeDeviceLookup,
+
+        # Forces the in-process streaming normalizer when the content cardinality allows it (compatibility/diagnostics).
+        [Parameter(Mandatory = $false)]
+        [switch]$DisableCompiledContentNormalization
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
     Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s), {3} inventory tuple(s), {4} NVD CVE(s)" -f (Get-NormalizationMachineLookupCount -Machines $Machines), $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count, $AdvancedHuntingInventoryData.Count, $NvdCveData.Count) -InformationAction Continue
-    $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath
+    $compiledPayloadSupported = (-not [string]::IsNullOrWhiteSpace($PayloadOutputPath) -and $ConsumeLookupsOnPayloadClose -and -not $DirectMergeDeviceLookup -and -not $DisableCompiledContentNormalization)
+    $preSyncedContentStoreExists = $null
+    if ($compiledPayloadSupported) {
+        $preSyncedContentStoreExists = [bool](Sync-VulnContentStoreSidecar -BasePath $DataPath)
+        $compiledPayloadSupported = $preSyncedContentStoreExists
+    }
+    $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath -CompiledPayloadSupported:$compiledPayloadSupported
     if ($executionPlan.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') {
         if ([string]::IsNullOrWhiteSpace($PayloadOutputPath) -or -not $ConsumeLookupsOnPayloadClose) { throw 'Compiled bounded content normalization requires direct payload output and lookup consumption.' }
         $compiledRefPaths = $null
@@ -9577,6 +9591,14 @@ function ConvertTo-NormalizedData {
         $AdvancedHuntingData.Clear(); $AdvancedHuntingDeviceUsers.Clear(); $AdvancedHuntingInventoryData.Clear(); $NvdCveData.Clear()
         Invoke-FullGarbageCollection
         [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
+        if ([long]$compiledResult.ProcessedCount -eq 0) {
+            throw (Get-NoOnboardedVulnerabilityMessage -DataPath $DataPath -SourceKind 'export files')
+        }
+        Write-Information ("  Loaded {0} onboarded vulnerability records" -f [long]$compiledResult.ProcessedCount) -InformationAction Continue
+        Write-Information ("  Normalized: {0} devices, {1} CVEs, {2} software, {3} vendors" -f [int]$compiledResult.DeviceCount, [int]$compiledResult.CveCount, [int]$compiledResult.SoftwareCount, [int]$compiledResult.VendorCount) -InformationAction Continue
+        if ([long]$compiledResult.FirstLastSwappedCount -gt 0) {
+            Write-Warning ("  Corrected {0} record(s) with FirstSeenTimestamp > LastSeenTimestamp" -f [long]$compiledResult.FirstLastSwappedCount)
+        }
         $compiledTelemetry = if ($null -eq $compiledResult.MemoryTelemetry) { $null } else {
             [ordered]@{
                 peakWorkingSetMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PeakWorkingSetBytes / 1MB, 1)
@@ -9597,7 +9619,7 @@ function ConvertTo-NormalizedData {
         }
         return @{
             Lookups = $null; LookupsConsumed = $true; DeviceCount = [int]$compiledResult.DeviceCount; CveCount = [int]$compiledResult.CveCount; SoftwareCount = [int]$compiledResult.SoftwareCount; VendorCount = [int]$compiledResult.VendorCount
-            Quality = [PSCustomObject]@{ FirstLastSwappedCount = 0 }; VulnCount = [long]$compiledResult.ProcessedCount; VulnsPath = $null; VulnColumnPaths = $null; PayloadPath = $PayloadOutputPath; CompiledMemoryTelemetry = $compiledTelemetry
+            Quality = [PSCustomObject]@{ FirstLastSwappedCount = [int]$compiledResult.FirstLastSwappedCount }; VulnCount = [long]$compiledResult.ProcessedCount; VulnsPath = $null; VulnColumnPaths = $null; PayloadPath = $PayloadOutputPath; CompiledMemoryTelemetry = $compiledTelemetry
         }
     }
     Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
@@ -9633,7 +9655,7 @@ function ConvertTo-NormalizedData {
     }
 
     $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-IsSyntheticDataset -BasePath $DataPath))
-    $contentStoreExists = Sync-VulnContentStoreSidecar -BasePath $DataPath
+    $contentStoreExists = if ($null -ne $preSyncedContentStoreExists) { $preSyncedContentStoreExists } else { Sync-VulnContentStoreSidecar -BasePath $DataPath }
     $storeExists = ((Test-VulnStoreExistence -BasePath $DataPath) -or $contentStoreExists)
 
     if ($contentStoreExists) {

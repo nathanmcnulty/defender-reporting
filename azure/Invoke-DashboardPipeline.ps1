@@ -339,6 +339,7 @@ namespace DefenderReporting.Store
         public int CveCount { get; set; }
         public int SoftwareCount { get; set; }
         public int VendorCount { get; set; }
+        public long FirstLastSwappedCount { get; set; }
         public CompiledMemoryTelemetry MemoryTelemetry { get; set; }
     }
 
@@ -399,6 +400,8 @@ namespace DefenderReporting.Store
             var deviceOnboarded = new List<bool>();
             var deviceIds = new List<string>();
             var softwareIdentities = new List<string>();
+            var softwareVendorIndexes = new List<int>();
+            var usedVendorIndexes = new HashSet<int>();
             var inventoryValues = new List<InventoryRecord>(); var inventoryValueMap = Map();
             var templateList = new List<Template>();
             var templateDiskIndexes = new List<int>(); var templateRegistryIndexes = new List<int>();
@@ -440,7 +443,7 @@ namespace DefenderReporting.Store
                     if (!softwareMap.TryGetValue(softwareKey, out softwareIndex)) {
                         softwareIndex = softwareCount++; softwareMap.Add(softwareKey, softwareIndex);
                         var software = new Software { Vendor = vendorIndex, Name = name, Reference = reference, InventoryIdentity = vendor + "|" + name };
-                        softwareIdentities.Add(software.InventoryIdentity); WriteSoftwareFragment(softwareOutput, software);
+                        softwareIdentities.Add(software.InventoryIdentity); softwareVendorIndexes.Add(vendorIndex); WriteSoftwareFragment(softwareOutput, software);
                     }
 
                     var cveId = Value(item, "c"); var scoreText = Value(item, "sc"); var severity = Value(item, "sev"); var exploit = Value(item, "ex"); var url = ConvertCveUrl(Value(item, "bu")); var batch = Value(item, "bt");
@@ -475,7 +478,7 @@ namespace DefenderReporting.Store
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers();
 
             telemetry.SetStage("ref-projection");
-            long processed = 0;
+            long processed = 0; long swappedCount = 0;
             using (var vulnOutput = new StreamWriter(vulnFragment, false, Utf8, 65536))
             {
                 foreach (var refPath in refPaths)
@@ -493,8 +496,9 @@ namespace DefenderReporting.Store
                                 var deviceIndex = values[1].GetInt32(); var templateIndex = values[2].GetInt32();
                                 if (deviceIndex < 0 || deviceIndex >= deviceOnboarded.Count || templateIndex < 0 || templateIndex >= templateList.Count || !deviceOnboarded[deviceIndex]) continue;
                                 var first = NormalizeDate(ScalarString(values[3])); var last = NormalizeDate(ScalarString(values[4]));
-                                if (String.CompareOrdinal(first, last) > 0) { var swap = first; first = last; last = swap; }
+                                if (!String.IsNullOrEmpty(first) && !String.IsNullOrEmpty(last) && String.CompareOrdinal(first, last) > 0) { var swap = first; first = last; last = swap; swappedCount++; }
                                 var template = templateList[templateIndex];
+                                if (template.Software >= 0 && template.Software < softwareVendorIndexes.Count) { var usedVendorIndex = softwareVendorIndexes[template.Software]; if (usedVendorIndex >= 0) usedVendorIndexes.Add(usedVendorIndex); }
                                 var firstIndex = Intern(first, dates, dateMap); var lastIndex = Intern(last, dates, dateMap);
                                 var inventoryIndex = -1;
                                 if (inventorySource != null && inventorySource.Count > 0 && deviceIds != null && softwareIdentities != null && deviceIndex < deviceIds.Count && template.Software >= 0 && template.Software < softwareIdentities.Count) {
@@ -519,6 +523,8 @@ namespace DefenderReporting.Store
             telemetry.SetStage("pre-assembly-cleanup");
             var resultDeviceCount = deviceOnboarded.Count;
             var resultVendorCount = vendors.Count;
+            var allowedAffectedSoftware = BuildAllowedAffectedSoftware(vendors, usedVendorIndexes, affectedSoftware);
+            usedVendorIndexes = null; softwareVendorIndexes = null;
             templateList = null; deviceOnboarded = null; deviceIds = null; softwareIdentities = null; inventorySource.Clear(); inventoryValueMap.Clear(); templateDiskIndexes = null; templateRegistryIndexes = null; dateMap.Clear();
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers(); TrimCurrentProcessWorkingSet();
@@ -536,7 +542,7 @@ namespace DefenderReporting.Store
                 writer.WritePropertyName("devices"); CopyJsonLines(writer, deviceFragment);
                 writer.WritePropertyName("inventory"); writer.WriteStartArray(); foreach (var inventory in inventoryValues) { writer.WriteStartObject(); WriteNullableString(writer, "cpe", inventory.Cpe); WriteNullableString(writer, "eos", inventory.EndOfSupportStatus); WriteNullableString(writer, "eod", inventory.EndOfSupportDate); writer.WriteEndObject(); } writer.WriteEndArray(); inventoryValues = null;
                 writer.WritePropertyName("software"); CopyJsonLines(writer, softwareFragment);
-                writer.WritePropertyName("cves"); CopyJsonLines(writer, cveFragment);
+                writer.WritePropertyName("cves"); CopyCveLinesWithAffectedSoftwareFilter(writer, cveFragment, allowedAffectedSoftware); allowedAffectedSoftware = null;
                 writer.WriteNull("noTagsIdx"); writer.WriteEndObject();
                 telemetry.SetStage("pre-vulnerability-assembly-cleanup");
                 GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
@@ -545,7 +551,7 @@ namespace DefenderReporting.Store
                 writer.WritePropertyName("vulns"); CopyJsonLines(writer, vulnFragment); writer.WriteEndObject();
             }
             try { Directory.Delete(stageRoot, true); } catch { }
-            var result = new CompiledNormalizationResult { ProcessedCount = processed, DeviceCount = resultDeviceCount, CveCount = cveCount, SoftwareCount = softwareCount, VendorCount = resultVendorCount };
+            var result = new CompiledNormalizationResult { ProcessedCount = processed, DeviceCount = resultDeviceCount, CveCount = cveCount, SoftwareCount = softwareCount, VendorCount = resultVendorCount, FirstLastSwappedCount = swappedCount };
             telemetry.SetStage("cleanup"); telemetry.Sample();
             vendors = null; exploits = null; groups = null; platforms = null; tags = null; versions = null; dates = null; diskPaths = null; registryPaths = null; batchTitles = null; affectedSoftware = null; inventoryValues = null;
             deviceOnboarded = null; deviceIds = null; softwareIdentities = null; templateList = null; templateDiskIndexes = null; templateRegistryIndexes = null;
@@ -630,6 +636,63 @@ namespace DefenderReporting.Store
         }
         private static void WriteInteger(StreamWriter output, int value) { output.Write(value.ToString(CultureInfo.InvariantCulture)); }
         private static void WriteNullableIntegerRange(StreamWriter output, List<int> values, int start, int count) { if (count <= 0) { output.Write("null"); return; } output.Write('['); for (var index = 0; index < count; index++) { if (index > 0) output.Write(','); WriteInteger(output, values[start + index]); } output.Write(']'); }
+        // Mirrors Get-VendorMatchKey so affected-software filtering matches the in-process normalizer.
+        public static string GetVendorMatchKey(string vendor)
+        {
+            if (String.IsNullOrWhiteSpace(vendor)) return String.Empty;
+            var trimmed = vendor.Trim();
+            if (Environment.GetEnvironmentVariable("DEFENDER_REPORTING_NORMALIZE_VENDOR_MATCH") != "1") return trimmed;
+            var normalized = trimmed.ToLowerInvariant();
+            normalized = System.Text.RegularExpressions.Regex.Replace(normalized, "[^a-z0-9]+", " ");
+            normalized = System.Text.RegularExpressions.Regex.Replace(normalized, "\\b(corporation|corp|incorporated|inc|llc|ltd|limited|company|co|gmbh|ag|plc|pte)\\b", " ");
+            return System.Text.RegularExpressions.Regex.Replace(normalized, "\\s+", " ").Trim();
+        }
+
+        // Mirrors Update-NormalizedAffectedSoftwareLookup: keep affected-software entries whose vendor was observed in projected rows,
+        // falling back to every vendor in the lookup when no row was projected.
+        public static bool[] BuildAllowedAffectedSoftware(IList<string> vendors, ICollection<int> usedVendorIndexes, IList<string> affectedSoftware)
+        {
+            var datasetVendors = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (usedVendorIndexes != null) foreach (var vendorIndex in usedVendorIndexes) { if (vendorIndex < 0 || vendorIndex >= vendors.Count) continue; var key = GetVendorMatchKey(vendors[vendorIndex]); if (!String.IsNullOrWhiteSpace(key)) datasetVendors.Add(key); }
+            if (datasetVendors.Count == 0) foreach (var vendor in vendors) { if (!String.IsNullOrWhiteSpace(vendor)) datasetVendors.Add(GetVendorMatchKey(vendor)); }
+            var allowed = new bool[affectedSoftware.Count];
+            for (var index = 0; index < affectedSoftware.Count; index++)
+            {
+                var value = affectedSoftware[index];
+                if (String.IsNullOrWhiteSpace(value)) continue;
+                var separatorIndex = value.IndexOf(':');
+                var vendor = separatorIndex >= 0 ? value.Substring(0, separatorIndex) : value;
+                allowed[index] = datasetVendors.Contains(GetVendorMatchKey(vendor));
+            }
+            return allowed;
+        }
+
+        private static void CopyCveLinesWithAffectedSoftwareFilter(Utf8JsonWriter writer, string path, bool[] allowedAffectedSoftware)
+        {
+            writer.WriteStartArray();
+            var filtered = new List<int>();
+            foreach (var line in File.ReadLines(path, Utf8))
+            {
+                if (String.IsNullOrWhiteSpace(line)) continue;
+                using (var document = JsonDocument.Parse(line))
+                {
+                    var root = document.RootElement;
+                    JsonElement affected;
+                    if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("as", out affected) || affected.ValueKind != JsonValueKind.Array) { writer.WriteRawValue(line, true); continue; }
+                    filtered.Clear();
+                    foreach (var item in affected.EnumerateArray()) { int index; if (item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out index) && index >= 0 && index < allowedAffectedSoftware.Length && allowedAffectedSoftware[index]) filtered.Add(index); }
+                    writer.WriteStartObject();
+                    foreach (var property in root.EnumerateObject())
+                    {
+                        if (property.NameEquals("as")) { writer.WritePropertyName("as"); if (filtered.Count == 0) writer.WriteNullValue(); else { writer.WriteStartArray(); foreach (var index in filtered) writer.WriteNumberValue(index); writer.WriteEndArray(); } }
+                        else property.WriteTo(writer);
+                    }
+                    writer.WriteEndObject();
+                }
+            }
+            writer.WriteEndArray();
+        }
+
         private static void CopyJsonLines(Utf8JsonWriter writer, string path) { writer.WriteStartArray(); foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; writer.WriteRawValue(line, true); } writer.WriteEndArray(); }
         private static void WriteIntArray(Utf8JsonWriter writer, int[] values) { writer.WriteStartArray(); if (values != null) foreach (var value in values) writer.WriteNumberValue(value); writer.WriteEndArray(); }
         private static void WriteNullableIntArray(Utf8JsonWriter writer, int[] values) { if (values == null || values.Length == 0) { writer.WriteNullValue(); return; } WriteIntArray(writer, values); }
@@ -16304,7 +16367,10 @@ function Get-NormalizationExecutionPlan {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $false)][string]$DeliveryMode = 'SelfContained',
-        [Parameter(Mandatory = $false)][ValidateRange(1000, 1000000)][int]$MaximumInProcessContentTemplates = 10000
+        [Parameter(Mandatory = $false)][ValidateRange(1000, 1000000)][int]$MaximumInProcessContentTemplates = 10000,
+        # Set when the caller writes the payload directly (PayloadOutputPath + ConsumeLookupsOnPayloadClose) without
+        # direct-merge device lookups, so the compiled bounded normalizer can be used regardless of cardinality.
+        [Parameter(Mandatory = $false)][switch]$CompiledPayloadSupported
     )
 
     $manifestPath = Join-Path $Path 'synthetic-manifest.json'
@@ -16330,7 +16396,7 @@ function Get-NormalizationExecutionPlan {
     $machineInputFile = @(Get-ChildItem -LiteralPath $Path -Filter 'Machines_Current.json*' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
     $hasMachineInput = if ($machineInputFile.Count -eq 0) { $false } else { $null -ne (Read-VulnNdjsonLinesFromPath -Path $machineInputFile[0].FullName | Select-Object -First 1) }
     $hasEnrichmentInput = @(Get-ChildItem -LiteralPath $Path -Filter 'AdvancedHunting_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0 -or @(Get-ChildItem -LiteralPath $Path -Filter 'NvdCve_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0
-    $compiledContentEligible = $requiresPartitionedContent
+    $compiledContentEligible = $requiresPartitionedContent -or ($CompiledPayloadSupported -and (Test-Path -LiteralPath $dictionaryPath -PathType Leaf))
     $estimatedPrivateMemoryMb = if ($compiledContentEligible) {
         [math]::Round((160 + ($deviceProfileCount * 0.001) + ($contentTemplateCount * 0.0012)), 1)
     }
@@ -16353,6 +16419,7 @@ function Get-NormalizationExecutionPlan {
         EstimatedPrivateMemoryMb = $estimatedPrivateMemoryMb
         EstimatedWorkingSetMb = $estimatedWorkingSetMb
         MaximumInProcessContentTemplates = $MaximumInProcessContentTemplates
+        CompiledPayloadSupported = [bool]$CompiledPayloadSupported
         HasMachineInput = $hasMachineInput
         HasEnrichmentInput = $hasEnrichmentInput
         SafeToExecute = (-not $requiresPartitionedContent -or $compiledContentEligible)
@@ -21531,12 +21598,22 @@ function ConvertTo-NormalizedData {
         [scriptblock]$NormalizationProgressCallback,
 
         [Parameter(Mandatory = $false)]
-        [switch]$DirectMergeDeviceLookup
+        [switch]$DirectMergeDeviceLookup,
+
+        # Forces the in-process streaming normalizer when the content cardinality allows it (compatibility/diagnostics).
+        [Parameter(Mandatory = $false)]
+        [switch]$DisableCompiledContentNormalization
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
     Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s), {3} inventory tuple(s), {4} NVD CVE(s)" -f (Get-NormalizationMachineLookupCount -Machines $Machines), $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count, $AdvancedHuntingInventoryData.Count, $NvdCveData.Count) -InformationAction Continue
-    $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath
+    $compiledPayloadSupported = (-not [string]::IsNullOrWhiteSpace($PayloadOutputPath) -and $ConsumeLookupsOnPayloadClose -and -not $DirectMergeDeviceLookup -and -not $DisableCompiledContentNormalization)
+    $preSyncedContentStoreExists = $null
+    if ($compiledPayloadSupported) {
+        $preSyncedContentStoreExists = [bool](Sync-VulnContentStoreSidecar -BasePath $DataPath)
+        $compiledPayloadSupported = $preSyncedContentStoreExists
+    }
+    $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath -CompiledPayloadSupported:$compiledPayloadSupported
     if ($executionPlan.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') {
         if ([string]::IsNullOrWhiteSpace($PayloadOutputPath) -or -not $ConsumeLookupsOnPayloadClose) { throw 'Compiled bounded content normalization requires direct payload output and lookup consumption.' }
         $compiledRefPaths = $null
@@ -21551,6 +21628,14 @@ function ConvertTo-NormalizedData {
         $AdvancedHuntingData.Clear(); $AdvancedHuntingDeviceUsers.Clear(); $AdvancedHuntingInventoryData.Clear(); $NvdCveData.Clear()
         Invoke-FullGarbageCollection
         [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
+        if ([long]$compiledResult.ProcessedCount -eq 0) {
+            throw (Get-NoOnboardedVulnerabilityMessage -DataPath $DataPath -SourceKind 'export files')
+        }
+        Write-Information ("  Loaded {0} onboarded vulnerability records" -f [long]$compiledResult.ProcessedCount) -InformationAction Continue
+        Write-Information ("  Normalized: {0} devices, {1} CVEs, {2} software, {3} vendors" -f [int]$compiledResult.DeviceCount, [int]$compiledResult.CveCount, [int]$compiledResult.SoftwareCount, [int]$compiledResult.VendorCount) -InformationAction Continue
+        if ([long]$compiledResult.FirstLastSwappedCount -gt 0) {
+            Write-Warning ("  Corrected {0} record(s) with FirstSeenTimestamp > LastSeenTimestamp" -f [long]$compiledResult.FirstLastSwappedCount)
+        }
         $compiledTelemetry = if ($null -eq $compiledResult.MemoryTelemetry) { $null } else {
             [ordered]@{
                 peakWorkingSetMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PeakWorkingSetBytes / 1MB, 1)
@@ -21571,7 +21656,7 @@ function ConvertTo-NormalizedData {
         }
         return @{
             Lookups = $null; LookupsConsumed = $true; DeviceCount = [int]$compiledResult.DeviceCount; CveCount = [int]$compiledResult.CveCount; SoftwareCount = [int]$compiledResult.SoftwareCount; VendorCount = [int]$compiledResult.VendorCount
-            Quality = [PSCustomObject]@{ FirstLastSwappedCount = 0 }; VulnCount = [long]$compiledResult.ProcessedCount; VulnsPath = $null; VulnColumnPaths = $null; PayloadPath = $PayloadOutputPath; CompiledMemoryTelemetry = $compiledTelemetry
+            Quality = [PSCustomObject]@{ FirstLastSwappedCount = [int]$compiledResult.FirstLastSwappedCount }; VulnCount = [long]$compiledResult.ProcessedCount; VulnsPath = $null; VulnColumnPaths = $null; PayloadPath = $PayloadOutputPath; CompiledMemoryTelemetry = $compiledTelemetry
         }
     }
     Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
@@ -21607,7 +21692,7 @@ function ConvertTo-NormalizedData {
     }
 
     $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-IsSyntheticDataset -BasePath $DataPath))
-    $contentStoreExists = Sync-VulnContentStoreSidecar -BasePath $DataPath
+    $contentStoreExists = if ($null -ne $preSyncedContentStoreExists) { $preSyncedContentStoreExists } else { Sync-VulnContentStoreSidecar -BasePath $DataPath }
     $storeExists = ((Test-VulnStoreExistence -BasePath $DataPath) -or $contentStoreExists)
 
     if ($contentStoreExists) {
@@ -21777,7 +21862,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 155e9dd37484b2d2509df9b9536b566e14de632799e7531637af3a96f04f3fc8
+# ArtifactFingerprint: 658fb8f2cc77a39f5e2083a279fef6f9e9ec41299baae161c0acd3d9338b540d
 
 
 
@@ -23393,17 +23478,18 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         Set-PipelineExecutionStage -Stage 'ReadNormalizationInputs' -Message 'Loading machine and Advanced Hunting inputs for dashboard normalization.'
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
-        $normalizationExecutionPlan = Get-NormalizationExecutionPlan -Path $tempExports -DeliveryMode $DashboardDeliveryMode
-        Write-Output ("  Normalization plan: devices={0}; contentTemplates={1}; machineLookup={2}; contentMode={3}; estimatedPrivate={4}MB; estimatedWorkingSet={5}MB" -f $normalizationExecutionPlan.DeviceProfileCount, $normalizationExecutionPlan.ContentTemplateCount, $normalizationExecutionPlan.DeviceLookupMode, $normalizationExecutionPlan.ContentNormalizationMode, $normalizationExecutionPlan.EstimatedPrivateMemoryMb, $normalizationExecutionPlan.EstimatedWorkingSetMb)
-        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties @{ normalizationExecutionPlan = $normalizationExecutionPlan })
-        if (-not $normalizationExecutionPlan.SafeToExecute) {
-            throw [string]$normalizationExecutionPlan.FailureReason
-        }
         $useDirectMergeDeviceLookupForRun = (
             $UseDirectMergeDeviceLookup -and
             (Sync-VulnContentStoreSidecar -BasePath $tempExports) -and
             (Test-VulnContentStoreSupportsDirectMerge -BasePath $tempExports)
         )
+        $normalizationExecutionPlan = Get-NormalizationExecutionPlan -Path $tempExports -DeliveryMode $DashboardDeliveryMode -CompiledPayloadSupported:(-not $useDirectMergeDeviceLookupForRun -and (Sync-VulnContentStoreSidecar -BasePath $tempExports))
+        Write-Output ("  Normalization plan: devices={0}; contentTemplates={1}; machineLookup={2}; contentMode={3}; estimatedPrivate={4}MB; estimatedWorkingSet={5}MB" -f $normalizationExecutionPlan.DeviceProfileCount, $normalizationExecutionPlan.ContentTemplateCount, $normalizationExecutionPlan.DeviceLookupMode, $normalizationExecutionPlan.ContentNormalizationMode, $normalizationExecutionPlan.EstimatedPrivateMemoryMb, $normalizationExecutionPlan.EstimatedWorkingSetMb)
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties @{ normalizationExecutionPlan = $normalizationExecutionPlan })
+        if (-not $normalizationExecutionPlan.SafeToExecute) {
+            throw [string]$normalizationExecutionPlan.FailureReason
+        }
+
         if ($useDirectMergeDeviceLookupForRun) {
             Write-Output "  Experimental direct-merge device lookup enabled for Azure runbook; skipping preloaded machine lookup."
             $machines = @{}

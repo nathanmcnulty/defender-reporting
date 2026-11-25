@@ -117,6 +117,7 @@ namespace DefenderReporting.Store
         public int CveCount { get; set; }
         public int SoftwareCount { get; set; }
         public int VendorCount { get; set; }
+        public long FirstLastSwappedCount { get; set; }
         public CompiledMemoryTelemetry MemoryTelemetry { get; set; }
     }
 
@@ -177,6 +178,8 @@ namespace DefenderReporting.Store
             var deviceOnboarded = new List<bool>();
             var deviceIds = new List<string>();
             var softwareIdentities = new List<string>();
+            var softwareVendorIndexes = new List<int>();
+            var usedVendorIndexes = new HashSet<int>();
             var inventoryValues = new List<InventoryRecord>(); var inventoryValueMap = Map();
             var templateList = new List<Template>();
             var templateDiskIndexes = new List<int>(); var templateRegistryIndexes = new List<int>();
@@ -218,7 +221,7 @@ namespace DefenderReporting.Store
                     if (!softwareMap.TryGetValue(softwareKey, out softwareIndex)) {
                         softwareIndex = softwareCount++; softwareMap.Add(softwareKey, softwareIndex);
                         var software = new Software { Vendor = vendorIndex, Name = name, Reference = reference, InventoryIdentity = vendor + "|" + name };
-                        softwareIdentities.Add(software.InventoryIdentity); WriteSoftwareFragment(softwareOutput, software);
+                        softwareIdentities.Add(software.InventoryIdentity); softwareVendorIndexes.Add(vendorIndex); WriteSoftwareFragment(softwareOutput, software);
                     }
 
                     var cveId = Value(item, "c"); var scoreText = Value(item, "sc"); var severity = Value(item, "sev"); var exploit = Value(item, "ex"); var url = ConvertCveUrl(Value(item, "bu")); var batch = Value(item, "bt");
@@ -253,7 +256,7 @@ namespace DefenderReporting.Store
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers();
 
             telemetry.SetStage("ref-projection");
-            long processed = 0;
+            long processed = 0; long swappedCount = 0;
             using (var vulnOutput = new StreamWriter(vulnFragment, false, Utf8, 65536))
             {
                 foreach (var refPath in refPaths)
@@ -271,8 +274,9 @@ namespace DefenderReporting.Store
                                 var deviceIndex = values[1].GetInt32(); var templateIndex = values[2].GetInt32();
                                 if (deviceIndex < 0 || deviceIndex >= deviceOnboarded.Count || templateIndex < 0 || templateIndex >= templateList.Count || !deviceOnboarded[deviceIndex]) continue;
                                 var first = NormalizeDate(ScalarString(values[3])); var last = NormalizeDate(ScalarString(values[4]));
-                                if (String.CompareOrdinal(first, last) > 0) { var swap = first; first = last; last = swap; }
+                                if (!String.IsNullOrEmpty(first) && !String.IsNullOrEmpty(last) && String.CompareOrdinal(first, last) > 0) { var swap = first; first = last; last = swap; swappedCount++; }
                                 var template = templateList[templateIndex];
+                                if (template.Software >= 0 && template.Software < softwareVendorIndexes.Count) { var usedVendorIndex = softwareVendorIndexes[template.Software]; if (usedVendorIndex >= 0) usedVendorIndexes.Add(usedVendorIndex); }
                                 var firstIndex = Intern(first, dates, dateMap); var lastIndex = Intern(last, dates, dateMap);
                                 var inventoryIndex = -1;
                                 if (inventorySource != null && inventorySource.Count > 0 && deviceIds != null && softwareIdentities != null && deviceIndex < deviceIds.Count && template.Software >= 0 && template.Software < softwareIdentities.Count) {
@@ -297,6 +301,8 @@ namespace DefenderReporting.Store
             telemetry.SetStage("pre-assembly-cleanup");
             var resultDeviceCount = deviceOnboarded.Count;
             var resultVendorCount = vendors.Count;
+            var allowedAffectedSoftware = BuildAllowedAffectedSoftware(vendors, usedVendorIndexes, affectedSoftware);
+            usedVendorIndexes = null; softwareVendorIndexes = null;
             templateList = null; deviceOnboarded = null; deviceIds = null; softwareIdentities = null; inventorySource.Clear(); inventoryValueMap.Clear(); templateDiskIndexes = null; templateRegistryIndexes = null; dateMap.Clear();
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers(); TrimCurrentProcessWorkingSet();
@@ -314,7 +320,7 @@ namespace DefenderReporting.Store
                 writer.WritePropertyName("devices"); CopyJsonLines(writer, deviceFragment);
                 writer.WritePropertyName("inventory"); writer.WriteStartArray(); foreach (var inventory in inventoryValues) { writer.WriteStartObject(); WriteNullableString(writer, "cpe", inventory.Cpe); WriteNullableString(writer, "eos", inventory.EndOfSupportStatus); WriteNullableString(writer, "eod", inventory.EndOfSupportDate); writer.WriteEndObject(); } writer.WriteEndArray(); inventoryValues = null;
                 writer.WritePropertyName("software"); CopyJsonLines(writer, softwareFragment);
-                writer.WritePropertyName("cves"); CopyJsonLines(writer, cveFragment);
+                writer.WritePropertyName("cves"); CopyCveLinesWithAffectedSoftwareFilter(writer, cveFragment, allowedAffectedSoftware); allowedAffectedSoftware = null;
                 writer.WriteNull("noTagsIdx"); writer.WriteEndObject();
                 telemetry.SetStage("pre-vulnerability-assembly-cleanup");
                 GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
@@ -323,7 +329,7 @@ namespace DefenderReporting.Store
                 writer.WritePropertyName("vulns"); CopyJsonLines(writer, vulnFragment); writer.WriteEndObject();
             }
             try { Directory.Delete(stageRoot, true); } catch { }
-            var result = new CompiledNormalizationResult { ProcessedCount = processed, DeviceCount = resultDeviceCount, CveCount = cveCount, SoftwareCount = softwareCount, VendorCount = resultVendorCount };
+            var result = new CompiledNormalizationResult { ProcessedCount = processed, DeviceCount = resultDeviceCount, CveCount = cveCount, SoftwareCount = softwareCount, VendorCount = resultVendorCount, FirstLastSwappedCount = swappedCount };
             telemetry.SetStage("cleanup"); telemetry.Sample();
             vendors = null; exploits = null; groups = null; platforms = null; tags = null; versions = null; dates = null; diskPaths = null; registryPaths = null; batchTitles = null; affectedSoftware = null; inventoryValues = null;
             deviceOnboarded = null; deviceIds = null; softwareIdentities = null; templateList = null; templateDiskIndexes = null; templateRegistryIndexes = null;
@@ -408,6 +414,63 @@ namespace DefenderReporting.Store
         }
         private static void WriteInteger(StreamWriter output, int value) { output.Write(value.ToString(CultureInfo.InvariantCulture)); }
         private static void WriteNullableIntegerRange(StreamWriter output, List<int> values, int start, int count) { if (count <= 0) { output.Write("null"); return; } output.Write('['); for (var index = 0; index < count; index++) { if (index > 0) output.Write(','); WriteInteger(output, values[start + index]); } output.Write(']'); }
+        // Mirrors Get-VendorMatchKey so affected-software filtering matches the in-process normalizer.
+        public static string GetVendorMatchKey(string vendor)
+        {
+            if (String.IsNullOrWhiteSpace(vendor)) return String.Empty;
+            var trimmed = vendor.Trim();
+            if (Environment.GetEnvironmentVariable("DEFENDER_REPORTING_NORMALIZE_VENDOR_MATCH") != "1") return trimmed;
+            var normalized = trimmed.ToLowerInvariant();
+            normalized = System.Text.RegularExpressions.Regex.Replace(normalized, "[^a-z0-9]+", " ");
+            normalized = System.Text.RegularExpressions.Regex.Replace(normalized, "\\b(corporation|corp|incorporated|inc|llc|ltd|limited|company|co|gmbh|ag|plc|pte)\\b", " ");
+            return System.Text.RegularExpressions.Regex.Replace(normalized, "\\s+", " ").Trim();
+        }
+
+        // Mirrors Update-NormalizedAffectedSoftwareLookup: keep affected-software entries whose vendor was observed in projected rows,
+        // falling back to every vendor in the lookup when no row was projected.
+        public static bool[] BuildAllowedAffectedSoftware(IList<string> vendors, ICollection<int> usedVendorIndexes, IList<string> affectedSoftware)
+        {
+            var datasetVendors = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (usedVendorIndexes != null) foreach (var vendorIndex in usedVendorIndexes) { if (vendorIndex < 0 || vendorIndex >= vendors.Count) continue; var key = GetVendorMatchKey(vendors[vendorIndex]); if (!String.IsNullOrWhiteSpace(key)) datasetVendors.Add(key); }
+            if (datasetVendors.Count == 0) foreach (var vendor in vendors) { if (!String.IsNullOrWhiteSpace(vendor)) datasetVendors.Add(GetVendorMatchKey(vendor)); }
+            var allowed = new bool[affectedSoftware.Count];
+            for (var index = 0; index < affectedSoftware.Count; index++)
+            {
+                var value = affectedSoftware[index];
+                if (String.IsNullOrWhiteSpace(value)) continue;
+                var separatorIndex = value.IndexOf(':');
+                var vendor = separatorIndex >= 0 ? value.Substring(0, separatorIndex) : value;
+                allowed[index] = datasetVendors.Contains(GetVendorMatchKey(vendor));
+            }
+            return allowed;
+        }
+
+        private static void CopyCveLinesWithAffectedSoftwareFilter(Utf8JsonWriter writer, string path, bool[] allowedAffectedSoftware)
+        {
+            writer.WriteStartArray();
+            var filtered = new List<int>();
+            foreach (var line in File.ReadLines(path, Utf8))
+            {
+                if (String.IsNullOrWhiteSpace(line)) continue;
+                using (var document = JsonDocument.Parse(line))
+                {
+                    var root = document.RootElement;
+                    JsonElement affected;
+                    if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("as", out affected) || affected.ValueKind != JsonValueKind.Array) { writer.WriteRawValue(line, true); continue; }
+                    filtered.Clear();
+                    foreach (var item in affected.EnumerateArray()) { int index; if (item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out index) && index >= 0 && index < allowedAffectedSoftware.Length && allowedAffectedSoftware[index]) filtered.Add(index); }
+                    writer.WriteStartObject();
+                    foreach (var property in root.EnumerateObject())
+                    {
+                        if (property.NameEquals("as")) { writer.WritePropertyName("as"); if (filtered.Count == 0) writer.WriteNullValue(); else { writer.WriteStartArray(); foreach (var index in filtered) writer.WriteNumberValue(index); writer.WriteEndArray(); } }
+                        else property.WriteTo(writer);
+                    }
+                    writer.WriteEndObject();
+                }
+            }
+            writer.WriteEndArray();
+        }
+
         private static void CopyJsonLines(Utf8JsonWriter writer, string path) { writer.WriteStartArray(); foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; writer.WriteRawValue(line, true); } writer.WriteEndArray(); }
         private static void WriteIntArray(Utf8JsonWriter writer, int[] values) { writer.WriteStartArray(); if (values != null) foreach (var value in values) writer.WriteNumberValue(value); writer.WriteEndArray(); }
         private static void WriteNullableIntArray(Utf8JsonWriter writer, int[] values) { if (values == null || values.Length == 0) { writer.WriteNullValue(); return; } WriteIntArray(writer, values); }

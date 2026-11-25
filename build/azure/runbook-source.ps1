@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Unified Azure Automation runbook for the Defender vulnerability dashboard pipeline.
 
@@ -1836,17 +1836,18 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         Set-PipelineExecutionStage -Stage 'ReadNormalizationInputs' -Message 'Loading machine and Advanced Hunting inputs for dashboard normalization.'
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
-        $normalizationExecutionPlan = Get-NormalizationExecutionPlan -Path $tempExports -DeliveryMode $DashboardDeliveryMode
-        Write-Output ("  Normalization plan: devices={0}; contentTemplates={1}; machineLookup={2}; contentMode={3}; estimatedPrivate={4}MB; estimatedWorkingSet={5}MB" -f $normalizationExecutionPlan.DeviceProfileCount, $normalizationExecutionPlan.ContentTemplateCount, $normalizationExecutionPlan.DeviceLookupMode, $normalizationExecutionPlan.ContentNormalizationMode, $normalizationExecutionPlan.EstimatedPrivateMemoryMb, $normalizationExecutionPlan.EstimatedWorkingSetMb)
-        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties @{ normalizationExecutionPlan = $normalizationExecutionPlan })
-        if (-not $normalizationExecutionPlan.SafeToExecute) {
-            throw [string]$normalizationExecutionPlan.FailureReason
-        }
         $useDirectMergeDeviceLookupForRun = (
             $UseDirectMergeDeviceLookup -and
             (Sync-VulnContentStoreSidecar -BasePath $tempExports) -and
             (Test-VulnContentStoreSupportsDirectMerge -BasePath $tempExports)
         )
+        $normalizationExecutionPlan = Get-NormalizationExecutionPlan -Path $tempExports -DeliveryMode $DashboardDeliveryMode -CompiledPayloadSupported:(-not $useDirectMergeDeviceLookupForRun -and (Sync-VulnContentStoreSidecar -BasePath $tempExports))
+        Write-Output ("  Normalization plan: devices={0}; contentTemplates={1}; machineLookup={2}; contentMode={3}; estimatedPrivate={4}MB; estimatedWorkingSet={5}MB" -f $normalizationExecutionPlan.DeviceProfileCount, $normalizationExecutionPlan.ContentTemplateCount, $normalizationExecutionPlan.DeviceLookupMode, $normalizationExecutionPlan.ContentNormalizationMode, $normalizationExecutionPlan.EstimatedPrivateMemoryMb, $normalizationExecutionPlan.EstimatedWorkingSetMb)
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties @{ normalizationExecutionPlan = $normalizationExecutionPlan })
+        if (-not $normalizationExecutionPlan.SafeToExecute) {
+            throw [string]$normalizationExecutionPlan.FailureReason
+        }
+
         if ($useDirectMergeDeviceLookupForRun) {
             Write-Output "  Experimental direct-merge device lookup enabled for Azure runbook; skipping preloaded machine lookup."
             $machines = @{}
