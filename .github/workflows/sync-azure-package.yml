@@ -1,4 +1,4 @@
-﻿name: Build Azure Package
+name: Build Azure Package
 
 concurrency:
   group: sync-azure-package-${{ github.ref }}
@@ -30,6 +30,7 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  AZ_ACCOUNTS_VERSION: '5.5.5'
 
 jobs:
   build-package:
@@ -45,7 +46,7 @@ jobs:
       - name: Install Az.Accounts PowerShell module
         shell: pwsh
         run: |
-          Install-Module -Name Az.Accounts -Force -AllowClobber -Scope CurrentUser
+          Install-Module -Name Az.Accounts -RequiredVersion $env:AZ_ACCOUNTS_VERSION -Force -AllowClobber -Scope CurrentUser
 
       - name: Prepare Azure package metadata
         id: package

@@ -4,7 +4,7 @@
 
 Defender for Endpoint vulnerability reporting has always been a pain point, and this felt like a great opportunity to use AI-assisted coding to build a dashboard without a dependency on Power BI or other expensive tools. The result is a PowerShell-built dashboard that defaults to a self-contained HTML artifact for direct-open use, with an opt-in split-assets mode for hosted deployments, along with validation tooling, Azure automation assets, GitHub Actions workflows, and PDF report generation.
 
-The dashboard workflow can publish Nathan’s approved demo exports and HTML only from `nathanmcnulty/defender-reporting` on `refs/heads/main`, or from a private repository under its existing rules. Keep the owner workflow disabled until its configured OIDC tenant is verified as the approved demo tenant; source checks alone cannot establish that binding. The PDF workflow remains private-only, unchanged, and disabled for public use, with no publishing steps. Ordinary local outputs stay ignored. Regression tests use deterministic synthetic datasets in temporary directories and minimal synthetic legacy fixtures under `tests/fixtures/`; do not include tenant data in test or PR evidence. Removing current-tree outputs does not remove historical copies; issue #68 remains open for the separate private historical response. See [GitHub Actions setup](docs/github-actions-setup.md) for the admission matrix and exact output allowlist.
+The dashboard workflow can publish Nathan’s approved demo exports and HTML to the single-commit `demo-data` branch (never `main`) only from `nathanmcnulty/defender-reporting` on `refs/heads/main`, or from a private repository under its existing rules. Keep the owner workflow disabled until its configured OIDC tenant is verified as the approved demo tenant; source checks alone cannot establish that binding. The PDF workflow remains private-only, unchanged, and disabled for public use, with no publishing steps. Ordinary local outputs stay ignored. Regression tests use deterministic synthetic datasets in temporary directories and minimal synthetic legacy fixtures under `tests/fixtures/`; do not include tenant data in test or PR evidence. Removing current-tree outputs does not remove historical copies; issue #68 remains open for the separate private historical response. See [GitHub Actions setup](docs/github-actions-setup.md) for the admission matrix and exact output allowlist.
 
 ## How it works
 
@@ -169,7 +169,7 @@ For local testing of the split-assets build, use a local HTTP server instead of 
 |---|---|
 | `Invoke-VulnerabilityExport.ps1` | Downloads Defender exports and writes the canonical gzip data store |
 | `Generate-VulnerabilityDashboard.ps1` | Builds the dashboard in self-contained or split-assets form and can validate the result |
-| `build/Validate-DashboardReports.ps1` | Validates an existing dashboard HTML against committed exports |
+| `build/Validate-DashboardReports.ps1` | Validates an existing dashboard HTML against local exports |
 | `Setup-AzureResources.ps1` | Provisions Azure compute (Automation Account or Function App), storage, scheduling, and optional Container App hosting |
 | `Setup-GitHubActionServicePrincipal.ps1` | Creates the Entra app and federated credential for GitHub Actions OIDC |
 
@@ -215,7 +215,7 @@ flowchart TD
 - The dashboard workflow admits the exact owner repository on `main`, plus private repositories; unknown visibility elsewhere fails closed. Keep it disabled until the approved demo tenant binding is verified. PDF export remains private-only and does not publish outputs. Exporter logs can expose RBAC group IDs and counts, so owner demo activation also approves those logs.
 - Build sources and build scripts now live under `build/`.
 - `build/generated/shared-helpers.ps1`, `build/generated/validation-helpers.ps1`, and `azure/function-app/ExportAndGenerate/run.ps1` are generated on demand and ignored by git.
-- `azure/Invoke-DashboardPipeline.ps1` is generated from the `build/` sources and can be refreshed locally or by CI.
+- `azure/Invoke-DashboardPipeline.ps1` is generated from the `build/` sources. Regenerate it with `build/azure/Build-Runbook.ps1` in the same PR; CI fails when it is stale.
 - Edit `src/powershell/Shared/**/*.ps1`, `src/powershell/Validation/**/*.ps1`, and `build/azure/runbook-source.ps1`; the generated helper bundles are driven by `build/manifests/*.json`, so update the relevant manifest when you add or reorder source files.
 - Run `node .\tests\Assert-DashboardActiveChartSeries.js`, `node .\tests\Assert-DashboardHistoricalRangeSemantics.js`, `node .\tests\Assert-DashboardImpactChartSeries.js`, and `node .\tests\Assert-DashboardRemediationViews.js` when you want the fast dashboard-JavaScript smoke path before the heavier maintainer preflight.
 - Run `./build/Invoke-RegressionValidation.ps1` for the deterministic local and PR-aligned preflight path.

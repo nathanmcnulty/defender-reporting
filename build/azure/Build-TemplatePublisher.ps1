@@ -39,9 +39,9 @@ if ($importMatches.Count -ne 1) {
 }
 
 $sourceFingerprintBuilder = [System.Text.StringBuilder]::new()
-[void]$sourceFingerprintBuilder.AppendLine("publisher-builder:$(Get-FileContentSha256Hex -Path $PSCommandPath)")
-[void]$sourceFingerprintBuilder.AppendLine("publisher-source:$(Get-FileContentSha256Hex -Path $publisherSourcePath)")
-[void]$sourceFingerprintBuilder.AppendLine("publisher-tools:$(Get-FileContentSha256Hex -Path $publisherToolsPath)")
+[void]$sourceFingerprintBuilder.Append("publisher-builder:$(Get-FileContentSha256Hex -Path $PSCommandPath)`n")
+[void]$sourceFingerprintBuilder.Append("publisher-source:$(Get-FileContentSha256Hex -Path $publisherSourcePath)`n")
+[void]$sourceFingerprintBuilder.Append("publisher-tools:$(Get-FileContentSha256Hex -Path $publisherToolsPath)`n")
 $sourceFingerprint = Get-TextSha256Hex -Text $sourceFingerprintBuilder.ToString()
 $generatedBanner = @"
 # GENERATED FILE - DO NOT EDIT DIRECTLY.
