@@ -36,7 +36,7 @@ No actual binding values were retrieved or verified by the offline tests. `dry_r
 
 ## Dashboard outputs
 
-The job preserves its daily `02:00 UTC` schedule and manual trigger. It runs the existing exporter with Advanced Hunting still included by default; collection is not widened. After validation, the staging helper force-stages only these paths, including recognized deletions:
+The job preserves its daily `02:00 UTC` schedule and manual trigger. It first restores incremental export state from the `demo-data` branch, then runs the existing exporter with Advanced Hunting still included by default; collection is not widened. After validation, the staging helper force-stages only these paths into an empty orphan worktree:
 
 - `VulnerabilityDashboard.html`
 - `exports/VulnExport_current.json.gz`, `VulnContentDictionary.json.gz`, `VulnCurrentRefs.json.gz`
@@ -44,7 +44,7 @@ The job preserves its daily `02:00 UTC` schedule and manual trigger. It runs the
 - `exports/Machines_Current.json.gz`, `Machines_History.json.gz`, `Machines_History_YYYYQ[1-4].json.gz`, `Machines_History_YYYYMMDDTHHMMSSZ_abcdefgh.json.gz` (eight lowercase hexadecimal suffix characters)
 - `exports/AdvancedHunting_Current.json.gz`
 
-Only the HTML is uploaded as a 30-day Actions artifact. Audit and manifest files remain under ignored `.local/` and are neither committed nor uploaded. Raw responses, legacy downloads, NVD cache files, credentials/configuration, locks, staging directories, arbitrary files and PDFs are excluded. The helper requires an empty index and rejects nonregular outputs before staging any file. Validation failure prevents publication; manual `dry_run: true` skips staging, commits and artifacts.
+Only the HTML is uploaded as a 30-day Actions artifact. Audit and manifest files remain under ignored `.local/` and are neither committed nor uploaded. Raw responses, legacy downloads, NVD cache files, credentials/configuration, locks, staging directories, arbitrary files and PDFs are excluded. The helper requires an empty index and rejects nonregular outputs before staging any file. The snapshot is committed and force-pushed to `refs/heads/demo-data`, so that branch always holds exactly one commit and `main` no longer grows with daily data. Validation failure prevents publication; manual `dry_run: true` skips staging, commits and artifacts.
 
 This is a filename allowlist, not content redaction. Approved owner demo outputs and logs are public. Private repository status does not make Pages, blob storage, Container Apps or other external destinations private. These workflows do not deploy to those destinations. History cleanup and issue #68 remain separate.
 
@@ -52,7 +52,7 @@ This is a filename allowlist, not content redaction. Approved owner demo outputs
 
 Use `Setup-GitHubActionServicePrincipal.ps1 -GitHubRepo "yourorg/defender-reporting" -IncludeAdvancedHunting` for the existing OIDC setup, and configure the returned client and tenant identifiers as `AZURE_CLIENT_ID` and `AZURE_TENANT_ID`. OIDC uses no stored client secret. This change does not run setup or alter credentials or service permissions. The exporter’s existing Advanced Hunting default still requires its existing `AdvancedQuery.Read.All` access alongside `Vulnerability.Read.All` and `Machine.Read.All`.
 
-Only the guarded dashboard job receives `contents: write` and `id-token: write`; top-level contents remain read-only. Branch protection may reject a bot push; there is no force push or protection bypass. Private forks retain their admission behavior and must review their own destination access controls before live collection.
+Only the guarded dashboard job receives `contents: write` and `id-token: write`; top-level contents remain read-only. The only push is the force-replace of the unprotected `demo-data` snapshot branch; nothing is pushed to `main` and there is no protection bypass. Private forks retain their admission behavior and must review their own destination access controls before live collection.
 
 ## Offline and hosted checks
 
