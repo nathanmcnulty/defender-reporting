@@ -1457,6 +1457,7 @@ function Export-ToStaticWebApp {
 # =============================================================================
 
 $tempRoot = $null
+$storageToken = $null
 
 try {
     Set-PipelineExecutionStage -Stage 'Authentication' -Message 'Authenticating with managed identity and resolving configuration.'
@@ -1472,8 +1473,18 @@ try {
     Write-Output "`n--- Stage A: Authentication ---"
 
     Write-Output "Connecting with Managed Identity..."
-    Connect-AzAccount -Identity | Out-Null
-    Write-Output "  Connected successfully"
+    # User-assigned-only hosts (such as Flex Consumption) need the client ID; AzureWebJobsStorage__clientId is the Function host's identity setting.
+    $managedIdentityClientId = @($env:AZURE_CLIENT_ID, $env:AzureWebJobsStorage__clientId) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -First 1
+    if ($managedIdentityClientId) {
+        Connect-AzAccount -Identity -AccountId $managedIdentityClientId | Out-Null
+        Write-Output "  Connected successfully (user-assigned identity $managedIdentityClientId)"
+    }
+    else {
+        Connect-AzAccount -Identity | Out-Null
+        Write-Output "  Connected successfully"
+    }
 
     # Resolve StorageAccountName from Automation variable if not provided as parameter
     if (-not $StorageAccountName) {
