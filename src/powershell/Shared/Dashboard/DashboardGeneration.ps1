@@ -4461,8 +4461,96 @@ function Write-BoundedNormalizationEnrichmentFragment {
     finally { $inventoryWriter.Dispose() }
 }
 
-function Invoke-BoundedContentStorePayloadProjection {
+function New-NormalizationSeverityIndexMap {
+    # Single source for severity indexes; the compiled normalizer receives these entries and this map's key comparer.
     [CmdletBinding()]
+    [OutputType([hashtable])]
+    param()
+
+    return @{
+        Critical = 0
+        High = 1
+        Medium = 2
+        Low = 3
+        None = 4
+    }
+}
+
+function Get-NormalizationKeyComparerDescriptor {
+    # Describes a hashtable's key comparer so the compiled normalizer can reproduce in-process lookup semantics.
+    # Throws for comparers it cannot reproduce instead of silently assuming a default.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable]$Table,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $comparerProperty = [hashtable].GetProperty('EqualityComparer', [System.Reflection.BindingFlags]'NonPublic,Instance')
+    $comparer = $comparerProperty.GetValue($Table)
+    if ($null -eq $comparer) { return 'Ordinal' }
+    foreach ($candidate in @(
+            @{ Descriptor = 'OrdinalIgnoreCase'; Comparer = [System.StringComparer]::OrdinalIgnoreCase }
+            @{ Descriptor = 'Ordinal'; Comparer = [System.StringComparer]::Ordinal }
+            @{ Descriptor = 'InvariantCultureIgnoreCase'; Comparer = [System.StringComparer]::InvariantCultureIgnoreCase }
+            @{ Descriptor = 'InvariantCulture'; Comparer = [System.StringComparer]::InvariantCulture }
+            @{ Descriptor = ('CultureIgnoreCase:' + [System.Globalization.CultureInfo]::CurrentCulture.Name); Comparer = [System.StringComparer]::CurrentCultureIgnoreCase }
+            @{ Descriptor = ('Culture:' + [System.Globalization.CultureInfo]::CurrentCulture.Name); Comparer = [System.StringComparer]::CurrentCulture }
+        )) {
+        if ($candidate.Comparer.Equals($comparer)) { return [string]$candidate.Descriptor }
+    }
+    throw [System.NotSupportedException]::new(("Compiled bounded normalization cannot reproduce the {0} key comparer '{1}'." -f $Name, $comparer.GetType().FullName))
+}
+
+function Test-CompiledNormalizationKeyComparerSupport {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable]$AdvancedHuntingInventoryData)
+
+    try { [void](Get-NormalizationKeyComparerDescriptor -Table $AdvancedHuntingInventoryData -Name 'inventory'); return $true }
+    catch [System.NotSupportedException] { return $false }
+}
+
+function Write-BoundedNormalizationOptions {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StagePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable]$AdvancedHuntingInventoryData
+    )
+
+    $severityIndexByName = New-NormalizationSeverityIndexMap
+    $severityIndexes = [ordered]@{}
+    foreach ($severityName in @($severityIndexByName.Keys | Sort-Object { [int]$severityIndexByName[$_] })) { $severityIndexes[[string]$severityName] = [int]$severityIndexByName[$severityName] }
+    $options = [ordered]@{
+        inventoryKeyComparer = Get-NormalizationKeyComparerDescriptor -Table $AdvancedHuntingInventoryData -Name 'inventory'
+        severityKeyComparer = Get-NormalizationKeyComparerDescriptor -Table $severityIndexByName -Name 'severity'
+        severityIndexes = $severityIndexes
+    }
+    [System.IO.File]::WriteAllText((Join-Path $StagePath 'normalizationOptions.json'), (ConvertTo-Json -InputObject $options -Compress -Depth 5), [System.Text.UTF8Encoding]::new($false))
+}
+
+function Complete-BoundedProjectionStaging {
+    # Disposes bounded-projection telemetry and removes the plaintext staging directory, always attempting both.
+    # Returns the failures (never throws) so callers can surface them alongside any original projection error.
+    [CmdletBinding()]
+    [OutputType([System.Exception])]
+    param(
+        [Parameter(Mandatory = $true)][string]$StagePath,
+        [Parameter(Mandatory = $false)]$Telemetry
+    )
+    $errors = [System.Collections.Generic.List[System.Exception]]::new()
+    if ($null -ne $Telemetry) {
+        try { $Telemetry.Dispose() }
+        catch { $errors.Add([System.InvalidOperationException]::new(("Bounded normalization telemetry disposal failed: {0}" -f $_.Exception.Message), $_.Exception)) }
+    }
+    $cleanupError = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($StagePath)
+    if ($null -ne $cleanupError) {
+        $errors.Add([System.IO.IOException]::new(("Plaintext staging directory '{0}' could not be removed: {1}" -f $StagePath, $cleanupError.Message), $cleanupError))
+    }
+    foreach ($errorItem in $errors) { $errorItem }
+}
+
+function Invoke-BoundedContentStorePayloadProjection {    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$DataPath,
         [Parameter(Mandatory = $true)][string]$PayloadOutputPath,
@@ -4492,24 +4580,23 @@ function Invoke-BoundedContentStorePayloadProjection {
             try { Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName $propertyName | ForEach-Object { $writer.WriteLine($_.ToString([Newtonsoft.Json.Formatting]::None)) } }
             finally { $writer.Dispose() }
         }
+        Write-BoundedNormalizationOptions -StagePath $stagePath -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData
         Write-BoundedNormalizationEnrichmentFragment -StagePath $stagePath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData
         if ($null -eq $effectiveRefPaths -or $effectiveRefPaths.Count -eq 0) { throw 'Bounded normalization did not resolve any vulnerability reference inputs.' }
         $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $effectiveRefPaths, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry, $StagingParent)
     }
     catch {
-        # Staged dictionary/enrichment fragments are plaintext tenant data; remove them on failure without masking the original error.
-        $failedCleanupError = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($stagePath)
-        if ($null -ne $failedCleanupError) {
-            throw [System.AggregateException]::new(("Bounded normalization failed ({0}) and its plaintext staging directory '{1}' could not be removed ({2})." -f $_.Exception.Message, $stagePath, $failedCleanupError.Message), [System.Exception[]]@($_.Exception, $failedCleanupError))
+        # Staged dictionary/enrichment fragments are plaintext tenant data; always clean up without masking the original error.
+        $projectionRecord = $_
+        $completionErrors = [System.Exception[]]@(Complete-BoundedProjectionStaging -StagePath $stagePath -Telemetry $telemetry)
+        if ($completionErrors.Count -gt 0) {
+            throw [System.AggregateException]::new(("Bounded normalization failed ({0}) and post-projection cleanup also failed: {1}" -f $projectionRecord.Exception.Message, (@($completionErrors | ForEach-Object Message) -join ' | ')), [System.Exception[]](@($projectionRecord.Exception) + $completionErrors))
         }
-        throw
+        throw $projectionRecord
     }
-    finally {
-        $telemetry.Dispose()
-    }
-    $cleanupError = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($stagePath)
-    if ($null -ne $cleanupError) {
-        throw [System.IO.IOException]::new(("Bounded normalization completed but its plaintext staging directory '{0}' could not be removed: {1}" -f $stagePath, $cleanupError.Message), $cleanupError)
+    $completionErrors = [System.Exception[]]@(Complete-BoundedProjectionStaging -StagePath $stagePath -Telemetry $telemetry)
+    if ($completionErrors.Count -gt 0) {
+        throw [System.AggregateException]::new(("Bounded normalization completed but post-projection cleanup failed: {0}" -f (@($completionErrors | ForEach-Object Message) -join ' | ')), $completionErrors)
     }
     Invoke-FullGarbageCollection
     [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
@@ -6093,13 +6180,8 @@ function Get-NormalizationContext {
     [OutputType([pscustomobject])]
     param()
 
-    $severityIndexByName = @{
-        Critical = 0
-        High = 1
-        Medium = 2
-        Low = 3
-        None = 4
-    }
+    $severityIndexByName = New-NormalizationSeverityIndexMap
+
 
     return [PSCustomObject]@{
         Lookups = @{
@@ -9588,6 +9670,10 @@ function ConvertTo-NormalizedData {
     if ($compiledPayloadSupported) {
         $preSyncedContentStoreExists = [bool](Sync-VulnContentStoreSidecar -BasePath $DataPath)
         $compiledPayloadSupported = $preSyncedContentStoreExists
+    }
+    if ($compiledPayloadSupported -and -not (Test-CompiledNormalizationKeyComparerSupport -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData)) {
+        Write-Information '  Compiled content normalization skipped: the inventory lookup uses a key comparer it cannot reproduce.' -InformationAction Continue
+        $compiledPayloadSupported = $false
     }
     $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath -CompiledPayloadSupported:$compiledPayloadSupported
     if ($executionPlan.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') {

@@ -232,6 +232,7 @@ using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace DefenderReporting.Store
@@ -356,6 +357,7 @@ namespace DefenderReporting.Store
         private sealed class CveEnrichment { public string PublishedDate, Description, EpssJson, ExploitAvailableJson, NvdLastModified, NvdBaseScoreJson, NvdBaseSeverity, NvdVector, NvdKevDate, NvdActionDue, NvdRequiredAction; public string[] AffectedSoftware, Weaknesses; }
         private sealed class Cve { public string Id, Url; public double? Score; public int Severity, Exploit, BatchTitle; public CveEnrichment Enrichment; public int[] AffectedSoftware; }
         private sealed class InventoryRecord { public string Cpe, EndOfSupportStatus, EndOfSupportDate; }
+        private sealed class NormalizationOptions { public StringComparer InventoryKeyComparer, SeverityKeyComparer; public Dictionary<string, int> SeverityIndexes; }
         private struct Template { public int Software, Cve, Version, Update, UpdateAvailable, DiskStart, DiskCount, RegistryStart, RegistryCount; }
         private struct HashKey { public ulong First, Second; public HashKey(ulong first, ulong second) { First = first; Second = second; } }
         private sealed class UlongIndexMap
@@ -407,15 +409,32 @@ namespace DefenderReporting.Store
             return result;
         }
 
+        // Deletes directly instead of probing with Directory.Exists, which reports false on access errors and invalid paths.
+        // Only a confirmed-absent directory counts as success; every other failure is returned for the caller to surface.
         public static Exception TryDeleteStagingDirectory(string path)
         {
+            if (String.IsNullOrWhiteSpace(path)) return new ArgumentNullException("path");
             Exception lastError = null;
             for (var attempt = 0; attempt < 3; attempt++)
             {
-                try { if (Directory.Exists(path)) Directory.Delete(path, true); return null; }
-                catch (Exception error) when (error is IOException || error is UnauthorizedAccessException) { lastError = error; Thread.Sleep(100 * (attempt + 1)); }
+                if (attempt > 0) Thread.Sleep(100 * attempt);
+                try { Directory.Delete(path, true); return null; }
+                catch (DirectoryNotFoundException notFound)
+                {
+                    if (IsConfirmedAbsent(path)) return null;
+                    lastError = notFound;
+                }
+                catch (Exception error) { lastError = error; }
             }
-            return Directory.Exists(path) ? lastError : null;
+            return lastError;
+        }
+
+        private static bool IsConfirmedAbsent(string path)
+        {
+            try { File.GetAttributes(path); return false; }
+            catch (FileNotFoundException) { return true; }
+            catch (DirectoryNotFoundException) { return true; }
+            catch (Exception) { return false; }
         }
 
         private static CompiledNormalizationResult ProjectStaged(string dictionaryPath, string[] refPaths, string outputPath, MemoryTelemetrySession telemetry, string stageRoot)
@@ -424,7 +443,8 @@ namespace DefenderReporting.Store
             var expectedTemplates = Directory.Exists(dictionaryPath) ? File.ReadLines(Path.Combine(dictionaryPath, "contentTemplates.ndjson"), Utf8).Count() : 1024;
             var machineOverlays = ReadMachineOverlays(Path.Combine(dictionaryPath, "machines.ndjson"));
             var cveEnrichment = ReadCveEnrichment(Path.Combine(dictionaryPath, "cveEnrichment.ndjson"));
-            var inventorySource = ReadInventory(Path.Combine(dictionaryPath, "inventory.ndjson"));
+            var normalizationOptions = ReadNormalizationOptions(Path.Combine(dictionaryPath, "normalizationOptions.json"));
+            var inventorySource = ReadInventory(Path.Combine(dictionaryPath, "inventory.ndjson"), normalizationOptions.InventoryKeyComparer);
             var vendors = new List<string>(); var vendorMap = Map();
             var exploits = new List<string>(); var exploitMap = Map();
             var groups = new List<string>(); var groupMap = Map();
@@ -504,7 +524,7 @@ namespace DefenderReporting.Store
                         CveEnrichment enrichment; cveEnrichment.TryGetValue(cveId, out enrichment);
                         var affectedIndexes = new List<int>();
                         if (enrichment != null && enrichment.AffectedSoftware != null) foreach (var affected in enrichment.AffectedSoftware) { var affectedIndex = Intern(affected, affectedSoftware, affectedSoftwareMap); if (affectedIndex >= 0) affectedIndexes.Add(affectedIndex); }
-                        WriteCveFragment(cveOutput, new Cve { Id = cveId, Score = score, Severity = SeverityIndex(severity), Exploit = Intern(exploit, exploits, exploitMap), Url = url, BatchTitle = Intern(batch, batchTitles, batchMap), Enrichment = enrichment, AffectedSoftware = affectedIndexes.Count > 0 ? affectedIndexes.ToArray() : null });
+                        WriteCveFragment(cveOutput, new Cve { Id = cveId, Score = score, Severity = SeverityIndex(severity, normalizationOptions.SeverityIndexes), Exploit = Intern(exploit, exploits, exploitMap), Url = url, BatchTitle = Intern(batch, batchTitles, batchMap), Enrichment = enrichment, AffectedSoftware = affectedIndexes.Count > 0 ? affectedIndexes.ToArray() : null });
                     }
 
                     var updateName = Value(item, "ru"); var updateIndex = -1;
@@ -649,9 +669,9 @@ namespace DefenderReporting.Store
             foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var id = Value(item, "id"); if (String.IsNullOrWhiteSpace(id)) continue; result[id] = new CveEnrichment { PublishedDate = NullIfEmpty(Value(item, "pd")), Description = NullIfEmpty(Value(item, "desc")), EpssJson = RawValue(item, "ep"), AffectedSoftware = StringArray(item, "as"), ExploitAvailableJson = RawValue(item, "ea"), NvdLastModified = NullIfEmpty(Value(item, "nlm")), NvdBaseScoreJson = RawValue(item, "nbs"), NvdBaseSeverity = NullIfEmpty(Value(item, "nsv")), NvdVector = NullIfEmpty(Value(item, "nvec")), NvdKevDate = NullIfEmpty(Value(item, "nkev")), NvdActionDue = NullIfEmpty(Value(item, "ndu")), NvdRequiredAction = NullIfEmpty(Value(item, "nact")), Weaknesses = StringArray(item, "nw") }; } }
             return result;
         }
-        private static Dictionary<string, InventoryRecord> ReadInventory(string path)
+        private static Dictionary<string, InventoryRecord> ReadInventory(string path, StringComparer comparer)
         {
-            var result = new Dictionary<string, InventoryRecord>(StringComparer.Ordinal); if (!File.Exists(path)) return result;
+            var result = new Dictionary<string, InventoryRecord>(comparer); if (!File.Exists(path)) return result;
             foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var key = Value(item, "k"); if (String.IsNullOrWhiteSpace(key)) continue; result[key] = new InventoryRecord { Cpe = NullIfEmpty(Value(item, "cpe")), EndOfSupportStatus = NullIfEmpty(Value(item, "eos")), EndOfSupportDate = NullIfEmpty(Value(item, "eod")) }; } }
             return result;
         }
@@ -663,8 +683,57 @@ namespace DefenderReporting.Store
         private static bool Boolean(JsonElement item, string name) { JsonElement value; if (!item.TryGetProperty(name, out value)) return false; return value.ValueKind == JsonValueKind.True || (value.ValueKind == JsonValueKind.String && String.Equals(value.GetString(), "true", StringComparison.OrdinalIgnoreCase)); }
         private static int Intern(string value, List<string> values, Dictionary<string, int> map) { if (String.IsNullOrEmpty(value)) return -1; int index; if (!map.TryGetValue(value, out index)) { index = values.Count; map.Add(value, index); values.Add(value); } return index; }
         private static void InternFlatArray(JsonElement item, string name, List<string> values, Dictionary<string, int> map, List<int> flattened, out int start, out int count) { start = flattened.Count; JsonElement array; if (item.TryGetProperty(name, out array)) { if (array.ValueKind == JsonValueKind.Array) foreach (var element in array.EnumerateArray()) { var index = Intern(ScalarString(element), values, map); if (index >= 0) flattened.Add(index); } else { var index = Intern(ScalarString(array), values, map); if (index >= 0) flattened.Add(index); } } count = flattened.Count - start; }
-        private static string NormalizeDate(string value) { if (String.IsNullOrWhiteSpace(value)) return String.Empty; if (value.Length >= 10 && value[4] == '-' && value[7] == '-') return value.Substring(0, 10); DateTime parsed; return DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out parsed) ? parsed.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : value; }
-        private static int SeverityIndex(string value) { switch (value) { case "Critical": return 0; case "High": return 1; case "Medium": return 2; case "Low": return 3; case "None": return 4; default: return -1; } }
+        private static readonly Regex MonthDayYearPrefix = new Regex(@"^(\d{1,2})/(\d{1,2})/(\d{4})", RegexOptions.CultureInvariant);
+        // Mirrors Convert-FastToYmdDate/Convert-ToYmdDate: blank or unparseable values normalize to no date (never the raw text).
+        private static string NormalizeDate(string value)
+        {
+            if (value == null) return String.Empty;
+            if (value.Length >= 10 && value[4] == '-' && value[7] == '-') return value.Substring(0, 10);
+            var raw = value.Trim();
+            if (raw.Length == 0) return String.Empty;
+            if (raw.Length >= 10 && raw[4] == '-' && raw[7] == '-') return raw.Substring(0, 10);
+            var match = MonthDayYearPrefix.Match(raw);
+            int month, day, year;
+            if (match.Success && Int32.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out month) && Int32.TryParse(match.Groups[2].Value, NumberStyles.None, CultureInfo.InvariantCulture, out day) && Int32.TryParse(match.Groups[3].Value, NumberStyles.None, CultureInfo.InvariantCulture, out year) && month >= 1 && month <= 12 && day >= 1 && day <= 31)
+                return year.ToString("D4", CultureInfo.InvariantCulture) + "-" + month.ToString("D2", CultureInfo.InvariantCulture) + "-" + day.ToString("D2", CultureInfo.InvariantCulture);
+            // PowerShell's [datetime] cast parses with the invariant culture and default styles, then formats with the current culture.
+            DateTime parsed; return DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed) ? parsed.ToString("yyyy-MM-dd", CultureInfo.CurrentCulture) : String.Empty;
+        }
+        private static int SeverityIndex(string value, Dictionary<string, int> severityIndexes) { int index; return value != null && severityIndexes.TryGetValue(value, out index) ? index : -1; }
+        private static StringComparer ResolveKeyComparer(string descriptor, string optionName)
+        {
+            // Absent descriptors use the default PowerShell hashtable comparer (OrdinalIgnoreCase) that the in-process normalizer sees.
+            if (String.IsNullOrEmpty(descriptor) || descriptor == "OrdinalIgnoreCase") return StringComparer.OrdinalIgnoreCase;
+            if (descriptor == "Ordinal") return StringComparer.Ordinal;
+            if (descriptor == "InvariantCulture") return StringComparer.InvariantCulture;
+            if (descriptor == "InvariantCultureIgnoreCase") return StringComparer.InvariantCultureIgnoreCase;
+            if (descriptor.StartsWith("Culture:", StringComparison.Ordinal)) return StringComparer.Create(CultureInfo.GetCultureInfo(descriptor.Substring(8)), false);
+            if (descriptor.StartsWith("CultureIgnoreCase:", StringComparison.Ordinal)) return StringComparer.Create(CultureInfo.GetCultureInfo(descriptor.Substring(18)), true);
+            throw new InvalidDataException("Unsupported bounded normalization key comparer '" + descriptor + "' for " + optionName + ".");
+        }
+        private static NormalizationOptions ReadNormalizationOptions(string path)
+        {
+            var options = new NormalizationOptions { InventoryKeyComparer = ResolveKeyComparer(null, "inventoryKeyComparer"), SeverityKeyComparer = ResolveKeyComparer(null, "severityKeyComparer") };
+            var severityEntries = new List<KeyValuePair<string, int>> { new KeyValuePair<string, int>("Critical", 0), new KeyValuePair<string, int>("High", 1), new KeyValuePair<string, int>("Medium", 2), new KeyValuePair<string, int>("Low", 3), new KeyValuePair<string, int>("None", 4) };
+            if (File.Exists(path))
+            {
+                using (var document = JsonDocument.Parse(File.ReadAllText(path, Utf8)))
+                {
+                    var root = document.RootElement;
+                    options.InventoryKeyComparer = ResolveKeyComparer(Value(root, "inventoryKeyComparer"), "inventoryKeyComparer");
+                    options.SeverityKeyComparer = ResolveKeyComparer(Value(root, "severityKeyComparer"), "severityKeyComparer");
+                    JsonElement severities;
+                    if (root.TryGetProperty("severityIndexes", out severities) && severities.ValueKind == JsonValueKind.Object)
+                    {
+                        severityEntries.Clear();
+                        foreach (var property in severities.EnumerateObject()) severityEntries.Add(new KeyValuePair<string, int>(property.Name, property.Value.GetInt32()));
+                    }
+                }
+            }
+            options.SeverityIndexes = new Dictionary<string, int>(options.SeverityKeyComparer);
+            foreach (var entry in severityEntries) options.SeverityIndexes[entry.Key] = entry.Value;
+            return options;
+        }
         private static string ConvertCveUrl(string value) { const string marker = "/security-guidance/advisory/"; var index = value.IndexOf(marker, StringComparison.OrdinalIgnoreCase); if (index >= 0) { var id = value.Substring(index + marker.Length); if (id.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) return "https://msrc.microsoft.com/update-guide/vulnerability/" + id; } return value; }
         private static string EmptyFallback(string value, string fallback) { return String.IsNullOrWhiteSpace(value) ? fallback : value; }
         private static string NullIfEmpty(string value) { return String.IsNullOrWhiteSpace(value) ? null : value; }
@@ -16546,8 +16615,96 @@ function Write-BoundedNormalizationEnrichmentFragment {
     finally { $inventoryWriter.Dispose() }
 }
 
-function Invoke-BoundedContentStorePayloadProjection {
+function New-NormalizationSeverityIndexMap {
+    # Single source for severity indexes; the compiled normalizer receives these entries and this map's key comparer.
     [CmdletBinding()]
+    [OutputType([hashtable])]
+    param()
+
+    return @{
+        Critical = 0
+        High = 1
+        Medium = 2
+        Low = 3
+        None = 4
+    }
+}
+
+function Get-NormalizationKeyComparerDescriptor {
+    # Describes a hashtable's key comparer so the compiled normalizer can reproduce in-process lookup semantics.
+    # Throws for comparers it cannot reproduce instead of silently assuming a default.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable]$Table,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $comparerProperty = [hashtable].GetProperty('EqualityComparer', [System.Reflection.BindingFlags]'NonPublic,Instance')
+    $comparer = $comparerProperty.GetValue($Table)
+    if ($null -eq $comparer) { return 'Ordinal' }
+    foreach ($candidate in @(
+            @{ Descriptor = 'OrdinalIgnoreCase'; Comparer = [System.StringComparer]::OrdinalIgnoreCase }
+            @{ Descriptor = 'Ordinal'; Comparer = [System.StringComparer]::Ordinal }
+            @{ Descriptor = 'InvariantCultureIgnoreCase'; Comparer = [System.StringComparer]::InvariantCultureIgnoreCase }
+            @{ Descriptor = 'InvariantCulture'; Comparer = [System.StringComparer]::InvariantCulture }
+            @{ Descriptor = ('CultureIgnoreCase:' + [System.Globalization.CultureInfo]::CurrentCulture.Name); Comparer = [System.StringComparer]::CurrentCultureIgnoreCase }
+            @{ Descriptor = ('Culture:' + [System.Globalization.CultureInfo]::CurrentCulture.Name); Comparer = [System.StringComparer]::CurrentCulture }
+        )) {
+        if ($candidate.Comparer.Equals($comparer)) { return [string]$candidate.Descriptor }
+    }
+    throw [System.NotSupportedException]::new(("Compiled bounded normalization cannot reproduce the {0} key comparer '{1}'." -f $Name, $comparer.GetType().FullName))
+}
+
+function Test-CompiledNormalizationKeyComparerSupport {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable]$AdvancedHuntingInventoryData)
+
+    try { [void](Get-NormalizationKeyComparerDescriptor -Table $AdvancedHuntingInventoryData -Name 'inventory'); return $true }
+    catch [System.NotSupportedException] { return $false }
+}
+
+function Write-BoundedNormalizationOptions {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StagePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable]$AdvancedHuntingInventoryData
+    )
+
+    $severityIndexByName = New-NormalizationSeverityIndexMap
+    $severityIndexes = [ordered]@{}
+    foreach ($severityName in @($severityIndexByName.Keys | Sort-Object { [int]$severityIndexByName[$_] })) { $severityIndexes[[string]$severityName] = [int]$severityIndexByName[$severityName] }
+    $options = [ordered]@{
+        inventoryKeyComparer = Get-NormalizationKeyComparerDescriptor -Table $AdvancedHuntingInventoryData -Name 'inventory'
+        severityKeyComparer = Get-NormalizationKeyComparerDescriptor -Table $severityIndexByName -Name 'severity'
+        severityIndexes = $severityIndexes
+    }
+    [System.IO.File]::WriteAllText((Join-Path $StagePath 'normalizationOptions.json'), (ConvertTo-Json -InputObject $options -Compress -Depth 5), [System.Text.UTF8Encoding]::new($false))
+}
+
+function Complete-BoundedProjectionStaging {
+    # Disposes bounded-projection telemetry and removes the plaintext staging directory, always attempting both.
+    # Returns the failures (never throws) so callers can surface them alongside any original projection error.
+    [CmdletBinding()]
+    [OutputType([System.Exception])]
+    param(
+        [Parameter(Mandatory = $true)][string]$StagePath,
+        [Parameter(Mandatory = $false)]$Telemetry
+    )
+    $errors = [System.Collections.Generic.List[System.Exception]]::new()
+    if ($null -ne $Telemetry) {
+        try { $Telemetry.Dispose() }
+        catch { $errors.Add([System.InvalidOperationException]::new(("Bounded normalization telemetry disposal failed: {0}" -f $_.Exception.Message), $_.Exception)) }
+    }
+    $cleanupError = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($StagePath)
+    if ($null -ne $cleanupError) {
+        $errors.Add([System.IO.IOException]::new(("Plaintext staging directory '{0}' could not be removed: {1}" -f $StagePath, $cleanupError.Message), $cleanupError))
+    }
+    foreach ($errorItem in $errors) { $errorItem }
+}
+
+function Invoke-BoundedContentStorePayloadProjection {    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$DataPath,
         [Parameter(Mandatory = $true)][string]$PayloadOutputPath,
@@ -16577,24 +16734,23 @@ function Invoke-BoundedContentStorePayloadProjection {
             try { Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName $propertyName | ForEach-Object { $writer.WriteLine($_.ToString([Newtonsoft.Json.Formatting]::None)) } }
             finally { $writer.Dispose() }
         }
+        Write-BoundedNormalizationOptions -StagePath $stagePath -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData
         Write-BoundedNormalizationEnrichmentFragment -StagePath $stagePath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData
         if ($null -eq $effectiveRefPaths -or $effectiveRefPaths.Count -eq 0) { throw 'Bounded normalization did not resolve any vulnerability reference inputs.' }
         $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $effectiveRefPaths, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry, $StagingParent)
     }
     catch {
-        # Staged dictionary/enrichment fragments are plaintext tenant data; remove them on failure without masking the original error.
-        $failedCleanupError = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($stagePath)
-        if ($null -ne $failedCleanupError) {
-            throw [System.AggregateException]::new(("Bounded normalization failed ({0}) and its plaintext staging directory '{1}' could not be removed ({2})." -f $_.Exception.Message, $stagePath, $failedCleanupError.Message), [System.Exception[]]@($_.Exception, $failedCleanupError))
+        # Staged dictionary/enrichment fragments are plaintext tenant data; always clean up without masking the original error.
+        $projectionRecord = $_
+        $completionErrors = [System.Exception[]]@(Complete-BoundedProjectionStaging -StagePath $stagePath -Telemetry $telemetry)
+        if ($completionErrors.Count -gt 0) {
+            throw [System.AggregateException]::new(("Bounded normalization failed ({0}) and post-projection cleanup also failed: {1}" -f $projectionRecord.Exception.Message, (@($completionErrors | ForEach-Object Message) -join ' | ')), [System.Exception[]](@($projectionRecord.Exception) + $completionErrors))
         }
-        throw
+        throw $projectionRecord
     }
-    finally {
-        $telemetry.Dispose()
-    }
-    $cleanupError = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($stagePath)
-    if ($null -ne $cleanupError) {
-        throw [System.IO.IOException]::new(("Bounded normalization completed but its plaintext staging directory '{0}' could not be removed: {1}" -f $stagePath, $cleanupError.Message), $cleanupError)
+    $completionErrors = [System.Exception[]]@(Complete-BoundedProjectionStaging -StagePath $stagePath -Telemetry $telemetry)
+    if ($completionErrors.Count -gt 0) {
+        throw [System.AggregateException]::new(("Bounded normalization completed but post-projection cleanup failed: {0}" -f (@($completionErrors | ForEach-Object Message) -join ' | ')), $completionErrors)
     }
     Invoke-FullGarbageCollection
     [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
@@ -18178,13 +18334,8 @@ function Get-NormalizationContext {
     [OutputType([pscustomobject])]
     param()
 
-    $severityIndexByName = @{
-        Critical = 0
-        High = 1
-        Medium = 2
-        Low = 3
-        None = 4
-    }
+    $severityIndexByName = New-NormalizationSeverityIndexMap
+
 
     return [PSCustomObject]@{
         Lookups = @{
@@ -21674,6 +21825,10 @@ function ConvertTo-NormalizedData {
         $preSyncedContentStoreExists = [bool](Sync-VulnContentStoreSidecar -BasePath $DataPath)
         $compiledPayloadSupported = $preSyncedContentStoreExists
     }
+    if ($compiledPayloadSupported -and -not (Test-CompiledNormalizationKeyComparerSupport -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData)) {
+        Write-Information '  Compiled content normalization skipped: the inventory lookup uses a key comparer it cannot reproduce.' -InformationAction Continue
+        $compiledPayloadSupported = $false
+    }
     $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath -CompiledPayloadSupported:$compiledPayloadSupported
     if ($executionPlan.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') {
         if ([string]::IsNullOrWhiteSpace($PayloadOutputPath) -or -not $ConsumeLookupsOnPayloadClose) { throw 'Compiled bounded content normalization requires direct payload output and lookup consumption.' }
@@ -21923,7 +22078,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: fd4100963f96c0d1d6fdd770a880d8d3ac62d2f261f16fd6d546f063c187571d
+# ArtifactFingerprint: bec0fc679e05dbcea0ea71415008a561f469eb8244d7f36adab30a759eec642e
 
 
 

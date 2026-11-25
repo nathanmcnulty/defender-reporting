@@ -2220,6 +2220,146 @@ function Test-CompiledBoundedContentNormalizationDeduplicatesDeviceProfiles {
     }
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 }
+function Invoke-CompiledVersusInProcessNormalization {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$DataPath,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][scriptblock]$NewInventory
+    )
+    $repoRoot = Split-Path -Path $PSScriptRoot -Parent
+    $legacyPath = Join-Path $DataPath "$Label-legacy.json.gz"
+    $legacy = ConvertTo-NormalizedData -DataPath $DataPath -VulnOutputPath (Join-Path $DataPath "$Label-legacy.json") -PayloadOutputPath $legacyPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingInventoryData (& $NewInventory) -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization
+    $compiledPath = Join-Path $DataPath "$Label-compiled.json.gz"
+    $compiled = ConvertTo-NormalizedData -DataPath $DataPath -VulnOutputPath (Join-Path $DataPath "$Label-compiled.json") -PayloadOutputPath $compiledPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingInventoryData (& $NewInventory) -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose
+    & node (Join-Path $repoRoot 'tests\helpers\Assert-ExpandedPayloadParity.js') $legacyPath $compiledPath | Out-Host
+    Assert-True ($LASTEXITCODE -eq 0) "Expected $Label compiled and in-process payloads to have expanded row parity."
+    return [PSCustomObject]@{
+        Legacy = $legacy
+        Compiled = $compiled
+        LegacyPayload = Read-GzipTextFile -Path $legacyPath | ConvertFrom-Json -Depth 30
+        CompiledPayload = Read-GzipTextFile -Path $compiledPath | ConvertFrom-Json -Depth 30
+    }
+}
+
+function Get-NormalizedPayloadRowSummary {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)]$Payload)
+    # Resolves each row's CVE id, severity, dates and inventory CPE so lookup ordering differences cannot hide value changes.
+    return @($Payload.vulns | ForEach-Object {
+            $cve = $Payload.lookups.cves[[int]$_[1]]
+            $severityIndex = if ($null -ne $cve.PSObject.Properties['sv'] -and $null -ne $cve.sv) { [int]$cve.sv } else { -1 }
+            $first = if ($null -ne $_[4] -and [int]$_[4] -ge 0) { [string]$Payload.lookups.dates[[int]$_[4]] } else { '' }
+            $last = if ($null -ne $_[5] -and [int]$_[5] -ge 0) { [string]$Payload.lookups.dates[[int]$_[5]] } else { '' }
+            $inventoryIndex = if ($_.Count -gt 10 -and $null -ne $_[10]) { [int]$_[10] } else { -1 }
+            $cpe = if ($inventoryIndex -ge 0) { [string]$Payload.lookups.inventory[$inventoryIndex].cpe } else { '' }
+            '{0}|{1}|{2}|{3}|{4}' -f [string]$cve.id, $(if ($severityIndex -ge 0) { [string]$Payload.lookups.severities[$severityIndex] } else { '' }), $first, $last, $cpe
+        } | Sort-Object)
+}
+
+function Test-CompiledBoundedContentNormalizationKeyComparerParity {
+    [CmdletBinding()]
+    param()
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-comparer-parity-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $newRow = {
+            param([string]$Id, [string]$CveId, [string]$Severity)
+            $row = Get-TestVulnRow -Id $Id -CveId $CveId -SnapshotDate '2026-07-10' -Version '1.0.0'
+            $row.DeviceId = 'Device-Inv'; $row.VulnerabilitySeverityLevel = $Severity
+            return $row
+        }
+        $rows = @(
+            (& $newRow 'sev-1' 'CVE-2026-7201' 'High')
+            (& $newRow 'sev-2' 'CVE-2026-7202' 'high')
+            (& $newRow 'sev-3' 'CVE-2026-7203' 'HIGH')
+            (& $newRow 'sev-4' 'CVE-2026-7204' 'cRiTiCaL')
+            (& $newRow 'sev-5' 'CVE-2026-7205' 'none')
+            (& $newRow 'sev-6' 'CVE-2026-7206' 'Severe')
+        )
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records $rows
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+        $inventoryRecord = { [PSCustomObject]@{ ProductCodeCpe = 'cpe:/a:contoso:legacy_agent:1.0.0'; EndOfSupportStatus = 'supported'; EndOfSupportDate = '2027-12-31' } }
+        $differentCaseKey = Get-AdvancedHuntingInventoryMatchKey -DeviceId 'device-inv' -SoftwareVendor 'CONTOSO' -SoftwareName 'legacy agent' -SoftwareVersion '1.0.0'
+
+        $default = Invoke-CompiledVersusInProcessNormalization -DataPath $tempRoot -Label 'default' -NewInventory { @{ $differentCaseKey = (& $inventoryRecord) } }.GetNewClosure()
+        Assert-True ($default.Compiled -is [hashtable] -and $null -ne $default.Compiled.CompiledMemoryTelemetry) 'Expected the default-comparer inventory run to use the compiled bounded normalizer.'
+        $legacyRows = Get-NormalizedPayloadRowSummary -Payload $default.LegacyPayload
+        $compiledRows = Get-NormalizedPayloadRowSummary -Payload $default.CompiledPayload
+        Assert-True (($legacyRows -join "`n") -eq ($compiledRows -join "`n")) ("Expected compiled severities and case-insensitive inventory enrichment to match in-process rows.`nlegacy:`n{0}`ncompiled:`n{1}" -f ($legacyRows -join "`n"), ($compiledRows -join "`n"))
+        foreach ($expected in @('CVE-2026-7201|High|', 'CVE-2026-7202|High|', 'CVE-2026-7203|High|', 'CVE-2026-7204|Critical|', 'CVE-2026-7205|None|', 'CVE-2026-7206||')) {
+            Assert-True (@($compiledRows | Where-Object { $_.StartsWith($expected, [System.StringComparison]::Ordinal) }).Count -eq 1) "Expected compiled severity mapping '$expected' to follow the case-insensitive in-process severity map."
+        }
+        Assert-True (@($compiledRows | Where-Object { $_.EndsWith('|cpe:/a:contoso:legacy_agent:1.0.0', [System.StringComparison]::Ordinal) }).Count -eq 6) 'Expected a differently capitalized default inventory key to enrich every row in both paths.'
+
+        $ordinal = Invoke-CompiledVersusInProcessNormalization -DataPath $tempRoot -Label 'ordinal' -NewInventory { $table = [hashtable]::new([System.StringComparer]::Ordinal); $table[$differentCaseKey] = (& $inventoryRecord); $table }.GetNewClosure()
+        Assert-True ($ordinal.Compiled -is [hashtable] -and $null -ne $ordinal.Compiled.CompiledMemoryTelemetry) 'Expected the ordinal-comparer inventory run to use the compiled bounded normalizer.'
+        $legacyOrdinalRows = Get-NormalizedPayloadRowSummary -Payload $ordinal.LegacyPayload
+        $compiledOrdinalRows = Get-NormalizedPayloadRowSummary -Payload $ordinal.CompiledPayload
+        Assert-True (($legacyOrdinalRows -join "`n") -eq ($compiledOrdinalRows -join "`n")) 'Expected an ordinal inventory hashtable comparer to be preserved by the compiled path.'
+        Assert-True (@($compiledOrdinalRows | Where-Object { $_.EndsWith('|cpe:/a:contoso:legacy_agent:1.0.0', [System.StringComparison]::Ordinal) }).Count -eq 0) 'Expected an ordinal inventory hashtable to keep case-sensitive lookups in both paths.'
+
+        $unsupportedComparer = [System.Collections.Generic.EqualityComparer[object]]::Default
+        $unsupportedInventory = [hashtable]::new([System.Collections.IEqualityComparer]$unsupportedComparer)
+        Assert-True (-not (Test-CompiledNormalizationKeyComparerSupport -AdvancedHuntingInventoryData $unsupportedInventory)) 'Expected an unrecognized inventory key comparer to be reported as unsupported.'
+        $unsupportedError = $null
+        try { [void](Get-NormalizationKeyComparerDescriptor -Table $unsupportedInventory -Name 'inventory') } catch { $unsupportedError = $_.Exception }
+        Assert-True ($unsupportedError -is [System.NotSupportedException]) 'Expected an unrecognized inventory key comparer to fail explicitly instead of assuming default semantics.'
+        $fallbackPath = Join-Path $tempRoot 'fallback.json.gz'
+        $fallback = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'fallback.json') -PayloadOutputPath $fallbackPath -Machines @{} -AdvancedHuntingData @{} -AdvancedHuntingInventoryData $unsupportedInventory -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -InformationAction SilentlyContinue
+        $fallbackTelemetry = if ($fallback -is [hashtable]) { $fallback['CompiledMemoryTelemetry'] } else { $fallback.PSObject.Properties['CompiledMemoryTelemetry']?.Value }
+        Assert-True ($null -eq $fallbackTelemetry -and $fallback.VulnCount -eq 6) ("Expected an unsupported inventory comparer to fall back to the in-process normalizer, got {0} with VulnCount={1}." -f $fallback.GetType().FullName, $fallback.VulnCount)
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
+function Test-CompiledBoundedContentNormalizationDateParity {
+    [CmdletBinding()]
+    param()
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-date-parity-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $newRow = {
+            param([string]$Id, [string]$CveId, $FirstSeen, $LastSeen)
+            $row = Get-TestVulnRow -Id $Id -CveId $CveId -SnapshotDate '2026-07-10' -Version '1.0.0'
+            $row.FirstSeenTimestamp = $FirstSeen; $row.LastSeenTimestamp = $LastSeen
+            return $row
+        }
+        $cases = @(
+            @{ Id = 'date-valid'; First = '2026-07-01T10:00:00Z'; Last = '2026-07-05T08:00:00Z'; ExpectedFirst = '2026-07-01'; ExpectedLast = '2026-07-05' }
+            @{ Id = 'date-valid-swapped'; First = '2026-07-09T10:00:00Z'; Last = '2026-07-02'; ExpectedFirst = '2026-07-02'; ExpectedLast = '2026-07-09' }
+            @{ Id = 'date-invalid'; First = 'not-a-date'; Last = '2026-07-05'; ExpectedFirst = ''; ExpectedLast = '2026-07-05' }
+            @{ Id = 'date-invalid-month-day'; First = '13/40/2026'; Last = 'Garbage'; ExpectedFirst = ''; ExpectedLast = '' }
+            @{ Id = 'date-whitespace'; First = '   '; Last = '  2026-07-03  '; ExpectedFirst = ''; ExpectedLast = '2026-07-03' }
+            @{ Id = 'date-mdy-prefix'; First = '7/4/2026abc'; Last = ' 7/6/2026 10:00 PM'; ExpectedFirst = '2026-07-04'; ExpectedLast = '2026-07-06' }
+            @{ Id = 'date-mdy-swapped'; First = '7/20/2026 10:00 AM'; Last = '7/4/2026'; ExpectedFirst = '2026-07-04'; ExpectedLast = '2026-07-20' }
+            @{ Id = 'date-mdy-permissive'; First = '2/30/2026'; Last = $null; ExpectedFirst = '2026-02-30'; ExpectedLast = '' }
+            @{ Id = 'date-parsed'; First = 'July 8, 2026'; Last = '2026/07/09'; ExpectedFirst = '2026-07-08'; ExpectedLast = '2026-07-09' }
+        )
+        $index = 0
+        $rows = @($cases | ForEach-Object { $index++; & $newRow $_.Id ('CVE-2026-73{0:D2}' -f $index) $_.First $_.Last })
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $tempRoot) -Records $rows
+        Publish-VulnContentStoreUnlocked -BasePath $tempRoot
+
+        $result = Invoke-CompiledVersusInProcessNormalization -DataPath $tempRoot -Label 'dates' -NewInventory { @{} }
+        Assert-True ($result.Compiled -is [hashtable] -and $null -ne $result.Compiled.CompiledMemoryTelemetry) 'Expected the date parity run to use the compiled bounded normalizer.'
+        $legacyRows = Get-NormalizedPayloadRowSummary -Payload $result.LegacyPayload
+        $compiledRows = Get-NormalizedPayloadRowSummary -Payload $result.CompiledPayload
+        Assert-True (($legacyRows -join "`n") -eq ($compiledRows -join "`n")) ("Expected compiled date normalization to match in-process rows.`nlegacy:`n{0}`ncompiled:`n{1}" -f ($legacyRows -join "`n"), ($compiledRows -join "`n"))
+        $index = 0
+        foreach ($case in $cases) {
+            $index++
+            $expected = 'CVE-2026-73{0:D2}|High|{1}|{2}|' -f $index, $case.ExpectedFirst, $case.ExpectedLast
+            Assert-True ($compiledRows -contains $expected) "Expected compiled date case '$($case.Id)' to normalize to '$expected'."
+        }
+        Assert-True (@($result.CompiledPayload.lookups.dates | Where-Object { [string]$_ -notmatch '^\d{4}-\d{2}-\d{2}$' }).Count -eq 0) 'Expected the compiled date lookup to contain only normalized dates, never raw unparseable text.'
+        $legacySwapped = [int]$result.Legacy.Quality.FirstLastSwappedCount
+        $compiledSwapped = [int]$result.Compiled.Quality.FirstLastSwappedCount
+        Assert-True ($legacySwapped -eq 2 -and $compiledSwapped -eq 2) "Expected only parseable reversed date pairs to be swapped in both paths, got legacy=$legacySwapped compiled=$compiledSwapped."
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
 function Test-CompiledBoundedContentNormalizationCleansStagingOnFailure {
     [CmdletBinding()]
     param()
@@ -2289,6 +2429,70 @@ function Test-CompiledBoundedContentNormalizationCleansStagingOnFailure {
         if ($null -ne $lockedStream) { $lockedStream.Dispose() }
         $lockedStage = Join-Path $tempRoot 'staging\locked-stage'
         if (-not $IsWindows -and (Test-Path -LiteralPath $lockedStage)) { [System.IO.File]::SetUnixFileMode($lockedStage, [System.IO.UnixFileMode]'UserRead, UserWrite, UserExecute') }
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+function Test-CompiledBoundedStagingCleanupSurfacesDisposalAndProbeFailures {
+    [CmdletBinding()]
+    param()
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-staging-hardening-' + [guid]::NewGuid().ToString('N'))
+    $originalComplete = ${function:Complete-BoundedProjectionStaging}
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        $normalizer = [DefenderReporting.Store.BoundedContentNormalizer]
+        Assert-True ($null -eq $normalizer::TryDeleteStagingDirectory((Join-Path $tempRoot 'never-created'))) 'Expected a genuinely absent staging directory to count as cleaned up.'
+        $fileAtStagePath = Join-Path $tempRoot 'stage-is-a-file'
+        [System.IO.File]::WriteAllText($fileAtStagePath, '{"secret":true}')
+        $fileError = $normalizer::TryDeleteStagingDirectory($fileAtStagePath)
+        Assert-True ($null -ne $fileError -and (Test-Path -LiteralPath $fileAtStagePath)) 'Expected a non-directory entry that Directory.Exists reports as absent to surface a cleanup error instead of a success.'
+        $invalidError = $normalizer::TryDeleteStagingDirectory((Join-Path $tempRoot ("invalid" + [char]0 + "stage")))
+        Assert-True ($null -ne $invalidError) 'Expected a path that Directory.Exists silently rejects to surface a cleanup error.'
+
+        $throwingTelemetry = [PSCustomObject]@{}
+        $throwingTelemetry | Add-Member -MemberType ScriptMethod -Name Dispose -Value { throw 'telemetry dispose boom' }
+        $helperStage = Join-Path $tempRoot 'helper-stage'
+        [void](New-Item -Path $helperStage -ItemType Directory -Force)
+        [System.IO.File]::WriteAllText((Join-Path $helperStage 'machines.ndjson'), '{"secret":true}')
+        $helperErrors = @(Complete-BoundedProjectionStaging -StagePath $helperStage -Telemetry $throwingTelemetry)
+        Assert-True (-not (Test-Path -LiteralPath $helperStage)) 'Expected staging cleanup to run even when telemetry disposal fails.'
+        Assert-True ($helperErrors.Count -eq 1 -and $helperErrors[0] -is [System.InvalidOperationException] -and $helperErrors[0].Message -like '*telemetry disposal failed*telemetry dispose boom*') 'Expected telemetry disposal failures to be returned explicitly.'
+        $fileErrors = @(Complete-BoundedProjectionStaging -StagePath $fileAtStagePath)
+        Assert-True ($fileErrors.Count -eq 1 -and $fileErrors[0] -is [System.IO.IOException] -and $fileErrors[0].Message -like '*could not be removed*') 'Expected staging cleanup failures to be returned explicitly.'
+
+        $dataRoot = Join-Path $tempRoot 'data'
+        $stagingParent = Join-Path $tempRoot 'staging'
+        [void](New-Item -Path $dataRoot -ItemType Directory -Force)
+        [void](New-Item -Path $stagingParent -ItemType Directory -Force)
+        $row = Get-TestVulnRow -Id 'staging-hardening-1' -CveId 'CVE-2026-7301' -SnapshotDate '2026-07-10' -Version '1.0.0'
+        Write-NdjsonRecordsFile -Path (Get-VulnCurrentPath -BasePath $dataRoot) -Records @($row)
+        Publish-VulnContentStoreUnlocked -BasePath $dataRoot
+        $invalidRefPath = Join-Path $tempRoot 'invalid-refs.ndjson'
+        [System.IO.File]::WriteAllText($invalidRefPath, "{not-json`n", [System.Text.UTF8Encoding]::new($false))
+        Set-Item -Path Function:Complete-BoundedProjectionStaging -Value {
+            param([string]$StagePath, $Telemetry)
+            if ($null -ne $Telemetry) { $Telemetry.Dispose() }
+            $proxy = [PSCustomObject]@{}
+            $proxy | Add-Member -MemberType ScriptMethod -Name Dispose -Value { throw 'telemetry dispose boom' }
+            & $originalComplete -StagePath $StagePath -Telemetry $proxy
+        }
+
+        $failureError = $null
+        try { $null = Invoke-BoundedContentStorePayloadProjection -DataPath $dataRoot -PayloadOutputPath (Join-Path $tempRoot 'failed.json.gz') -RefPaths @($invalidRefPath) -StagingParent $stagingParent }
+        catch { $failureError = $_.Exception }
+        Assert-True ($failureError -is [System.AggregateException] -and $failureError.InnerExceptions.Count -eq 2) 'Expected a projection failure plus disposal failure to surface both errors.'
+        $hasJsonError = $false; $current = $failureError.InnerExceptions[0]; while ($null -ne $current) { if ($current -is [System.Text.Json.JsonException]) { $hasJsonError = $true }; $current = $current.InnerException }
+        Assert-True ($hasJsonError -and $failureError.InnerExceptions[1].Message -like '*telemetry disposal failed*') 'Expected the original projection error to stay first, followed by the disposal failure.'
+        Assert-True (@(Get-ChildItem -LiteralPath $stagingParent -Force).Count -eq 0) 'Expected failure-path disposal errors not to skip plaintext staging cleanup.'
+
+        $successPayloadPath = Join-Path $tempRoot 'success.json.gz'
+        $successError = $null
+        try { $null = Invoke-BoundedContentStorePayloadProjection -DataPath $dataRoot -PayloadOutputPath $successPayloadPath -StagingParent $stagingParent }
+        catch { $successError = $_.Exception }
+        Assert-True ($successError -is [System.AggregateException] -and $successError.Message -like '*completed but post-projection cleanup failed*telemetry dispose boom*') 'Expected success-path disposal failures to be surfaced explicitly.'
+        Assert-True ((Test-Path -LiteralPath $successPayloadPath) -and @(Get-ChildItem -LiteralPath $stagingParent -Force).Count -eq 0) 'Expected success-path disposal failures not to skip plaintext staging cleanup.'
+    }
+    finally {
+        Set-Item -Path Function:Complete-BoundedProjectionStaging -Value $originalComplete
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }

@@ -10,6 +10,7 @@ using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace DefenderReporting.Store
@@ -134,6 +135,7 @@ namespace DefenderReporting.Store
         private sealed class CveEnrichment { public string PublishedDate, Description, EpssJson, ExploitAvailableJson, NvdLastModified, NvdBaseScoreJson, NvdBaseSeverity, NvdVector, NvdKevDate, NvdActionDue, NvdRequiredAction; public string[] AffectedSoftware, Weaknesses; }
         private sealed class Cve { public string Id, Url; public double? Score; public int Severity, Exploit, BatchTitle; public CveEnrichment Enrichment; public int[] AffectedSoftware; }
         private sealed class InventoryRecord { public string Cpe, EndOfSupportStatus, EndOfSupportDate; }
+        private sealed class NormalizationOptions { public StringComparer InventoryKeyComparer, SeverityKeyComparer; public Dictionary<string, int> SeverityIndexes; }
         private struct Template { public int Software, Cve, Version, Update, UpdateAvailable, DiskStart, DiskCount, RegistryStart, RegistryCount; }
         private struct HashKey { public ulong First, Second; public HashKey(ulong first, ulong second) { First = first; Second = second; } }
         private sealed class UlongIndexMap
@@ -185,15 +187,32 @@ namespace DefenderReporting.Store
             return result;
         }
 
+        // Deletes directly instead of probing with Directory.Exists, which reports false on access errors and invalid paths.
+        // Only a confirmed-absent directory counts as success; every other failure is returned for the caller to surface.
         public static Exception TryDeleteStagingDirectory(string path)
         {
+            if (String.IsNullOrWhiteSpace(path)) return new ArgumentNullException("path");
             Exception lastError = null;
             for (var attempt = 0; attempt < 3; attempt++)
             {
-                try { if (Directory.Exists(path)) Directory.Delete(path, true); return null; }
-                catch (Exception error) when (error is IOException || error is UnauthorizedAccessException) { lastError = error; Thread.Sleep(100 * (attempt + 1)); }
+                if (attempt > 0) Thread.Sleep(100 * attempt);
+                try { Directory.Delete(path, true); return null; }
+                catch (DirectoryNotFoundException notFound)
+                {
+                    if (IsConfirmedAbsent(path)) return null;
+                    lastError = notFound;
+                }
+                catch (Exception error) { lastError = error; }
             }
-            return Directory.Exists(path) ? lastError : null;
+            return lastError;
+        }
+
+        private static bool IsConfirmedAbsent(string path)
+        {
+            try { File.GetAttributes(path); return false; }
+            catch (FileNotFoundException) { return true; }
+            catch (DirectoryNotFoundException) { return true; }
+            catch (Exception) { return false; }
         }
 
         private static CompiledNormalizationResult ProjectStaged(string dictionaryPath, string[] refPaths, string outputPath, MemoryTelemetrySession telemetry, string stageRoot)
@@ -202,7 +221,8 @@ namespace DefenderReporting.Store
             var expectedTemplates = Directory.Exists(dictionaryPath) ? File.ReadLines(Path.Combine(dictionaryPath, "contentTemplates.ndjson"), Utf8).Count() : 1024;
             var machineOverlays = ReadMachineOverlays(Path.Combine(dictionaryPath, "machines.ndjson"));
             var cveEnrichment = ReadCveEnrichment(Path.Combine(dictionaryPath, "cveEnrichment.ndjson"));
-            var inventorySource = ReadInventory(Path.Combine(dictionaryPath, "inventory.ndjson"));
+            var normalizationOptions = ReadNormalizationOptions(Path.Combine(dictionaryPath, "normalizationOptions.json"));
+            var inventorySource = ReadInventory(Path.Combine(dictionaryPath, "inventory.ndjson"), normalizationOptions.InventoryKeyComparer);
             var vendors = new List<string>(); var vendorMap = Map();
             var exploits = new List<string>(); var exploitMap = Map();
             var groups = new List<string>(); var groupMap = Map();
@@ -282,7 +302,7 @@ namespace DefenderReporting.Store
                         CveEnrichment enrichment; cveEnrichment.TryGetValue(cveId, out enrichment);
                         var affectedIndexes = new List<int>();
                         if (enrichment != null && enrichment.AffectedSoftware != null) foreach (var affected in enrichment.AffectedSoftware) { var affectedIndex = Intern(affected, affectedSoftware, affectedSoftwareMap); if (affectedIndex >= 0) affectedIndexes.Add(affectedIndex); }
-                        WriteCveFragment(cveOutput, new Cve { Id = cveId, Score = score, Severity = SeverityIndex(severity), Exploit = Intern(exploit, exploits, exploitMap), Url = url, BatchTitle = Intern(batch, batchTitles, batchMap), Enrichment = enrichment, AffectedSoftware = affectedIndexes.Count > 0 ? affectedIndexes.ToArray() : null });
+                        WriteCveFragment(cveOutput, new Cve { Id = cveId, Score = score, Severity = SeverityIndex(severity, normalizationOptions.SeverityIndexes), Exploit = Intern(exploit, exploits, exploitMap), Url = url, BatchTitle = Intern(batch, batchTitles, batchMap), Enrichment = enrichment, AffectedSoftware = affectedIndexes.Count > 0 ? affectedIndexes.ToArray() : null });
                     }
 
                     var updateName = Value(item, "ru"); var updateIndex = -1;
@@ -427,9 +447,9 @@ namespace DefenderReporting.Store
             foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var id = Value(item, "id"); if (String.IsNullOrWhiteSpace(id)) continue; result[id] = new CveEnrichment { PublishedDate = NullIfEmpty(Value(item, "pd")), Description = NullIfEmpty(Value(item, "desc")), EpssJson = RawValue(item, "ep"), AffectedSoftware = StringArray(item, "as"), ExploitAvailableJson = RawValue(item, "ea"), NvdLastModified = NullIfEmpty(Value(item, "nlm")), NvdBaseScoreJson = RawValue(item, "nbs"), NvdBaseSeverity = NullIfEmpty(Value(item, "nsv")), NvdVector = NullIfEmpty(Value(item, "nvec")), NvdKevDate = NullIfEmpty(Value(item, "nkev")), NvdActionDue = NullIfEmpty(Value(item, "ndu")), NvdRequiredAction = NullIfEmpty(Value(item, "nact")), Weaknesses = StringArray(item, "nw") }; } }
             return result;
         }
-        private static Dictionary<string, InventoryRecord> ReadInventory(string path)
+        private static Dictionary<string, InventoryRecord> ReadInventory(string path, StringComparer comparer)
         {
-            var result = new Dictionary<string, InventoryRecord>(StringComparer.Ordinal); if (!File.Exists(path)) return result;
+            var result = new Dictionary<string, InventoryRecord>(comparer); if (!File.Exists(path)) return result;
             foreach (var line in File.ReadLines(path, Utf8)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var key = Value(item, "k"); if (String.IsNullOrWhiteSpace(key)) continue; result[key] = new InventoryRecord { Cpe = NullIfEmpty(Value(item, "cpe")), EndOfSupportStatus = NullIfEmpty(Value(item, "eos")), EndOfSupportDate = NullIfEmpty(Value(item, "eod")) }; } }
             return result;
         }
@@ -441,8 +461,57 @@ namespace DefenderReporting.Store
         private static bool Boolean(JsonElement item, string name) { JsonElement value; if (!item.TryGetProperty(name, out value)) return false; return value.ValueKind == JsonValueKind.True || (value.ValueKind == JsonValueKind.String && String.Equals(value.GetString(), "true", StringComparison.OrdinalIgnoreCase)); }
         private static int Intern(string value, List<string> values, Dictionary<string, int> map) { if (String.IsNullOrEmpty(value)) return -1; int index; if (!map.TryGetValue(value, out index)) { index = values.Count; map.Add(value, index); values.Add(value); } return index; }
         private static void InternFlatArray(JsonElement item, string name, List<string> values, Dictionary<string, int> map, List<int> flattened, out int start, out int count) { start = flattened.Count; JsonElement array; if (item.TryGetProperty(name, out array)) { if (array.ValueKind == JsonValueKind.Array) foreach (var element in array.EnumerateArray()) { var index = Intern(ScalarString(element), values, map); if (index >= 0) flattened.Add(index); } else { var index = Intern(ScalarString(array), values, map); if (index >= 0) flattened.Add(index); } } count = flattened.Count - start; }
-        private static string NormalizeDate(string value) { if (String.IsNullOrWhiteSpace(value)) return String.Empty; if (value.Length >= 10 && value[4] == '-' && value[7] == '-') return value.Substring(0, 10); DateTime parsed; return DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out parsed) ? parsed.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) : value; }
-        private static int SeverityIndex(string value) { switch (value) { case "Critical": return 0; case "High": return 1; case "Medium": return 2; case "Low": return 3; case "None": return 4; default: return -1; } }
+        private static readonly Regex MonthDayYearPrefix = new Regex(@"^(\d{1,2})/(\d{1,2})/(\d{4})", RegexOptions.CultureInvariant);
+        // Mirrors Convert-FastToYmdDate/Convert-ToYmdDate: blank or unparseable values normalize to no date (never the raw text).
+        private static string NormalizeDate(string value)
+        {
+            if (value == null) return String.Empty;
+            if (value.Length >= 10 && value[4] == '-' && value[7] == '-') return value.Substring(0, 10);
+            var raw = value.Trim();
+            if (raw.Length == 0) return String.Empty;
+            if (raw.Length >= 10 && raw[4] == '-' && raw[7] == '-') return raw.Substring(0, 10);
+            var match = MonthDayYearPrefix.Match(raw);
+            int month, day, year;
+            if (match.Success && Int32.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out month) && Int32.TryParse(match.Groups[2].Value, NumberStyles.None, CultureInfo.InvariantCulture, out day) && Int32.TryParse(match.Groups[3].Value, NumberStyles.None, CultureInfo.InvariantCulture, out year) && month >= 1 && month <= 12 && day >= 1 && day <= 31)
+                return year.ToString("D4", CultureInfo.InvariantCulture) + "-" + month.ToString("D2", CultureInfo.InvariantCulture) + "-" + day.ToString("D2", CultureInfo.InvariantCulture);
+            // PowerShell's [datetime] cast parses with the invariant culture and default styles, then formats with the current culture.
+            DateTime parsed; return DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed) ? parsed.ToString("yyyy-MM-dd", CultureInfo.CurrentCulture) : String.Empty;
+        }
+        private static int SeverityIndex(string value, Dictionary<string, int> severityIndexes) { int index; return value != null && severityIndexes.TryGetValue(value, out index) ? index : -1; }
+        private static StringComparer ResolveKeyComparer(string descriptor, string optionName)
+        {
+            // Absent descriptors use the default PowerShell hashtable comparer (OrdinalIgnoreCase) that the in-process normalizer sees.
+            if (String.IsNullOrEmpty(descriptor) || descriptor == "OrdinalIgnoreCase") return StringComparer.OrdinalIgnoreCase;
+            if (descriptor == "Ordinal") return StringComparer.Ordinal;
+            if (descriptor == "InvariantCulture") return StringComparer.InvariantCulture;
+            if (descriptor == "InvariantCultureIgnoreCase") return StringComparer.InvariantCultureIgnoreCase;
+            if (descriptor.StartsWith("Culture:", StringComparison.Ordinal)) return StringComparer.Create(CultureInfo.GetCultureInfo(descriptor.Substring(8)), false);
+            if (descriptor.StartsWith("CultureIgnoreCase:", StringComparison.Ordinal)) return StringComparer.Create(CultureInfo.GetCultureInfo(descriptor.Substring(18)), true);
+            throw new InvalidDataException("Unsupported bounded normalization key comparer '" + descriptor + "' for " + optionName + ".");
+        }
+        private static NormalizationOptions ReadNormalizationOptions(string path)
+        {
+            var options = new NormalizationOptions { InventoryKeyComparer = ResolveKeyComparer(null, "inventoryKeyComparer"), SeverityKeyComparer = ResolveKeyComparer(null, "severityKeyComparer") };
+            var severityEntries = new List<KeyValuePair<string, int>> { new KeyValuePair<string, int>("Critical", 0), new KeyValuePair<string, int>("High", 1), new KeyValuePair<string, int>("Medium", 2), new KeyValuePair<string, int>("Low", 3), new KeyValuePair<string, int>("None", 4) };
+            if (File.Exists(path))
+            {
+                using (var document = JsonDocument.Parse(File.ReadAllText(path, Utf8)))
+                {
+                    var root = document.RootElement;
+                    options.InventoryKeyComparer = ResolveKeyComparer(Value(root, "inventoryKeyComparer"), "inventoryKeyComparer");
+                    options.SeverityKeyComparer = ResolveKeyComparer(Value(root, "severityKeyComparer"), "severityKeyComparer");
+                    JsonElement severities;
+                    if (root.TryGetProperty("severityIndexes", out severities) && severities.ValueKind == JsonValueKind.Object)
+                    {
+                        severityEntries.Clear();
+                        foreach (var property in severities.EnumerateObject()) severityEntries.Add(new KeyValuePair<string, int>(property.Name, property.Value.GetInt32()));
+                    }
+                }
+            }
+            options.SeverityIndexes = new Dictionary<string, int>(options.SeverityKeyComparer);
+            foreach (var entry in severityEntries) options.SeverityIndexes[entry.Key] = entry.Value;
+            return options;
+        }
         private static string ConvertCveUrl(string value) { const string marker = "/security-guidance/advisory/"; var index = value.IndexOf(marker, StringComparison.OrdinalIgnoreCase); if (index >= 0) { var id = value.Substring(index + marker.Length); if (id.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) return "https://msrc.microsoft.com/update-guide/vulnerability/" + id; } return value; }
         private static string EmptyFallback(string value, string fallback) { return String.IsNullOrWhiteSpace(value) ? fallback : value; }
         private static string NullIfEmpty(string value) { return String.IsNullOrWhiteSpace(value) ? null : value; }
