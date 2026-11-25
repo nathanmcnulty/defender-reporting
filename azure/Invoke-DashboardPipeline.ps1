@@ -16909,6 +16909,23 @@ function Invoke-BoundedContentStorePayloadProjection {
             try {
                 Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName $propertyName | ForEach-Object {
                     if ($propertyName -eq 'contentTemplates') { $templateCveId = [string]$_['c']; if (-not [string]::IsNullOrWhiteSpace($templateCveId)) { [void]$templateCveIds.Add($templateCveId) } }
+                    # Preserve PowerShell's string conversion for legacy non-string path entries.
+                    if ($propertyName -eq 'contentTemplates' -and $PayloadContract -eq 'in-process-compatible') {
+                        foreach ($pathProperty in @('dp', 'rp')) {
+                            $pathToken = $_[$pathProperty]
+                            if ($null -eq $pathToken) { continue }
+                            $requiresConversion = if ($pathToken -is [Newtonsoft.Json.Linq.JArray]) {
+                                foreach ($pathItem in $pathToken) {
+                                    if ($pathItem.Type -notin @([Newtonsoft.Json.Linq.JTokenType]::String, [Newtonsoft.Json.Linq.JTokenType]::Null)) { $true; break }
+                                }
+                            }
+                            else { $pathToken.Type -notin @([Newtonsoft.Json.Linq.JTokenType]::String, [Newtonsoft.Json.Linq.JTokenType]::Null) }
+                            if ($requiresConversion) {
+                                $pathValues = [string[]]@(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $_ -Name $pathProperty))
+                                $_[$pathProperty] = [Newtonsoft.Json.Linq.JArray]::FromObject($pathValues)
+                            }
+                        }
+                    }
                     $writer.WriteLine($_.ToString([Newtonsoft.Json.Formatting]::None))
                 }
             }
@@ -22268,7 +22285,7 @@ function ConvertTo-NormalizedData {
         PayloadPath = $writerCloseResult.PayloadPath
     }
 }
-# ArtifactFingerprint: 1404f20dcd7e18f21cbfa824d60e0d49c7d44a299780d712f445cb989d4f25db
+# ArtifactFingerprint: 46dc20e2adeee3ed466f9b2982bad200f6bbefa4c2a3723725d00385d672d0e1
 
 
 

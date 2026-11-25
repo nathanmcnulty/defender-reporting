@@ -4627,6 +4627,23 @@ function Invoke-BoundedContentStorePayloadProjection {
             try {
                 Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName $propertyName | ForEach-Object {
                     if ($propertyName -eq 'contentTemplates') { $templateCveId = [string]$_['c']; if (-not [string]::IsNullOrWhiteSpace($templateCveId)) { [void]$templateCveIds.Add($templateCveId) } }
+                    # Preserve PowerShell's string conversion for legacy non-string path entries.
+                    if ($propertyName -eq 'contentTemplates' -and $PayloadContract -eq 'in-process-compatible') {
+                        foreach ($pathProperty in @('dp', 'rp')) {
+                            $pathToken = $_[$pathProperty]
+                            if ($null -eq $pathToken) { continue }
+                            $requiresConversion = if ($pathToken -is [Newtonsoft.Json.Linq.JArray]) {
+                                foreach ($pathItem in $pathToken) {
+                                    if ($pathItem.Type -notin @([Newtonsoft.Json.Linq.JTokenType]::String, [Newtonsoft.Json.Linq.JTokenType]::Null)) { $true; break }
+                                }
+                            }
+                            else { $pathToken.Type -notin @([Newtonsoft.Json.Linq.JTokenType]::String, [Newtonsoft.Json.Linq.JTokenType]::Null) }
+                            if ($requiresConversion) {
+                                $pathValues = [string[]]@(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $_ -Name $pathProperty))
+                                $_[$pathProperty] = [Newtonsoft.Json.Linq.JArray]::FromObject($pathValues)
+                            }
+                        }
+                    }
                     $writer.WriteLine($_.ToString([Newtonsoft.Json.Formatting]::None))
                 }
             }

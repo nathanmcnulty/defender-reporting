@@ -196,6 +196,7 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-CompiledBoundedContentNormalizationPipeDelimitedKeyParity'; SuccessMessage = 'Compiled pipe-delimited lookup key parity checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationRequiresStagedFragment'; SuccessMessage = 'Compiled required staged fragment checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationRawPayloadParity'; SuccessMessage = 'Compiled bounded raw payload parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationNonStringPathParity'; SuccessMessage = 'Compiled bounded non-string path parity checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationScoreParity'; SuccessMessage = 'Compiled bounded CVSS score parity checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationMachineInfoParity'; SuccessMessage = 'Compiled bounded machine-info parity checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationHighCardinalityContract'; SuccessMessage = 'Compiled bounded high-cardinality payload contract checks passed.' }

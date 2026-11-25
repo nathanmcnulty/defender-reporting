@@ -2583,6 +2583,47 @@ function Test-CompiledBoundedContentNormalizationRawPayloadParity {
     finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 }
 
+function Test-CompiledBoundedContentNormalizationNonStringPathParity {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-path-values-' + [guid]::NewGuid().ToString('N'))
+    try {
+        [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+        Initialize-CompiledRawPayloadParityStore -DataPath $tempRoot
+        $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $tempRoot
+        $dictionary = [Newtonsoft.Json.Linq.JObject]::Parse((Read-GzipTextFile -Path $dictionaryPath))
+        $templates = $dictionary['contentTemplates']
+        $templates[0]['dp'] = [Newtonsoft.Json.Linq.JArray]::Parse('[true,false,9.0,1e2,0,{"key":"value"},["nested"],null,"C:\\\\path","path-high-surrogate"]')
+        $templates[0]['rp'] = [Newtonsoft.Json.Linq.JArray]::Parse('[false,2.5,null,"HKLM","path-low-surrogate"]')
+        $templates[1]['dp'] = [Newtonsoft.Json.Linq.JValue]::new($true)
+        $templates[1]['rp'] = [Newtonsoft.Json.Linq.JValue]::new(2.5)
+        $templates[2]['dp'] = [Newtonsoft.Json.Linq.JObject]::Parse('{"first":"one","second":2}')
+        $templates[2]['rp'] = [Newtonsoft.Json.Linq.JArray]::Parse('["2026-07-10T12:34:56Z","HKLM"]')
+        $templates[3]['dp'] = [Newtonsoft.Json.Linq.JArray]::Parse('[null,"","  ","path-standalone-surrogate"]')
+        $templates[3]['rp'] = [Newtonsoft.Json.Linq.JValue]::CreateNull()
+        $dictionaryJson = $dictionary.ToString([Newtonsoft.Json.Formatting]::None).Replace('"path-high-surrogate"', '"\ud800"').Replace('"path-low-surrogate"', '"\udc00"').Replace('"path-standalone-surrogate"', '"\ud800"')
+        Write-GzipTextFile -Path $dictionaryPath -Content $dictionaryJson
+
+        $legacyPath = Join-Path $tempRoot 'legacy.json.gz'
+        $compiledPath = Join-Path $tempRoot 'compiled.json.gz'
+        $null = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'legacy.json') -PayloadOutputPath $legacyPath -Machines @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DisableCompiledContentNormalization
+        $compiled = ConvertTo-NormalizedData -DataPath $tempRoot -VulnOutputPath (Join-Path $tempRoot 'compiled.json') -PayloadOutputPath $compiledPath -Machines @{} -SkipObservedWindowMerge -ConsumeLookupsOnPayloadClose -UseExperimentalCompiledSmallPayload
+        Assert-True ($null -ne $compiled.CompiledMemoryTelemetry) 'Expected the experimental compiled path to process non-string path entries.'
+        $legacyPayload = (Read-GzipTextFile -Path $legacyPath) | ConvertFrom-Json -Depth 30
+        $compiledPayload = (Read-GzipTextFile -Path $compiledPath) | ConvertFrom-Json -Depth 30
+        $legacyPaths = ConvertTo-Json -InputObject $legacyPayload.lookups.diskPaths -Depth 20 -Compress
+        $compiledPaths = ConvertTo-Json -InputObject $compiledPayload.lookups.diskPaths -Depth 20 -Compress
+        Assert-True ($legacyPaths -ceq $compiledPaths) ("Expected non-string disk paths to use PowerShell conversion.`nlegacy: {0}`ncompiled: {1}" -f $legacyPaths, $compiledPaths)
+        Assert-True ([System.Collections.StructuralComparisons]::StructuralEqualityComparer.Equals((Read-GzipBytesFile -Path $legacyPath), (Read-GzipBytesFile -Path $compiledPath))) 'Expected non-string path inputs to preserve exact in-process payload bytes.'
+        $compactPath = Join-Path $tempRoot 'compact.json.gz'
+        $null = Invoke-BoundedContentStorePayloadProjection -DataPath $tempRoot -PayloadOutputPath $compactPath -Machines @{} -PayloadContract 'high-cardinality-compact'
+        $compact = (Read-GzipTextFile -Path $compactPath) | ConvertFrom-Json -Depth 30
+        Assert-True (@($compact.lookups.diskPaths) -ccontains 'true' -and @($compact.lookups.diskPaths) -ccontains '9.0' -and @($compact.lookups.diskPaths) -cnotcontains 'True') 'Expected high-cardinality path values to retain the compact contract.'
+    }
+    finally { if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+
 function Test-CompiledBoundedContentNormalizationScoreParity {
     [CmdletBinding()]
     param()
