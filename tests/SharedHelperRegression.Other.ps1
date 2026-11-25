@@ -253,6 +253,35 @@ function Test-FunctionAppWriteOutputNoEnumeratePreservesJObject {
     Assert-True ((Get-VulnPropertyValue -InputObject $observed[0] -Name 'ob') -eq $true) 'Expected Function App Write-Output -NoEnumerate to preserve compact boolean properties.'
 }
 
+function Test-FunctionExecutionInvocationDoesNotReplay {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseApprovedVerbs', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidOverwritingBuiltInCmdlets', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseSingularNouns', '', Justification = 'Local network-free test doubles preserve production call signatures and cannot mutate external state.')]
+    [CmdletBinding()]
+    param()
+    $path = Join-Path (Split-Path $PSScriptRoot -Parent) 'build/Invoke-AzureDeploymentValidation.ps1'
+    $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$null)
+    $node = $ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Start-FunctionExecution'}, $false)
+    . ([scriptblock]::Create($node.Extent.Text))
+    $calls = [Collections.Generic.List[string]]::new()
+    function Write-ValidationLogLine { param($Message,$ForegroundColor) $calls.Add($Message) }
+    function Start-Sleep { param($Seconds) }
+    function Wait-FunctionHostReady { param($HostName,$MasterKey,$TimeoutMinutes) }
+    function Wait-FunctionAdminFunctionReady { param($HostName,$MasterKey,$TimeoutMinutes) }
+    $posts = [ref]0
+    function Invoke-FunctionAdminRequest { param($Method,$HostName,$MasterKey,$Path,$Body) $posts.Value++;if($posts.Value -eq 1){throw 'response lost after accepted POST'};[pscustomobject]@{StatusCode=202} }
+    $failure=$null
+    try { $null=Start-FunctionExecution -HostName 'test.invalid' -MasterKey 'test-only' } catch {$failure=$_}
+    Assert-True ($posts.Value -eq 1 -and $null -ne $failure -and $failure.Exception.Message -like '*Reconcile*no retry*') 'Uncertain non-idempotent POST must stop after one attempt, not replay a mutation.'
+    $postObserved=[ref]([datetime]::MinValue)
+    function Invoke-FunctionAdminRequest { param($Method,$HostName,$MasterKey,$Path,$Body) $posts.Value++;$postObserved.Value=[datetime]::UtcNow;[pscustomobject]@{StatusCode=202} }
+    $start=Start-FunctionExecution -HostName 'test.invalid' -MasterKey 'test-only'
+    Assert-True ($start -is [datetime] -and $start.Kind -eq [DateTimeKind]::Utc -and $start -le $postObserved.Value) 'Invocation timestamp must be a single real UTC DateTime recorded before POST.'
+    Assert-True ($calls[0] -like 'Submitting one Function App invocation at*') 'Invocation intent must be logged before the transport call.'
+}
+
 function Test-GetBlobListPagination {
     [CmdletBinding()]
     param()

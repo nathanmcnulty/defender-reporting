@@ -25,10 +25,13 @@ async function exerciseAdmin(page, guard, timeout) {
         const originalMode = remediationReportMode;
         let originalDownload;
         let downloadHookCaptured = false;
+        let originalHeaderCapture;
+        let headerHookCaptured = false;
         const hadSkipWarning = Object.prototype.hasOwnProperty.call(window, '__skipPdfExportPageWarning');
         const originalSkipWarning = window.__skipPdfExportPageWarning;
         const results = [];
         const need = (value, reason) => { if (!value) throw new Error(reason); };
+        const checkpoint = (name, state, report = null, counts) => window.__issue70?.checkpoint?.(name, state, report, null, counts);
         const settle = async predicate => {
             const start = performance.now();
             while (!predicate()) {
@@ -42,9 +45,11 @@ async function exerciseAdmin(page, guard, timeout) {
             && document.getElementById(report + '-section')?.getAttribute('aria-busy') !== 'true';
         const apply = async state => {
             const start = performance.now();
+            checkpoint('admin-filter', 'start', activeReportId);
             filterState = finalizeFilterState(cloneFilterState(state));
             applyFilters();
             await settle(() => ready(activeReportId));
+            checkpoint('admin-filter', 'completed', activeReportId);
             return performance.now() - start;
         };
         try {
@@ -58,10 +63,29 @@ async function exerciseAdmin(page, guard, timeout) {
             need(filteredData.length > 0 && filteredData.length <= 250, 'Selected device PDF scope must have 1-250 source rows.');
             const representativeRows = filteredData.length;
             const runtimeStart = performance.now();
+            checkpoint('admin-runtime', 'start');
             await ensurePdfExportRuntimeLoaded();
+            checkpoint('admin-runtime', 'completed');
+            if (typeof window.__issue70?.checkpoint === 'function') {
+                originalHeaderCapture = capturePdfHeaderImage;
+                headerHookCaptured = true;
+                capturePdfHeaderImage = async function(...args) {
+                    checkpoint('admin-pdf-header', 'start', activeReportId);
+                    try {
+                        const result = await originalHeaderCapture.apply(this, args);
+                        checkpoint('admin-pdf-header', 'completed', activeReportId);
+                        return result;
+                    } catch (error) {
+                        checkpoint('admin-pdf-header', 'failed', activeReportId);
+                        throw error;
+                    }
+                };
+            }
             const pdfRuntimeLoadMs = performance.now() - runtimeStart;
             const librariesStart = performance.now();
+            checkpoint('admin-libraries', 'start');
             await loadPdfLibraries();
+            checkpoint('admin-libraries', 'completed');
             const pdfLibrariesLoadMs = performance.now() - librariesStart;
             originalDownload = downloadPdfDocument;
             downloadHookCaptured = true;
@@ -74,8 +98,10 @@ async function exerciseAdmin(page, guard, timeout) {
                 need(scope !== 'empty' || filteredData.length === 0, 'Empty filter broadened scope.');
                 for (const report of reports) {
                     const switchStart = performance.now();
+                    checkpoint('admin-switch', 'start', report);
                     selectReportById(report);
                     await settle(() => ready(report));
+                    checkpoint('admin-switch', 'completed', report);
                     const switchMs = performance.now() - switchStart;
                     let detailMs = null;
                     let detailKind = scope === 'empty' ? 'empty-scope' : 'no-matching-data';
@@ -92,12 +118,14 @@ async function exerciseAdmin(page, guard, timeout) {
                     const detailRow = usesModal ? section.querySelector('tbody tr[data-row-index]') : null;
                     if (scope === 'representative' && detailRow) {
                         const detailStart = performance.now();
+                        checkpoint('admin-detail', 'start', report);
                         // Exercise the real delegated row handler, including its
                         // report-specific payload mapping and deferred rendering.
                         detailRow.click();
                         await settle(() => document.getElementById('detailModal').classList.contains('active')
                             && !document.getElementById('modalBody').querySelector('.loading'));
                         detailMs = performance.now() - detailStart;
+                        checkpoint('admin-detail', 'completed', report);
                         detailKind = 'modal';
                         closeModal();
                     } else if (scope === 'representative' && !usesModal) {
@@ -110,7 +138,15 @@ async function exerciseAdmin(page, guard, timeout) {
                     // Retain the real exporter, html2canvas, pdfmake layout and
                     // fonts. Replace only the final user download with getBuffer.
                     downloadPdfDocument = async document => {
-                        const buffer = await getPdfBuffer(document, timeoutMs);
+                        checkpoint('admin-pdf-buffer', 'start', report);
+                        let buffer;
+                        try {
+                            buffer = await getPdfBuffer(document, timeoutMs);
+                            checkpoint('admin-pdf-buffer', 'completed', report);
+                        } catch (error) {
+                            checkpoint('admin-pdf-buffer', 'failed', report);
+                            throw error;
+                        }
                         const bytes = new Uint8Array(buffer);
                         const header = String.fromCharCode(...bytes.subarray(0, 5));
                         const tail = String.fromCharCode(...bytes.subarray(Math.max(0, bytes.length - 128)));
@@ -119,7 +155,9 @@ async function exerciseAdmin(page, guard, timeout) {
                         pdf = { bytes: bytes.length, sha256: Array.from(new Uint8Array(hash), value => value.toString(16).padStart(2, '0')).join('') };
                     };
                     const pdfStart = performance.now();
+                    checkpoint('admin-pdf', 'start', report, { sourceRows: filteredData.length, reportRows });
                     await exportToPDF();
+                    checkpoint('admin-pdf', 'completed', report);
                     need(pdf && !pdfExportInProgress, 'Real PDF export failed or did not restore controls.');
                     need(before === JSON.stringify(cloneFilterState(filterState)) && activeReportId === report, 'PDF changed selected scope.');
                     const summaryCards = JSON.parse(JSON.stringify(buildDashboardValidationSnapshot().summaryCards));
@@ -129,6 +167,7 @@ async function exerciseAdmin(page, guard, timeout) {
             }
             return { restored: true, representativeRows, pdfLibrarySourceRows: representativeRows, filterMs, pdfRuntimeLoadMs, pdfLibrariesLoadMs, pdfPageWarningSuppressed: true, reports: results, detailScope: 'All three modal report families when matching data exists; device-report inline detail cost is included in report switching. Missing detail data is labelled explicitly.', pdfScope: 'Real PDF bytes/layout; final user download replaced by getBuffer; no visual/readability or semantic-content proof.' };
         } finally {
+            if (headerHookCaptured) capturePdfHeaderImage = originalHeaderCapture;
             if (downloadHookCaptured) downloadPdfDocument = originalDownload;
             remediationReportMode = originalMode;
             if (hadSkipWarning) window.__skipPdfExportPageWarning = originalSkipWarning;

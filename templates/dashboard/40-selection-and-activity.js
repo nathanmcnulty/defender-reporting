@@ -410,7 +410,9 @@ function applyDerivedVulnerabilityFields(rows) {
         v._remediationDate = remediationEvidence ? lastSeenDate : '';
         v._remediationString = buildRemediationString(v);
         v._environmentFirstSeenDate = environmentFirstSeenDate;
-        v._issueKey = null;
+        // Release scratch retained by older cache/worker rows without adding
+        // an unused property to rows that never stored it.
+        if (Object.hasOwn(v, '_issueKey')) v._issueKey = null;
         v._deviceFilterKey = v.DeviceId || v.DeviceName || '';
         v._deviceSearchText = `${v.DeviceName || ''} ${v.DeviceId || ''}`.toLowerCase();
         v._normalizedGroup = normalizeGroupName(v.RbacGroupName);

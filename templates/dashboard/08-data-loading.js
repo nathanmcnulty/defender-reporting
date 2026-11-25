@@ -525,7 +525,7 @@ async function denormalizeAllVulns(options = {}) {
             _lastSeenDate: lastSeen,
             RecommendedSecurityUpdate: updateName,
             _index: i,
-            _issueKey: issueKey,
+            _environmentFirstSeenDate: '',
             // Derived fields (inlined, using pre-computed device values)
             _machineLastSeenDate: machineLastSeen,
             _latestActivityDate: latestActivity,
@@ -546,12 +546,22 @@ async function denormalizeAllVulns(options = {}) {
 
     vulnerabilityData.length = rowCount;
 
-    // Second pass: assign _environmentFirstSeenDate (uses stored _issueKey)
+    // Recompute the temporary issue identity from the original references.
+    // Reserve the final date in the literal instead of retaining a scratch
+    // property and adding a new property to every completed row.
     const totalDenormalizeWork = rawCount + vulnerabilityData.length;
     for (let i = 0; i < vulnerabilityData.length; i++) {
         const v = vulnerabilityData[i];
-        v._environmentFirstSeenDate = earliestFirstSeenByIssue.get(v._issueKey) || v._firstSeenDate;
-        v._issueKey = null;
+        const rawIndex = v._index;
+        const rawRow = isColumnar ? null : rawVulns[rawIndex];
+        const cveIdx = isColumnar ? cCol[rawIndex] : rawRow[1];
+        const swIdx = isColumnar ? sCol[rawIndex] : rawRow[2];
+        const verIdx = isColumnar ? vCol[rawIndex] : rawRow[3];
+        const versionIdentity = versionIdentities.indices[verIdx] ?? versionIdentities.emptyId;
+        const issueKey = numericIssueKeys
+            ? (cveIdentities.indices[cveIdx] * softwareRadix + softwareIdentities.indices[swIdx]) * versionRadix + versionIdentity
+            : cveIdentities.indices[cveIdx] + ':' + softwareIdentities.indices[swIdx] + ':' + versionIdentity;
+        v._environmentFirstSeenDate = earliestFirstSeenByIssue.get(issueKey) || v._firstSeenDate;
 
         qualitySummary.totalRecords++;
         const deviceKey = getDeviceIdentityKey(v);
@@ -689,6 +699,21 @@ function materializeRow(v) {
     return v;
 }
 
+// Keep the serialized bytes and decoded text out of the row-building frame.
+// denormalizeInWorker has already terminated the worker before resolving.
+function readWorkerPayload(result) {
+    if (!result.jsonUtf8) return result;
+    const bytes = result.jsonUtf8;
+    result.jsonUtf8 = null;
+    const decodeStart = performance.now();
+    const text = new TextDecoder().decode(bytes);
+    recordDashboardPhaseTiming('mainDecodeMs', performance.now() - decodeStart);
+    const parseStart = performance.now();
+    const data = JSON.parse(text);
+    recordDashboardPhaseTiming('mainParseMs', performance.now() - parseStart);
+    return { rows: null, lookups: data.lookups, rawVulns: data.vulns };
+}
+
 /**
  * Denormalize with Worker + IndexedDB caching.
  * Falls back to main-thread denormalization on any failure.
@@ -751,7 +776,7 @@ async function denormalizeWithCaching() {
         const label = compBytes ? 'decompressing' : 'denormalizing';
         logDebug(label, compBytes ? '(compressed bytes via Worker)' : getRawVulnCount(), 'records via Web Worker...');
         const startTime = performance.now();
-        const result = await denormalizeInWorker(compBytes);
+        const result = readWorkerPayload(await denormalizeInWorker(compBytes));
         if (result.lookups) lookups = result.lookups;
         if (result.rawVulns) rawVulns = result.rawVulns;
         if (result.skippedInvalidRows > 0) {
