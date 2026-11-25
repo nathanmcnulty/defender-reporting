@@ -9,7 +9,7 @@ This is a priority order, not a release schedule. Finish the current work and it
 - Self-contained HTML, hosted split assets, and Dual packaging remain supported. The hosted app should not become a requirement for opening an offline report.
 - Filtering and flexible reporting are core features. PDF export should use the selected report and page filters, including the date window.
 - Keep the optimized pipeline and existing data contracts unless evidence supports a focused change. A working pipeline does not need a new architecture to improve the dashboard.
-- The owner's public lab data and CI-generated demo PDFs are intentional demonstrations. That does not make another admin's tenant data public by default.
+- The public demo and CI-generated demo PDFs are intentional demonstrations. Demo data needs explicit approval for public release; another admin's tenant data is not public by default.
 - Keep deployment, routine operation, and troubleshooting understandable without requiring admins to learn the repository's internal test machinery.
 
 ## 1. Finish current work and review the baseline
@@ -84,7 +84,7 @@ issues retain their own acceptance criteria.
 | PRs #109, #110 and #115 | Merged. #110 retained the measured worker-transfer and PDF changes. | Keep their measurement limits with the evidence; full-scale browser acceptance is still open. |
 | PR #111 | Closed; the default-off experiment had no measured benefit. | The [design record](https://github.com/nathanmcnulty/defender-reporting/blob/dc6afaf9c2427ea257f36a546f9885d57a022ff3/docs/streamed-scratch-candidate.md) remains on the retained experiment branch; revisit only with a measured candidate. |
 | #92 | Closed after a successful live Function-host export and dashboard generation on PowerShell 7.6. | Automation-host validation remains separate; no live Automation receipt was obtained. |
-| #68 | `main` history was cleaned, but existing release tags still retain old history and `demo-data` remains public. | Decide whether to rewrite release tags and whether the demo should use approved demo-tenant data, synthetic data or private storage. |
+| #68 | The public demo workflow is manually disabled; existing `demo-data` and release-tag history remain public. | Decide whether to rewrite release tags and whether the demo should use approved demo-tenant data, synthetic data or private storage. |
 | #67 / #69 / #70 | #67 is closed; #69 and #70 remain open. | Preserve their separate Automation and full-scale browser acceptance gates. |
 
 ### Recommendations
@@ -96,7 +96,7 @@ issues retain their own acceptance criteria.
 
 **Code and repository reduction**
 
-- The daily demo now force-pushes one orphan snapshot to `demo-data`; outputs are untracked on `main`. With owner approval, `main` and all retained non-demo branches were moved onto cleaned histories, and merged or superseded branches were deleted. A fresh `main`-only clone without tags is 9.69 MiB versus about 364 MiB before the rewrite.
+- The demo workflow, currently manually disabled, is configured to force-push one orphan snapshot to `demo-data`; outputs are untracked on `main`. With owner approval, `main` and all retained non-demo branches were moved onto cleaned histories, and merged or superseded branches were deleted. A fresh `main`-only clone without tags is 9.69 MiB versus about 364 MiB before the rewrite.
 - The eight existing release tags were not rewritten and still retain old history, so ordinary clones that fetch tags may remain large. GitHub pull-request references and forks can also retain copies. The public demo snapshot is not sanitized; #68 remains open.
 - *Done:* dated evidence moved to `docs/archive/` and the chat replay removed. `docs/performance-baselines.md` stays because the PR template links it.
 - *Done:* the runner now dot-sources seven `tests/SharedHelperRegression.<Area>.ps1` fragments. Both `Measure-*` scripts stay for now: `Invoke-BenchmarkSeries.ps1` and the performance playbook still use the branch benchmark, and #69/#70 remain open.
