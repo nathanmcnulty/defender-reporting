@@ -138,20 +138,20 @@ function Get-PowerShellArtifactFingerprint {
     }
 
     $builder = [System.Text.StringBuilder]::new()
-    [void]$builder.AppendLine("artifact:$($manifest.ArtifactName)")
+    [void]$builder.Append("artifact:$($manifest.ArtifactName)`n")
     # The output path is part of the trust contract so a renamed or moved generated
     # artifact must be rebuilt instead of silently reusing a fingerprint from a
     # different destination.
-    [void]$builder.AppendLine("output:$($manifest.OutputRelativePath)")
-    [void]$builder.AppendLine("build:$((Get-RepoRelativeDisplayPath -Path $BuildScriptPath -RepoRoot $RepoRoot))")
-    [void]$builder.AppendLine("build-hash:$(Get-FileContentSha256Hex -Path $BuildScriptPath)")
-    [void]$builder.AppendLine("manifest-hash:$(Get-FileContentSha256Hex -Path $manifest.ManifestPath)")
+    [void]$builder.Append("output:$($manifest.OutputRelativePath)`n")
+    [void]$builder.Append("build:$((Get-RepoRelativeDisplayPath -Path $BuildScriptPath -RepoRoot $RepoRoot))`n")
+    [void]$builder.Append("build-hash:$(Get-FileContentSha256Hex -Path $BuildScriptPath)`n")
+    [void]$builder.Append("manifest-hash:$(Get-FileContentSha256Hex -Path $manifest.ManifestPath)`n")
 
     for ($index = 0; $index -lt $manifest.SourceFiles.Count; $index++) {
         $sourcePath = $manifest.SourceFiles[$index]
         $relativePath = $manifest.SourceRelativePaths[$index]
-        [void]$builder.AppendLine("source:$relativePath")
-        [void]$builder.AppendLine("source-hash:$(Get-FileContentSha256Hex -Path $sourcePath)")
+        [void]$builder.Append("source:$relativePath`n")
+        [void]$builder.Append("source-hash:$(Get-FileContentSha256Hex -Path $sourcePath)`n")
     }
 
     return Get-TextSha256Hex -Text $builder.ToString()

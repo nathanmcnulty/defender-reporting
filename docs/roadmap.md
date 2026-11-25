@@ -74,15 +74,53 @@ These are options to evaluate after the work above, not selected implementations
 - **Richer remediation guidance:** Add patch lineage or minimum/latest-fix claims only with a reliable supporting data source.
 - **Azure deployment wrapper:** Review the separate wrapper after the standalone pipeline and dashboard work is settled. Keep wrapper changes out of this roadmap's initial implementation work.
 
+## Triage snapshot, November 24, 2026
+
+Based on main `535eafb`. Recommendations only; each merge, close or live run remains an owner decision.
+
+| Item | State | Recommendation |
+| --- | --- | --- |
+| PR #115 | Based on main, merges cleanly, CI green. Fixes a non-idempotent POST retry and early success in Function validation. | Mark ready and merge with a non-closing reference to #92. The live #92 gate does not need to block a source-only fix. |
+| PR #109 | Diagnostics only, merges cleanly, CI green. Base of #110/#111. | Merge, or fold into #110. |
+| PR #110 | Mixed results: median family peak lower, warm init about 2% slower, full scale still exceeds 2 GiB. PDF header-clone isolation is an independent robustness win. | Split out the PDF header isolation plus parity tests and merge those. Accept or drop the worker byte transfer on its measurements. Avoid committing the 3,094-line fixture if it can be generated. |
+| PR #111 | Default-off experiment with no measured benefit. Has a content conflict with `main` in `azure/Invoke-DashboardPipeline.ps1` (the only conflicted file; it is the generated runbook built by `build/azure/Build-Runbook.ps1`, so regenerating it after rebasing resolves the conflict). | Close and keep `docs/streamed-scratch-candidate.md` as the record. Reopen only with a measured candidate. |
+| #92 | .NET 8 support ended November 10, 2026. Source already targets PowerShell 7.6. | Highest priority: hosts deployed on 7.4 are now unsupported. Schedule the live gate. |
+| #68 | Workflow containment is done. The historical-retention decision is pending. | Decide together with the repository-size item below, then close. |
+| #67 / #69 / #70 | Many measurement rounds; still blocked by fixed 400 MB (Automation) and 2 GiB (browser) ceilings. | Record a supported-scale envelope and the architecture options below before more campaigns. |
+
+### Recommendations
+
+**Reliability**
+
+- *Done on this branch:* generated-artifact fingerprints used `StringBuilder.AppendLine`, whose newline is platform-specific, and the repository had no `.gitattributes`. Windows builds therefore disagreed with the CI sync job. Fingerprints now use explicit LF and checkouts pin LF. Linux values are unchanged.
+- Pin `PSScriptAnalyzer` and `Az.Accounts` versions in workflows, and cache them, instead of installing the latest on every run. `jq` is already on `ubuntu-latest`, so the `apt-get` step can go.
+- Stop committing the generated 1 MB runbook (`azure/Invoke-DashboardPipeline.ps1`) from a bot push. It causes conflicts in every stacked branch (for example #111). Build it in the release package and have setup consume the package, or at least check for drift in CI instead of auto-committing.
+- *Done:* versions pinned and cached, `apt-get` removed, the runbook bot workflow retired, and CI now fails on generated-artifact drift.
+
+**Code and repository reduction**
+
+- About 320 of the repository's 364 MiB of history is the daily demo commit (`exports/*.gz` and `VulnerabilityDashboard.html`). Publish the demo to GitHub Pages or a force-pushed orphan branch instead of `main`. Purging history (part of the #68 decision) would shrink clones by roughly 90%.
+- *Done:* the daily demo now force-pushes a single orphan commit to the `demo-data` branch and outputs are untracked on `main`. The history purge still needs owner sign-off.
+- Move dated evidence (`docs/handoffs/`, `docs/performance-baselines.md` at 142 KB, dated reviews) to `docs/archive/` or release assets. Also move the root chat-replay JSON. Current guidance should stay short.
+- *Done:* dated evidence moved to `docs/archive/` and the chat replay removed. `docs/performance-baselines.md` stays because the PR template links it.
+- Split `tests/Run-SharedHelperRegression.ps1` (495 KB) by area. Retire one-off campaign scripts such as `Measure-BranchVsMainBenchmark.ps1` and `Measure-RunbookInputLoadExperiment.ps1` once their issues close.
+- *Done:* the runner now dot-sources seven `tests/SharedHelperRegression.<Area>.ps1` fragments. Both `Measure-*` scripts stay for now: `Invoke-BenchmarkSeries.ps1` and the performance playbook still use the branch benchmark, and #67 is open.
+
+**Performance (structural options for #67/#69/#70)**
+
+- *Browser:* the full-scale failure comes from materializing about 1.2M rows client-side. Precompute per-report aggregates during generation and lazy-load row partitions (by device or CVE) for detail and PDF views. This addresses the 2 GiB ceiling directly instead of trimming allocations.
+- *Normalization:* the 19,677-row replay allocates about 4.1 GB cumulatively, which points to PowerShell object churn. Extending the existing compiled projector (`CompiledVulnContentProjector.ps1`) to cover the enrichment join is the most promising lever for #69.
+- *Runtime:* the 400 MB Automation sandbox limit drives much of the import/replay effort. A Container Apps job or Flex Function with configurable memory would remove that constraint. Evaluate cost and operations before investing further under the 400 MB cap.
+
 ## Keeping this useful
 
-The [November 6 reliability reconciliation](reliability-review-2026-11-06.md)
+The [November 6 reliability reconciliation](archive/reliability-review-2026-11-06.md)
 starts from main after #105, records the distinct #99–#104 correctness gaps,
 preserves #98's demo/fork-protection ownership, and separates accepted full-scale
 PackageOnly evidence from the remaining #67/#69 import/replay and #92 live gates.
 Its source checks do not close those acceptance gates.
 
-The [subsequent browser/admin validation](browser-admin-validation-2026-11-06.md)
+The [subsequent browser/admin validation](archive/browser-admin-validation-2026-11-06.md)
 records corrected Hosted/self-contained PDF checks, the 19,677-row scoped admin
 experience and the measured cached-row refresh improvement. It retains mixed
 switch timings and full-scale memory failures. The next performance work must
@@ -92,4 +130,4 @@ and #92 runtime acceptance remain separate work with their existing gates.
 
 Use issues for concrete work and this document for order and product direction. Link verified review findings as they arrive; do not turn every idea into a promised feature. Update the roadmap when a decision or accepted result changes the next useful step.
 
-Planning snapshot: current main `69e5cfd53e5f1e6c8b762c86cb5b3967b3359e98`, open issues #67/#68/#69/#70/#92, and draft PR #98. The [October import/Dual measurements](import-dual-measurements-2026-10-28.md), [dashboard review](dashboard-performance-review.md), and [test guide](../tests/README.md) provide context with their own evidence limits. Older observations are not current performance guarantees, and this roadmap does not close any issue.
+Planning snapshot: current main `69e5cfd53e5f1e6c8b762c86cb5b3967b3359e98`, open issues #67/#68/#69/#70/#92, and draft PR #98. The [October import/Dual measurements](archive/import-dual-measurements-2026-10-28.md), [dashboard review](dashboard-performance-review.md), and [test guide](../tests/README.md) provide context with their own evidence limits. Older observations are not current performance guarantees, and this roadmap does not close any issue.

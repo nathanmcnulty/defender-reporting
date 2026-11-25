@@ -186,9 +186,9 @@ function Get-DashboardTemplatePublishState {
             $file.FullName
         }
 
-        [void]$fingerprintBuilder.AppendLine("path:$relativePath")
-        [void]$fingerprintBuilder.AppendLine("sha256:$contentSha256")
-        [void]$fingerprintBuilder.AppendLine("contentType:$contentType")
+        [void]$fingerprintBuilder.Append("path:$relativePath`n")
+        [void]$fingerprintBuilder.Append("sha256:$contentSha256`n")
+        [void]$fingerprintBuilder.Append("contentType:$contentType`n")
 
         [PSCustomObject]@{
             Path = $relativePath

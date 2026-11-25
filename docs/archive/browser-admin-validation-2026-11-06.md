@@ -170,7 +170,7 @@ report-tour workload. Keep its results separate from the scoped workflow.
 Progress journals preserve the last observed phase if the outer guard terminates
 a run. A journal or individual PDF does not establish a pass without the complete
 containing run, unchanged input/product inventories and native cleanup proof.
-See [the test guide](../tests/README.md) for artifact receipts and semantic/visual
+See [the test guide](../../tests/README.md) for artifact receipts and semantic/visual
 review requirements. All captured content in this campaign is synthetic.
 
 ## Existing backend and runtime evidence

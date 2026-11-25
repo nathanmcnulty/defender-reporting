@@ -26,8 +26,12 @@ for (const repository of ['nathanmcnulty/defender-reporting', 'someone/fork', 'n
 assert.equal(isAllowedRepository('someone/fork', {}, 'refs/heads/main'), false);
 assert.match(yaml, /cron: '0 2 \* \* \*'/);
 assert.match(yaml, /    permissions:\n      contents: write\n      id-token: write/);
-assert.match(yaml, /node \.github\/scripts\/stage-demo-outputs\.js dashboard/);
-assert.match(yaml, /git push origin "HEAD:\$GITHUB_REF"/);
+assert.match(yaml, /node "\$GITHUB_WORKSPACE\/\.github\/scripts\/stage-demo-outputs\.js" dashboard/);
+// Demo state lives on a force-replaced orphan snapshot branch; nothing is pushed to the triggering ref.
+assert.match(yaml, /git worktree add --quiet --orphan -b demo-publish "\$RUNNER_TEMP\/demo"/);
+assert.match(yaml, /git push --force origin HEAD:refs\/heads\/demo-data/);
+assert.match(yaml, /git archive FETCH_HEAD -- exports VulnerabilityDashboard\.html \| tar -x/);
+assert.doesNotMatch(yaml, /GITHUB_REF|refs\/heads\/main\b(?!')/);
 assert.doesNotMatch(yaml, /git add|always\(\)|reports\/|Export-Pdf/i);
 assert.equal((yaml.match(/if: \$\{\{ !inputs\.dry_run \}\}/g) || []).length, 3);
 assert.match(yaml, /path: VulnerabilityDashboard\.html\n          if-no-files-found: error\n          retention-days: 30/);
