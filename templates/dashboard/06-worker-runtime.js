@@ -3,8 +3,8 @@
 // =============================================================================
 
 /**
- * Build a Worker source that decompresses (if given compressed bytes) and denormalizes.
- * When compressed bytes are provided via Transferable, pako.inflate runs off-main-thread.
+ * Inflate compressed input off-main-thread and transfer its UTF-8 bytes back.
+ * Non-compressed input retains the existing worker denormalization path.
  */
 function buildWorkerSource() {
     return `
@@ -17,29 +17,26 @@ self.onmessage = async function(e) {
 
     // If compressed data was transferred, decompress it first
     if (e.data.compressedBytes) {
-        var data;
+        var jsonUtf8;
         if (typeof DecompressionStream !== 'undefined') {
             // Native gzip decompression — significantly faster than pako
             var ds = new DecompressionStream('gzip');
             var blob = new Blob([e.data.compressedBytes]);
             var decompressedStream = blob.stream().pipeThrough(ds);
-            var text = await new Response(decompressedStream).text();
-            self.postMessage({ phase: 'workerInflateMs', duration: performance.now() - inflateStart });
-            var parseStart = performance.now();
-            data = JSON.parse(text);
+            jsonUtf8 = await new Response(decompressedStream).arrayBuffer();
         } else {
-            var decompressed = pako.inflate(e.data.compressedBytes, { to: 'string' });
-            self.postMessage({ phase: 'workerInflateMs', duration: performance.now() - inflateStart });
-            var parseStart = performance.now();
-            data = JSON.parse(decompressed);
+            var inflated = pako.inflate(e.data.compressedBytes);
+            jsonUtf8 = inflated.byteOffset === 0 && inflated.byteLength === inflated.buffer.byteLength
+                ? inflated.buffer : inflated.buffer.slice(inflated.byteOffset, inflated.byteOffset + inflated.byteLength);
         }
-        self.postMessage({ phase: 'workerParseMs', duration: performance.now() - parseStart });
-        lookups = data.lookups;
-        rawVulns = data.vulns;
+        self.postMessage({ phase: 'workerInflateMs', duration: performance.now() - inflateStart });
+        // Transfer bytes rather than cloning a parsed graph. The receiver parses
+        // only after this worker has been terminated by settle().
+        self.postMessage({ rows: null, jsonUtf8: jsonUtf8, postedAt: performance.timeOrigin + performance.now() }, [jsonUtf8]);
+        return;
     }
 
-    // For large compressed datasets, return raw data without denormalizing
-    // to avoid structured-clone memory limits on postMessage
+    // Preserve raw-data delivery for non-compressed callers requesting it.
     if (decompressOnly) {
         self.postMessage({ rows: null, lookups: lookups, rawVulns: rawVulns, postedAt: performance.timeOrigin + performance.now() });
         return;
@@ -229,10 +226,10 @@ self.onmessage = async function(e) {
 
 /**
  * Run denormalization in a Web Worker.
- * When compressedBytes is provided, decompression also runs in the Worker (off main thread).
+ * Compressed input returns transferable UTF-8 bytes for parsing after worker cleanup.
  * Falls back to main-thread if Worker is unavailable.
  * @param {Uint8Array} [compressedBytes] - Optional compressed payload bytes
- * @returns {Promise<{rows: Array, lookups?: Object, rawVulns?: Object}>}
+ * @returns {Promise<{rows: Array|null, jsonUtf8?: ArrayBuffer, lookups?: Object, rawVulns?: Object}>}
  */
 async function denormalizeInWorker(compressedBytes) {
     const operationStart = performance.now();
