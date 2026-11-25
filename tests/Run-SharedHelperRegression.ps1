@@ -193,6 +193,8 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-CompiledBoundedContentNormalizationCveEnrichmentComparerParity'; SuccessMessage = 'Compiled CVE enrichment comparer parity checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationPipeDelimitedKeyParity'; SuccessMessage = 'Compiled pipe-delimited lookup key parity checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationRequiresStagedFragments'; SuccessMessage = 'Compiled required staged fragment checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationRawPayloadParity'; SuccessMessage = 'Compiled bounded raw payload parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationHighCardinalityContract'; SuccessMessage = 'Compiled bounded high-cardinality payload contract checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationDateParity'; SuccessMessage = 'Compiled bounded date normalization parity checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationInvalidCalendarDateParity'; SuccessMessage = 'Compiled bounded invalid calendar date parity checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationCleansStagingOnFailure'; SuccessMessage = 'Compiled bounded staging cleanup checks passed.' }

@@ -4378,6 +4378,9 @@ function Get-NormalizationExecutionPlan {
         ContentTemplateCount = $contentTemplateCount
         DeviceLookupMode = if ($deviceProfileCount -ge 5000) { 'compiled-file-backed' } else { 'compact-file-backed' }
         ContentNormalizationMode = if ($compiledContentEligible) { 'compiled-bounded-standard-payload' } elseif ($requiresPartitionedContent) { 'partitioned-required' } else { 'in-process-streaming' }
+        # Stores above the in-process limit keep the accepted high-cardinality compiled payload shape; smaller stores
+        # routed to the compiled normalizer must reproduce the in-process payload shape they previously received.
+        CompiledPayloadContract = if (-not $compiledContentEligible) { $null } elseif ($requiresPartitionedContent) { 'high-cardinality-compact' } else { 'in-process-compatible' }
         DeliveryMode = $DeliveryMode
         EstimatedPrivateMemoryMb = $estimatedPrivateMemoryMb
         EstimatedWorkingSetMb = $estimatedWorkingSetMb
@@ -4525,7 +4528,8 @@ function Write-BoundedNormalizationOptions {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$StagePath,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable]$AdvancedHuntingInventoryData
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable]$AdvancedHuntingInventoryData,
+        [Parameter(Mandatory = $true)][ValidateSet('in-process-compatible', 'high-cardinality-compact')][string]$PayloadContract
     )
 
     $severityIndexByName = New-NormalizationSeverityIndexMap
@@ -4535,6 +4539,7 @@ function Write-BoundedNormalizationOptions {
         inventoryKeyComparer = Get-NormalizationKeyComparerDescriptor -Table $AdvancedHuntingInventoryData -Name 'inventory'
         severityKeyComparer = Get-NormalizationKeyComparerDescriptor -Table $severityIndexByName -Name 'severity'
         severityIndexes = $severityIndexes
+        payloadContract = $PayloadContract
     }
     [System.IO.File]::WriteAllText((Join-Path $StagePath 'normalizationOptions.json'), (ConvertTo-Json -InputObject $options -Compress -Depth 5), [System.Text.UTF8Encoding]::new($false))
 }
@@ -4571,7 +4576,9 @@ function Invoke-BoundedContentStorePayloadProjection {
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingInventoryData = @{},
         [Parameter(Mandatory = $false)][hashtable]$NvdCveData = @{},
         [Parameter(Mandatory = $false)][string[]]$RefPaths,
-        [Parameter(Mandatory = $false)][string]$StagingParent
+        [Parameter(Mandatory = $false)][string]$StagingParent,
+        # in-process-compatible reproduces the in-process payload shape; high-cardinality-compact keeps the accepted compiled shape.
+        [Parameter(Mandatory = $true)][ValidateSet('in-process-compatible', 'high-cardinality-compact')][string]$PayloadContract
     )
     Initialize-CompiledVulnContentProjector
     $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $DataPath
@@ -4597,7 +4604,7 @@ function Invoke-BoundedContentStorePayloadProjection {
             }
             finally { $writer.Dispose() }
         }
-        Write-BoundedNormalizationOptions -StagePath $stagePath -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData
+        Write-BoundedNormalizationOptions -StagePath $stagePath -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -PayloadContract $PayloadContract
         Write-BoundedNormalizationEnrichmentFragment -StagePath $stagePath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -TemplateCveIds $templateCveIds
         if ($null -eq $effectiveRefPaths -or $effectiveRefPaths.Count -eq 0) { throw 'Bounded normalization did not resolve any vulnerability reference inputs.' }
         $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $effectiveRefPaths, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry, $StagingParent)
@@ -9701,7 +9708,7 @@ function ConvertTo-NormalizedData {
             if (-not [string]::IsNullOrWhiteSpace($mergedRefPath) -and (Test-Path -LiteralPath $mergedRefPath -PathType Leaf)) { $compiledRefPaths = @($mergedRefPath) }
         }
         Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{ Kind = 'phase'; Phase = 'CompiledBoundedContentNormalization'; Message = 'Streaming high-cardinality content and enrichment inputs through the compiled bounded projector.' })
-        $compiledResult = Invoke-BoundedContentStorePayloadProjection -DataPath $DataPath -PayloadOutputPath $PayloadOutputPath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -RefPaths $compiledRefPaths
+        $compiledResult = Invoke-BoundedContentStorePayloadProjection -DataPath $DataPath -PayloadOutputPath $PayloadOutputPath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -RefPaths $compiledRefPaths -PayloadContract $executionPlan.CompiledPayloadContract
         if (Test-FileBackedNormalizationMachineLookup -Machines $Machines) { Remove-FileBackedNormalizationMachineLookup -Machines $Machines } else { $Machines.Clear() }
         $AdvancedHuntingData.Clear(); $AdvancedHuntingDeviceUsers.Clear(); $AdvancedHuntingInventoryData.Clear(); $NvdCveData.Clear()
         Invoke-FullGarbageCollection

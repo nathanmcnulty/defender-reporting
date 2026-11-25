@@ -9,6 +9,7 @@ using System.Security.Cryptography;
 using System.Runtime;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -122,20 +123,53 @@ namespace DefenderReporting.Store
         public CompiledMemoryTelemetry MemoryTelemetry { get; set; }
     }
 
-    public static class BoundedContentNormalizer
+    // Reproduces Newtonsoft.Json default string escaping (as used by the in-process payload writer): only control characters,
+// quote, backslash, U+0085, U+2028 and U+2029 are escaped, with short forms and lowercase hex; everything else is emitted raw.
+public sealed class NewtonsoftDefaultEscapingEncoder : JavaScriptEncoder
+{
+    public static readonly NewtonsoftDefaultEscapingEncoder Instance = new NewtonsoftDefaultEscapingEncoder();
+    private NewtonsoftDefaultEscapingEncoder() { }
+    public override int MaxOutputCharactersPerInputCharacter { get { return 6; } }
+    public override bool WillEncode(int unicodeScalar) { return unicodeScalar < 0x20 || unicodeScalar == 0x22 || unicodeScalar == 0x5C || unicodeScalar == 0x85 || unicodeScalar == 0x2028 || unicodeScalar == 0x2029; }
+    public override unsafe int FindFirstCharacterToEncode(char* text, int textLength) { for (var index = 0; index < textLength; index++) if (WillEncode(text[index])) return index; return -1; }
+    public override unsafe bool TryEncodeUnicodeScalar(int unicodeScalar, char* buffer, int bufferLength, out int numberOfCharactersWritten)
+    {
+        if (!WillEncode(unicodeScalar)) { return TryWriteScalarAsChar(unicodeScalar, buffer, bufferLength, out numberOfCharactersWritten); }
+        char shortForm = (char)0;
+        switch (unicodeScalar) { case 0x08: shortForm = (char)98; break; case 0x09: shortForm = (char)116; break; case 0x0A: shortForm = (char)110; break; case 0x0C: shortForm = (char)102; break; case 0x0D: shortForm = (char)114; break; case 0x22: shortForm = (char)34; break; case 0x5C: shortForm = (char)92; break; }
+        if (shortForm != (char)0) { if (bufferLength < 2) { numberOfCharactersWritten = 0; return false; } buffer[0] = (char)92; buffer[1] = shortForm; numberOfCharactersWritten = 2; return true; }
+        if (bufferLength < 6) { numberOfCharactersWritten = 0; return false; }
+        const string hex = "0123456789abcdef";
+        buffer[0] = (char)92; buffer[1] = (char)117; buffer[2] = hex[(unicodeScalar >> 12) & 0xF]; buffer[3] = hex[(unicodeScalar >> 8) & 0xF]; buffer[4] = hex[(unicodeScalar >> 4) & 0xF]; buffer[5] = hex[unicodeScalar & 0xF];
+        numberOfCharactersWritten = 6; return true;
+    }
+    private static unsafe bool TryWriteScalarAsChar(int unicodeScalar, char* buffer, int bufferLength, out int numberOfCharactersWritten)
+    {
+        var text = Char.ConvertFromUtf32(unicodeScalar);
+        if (bufferLength < text.Length) { numberOfCharactersWritten = 0; return false; }
+        for (var index = 0; index < text.Length; index++) buffer[index] = text[index];
+        numberOfCharactersWritten = text.Length; return true;
+    }
+}
+
+public static class BoundedContentNormalizer
     {
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool SetProcessWorkingSetSize(IntPtr process, IntPtr minimumWorkingSetSize, IntPtr maximumWorkingSetSize);
         private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false);
-        private static readonly JsonWriterOptions WriterOptions = new JsonWriterOptions { SkipValidation = true };
+        private static readonly JsonWriterOptions CompactWriterOptions = new JsonWriterOptions { SkipValidation = true };
+        private static readonly JsonWriterOptions InProcessCompatibleWriterOptions = new JsonWriterOptions { SkipValidation = true, Encoder = NewtonsoftDefaultEscapingEncoder.Instance };
+        // Projection is single-threaded; the active payload contract selects the string escaping used for every fragment and the final payload.
+        [ThreadStatic] private static bool inProcessCompatibleEscaping;
+        private static JsonWriterOptions WriterOptions { get { return inProcessCompatibleEscaping ? InProcessCompatibleWriterOptions : CompactWriterOptions; } }
         private sealed class Device { public string Id, Name, OsVersion, MachineInfoJson; public int Group, Platform; public int[] Tags; public bool Onboarded; }
         private sealed class MachineOverlay { public string Name, Group, Platform, OsVersion, MachineInfoJson; public string[] Tags; }
         private sealed class Software { public int Vendor; public string Name, Reference, InventoryIdentity; }
         private sealed class Update { public string Name, Id, Url; }
-        private sealed class CveEnrichment { /* String-like enrichment fields hold staged raw JSON so supplied empty or whitespace values are preserved. */ public string PublishedDate, Description, EpssJson, ExploitAvailableJson, NvdLastModified, NvdBaseScoreJson, NvdBaseSeverity, NvdVector, NvdKevDate, NvdActionDue, NvdRequiredAction; public string[] AffectedSoftware, Weaknesses; }
+        private sealed class CveEnrichment { /* String-like enrichment fields hold staged raw JSON so supplied empty or whitespace values are preserved. */ public string PublishedDate, Description, EpssJson, ExploitAvailableJson, NvdLastModified, NvdBaseScoreJson, NvdBaseSeverity, NvdVector, NvdKevDate, NvdActionDue, NvdRequiredAction, WeaknessesJson; public string[] AffectedSoftware, Weaknesses; }
         private sealed class Cve { public string Id, Url; public double? Score; public int Severity, Exploit, BatchTitle; public CveEnrichment Enrichment; public int[] AffectedSoftware; }
         private sealed class InventoryRecord { public string Cpe, EndOfSupportStatus, EndOfSupportDate; }
-        private sealed class NormalizationOptions { public StringComparer InventoryKeyComparer, SeverityKeyComparer; public Dictionary<string, int> SeverityIndexes; }
+        private sealed class NormalizationOptions { public StringComparer InventoryKeyComparer, SeverityKeyComparer; public Dictionary<string, int> SeverityIndexes; public bool InProcessCompatible; }
         private struct Template { public int Software, Cve, Version, Update, UpdateAvailable, DiskStart, DiskCount, RegistryStart, RegistryCount; }
         private struct HashKey { public ulong First, Second; public HashKey(ulong first, ulong second) { First = first; Second = second; } }
         private sealed class UlongIndexMap
@@ -165,7 +199,7 @@ namespace DefenderReporting.Store
             if (telemetry == null) throw new ArgumentNullException("telemetry");
             if (String.IsNullOrWhiteSpace(stagingParent)) throw new ArgumentNullException("stagingParent");
             var stageRoot = Path.Combine(stagingParent, "bounded-normalizer-" + Guid.NewGuid().ToString("N"));
-            return (CompiledNormalizationResult)RunWithStagingCleanup(stageRoot, () => ProjectStaged(dictionaryPath, refPaths, outputPath, telemetry, stageRoot));
+            return (CompiledNormalizationResult)RunWithStagingCleanup(stageRoot, () => { var previousEscaping = inProcessCompatibleEscaping; try { return ProjectStaged(dictionaryPath, refPaths, outputPath, telemetry, stageRoot); } finally { inProcessCompatibleEscaping = previousEscaping; } });
         }
 
         // Staged fragments contain plaintext tenant data, so the staging directory is removed on success and failure;
@@ -220,8 +254,9 @@ namespace DefenderReporting.Store
             telemetry.SetStage("template-interning");
             var expectedTemplates = Directory.Exists(dictionaryPath) ? File.ReadLines(Path.Combine(dictionaryPath, "contentTemplates.ndjson"), Utf8).Count() : 1024;
             var machineOverlays = ReadMachineOverlays(Path.Combine(dictionaryPath, "machines.ndjson"));
-            var cveEnrichment = ReadCveEnrichment(Path.Combine(dictionaryPath, "cveEnrichment.ndjson"));
             var normalizationOptions = ReadNormalizationOptions(Path.Combine(dictionaryPath, "normalizationOptions.json"));
+            var inProcessCompatible = normalizationOptions.InProcessCompatible; inProcessCompatibleEscaping = inProcessCompatible;
+            var cveEnrichment = ReadCveEnrichment(Path.Combine(dictionaryPath, "cveEnrichment.ndjson"), inProcessCompatible);
             var inventorySource = ReadInventory(Path.Combine(dictionaryPath, "inventory.ndjson"), normalizationOptions.InventoryKeyComparer);
             var vendors = new List<string>(); var vendorMap = Map();
             var exploits = new List<string>(); var exploitMap = Map();
@@ -231,11 +266,11 @@ namespace DefenderReporting.Store
             var versions = new List<string>(); var versionMap = Map();
             var dates = new List<string>(); var dateMap = Map();
             var diskPaths = new List<string>(); var diskMap = Map();
-            var registryPaths = new List<string>(); var registryMap = Map();
+            var registryPaths = new List<string>(); var registryMap = Map(); var templatePathMap = Map();
             var batchTitles = new List<string>(); var batchMap = Map();
             var affectedSoftware = new List<string>(); var affectedSoftwareMap = Map();
             var softwareMap = HashMap(expectedTemplates); var softwareCount = 0;
-            var updateMap = HashMap(expectedTemplates); var updateCount = 0;
+            var updateMap = HashMap(inProcessCompatible ? 0 : expectedTemplates); var updateCount = 0;
             var cveMap = HashMap(expectedTemplates); var cveCount = 0;
             var deviceOnboarded = new List<bool>();
             var deviceIds = new List<string>();
@@ -306,20 +341,30 @@ namespace DefenderReporting.Store
                     }
 
                     var updateName = Value(item, "ru"); var updateIndex = -1;
-                    if (!String.IsNullOrWhiteSpace(updateName) && updateName != "--") {
+                    if (inProcessCompatible) {
+                        // Mirrors Resolve-UpdateLookupIndex: its [hashtable] parameter receives a fresh copy of the index map per call, so every
+                        // eligible template appends its own update entry and whitespace-only names are retained.
+                        if (!String.IsNullOrEmpty(updateName) && updateName != "--") { updateIndex = updateCount++; WriteUpdateFragment(updateOutput, new Update { Name = updateName, Id = Value(item, "rid"), Url = Value(item, "url") }); }
+                    } else if (!String.IsNullOrWhiteSpace(updateName) && updateName != "--") {
+                        // High-cardinality compact contract: updates are interned globally by exact per-field values.
                         var updateId = Value(item, "rid"); var updateUrl = Value(item, "url"); var updateKey = GetFieldHashKey(updateName, updateId, updateUrl);
                         if (!updateMap.TryGetValue(updateKey, out updateIndex)) { updateIndex = updateCount++; updateMap.Add(updateKey, updateIndex); WriteUpdateFragment(updateOutput, new Update { Name = updateName, Id = updateId, Url = updateUrl }); }
                     }
                     int diskStart, diskCount, registryStart, registryCount;
-                    InternFlatArray(item, "dp", diskPaths, diskMap, templateDiskIndexes, out diskStart, out diskCount);
-                    InternFlatArray(item, "rp", registryPaths, registryMap, templateRegistryIndexes, out registryStart, out registryCount);
+                    if (inProcessCompatible) {
+                        AppendTemplatePathArray(item, "dp", diskPaths, templatePathMap, templateDiskIndexes, out diskStart, out diskCount);
+                        AppendTemplatePathArray(item, "rp", registryPaths, templatePathMap, templateRegistryIndexes, out registryStart, out registryCount);
+                    } else {
+                        InternFlatArray(item, "dp", diskPaths, diskMap, templateDiskIndexes, out diskStart, out diskCount);
+                        InternFlatArray(item, "rp", registryPaths, registryMap, templateRegistryIndexes, out registryStart, out registryCount);
+                    }
                     templateList.Add(new Template {
                         Software = softwareIndex, Cve = cveIndex, Version = Intern(Value(item, "ver"), versions, versionMap), Update = updateIndex,
                         UpdateAvailable = Boolean(item, "ua") ? 1 : 0, DiskStart = diskStart, DiskCount = diskCount, RegistryStart = registryStart, RegistryCount = registryCount
                     });
                 });
             }
-            foreach (var map in new[] { vendorMap, exploitMap, groupMap, platformMap, tagMap, versionMap, diskMap, registryMap, batchMap, affectedSoftwareMap }) map.Clear();
+            foreach (var map in new[] { vendorMap, exploitMap, groupMap, platformMap, tagMap, versionMap, diskMap, registryMap, templatePathMap, batchMap, affectedSoftwareMap }) map.Clear();
             softwareMap.Clear(); updateMap.Clear(); cveMap.Clear();
             GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers();
@@ -380,7 +425,13 @@ namespace DefenderReporting.Store
             using (var gzip = new GZipStream(file, CompressionLevel.Fastest, false))
             using (var writer = new Utf8JsonWriter(gzip, WriterOptions))
             {
-                writer.WriteStartObject(); writer.WriteString("vulnsFormat", "rows-v1"); writer.WritePropertyName("lookups"); writer.WriteStartObject();
+                writer.WriteStartObject(); writer.WriteString("vulnsFormat", "rows-v1");
+                if (inProcessCompatible) {
+                    // The in-process payload writer (Open-CombinedPayloadWriter) streams vulns before lookups.
+                    telemetry.SetStage("vulnerability-assembly");
+                    writer.WritePropertyName("vulns"); CopyJsonLines(writer, vulnFragment);
+                }
+                writer.WritePropertyName("lookups"); writer.WriteStartObject();
                 WriteStrings(writer, "vendors", vendors); vendors = null; WriteFixedStrings(writer, "severities", new[] { "Critical", "High", "Medium", "Low", "None" }); WriteStrings(writer, "exploitLevels", exploits); exploits = null;
                 WriteStrings(writer, "groups", groups); groups = null; WriteStrings(writer, "platforms", platforms); platforms = null; WriteStrings(writer, "tags", tags); tags = null;
                 writer.WritePropertyName("updates"); CopyJsonLines(writer, updateFragment);
@@ -391,11 +442,14 @@ namespace DefenderReporting.Store
                 writer.WritePropertyName("software"); CopyJsonLines(writer, softwareFragment);
                 writer.WritePropertyName("cves"); CopyCveLinesWithAffectedSoftwareFilter(writer, cveFragment, allowedAffectedSoftware); allowedAffectedSoftware = null;
                 writer.WriteNull("noTagsIdx"); writer.WriteEndObject();
-                telemetry.SetStage("pre-vulnerability-assembly-cleanup");
-                GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
-                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers(); TrimCurrentProcessWorkingSet();
-                telemetry.SetStage("vulnerability-assembly");
-                writer.WritePropertyName("vulns"); CopyJsonLines(writer, vulnFragment); writer.WriteEndObject();
+                if (!inProcessCompatible) {
+                    telemetry.SetStage("pre-vulnerability-assembly-cleanup");
+                    GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;
+                    GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, true, true); GC.WaitForPendingFinalizers(); TrimCurrentProcessWorkingSet();
+                    telemetry.SetStage("vulnerability-assembly");
+                    writer.WritePropertyName("vulns"); CopyJsonLines(writer, vulnFragment);
+                }
+                writer.WriteEndObject();
             }
             var result = new CompiledNormalizationResult { ProcessedCount = processed, DeviceCount = resultDeviceCount, CveCount = cveCount, SoftwareCount = softwareCount, VendorCount = resultVendorCount, FirstLastSwappedCount = swappedCount };
             telemetry.SetStage("cleanup"); telemetry.Sample();
@@ -425,7 +479,7 @@ namespace DefenderReporting.Store
             }
             return new HashKey(first, second);
         }
-        // Update lookups are exact per-field values: the in-process update index never deduplicates across templates, so pipe-joined collapsing would change row values.
+        // High-cardinality compact contract: update lookups are interned globally by exact per-field values.
         private static HashKey GetFieldHashKey(params string[] values)
         {
             const ulong offset1 = 14695981039346656037UL, offset2 = 7809847782465536322UL, prime1 = 1099511628211UL, prime2 = 14029467366897019727UL; var first = offset1; var second = offset2;
@@ -463,10 +517,10 @@ namespace DefenderReporting.Store
             foreach (var line in ReadRequiredFragmentLines(path)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var id = Value(item, "id"); if (String.IsNullOrWhiteSpace(id)) continue; result[id] = new MachineOverlay { Name = Value(item, "n"), Group = Value(item, "g"), Platform = Value(item, "o"), OsVersion = Value(item, "ov"), Tags = StringArray(item, "t"), MachineInfoJson = RawValue(item, "m") }; } }
             return result;
         }
-        private static Dictionary<string, CveEnrichment> ReadCveEnrichment(string path)
+        private static Dictionary<string, CveEnrichment> ReadCveEnrichment(string path, bool inProcessCompatible)
         {
             var result = new Dictionary<string, CveEnrichment>(StringComparer.Ordinal);
-            foreach (var line in ReadRequiredFragmentLines(path)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var id = Value(item, "id"); if (String.IsNullOrWhiteSpace(id)) continue; result[id] = new CveEnrichment { PublishedDate = RawValue(item, "pd"), Description = RawValue(item, "desc"), EpssJson = RawValue(item, "ep"), AffectedSoftware = StringArray(item, "as"), ExploitAvailableJson = RawValue(item, "ea"), NvdLastModified = RawValue(item, "nlm"), NvdBaseScoreJson = RawValue(item, "nbs"), NvdBaseSeverity = RawValue(item, "nsv"), NvdVector = RawValue(item, "nvec"), NvdKevDate = RawValue(item, "nkev"), NvdActionDue = RawValue(item, "ndu"), NvdRequiredAction = RawValue(item, "nact"), Weaknesses = StringArray(item, "nw") }; } }
+            foreach (var line in ReadRequiredFragmentLines(path)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var id = Value(item, "id"); if (String.IsNullOrWhiteSpace(id)) continue; result[id] = new CveEnrichment { PublishedDate = RawValue(item, "pd"), Description = RawValue(item, "desc"), EpssJson = RawValue(item, "ep"), AffectedSoftware = inProcessCompatible ? ScalarStringArray(item, "as") : StringArray(item, "as"), ExploitAvailableJson = RawValue(item, "ea"), NvdLastModified = RawValue(item, "nlm"), NvdBaseScoreJson = RawValue(item, "nbs"), NvdBaseSeverity = RawValue(item, "nsv"), NvdVector = RawValue(item, "nvec"), NvdKevDate = RawValue(item, "nkev"), NvdActionDue = RawValue(item, "ndu"), NvdRequiredAction = RawValue(item, "nact"), WeaknessesJson = inProcessCompatible ? RawValue(item, "nw") : null, Weaknesses = inProcessCompatible ? null : StringArray(item, "nw") }; } }
             return result;
         }
         private static Dictionary<string, InventoryRecord> ReadInventory(string path, StringComparer comparer)
@@ -475,6 +529,8 @@ namespace DefenderReporting.Store
             foreach (var line in ReadRequiredFragmentLines(path)) { if (String.IsNullOrWhiteSpace(line)) continue; using (var document = JsonDocument.Parse(line)) { var item = document.RootElement; var key = Value(item, "k"); if (String.IsNullOrWhiteSpace(key)) continue; result[key] = new InventoryRecord { Cpe = NullIfEmpty(Value(item, "cpe")), EndOfSupportStatus = NullIfEmpty(Value(item, "eos")), EndOfSupportDate = NullIfEmpty(Value(item, "eod")) }; } }
             return result;
         }
+        // Keeps empty and whitespace entries; callers apply the in-process Get-OrCreateIndex rule that skips only empty values.
+        private static string[] ScalarStringArray(JsonElement item, string name) { JsonElement value; if (!item.TryGetProperty(name, out value) || value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined) return null; var values = new List<string>(); if (value.ValueKind == JsonValueKind.Array) { foreach (var element in value.EnumerateArray()) values.Add(ScalarString(element)); } else values.Add(ScalarString(value)); return values.ToArray(); }
         private static string[] StringArray(JsonElement item, string name) { JsonElement value; if (!item.TryGetProperty(name, out value) || value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined) return null; var values = new List<string>(); if (value.ValueKind == JsonValueKind.Array) { foreach (var element in value.EnumerateArray()) { var text = ScalarString(element); if (!String.IsNullOrWhiteSpace(text)) values.Add(text); } } else { var text = ScalarString(value); if (!String.IsNullOrWhiteSpace(text)) values.Add(text); } return values.Count == 0 ? null : values.ToArray(); }
         private static string RawValue(JsonElement item, string name) { JsonElement value; if (!item.TryGetProperty(name, out value) || value.ValueKind == JsonValueKind.Null || value.ValueKind == JsonValueKind.Undefined) return null; return value.GetRawText(); }
         private static Stream OpenInput(string path) { var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan); return path.EndsWith(".gz", StringComparison.OrdinalIgnoreCase) ? (Stream)new GZipStream(file, CompressionMode.Decompress, false) : file; }
@@ -483,6 +539,10 @@ namespace DefenderReporting.Store
         private static bool Boolean(JsonElement item, string name) { JsonElement value; if (!item.TryGetProperty(name, out value)) return false; return value.ValueKind == JsonValueKind.True || (value.ValueKind == JsonValueKind.String && String.Equals(value.GetString(), "true", StringComparison.OrdinalIgnoreCase)); }
         private static int Intern(string value, List<string> values, Dictionary<string, int> map) { if (String.IsNullOrEmpty(value)) return -1; int index; if (!map.TryGetValue(value, out index)) { index = values.Count; map.Add(value, index); values.Add(value); } return index; }
         private static void InternFlatArray(JsonElement item, string name, List<string> values, Dictionary<string, int> map, List<int> flattened, out int start, out int count) { start = flattened.Count; JsonElement array; if (item.TryGetProperty(name, out array)) { if (array.ValueKind == JsonValueKind.Array) foreach (var element in array.EnumerateArray()) { var index = Intern(ScalarString(element), values, map); if (index >= 0) flattened.Add(index); } else { var index = Intern(ScalarString(array), values, map); if (index >= 0) flattened.Add(index); } } count = flattened.Count - start; }
+        // Mirrors Get-StringArray (drops null/whitespace entries) followed by Resolve-NormalizedLookupIndexList, whose [hashtable]
+        // parameter is a fresh case-sensitive copy per call: values deduplicate only within one template, so each template appends its own entries.
+        private static void AppendTemplatePathArray(JsonElement item, string name, List<string> values, Dictionary<string, int> map, List<int> flattened, out int start, out int count) { start = flattened.Count; map.Clear(); JsonElement array; if (item.TryGetProperty(name, out array) && array.ValueKind != JsonValueKind.Null && array.ValueKind != JsonValueKind.Undefined) { if (array.ValueKind == JsonValueKind.Array) { foreach (var element in array.EnumerateArray()) { if (element.ValueKind == JsonValueKind.Null || element.ValueKind == JsonValueKind.Undefined) continue; AppendTemplatePath(ScalarString(element), values, map, flattened); } } else AppendTemplatePath(ScalarString(array), values, map, flattened); } map.Clear(); count = flattened.Count - start; }
+        private static void AppendTemplatePath(string value, List<string> values, Dictionary<string, int> map, List<int> flattened) { if (String.IsNullOrWhiteSpace(value)) return; flattened.Add(Intern(value, values, map)); }
         // Mirrors the in-process `[datetime]$firstSeen -gt [datetime]$lastSeen` swap check, including its failure (first value
         // converted first) when a permissively normalized M/D/YYYY value such as 2026-02-30 is not a calendar date.
         private static int CompareSeenDates(string first, string last) { var firstDate = ConvertSeenDate(first); return firstDate.CompareTo(ConvertSeenDate(last)); }
@@ -520,6 +580,14 @@ namespace DefenderReporting.Store
             if (descriptor.StartsWith("CultureIgnoreCase:", StringComparison.Ordinal)) return StringComparer.Create(CultureInfo.GetCultureInfo(descriptor.Substring(18)), true);
             throw new InvalidDataException("Unsupported bounded normalization key comparer '" + descriptor + "' for " + optionName + ".");
         }
+        // in-process-compatible mirrors the PowerShell in-process payload shape for stores at or below the in-process template limit;
+        // high-cardinality-compact keeps the previously accepted compiled payload shape (global update/path interning).
+        private static bool ResolvePayloadContract(string contract)
+        {
+            if (String.Equals(contract, "in-process-compatible", StringComparison.Ordinal)) return true;
+            if (String.Equals(contract, "high-cardinality-compact", StringComparison.Ordinal)) return false;
+            throw new InvalidDataException("Unsupported or missing bounded normalization payloadContract '" + contract + "'.");
+        }
         private static NormalizationOptions ReadNormalizationOptions(string path)
         {
             var options = new NormalizationOptions { InventoryKeyComparer = ResolveKeyComparer(null, "inventoryKeyComparer"), SeverityKeyComparer = ResolveKeyComparer(null, "severityKeyComparer") };
@@ -530,6 +598,7 @@ namespace DefenderReporting.Store
                     var root = document.RootElement;
                     options.InventoryKeyComparer = ResolveKeyComparer(Value(root, "inventoryKeyComparer"), "inventoryKeyComparer");
                     options.SeverityKeyComparer = ResolveKeyComparer(Value(root, "severityKeyComparer"), "severityKeyComparer");
+                    options.InProcessCompatible = ResolvePayloadContract(Value(root, "payloadContract"));
                     JsonElement severities;
                     if (root.TryGetProperty("severityIndexes", out severities) && severities.ValueKind == JsonValueKind.Object)
                     {
@@ -552,7 +621,7 @@ namespace DefenderReporting.Store
         private static void WriteDeviceFragment(StreamWriter output, Device value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); writer.WriteString("n", value.Name); writer.WriteNumber("g", value.Group); writer.WriteNumber("o", value.Platform); if (value.OsVersion == null) writer.WriteNull("ov"); else writer.WriteString("ov", value.OsVersion); writer.WritePropertyName("t"); WriteIntArray(writer, value.Tags); writer.WritePropertyName("m"); WriteRawNullable(writer, value.MachineInfoJson); writer.WriteEndObject(); }); }
         private static void WriteSoftwareFragment(StreamWriter output, Software value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteNumber("v", value.Vendor); writer.WriteString("n", value.Name); writer.WriteString("r", value.Reference); writer.WriteEndObject(); }); }
         private static void WriteUpdateFragment(StreamWriter output, Update value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("n", value.Name); writer.WriteString("id", value.Id); writer.WriteString("url", value.Url); writer.WriteEndObject(); }); }
-        private static void WriteCveFragment(StreamWriter output, Cve value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); if (value.Score.HasValue) writer.WriteNumber("sc", value.Score.Value); else writer.WriteNull("sc"); writer.WriteNumber("sv", value.Severity); writer.WriteNumber("ex", value.Exploit); writer.WriteString("u", value.Url); writer.WriteNumber("bt", value.BatchTitle); var e = value.Enrichment; writer.WritePropertyName("pd"); WriteRawNullable(writer, e == null ? null : e.PublishedDate); writer.WritePropertyName("desc"); WriteRawNullable(writer, e == null ? null : e.Description); writer.WritePropertyName("ep"); WriteRawNullable(writer, e == null ? null : e.EpssJson); writer.WritePropertyName("as"); WriteNullableIntArray(writer, value.AffectedSoftware); writer.WritePropertyName("ea"); WriteRawNullable(writer, e == null ? null : e.ExploitAvailableJson); writer.WritePropertyName("nlm"); WriteRawNullable(writer, e == null ? null : e.NvdLastModified); writer.WritePropertyName("nbs"); WriteRawNullable(writer, e == null ? null : e.NvdBaseScoreJson); writer.WritePropertyName("nsv"); WriteRawNullable(writer, e == null ? null : e.NvdBaseSeverity); writer.WritePropertyName("nvec"); WriteRawNullable(writer, e == null ? null : e.NvdVector); writer.WritePropertyName("nkev"); WriteRawNullable(writer, e == null ? null : e.NvdKevDate); writer.WritePropertyName("ndu"); WriteRawNullable(writer, e == null ? null : e.NvdActionDue); writer.WritePropertyName("nact"); WriteRawNullable(writer, e == null ? null : e.NvdRequiredAction); writer.WritePropertyName("nw"); WriteNullableStringArray(writer, e == null ? null : e.Weaknesses); writer.WriteEndObject(); }); }
+        private static void WriteCveFragment(StreamWriter output, Cve value) { WriteFragment(output, writer => { writer.WriteStartObject(); writer.WriteString("id", value.Id); if (value.Score.HasValue) writer.WriteNumber("sc", value.Score.Value); else writer.WriteNull("sc"); writer.WriteNumber("sv", value.Severity); writer.WriteNumber("ex", value.Exploit); writer.WriteString("u", value.Url); writer.WriteNumber("bt", value.BatchTitle); var e = value.Enrichment; writer.WritePropertyName("pd"); WriteRawNullable(writer, e == null ? null : e.PublishedDate); writer.WritePropertyName("desc"); WriteRawNullable(writer, e == null ? null : e.Description); writer.WritePropertyName("ep"); WriteRawNullable(writer, e == null ? null : e.EpssJson); writer.WritePropertyName("as"); WriteNullableIntArray(writer, value.AffectedSoftware); writer.WritePropertyName("ea"); WriteRawNullable(writer, e == null ? null : e.ExploitAvailableJson); writer.WritePropertyName("nlm"); WriteRawNullable(writer, e == null ? null : e.NvdLastModified); writer.WritePropertyName("nbs"); WriteRawNullable(writer, e == null ? null : e.NvdBaseScoreJson); writer.WritePropertyName("nsv"); WriteRawNullable(writer, e == null ? null : e.NvdBaseSeverity); writer.WritePropertyName("nvec"); WriteRawNullable(writer, e == null ? null : e.NvdVector); writer.WritePropertyName("nkev"); WriteRawNullable(writer, e == null ? null : e.NvdKevDate); writer.WritePropertyName("ndu"); WriteRawNullable(writer, e == null ? null : e.NvdActionDue); writer.WritePropertyName("nact"); WriteRawNullable(writer, e == null ? null : e.NvdRequiredAction); writer.WritePropertyName("nw"); if (e != null && e.WeaknessesJson != null) WriteRawNullable(writer, e.WeaknessesJson); else WriteNullableStringArray(writer, e == null ? null : e.Weaknesses); writer.WriteEndObject(); }); }
         private static void WriteVulnFragment(StreamWriter output, int deviceIndex, Template template, int firstIndex, int lastIndex, int inventoryIndex, List<int> diskIndexes, List<int> registryIndexes)
         {
             output.Write('['); WriteInteger(output, deviceIndex); output.Write(','); WriteInteger(output, template.Cve); output.Write(','); WriteInteger(output, template.Software); output.Write(','); WriteInteger(output, template.Version);
@@ -1048,6 +1117,6 @@ function Initialize-CompiledVulnContentProjector {
     param()
 
     if ($null -eq ('DefenderReporting.Store.VulnContentProjector' -as [type])) {
-        Add-Type -TypeDefinition $Script:CompiledVulnContentProjectorSource -Language CSharp
+        Add-Type -TypeDefinition $Script:CompiledVulnContentProjectorSource -Language CSharp -CompilerOptions '/unsafe'
     }
 }
