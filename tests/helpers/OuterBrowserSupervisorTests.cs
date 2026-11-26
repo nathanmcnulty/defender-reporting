@@ -63,6 +63,7 @@ namespace OuterSupervisorTests {
             Memories++; if (Fault == "counter") return false;
             bool result = base.Memory(process, ref value);
             if (Fault == "zero-counter") value.ws = UIntPtr.Zero;
+            if (Fault == "over-limit") value.ws = new UIntPtr(OuterBrowserSupervisor.JobLimit + 1);
             return result;
         }
         internal override Native.Accounting Accounting() {
@@ -142,11 +143,12 @@ namespace OuterSupervisorTests {
         }
         public static void Native(string pwsh, string marker) {
             if (!OperatingSystem.IsWindows()) throw new Exception("Windows required");
-            foreach (string fault in new[] { "assignment", "membership", "membership-running", "membership-unknown", "counter", "zero-counter", "accounting", "enumeration", "success" }) {
+            foreach (string fault in new[] { "assignment", "membership", "membership-running", "membership-unknown", "counter", "zero-counter", "over-limit", "accounting", "enumeration", "success" }) {
                 if (File.Exists(marker)) File.Delete(marker);
                 var f = new NativeFault { Fault = fault };
+                var report = new OuterResult();
                 string script = "[IO.File]::WriteAllText('" + marker.Replace("'", "''") + "','started'); Start-Sleep -Seconds 2";
-                int result = OuterBrowserSupervisor.RunCore(pwsh, new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script)) }, f);
+                int result = OuterBrowserSupervisor.RunCore(pwsh, new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script)) }, f, report);
                 if (fault == "success")
                     Require(result == 0 && f.Resumes == 1 && File.Exists(marker), "native success");
                 else {
@@ -156,7 +158,10 @@ namespace OuterSupervisorTests {
                     if (fault == "assignment") Require(f.Rollbacks == 1 && f.Waits == 1 && f.RollbackWait == 0, "original handle rollback");
                     if (fault == "membership-running" || fault == "membership-unknown")
                         Require(f.Resumes == 1 && f.Members >= 2 && f.AbortConfirmed, "running membership failure");
-                    if (fault == "counter" || fault == "zero-counter") Require(f.Resumes == 1 && f.Memories > 0, "counter failure");
+                    if (fault == "counter" || fault == "zero-counter" || fault == "over-limit")
+                        Require(f.Resumes == 1 && f.Memories > 0 && f.AbortConfirmed, "counter or working-set limit failure");
+                    if (fault == "zero-counter") Require(report.FailureStep == "process-working-set", "zero counter diagnostic");
+                    if (fault == "over-limit") Require(report.FailureStep == "working-set-limit", "working-set limit diagnostic");
                     if (fault == "accounting") Require(f.Resumes == 1 && f.Accounts > 0, "accounting failure");
                     if (fault == "enumeration") Require(f.Resumes == 1 && f.Enumerations >= 2, "enumeration failure");
                 }

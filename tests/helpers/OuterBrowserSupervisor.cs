@@ -358,8 +358,10 @@ namespace LaunchBound {
                     var memory = new Native.Memory { size = (uint)Marshal.SizeOf<Native.Memory>() };
                     diagnosticStep = "process-memory";
                     Native.Check(Memory(process, ref memory));
+                    diagnosticStep = "process-working-set";
                     if (memory.ws.ToUInt64() == 0) throw new InvalidOperationException();
                     sum = checked(sum + memory.ws.ToUInt64());
+                    diagnosticStep = "working-set-limit";
                     if (sum > OuterBrowserSupervisor.JobLimit) throw new InvalidOperationException();
                 }
                 diagnosticStep = "process-list-after";

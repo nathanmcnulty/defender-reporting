@@ -23,7 +23,9 @@ private. The supervisor writes a JSON status to stderr with admission sample
 times and bytes, sampled runtime counts/peaks and cleanup confirmation; it
 also reports fixed failure phase/step/category labels and a native error code
 when applicable, without paths, arguments or exception messages. The peak is
-sampled, not an OS high-water mark.
+sampled, not an OS high-water mark. The census labels distinguish a zero
+per-process counter from an observed partial sum above the working-set limit;
+a failing partial sum is not included in the reported completed-census peak.
 `CleanupConfirmed` covers the retained root and outer job, not browser profile
 removal or complete output after a failed run. Retain telemetry separately when
 evidence is required.
