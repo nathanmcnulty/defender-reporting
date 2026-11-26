@@ -27,7 +27,7 @@ function createTestRow(overrides = {}) {
 
 async function assertLazyAggregateParity() {
     const dashboard = loadDashboardHarness(`
-async function measureAggregate(eager) {
+async function measureAggregate(eager, columnar) {
     const rowCount = 6000;
     lookups = {
         devices: [
@@ -41,7 +41,10 @@ async function measureAggregate(eager) {
         vendors: ['microsoft'], severities: ['High'], exploitLevels: [], batchTitles: ['Microsoft March 2026 Updates'],
         affSoftware: ['microsoft:windows_11'], inventory: [], diskPaths: ['C:/Windows/file'], regPaths: ['HKLM/Software/Test']
     };
-    rawVulns = Array.from({ length: rowCount }, (_, index) => [index % 2, 0, 0, 0, 0, 1, 1, 0, [0], [0], -1]);
+    const rawRows = Array.from({ length: rowCount }, (_, index) => [index % 2, 0, 0, 0, 0, 1, 1, 0, [0], [0], -1]);
+    rawVulns = columnar
+        ? Object.fromEntries(['d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp', 'iv'].map((key, index) => [key, rawRows.map(row => row[index])]))
+        : rawRows;
     await denormalizeAllVulns();
     filterState = createEmptyFilterState();
     filterState.startDate = '2026-03-01';
@@ -51,8 +54,14 @@ async function measureAggregate(eager) {
     remediationDescriptorCache.clear();
     const started = performance.now();
     if (eager) vulnerabilityData.forEach(materializeRow);
-    const table = getRemediationTableData();
     const impact = getImpactAnalysisData();
+    const impactMaterialized = vulnerabilityData.filter(row => row._aggregateMat || row._mat).length;
+    const impactVersions = impact.top25.map(row => ({ name: row.name, count: row.vulnerabilities.length }));
+    const impactTable = getImpactAnalysisTableData().map(row => ({
+        rank: row.rank, name: row.name, devices: row.devices, cveIds: row.cveIds, impact: row.impact, update: row.updateValue
+    }));
+    const impactChart = getImpactChartData();
+    const table = getRemediationTableData();
     const elapsed = performance.now() - started;
     const materialized = vulnerabilityData.filter(row => row._mat).length;
     const evidenceArrays = vulnerabilityData.reduce((count, row) => count + Number(Array.isArray(row.DiskPaths)) + Number(Array.isArray(row.RegistryPaths)), 0);
@@ -67,20 +76,25 @@ async function measureAggregate(eager) {
         ? config.rowBuilder(config.items[0]) + config.rowBuilder(config.items[config.items.length - 1]) : '').join('');
     vulnerabilityData.forEach(materializeRow);
     const detail = JSON.stringify(detailFields.map(field => vulnerabilityData[0][field]));
-    return { summary, detail, sections: modalHtml, materialized, evidenceArrays, described, elapsed, groups: table.length };
+    return { summary, detail, sections: modalHtml, impactVersions, impactTable, impactChart, impactMaterialized, materialized, evidenceArrays, described, elapsed, groups: table.length };
 }
 module.exports = { measureAggregate };
 `, { performance: require('perf_hooks').performance });
     const lazyTimes = [];
     const eagerTimes = [];
     for (let iteration = 0; iteration < 3; iteration++) {
-        const lazy = await dashboard.measureAggregate(false);
-        const eager = await dashboard.measureAggregate(true);
+        const lazy = await dashboard.measureAggregate(false, iteration === 2);
+        const eager = await dashboard.measureAggregate(true, iteration === 2);
         assert.strictEqual(lazy.summary, eager.summary, 'Lazy aggregates must preserve titles, URLs, grouping, and counts.');
         assert.strictEqual(lazy.detail, eager.detail, 'Eventual detail/PDF properties must match expanded rows.');
         const normalizeTooltipIds = html => html.replace(/data-tooltip-id="modal-cve-\d+"/g, 'data-tooltip-id="modal-cve"');
         assert.strictEqual(normalizeTooltipIds(lazy.sections), normalizeTooltipIds(eager.sections), 'Modal content must match expanded rows.');
         assert.strictEqual(lazy.groups, 2, 'Lazy metadata must preserve OS-version grouping.');
+        assert.deepStrictEqual(lazy.impactVersions, eager.impactVersions, 'Impact groups must preserve OS versions and membership.');
+        assert.deepStrictEqual(lazy.impactTable, eager.impactTable, 'Impact table values must match fully materialized rows.');
+        assert.deepStrictEqual(lazy.impactChart, eager.impactChart, 'Impact chart series must match fully materialized rows.');
+        assert.strictEqual(lazy.impactMaterialized, 0, 'Impact analysis must not expand aggregate fields on every row.');
+        assert.strictEqual(eager.impactMaterialized, 6000);
         assert.strictEqual(lazy.materialized, 0);
         assert.strictEqual(lazy.evidenceArrays, 0);
         assert.strictEqual(lazy.described, 0);
@@ -91,6 +105,58 @@ module.exports = { measureAggregate };
     }
     const median = values => values.sort((left, right) => left - right)[1].toFixed(1);
     console.log('Aggregate probe (6000 rows, 3 runs): detail rows 6000 -> 0; evidence arrays 12000 -> 0; median eager/lazy ms ' + median(eagerTimes) + '/' + median(lazyTimes));
+}
+
+function assertAggregateMetadataProjection() {
+    const dashboard = loadDashboardHarness(`
+function checkProjection() {
+    lookups = {
+        devices: [{ ov: '10.0.26100.1' }],
+        cves: [{ u: 'https://example.com/cve', bt: 0 }],
+        software: [{ r: 'recommendation' }],
+        updates: [{ id: '123', url: 'https://example.com/update' }],
+        batchTitles: ['Advisory']
+    };
+    rawVulns = [
+        [0, 0, 0, 0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 0, 0, 0, -1],
+        [0, 99, 0, 0, 0, 0, 1, 0]
+    ];
+    const keys = ['CveBatchUrl', 'CveBatchTitle', 'RecommendedSecurityUpdateId', 'RecommendedSecurityUpdateUrl', 'OSVersion', 'SecurityUpdateAvailable', 'RecommendationReference'];
+    const result = [];
+    for (let index = 0; index < rawVulns.length; index++) {
+        const row = { _index: index, CveBatchTitle: 'original' };
+        const original = JSON.stringify(row);
+        const projected = getAggregateRowMetadata(row);
+        const copy = { ...row };
+        materializeAggregateRow(copy);
+        result.push({
+            unchanged: JSON.stringify(row) === original,
+            projected: projected && keys.map(key => projected[key]),
+            materialized: projected && keys.map(key => copy[key]),
+            marked: !!copy._aggregateMat
+        });
+    }
+    const ready = { _index: 0, _mat: true, OSVersion: 'existing' };
+    result.push({ readyUnchanged: getAggregateRowMetadata(ready) === null && materializeAggregateRow(ready) === ready && ready.OSVersion === 'existing' });
+    rawVulns = null;
+    const cached = { _index: 0, OSVersion: 'cached' };
+    result.push({ cachedUnchanged: getAggregateRowMetadata(cached) === null && materializeAggregateRow(cached) === cached && cached.OSVersion === 'cached' });
+    return JSON.stringify(result);
+}
+module.exports = { checkProjection };
+`);
+    const result = JSON.parse(dashboard.checkProjection());
+    for (const entry of result.slice(0, 2)) {
+        assert.strictEqual(entry.unchanged, true, 'Reading aggregate metadata must not mutate the source row.');
+        assert.deepStrictEqual(entry.projected, entry.materialized, 'Projected metadata must match normal aggregate materialization.');
+        assert.strictEqual(entry.marked, true);
+    }
+    assert.strictEqual(result[2].unchanged, true);
+    assert.strictEqual(result[2].projected, null, 'Missing lookup records must retain the existing fallback.');
+    assert.strictEqual(result[2].marked, false);
+    assert.strictEqual(result[3].readyUnchanged, true);
+    assert.strictEqual(result[4].cachedUnchanged, true);
 }
 
 async function main() {
@@ -945,6 +1011,7 @@ module.exports = {
         'Expected scoped numeric remediation labels to render as product patch references.'
     );
 
+    assertAggregateMetadataProjection();
     await assertLazyAggregateParity();
     console.log('Remediation report mode and density helpers passed.');
 }

@@ -599,30 +599,35 @@ async function denormalizeAllVulns(options = {}) {
     logDebug('Denormalization complete in', elapsed, 'ms');
 }
 
-/**
- * Lazily resolve deferred detail properties on a vulnerability row.
- * Properties like DiskPaths, RegistryPaths, CveBatchUrl, etc. are only
- * needed for table/card/modal detail views (not for filtering or charts).
- * This avoids 1.5M array allocations during denormalization.
- * @param {Object} v - Vulnerability row object
- * @returns {Object} The same object, enriched with deferred properties
- */
-function materializeAggregateRow(v) {
-    if (v._aggregateMat || v._mat || !rawVulns || !lookups || v._index == null) return v;
+function getAggregateRowMetadata(v) {
+    if (v._aggregateMat || v._mat || !rawVulns || !lookups || v._index == null) return null;
     const rec = getRawVulnRecord(v._index);
-    if (!rec) return v;
+    if (!rec) return null;
     const device = getLookupRecord(lookups.devices, rec[0]);
     const cve = getLookupRecord(lookups.cves, rec[1]);
     const software = getLookupRecord(lookups.software, rec[2]);
-    if (!device || !cve || !software) return v;
+    if (!device || !cve || !software) return null;
     const updateObj = getLookupValue(lookups.updates, rec[7]);
-    v.CveBatchUrl = cve.u;
-    v.CveBatchTitle = getLookupValue(lookups.batchTitles, cve.bt);
-    v.RecommendedSecurityUpdateId = updateObj ? (updateObj.id || null) : null;
-    v.RecommendedSecurityUpdateUrl = updateObj ? (updateObj.url || null) : null;
-    v.OSVersion = device.ov;
-    v.SecurityUpdateAvailable = rec[6] === 1;
-    v.RecommendationReference = software.r;
+    return {
+        CveBatchUrl: cve.u,
+        CveBatchTitle: getLookupValue(lookups.batchTitles, cve.bt),
+        RecommendedSecurityUpdateId: updateObj ? (updateObj.id || null) : null,
+        RecommendedSecurityUpdateUrl: updateObj ? (updateObj.url || null) : null,
+        OSVersion: device.ov,
+        SecurityUpdateAvailable: rec[6] === 1,
+        RecommendationReference: software.r
+    };
+}
+
+/**
+ * Lazily resolve aggregate properties on the original vulnerability row.
+ * @param {Object} v - Vulnerability row object
+ * @returns {Object} The same object, enriched with aggregate properties
+ */
+function materializeAggregateRow(v) {
+    const metadata = getAggregateRowMetadata(v);
+    if (!metadata) return v;
+    Object.assign(v, metadata);
     v._aggregateMat = true;
     return v;
 }

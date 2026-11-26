@@ -491,25 +491,35 @@ function getImpactAnalysisData() {
     const activeRows = getActiveRowsForCurrentSelection();
     const remediationDescriptors = new Array(activeRows.length);
     const remediationFormattedSoftware = new Array(activeRows.length);
+    const remediationOsVersions = new Array(activeRows.length);
     const remediationRawKeys = new Array(activeRows.length);
     const versionBucketsByBaseKey = new Map();
     const rawKeyToMergedKey = new Map();
 
     for (let i = 0, len = activeRows.length; i < len; i++) {
         const v = activeRows[i];
-        const remediation = buildRemediationDescriptor(v);
+        const metadata = getAggregateRowMetadata(v);
+        const descriptorInput = metadata ? {
+            SoftwareVendor: v.SoftwareVendor,
+            SoftwareName: v.SoftwareName,
+            RecommendedSecurityUpdate: v.RecommendedSecurityUpdate,
+            OSPlatform: v.OSPlatform,
+            ...metadata
+        } : v;
+        const remediation = buildRemediationDescriptor(descriptorInput);
         const formattedSoftware = formatSoftwarePart(v.SoftwareName);
         const baseKey = remediation.key;
         const canSplitByOsVersion = shouldSplitRemediationByOsVersion(formattedSoftware, v.OSPlatform);
 
         remediationDescriptors[i] = remediation;
         remediationFormattedSoftware[i] = formattedSoftware;
+        remediationOsVersions[i] = descriptorInput.OSVersion;
 
         if (!canSplitByOsVersion) {
             continue;
         }
 
-        const versionBucket = normalizeOsVersionGroupingLabel(v.OSPlatform, v.OSVersion);
+        const versionBucket = normalizeOsVersionGroupingLabel(v.OSPlatform, descriptorInput.OSVersion);
         if (!versionBucket) {
             continue;
         }
@@ -529,7 +539,7 @@ function getImpactAnalysisData() {
         const baseKey = remediation.key;
         const splitByVersion = (versionBucketsByBaseKey.get(baseKey)?.size || 0) > 1;
         const baseImpactName = getScopedRemediationDisplayTitle(remediation);
-        const impactName = getVersionAwareImpactDisplayName(remediation, formattedSoftware, v.OSPlatform, v.OSVersion, splitByVersion);
+        const impactName = getVersionAwareImpactDisplayName(remediation, formattedSoftware, v.OSPlatform, remediationOsVersions[index], splitByVersion);
         const key = impactName !== baseImpactName ? `${baseKey}|${impactName}` : baseKey;
         remediationRawKeys[index] = key;
 
