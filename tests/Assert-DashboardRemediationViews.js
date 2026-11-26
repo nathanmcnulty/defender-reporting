@@ -189,6 +189,28 @@ module.exports = { checkProjection };
     assert.strictEqual(result[4].cachedUnchanged, true);
 }
 
+function assertUnsplitImpactNamesDoNotPopulateVersionCache() {
+    const dashboard = loadDashboardHarness(`
+function checkNames() {
+    versionAwareImpactDisplayNameCache.clear();
+    const descriptor = { key: 'example', title: 'Windows 11: Security update', softwareLabel: 'Windows 11', scopeLabel: 'Windows 11' };
+    const expected = getScopedRemediationDisplayTitle(descriptor);
+    const names = Array.from({ length: 100 }, (_, i) =>
+        getVersionAwareImpactDisplayName(descriptor, 'Windows 11', 'Windows11', '10.0.' + i, false));
+    const unsplitCacheSize = versionAwareImpactDisplayNameCache.size;
+    const splitNames = ['10.0.22631', '10.0.26100'].map(version =>
+        getVersionAwareImpactDisplayName(descriptor, 'Windows 11', 'Windows11', version, true));
+    return JSON.stringify({ expected, names, unsplitCacheSize, splitNames, splitCacheSize: versionAwareImpactDisplayNameCache.size });
+}
+module.exports = { checkNames };
+`);
+    const result = JSON.parse(dashboard.checkNames());
+    assert.ok(result.names.every(name => name === result.expected), 'Unsplit versions must retain the original impact name.');
+    assert.strictEqual(result.unsplitCacheSize, 0, 'Unsplit versions must not populate the version-specific cache.');
+    assert.notStrictEqual(result.splitNames[0], result.splitNames[1], 'Distinct split versions must retain distinct impact names.');
+    assert.strictEqual(result.splitCacheSize, 2, 'Split version names must still be cached separately.');
+}
+
 async function main() {
     const dashboard = loadDashboardHarness(`
 module.exports = {
@@ -1042,6 +1064,7 @@ module.exports = {
     );
 
     assertAggregateMetadataProjection();
+    assertUnsplitImpactNamesDoNotPopulateVersionCache();
     await assertLazyAggregateParity();
     console.log('Remediation report mode and density helpers passed.');
 }

@@ -532,7 +532,9 @@ function getImpactAnalysisData() {
         const baseKey = remediation.key;
         const splitByVersion = (versionBucketsByBaseKey.get(baseKey)?.size || 0) > 1;
         const baseImpactName = getScopedRemediationDisplayTitle(remediation);
-        const impactName = getVersionAwareImpactDisplayName(remediation, formattedSoftware, v.OSPlatform, remediationOsVersions[index], splitByVersion);
+        const impactName = splitByVersion
+            ? getVersionAwareImpactDisplayName(remediation, formattedSoftware, v.OSPlatform, remediationOsVersions[index], true)
+            : baseImpactName;
         const key = impactName !== baseImpactName ? `${baseKey}|${impactName}` : baseKey;
         remediationRawKeys[index] = key;
 
