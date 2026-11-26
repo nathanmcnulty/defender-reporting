@@ -1,6 +1,7 @@
 // Windows outer guard for one browser-harness process tree.
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -15,6 +16,7 @@ namespace LaunchBound {
         internal int Active;
         internal ulong WorkingSet;
     }
+    internal sealed class OuterCensusChangedException : InvalidOperationException { }
     public sealed class OuterAdmissionSample {
         public long ElapsedMilliseconds { get; set; }
         public ulong AvailableBytes { get; set; }
@@ -22,14 +24,22 @@ namespace LaunchBound {
     public sealed class OuterResult {
         public bool Success { get; internal set; }
         public bool CleanupConfirmed { get; internal set; }
+        public string FailurePhase { get; internal set; }
+        public string FailureStep { get; internal set; }
+        public string FailureKind { get; internal set; }
+        public int? NativeErrorCode { get; internal set; }
+        public bool AbortFailed { get; internal set; }
+        public bool CloseFailed { get; internal set; }
         public List<OuterAdmissionSample> AdmissionSamples { get; } = new List<OuterAdmissionSample>();
         public int RuntimeSamples { get; internal set; }
+        public int CensusRetries { get; internal set; }
         public ulong PeakWorkingSetBytes { get; internal set; }
         public ulong? MinimumAvailableBytes { get; internal set; }
     }
 
     // Only tests compiled into this assembly can replace this implementation.
     internal abstract class OuterPlatform {
+        internal virtual string DiagnosticStep { get { return null; } }
         internal abstract long Milliseconds { get; }
         internal abstract void Sleep(int milliseconds);
         internal abstract ulong Available();
@@ -55,6 +65,7 @@ namespace LaunchBound {
 
         internal static int RunCore(string executable, string[] arguments, OuterPlatform platform, OuterResult report = null) {
             bool success = false, cleaned = false;
+            string phase = "admission";
             try {
                 for (int i = 0; i < 5; i++) {
                     if (i != 0) {
@@ -67,25 +78,41 @@ namespace LaunchBound {
                     if (available <= Admission) throw new InvalidOperationException();
                 }
                 long started = platform.Milliseconds;
+                phase = "start";
                 platform.Start(executable, arguments);
                 while (true) {
+                    phase = "runtime-deadline";
                     long sampleStarted = platform.Milliseconds;
                     if (sampleStarted - started >= Deadline) throw new TimeoutException();
+                    phase = "runtime-memory";
                     ulong available = platform.Available();
                     if (report != null) {
                         report.RuntimeSamples++;
                         if (!report.MinimumAvailableBytes.HasValue || available < report.MinimumAvailableBytes) report.MinimumAvailableBytes = available;
                     }
                     if (available < Floor) throw new InvalidOperationException();
+                    phase = "runtime-streams";
                     platform.CheckStreams();
-                    OuterCensus census = platform.Census();
+                    phase = "runtime-census";
+                    OuterCensus census;
+                    while (true) {
+                        try { census = platform.Census(); break; }
+                        catch (OuterCensusChangedException) {
+                            if (platform.Milliseconds - sampleStarted >= Interval) throw;
+                            if (report != null) report.CensusRetries++;
+                            platform.Sleep(1);
+                            if (platform.Milliseconds - sampleStarted >= Interval) throw;
+                        }
+                    }
                     if (census == null || census.Active < 0) throw new InvalidOperationException();
                     if (report != null) report.PeakWorkingSetBytes = Math.Max(report.PeakWorkingSetBytes, census.WorkingSet);
                     if (census.WorkingSet > JobLimit) throw new InvalidOperationException();
+                    phase = "root-exit";
                     uint code;
                     if (platform.RootExited(out code)) {
                         if (code != 0 || census.Active != 0 || !platform.StreamsComplete()) throw new InvalidOperationException();
                         // A second stable census closes the root-exit/accounting race.
+                        phase = "terminal-census";
                         OuterCensus final = platform.Census();
                         ulong finalAvailable = platform.Available();
                         if (report != null && (!report.MinimumAvailableBytes.HasValue || finalAvailable < report.MinimumAvailableBytes))
@@ -100,11 +127,21 @@ namespace LaunchBound {
                     if (remaining <= 0) throw new TimeoutException();
                     platform.Sleep((int)remaining);
                 }
-            } catch { success = false; }
-            if (!success) {
-                try { platform.Abort(); cleaned = true; } catch { }
+            } catch (Exception error) {
+                success = false;
+                if (report != null) {
+                    report.FailurePhase = phase;
+                    report.FailureStep = phase == "runtime-census" || phase == "terminal-census" ? platform.DiagnosticStep : null;
+                    report.FailureKind = error is TimeoutException ? "timeout" :
+                        error is Win32Exception ? "native" : error is IOException ? "io" :
+                        error is ArgumentException ? "argument" : error is InvalidOperationException ? "state" : "execution";
+                    if (error is Win32Exception native) report.NativeErrorCode = native.NativeErrorCode;
+                }
             }
-            try { platform.Close(); } catch { success = false; cleaned = false; }
+            if (!success) {
+                try { platform.Abort(); cleaned = true; } catch { if (report != null) report.AbortFailed = true; }
+            }
+            try { platform.Close(); } catch { success = false; cleaned = false; if (report != null) report.CloseFailed = true; }
             if (report != null) { report.Success = success; report.CleanupConfirmed = cleaned; }
             return success ? 0 : 1;
         }
@@ -119,6 +156,8 @@ namespace LaunchBound {
         Thread watchdog;
         readonly ManualResetEvent watchdogStop = new ManualResetEvent(false);
         bool assigned, created, creationUncertain, expired, closed;
+        string diagnosticStep;
+        internal override string DiagnosticStep { get { return diagnosticStep; } }
         long startTime;
         internal override long Milliseconds { get { return clock.ElapsedMilliseconds; } }
         internal override void Sleep(int milliseconds) { Thread.Sleep(milliseconds); }
@@ -302,29 +341,49 @@ namespace LaunchBound {
             if (limit.basic.flags != 0x2200 || limit.job.ToUInt64() != OuterBrowserSupervisor.JobLimit || Query<uint>(4) != 0) throw new InvalidOperationException();
         }
         internal override OuterCensus Census() {
+            diagnosticStep = "deadline";
             CheckDeadline();
-            var before = Accounting(); int[] ids = Pids(); ulong sum = 0;
+            diagnosticStep = "accounting-before";
+            var before = Accounting();
+            diagnosticStep = "process-list-before";
+            int[] ids = Pids(); ulong sum = 0;
             var retained = new List<KernelHandle>();
             try {
                 foreach (int pid in ids) {
+                    diagnosticStep = "process-open";
                     var process = new KernelHandle(Native.OpenProcess(0x100410, false, pid)); retained.Add(process);
                     Native.Check(!process.IsInvalid);
+                    diagnosticStep = "process-membership";
                     if (!Member(process) || Native.WaitForSingleObject(process, 0) != 258) throw new InvalidOperationException();
                     var memory = new Native.Memory { size = (uint)Marshal.SizeOf<Native.Memory>() };
+                    diagnosticStep = "process-memory";
                     Native.Check(Memory(process, ref memory));
                     if (memory.ws.ToUInt64() == 0) throw new InvalidOperationException();
                     sum = checked(sum + memory.ws.ToUInt64());
+                    if (sum > OuterBrowserSupervisor.JobLimit) throw new InvalidOperationException();
                 }
-                int[] afterIds = Pids(); var after = Accounting();
-                if (before.active != ids.Length || after.active != ids.Length || before.total != after.total ||
-                    before.terminated != after.terminated || !ids.SequenceEqual(afterIds)) throw new InvalidOperationException();
+                diagnosticStep = "process-list-after";
+                int[] afterIds = Pids();
+                diagnosticStep = "accounting-after";
+                var after = Accounting();
+                diagnosticStep = "accounting-bracket";
+                if (before.total != after.total || before.terminated != after.terminated || !ids.SequenceEqual(afterIds)) {
+                    diagnosticStep = "process-churn";
+                    throw new OuterCensusChangedException();
+                }
+                if (before.active != ids.Length || after.active != ids.Length) {
+                    diagnosticStep = "accounting-count";
+                    throw new InvalidOperationException();
+                }
+                diagnosticStep = "process-liveness";
                 foreach (var process in retained) if (Native.WaitForSingleObject(process, 0) != 258) throw new InvalidOperationException();
+                diagnosticStep = "deadline";
                 CheckDeadline();
                 return new OuterCensus { Active = ids.Length, WorkingSet = sum };
             } finally {
                 bool allClosed = true;
                 foreach (var process in retained) if (!CloseChecked(process)) allClosed = false;
-                if (!allClosed) throw new InvalidOperationException();
+                if (!allClosed) { diagnosticStep = "process-close"; throw new InvalidOperationException(); }
             }
         }
         internal override bool RootExited(out uint code) {

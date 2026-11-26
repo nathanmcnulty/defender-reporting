@@ -8,8 +8,11 @@ using LaunchBound;
 
 namespace OuterSupervisorTests {
     internal sealed class Fake : OuterPlatform {
+        internal override string DiagnosticStep { get { return "test-census"; } }
         internal long Now;
         internal int Samples, Sleeps, Aborts, Closes, CensusCalls;
+        internal int CensusChangesRemaining;
+        internal bool AlwaysChangeCensus;
         internal bool Started, Exited = true, Streams = true, ThrowStart, ThrowCensus, ThrowStream, ThrowExit, ThrowAbort, ThrowClose, ThrowAvailable;
         internal ulong AdmissionValue = OuterBrowserSupervisor.Admission + 1, RuntimeValue = OuterBrowserSupervisor.Floor;
         internal int Active;
@@ -27,7 +30,12 @@ namespace OuterSupervisorTests {
             SampleTimes.Add(Now); if (ThrowAvailable) throw new Exception(); return Samples++ < 5 ? AdmissionValue : RuntimeValue;
         }
         internal override void Start(string exe, string[] args) { Started = true; StartedAt = Now; if (ThrowStart) throw new Exception(); }
-        internal override OuterCensus Census() { CensusCalls++; if (ThrowCensus) throw new Exception(); return new OuterCensus { Active = Active, WorkingSet = WorkingSet }; }
+        internal override OuterCensus Census() {
+            CensusCalls++;
+            if (ThrowCensus) throw new Exception();
+            if (AlwaysChangeCensus || CensusChangesRemaining-- > 0) throw new OuterCensusChangedException();
+            return new OuterCensus { Active = Active, WorkingSet = WorkingSet };
+        }
         internal override bool RootExited(out uint exitCode) { if (ThrowExit) throw new Exception(); exitCode = ExitCode; return Exited; }
         internal override void CheckStreams() { if (ThrowStream) throw new Exception(); }
         internal override bool StreamsComplete() { return Streams; }
@@ -98,7 +106,21 @@ namespace OuterSupervisorTests {
                 "safe admission telemetry");
             var unconfirmed = new OuterResult(); var cleanupFault = new Fake { ThrowAbort = true, ThrowCensus = true };
             Require(OuterBrowserSupervisor.RunCore("unused", Array.Empty<string>(), cleanupFault, unconfirmed) == 1 &&
-                !unconfirmed.Success && !unconfirmed.CleanupConfirmed, "cleanup telemetry");
+                !unconfirmed.Success && !unconfirmed.CleanupConfirmed && unconfirmed.AbortFailed &&
+                unconfirmed.FailurePhase == "runtime-census" && unconfirmed.FailureStep == "test-census" &&
+                unconfirmed.FailureKind == "execution", "cleanup and sanitized failure telemetry");
+            var closeReport = new OuterResult(); var closeFault = new Fake { ThrowClose = true };
+            Require(OuterBrowserSupervisor.RunCore("unused", Array.Empty<string>(), closeFault, closeReport) == 1 &&
+                !closeReport.Success && !closeReport.CleanupConfirmed && closeReport.CloseFailed, "close failure telemetry");
+            var churnReport = new OuterResult(); var churn = new Fake { CensusChangesRemaining = 2 };
+            Require(OuterBrowserSupervisor.RunCore("unused", Array.Empty<string>(), churn, churnReport) == 0 &&
+                churnReport.CensusRetries == 2 && churn.CensusCalls == 4 && churn.Now - churn.StartedAt == 2,
+                "brief observed churn retries inside one sampling interval");
+            var sustainedReport = new OuterResult(); var sustained = new Fake { AlwaysChangeCensus = true };
+            Require(OuterBrowserSupervisor.RunCore("unused", Array.Empty<string>(), sustained, sustainedReport) == 1 &&
+                sustained.Now - sustained.StartedAt == OuterBrowserSupervisor.Interval && sustained.Aborts == 1 &&
+                sustainedReport.FailurePhase == "runtime-census" && !sustainedReport.Success,
+                "sustained churn fails closed within the sampling interval");
             var low = new Fake { AdmissionValue = OuterBrowserSupervisor.Admission };
             Require(Run(low) == 1 && !low.Started && low.Aborts == 1, "strict admission");
             foreach (var f in new[] {
@@ -177,11 +199,15 @@ namespace OuterSupervisorTests {
                 }
                 return null;
             });
-            int result = OuterBrowserSupervisor.RunCore(pwsh, new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(root)) }, f);
+            var report = new OuterResult();
+            int result = OuterBrowserSupervisor.RunCore(pwsh, new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(root)) }, f, report);
             Require(observer.Wait(12000), "child observer timeout");
             using (var childHandle = observer.Result) {
                 Require(result == 1 && f.MaxActive >= 2 && f.RootExitObserved && f.AbortConfirmed && childHandle != null &&
-                    LaunchBound.Native.WaitForSingleObject(childHandle, 5000) == 0, "surviving child cleanup");
+                    LaunchBound.Native.WaitForSingleObject(childHandle, 5000) == 0,
+                    "surviving child cleanup: phase=" + report.FailurePhase + ", step=" + report.FailureStep +
+                    ", kind=" + report.FailureKind + ", maxActive=" + f.MaxActive + ", rootExit=" + f.RootExitObserved +
+                    ", abortConfirmed=" + f.AbortConfirmed + ", observer=" + (childHandle != null));
             }
             if (File.Exists(marker)) File.Delete(marker);
         }

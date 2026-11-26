@@ -21,7 +21,9 @@ The standard input of the guarded process is NUL. Its stdout and stderr are
 passed through unchanged, so treat those streams and harness evidence as
 private. The supervisor writes a JSON status to stderr with admission sample
 times and bytes, sampled runtime counts/peaks and cleanup confirmation; it
-contains no paths or arguments. The peak is sampled, not an OS high-water mark.
+also reports fixed failure phase/step/category labels and a native error code
+when applicable, without paths, arguments or exception messages. The peak is
+sampled, not an OS high-water mark.
 `CleanupConfirmed` covers the retained root and outer job, not browser profile
 removal or complete output after a failed run. Retain telemetry separately when
 evidence is required.
@@ -35,8 +37,10 @@ The immutable policy is an unnamed, non-inheritable outer job with flags
 2 GiB summed whole-job working set, 3 GiB available-physical-memory floor,
 and 500 ms runtime sampling. Five admission readings must each exceed
 5.25 GiB and be at least 500 ms apart. A host below that threshold is rejected;
-there is no production bypass. Unexpected process churn or an inaccessible
-counter also fails closed. A failure status does not certify cleanup: retain
+there is no production bypass. A census that proves process churn is retried
+only within the current 500 ms sampling interval; persistent churn, inconsistent
+accounting or an inaccessible counter fails closed. Every observed partial sum
+over the working-set cap fails immediately. A failure status does not certify cleanup: retain
 private evidence and investigate any unconfirmed cleanup before another run.
 This guard does not replace the harness's inner owner, profile, readiness,
 offline or semantic checks.
