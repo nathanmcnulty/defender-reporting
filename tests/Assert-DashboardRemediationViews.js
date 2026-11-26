@@ -270,6 +270,41 @@ module.exports = { checkDeviceSnapshots };
     assert.strictEqual(result.first, 'First', 'Each group must retain its first device observation.');
 }
 
+function assertDeviceSeverityFirstObservation() {
+    const dashboard = loadDashboardHarness(`
+function checkDeviceSeverity() {
+    const rows = [
+        { CveId: 'CVE-1', VulnerabilitySeverityLevel: 'High', RecommendedSecurityUpdate: 'Update A' },
+        { CveId: 'CVE-1', VulnerabilitySeverityLevel: 'Critical', RecommendedSecurityUpdate: 'Update B' },
+        { CveId: 'CVE-2', VulnerabilitySeverityLevel: undefined, RecommendedSecurityUpdate: 'Update A' },
+        { CveId: 'CVE-2', VulnerabilitySeverityLevel: 'Low', RecommendedSecurityUpdate: 'Update B' }
+    ].map(row => ({
+        ...row, _mat: true, DeviceId: 'device-1', DeviceName: 'First',
+        SoftwareVendor: 'Vendor', SoftwareName: 'Product', OSPlatform: 'Windows11',
+        FirstSeenTimestamp: '2026-03-01', LastSeenTimestamp: '2026-03-26'
+    }));
+    applyDerivedVulnerabilityFields(rows);
+    rawVulns = null;
+    filterState = createEmptyFilterState();
+    filterState.startDate = '2026-03-01';
+    filterState.endDate = '2026-03-26';
+    vulnerabilityData = rows;
+    filteredData = rows;
+    remediationReportMode = REMEDIATION_REPORT_MODE_RANGE;
+    invalidateAggregateCache();
+    renderRemediationsByDeviceTablePage = () => {};
+    renderRemediationsByDeviceTable();
+    const device = getAggregateCache().remediationsByDeviceData[0];
+    return JSON.stringify({ cveCount: device.cveCount, severities: device.deviceSeverities, cvesBySeverity: device.deviceCvesBySeverity });
+}
+module.exports = { checkDeviceSeverity };
+`);
+    const result = JSON.parse(dashboard.checkDeviceSeverity());
+    assert.strictEqual(result.cveCount, 2);
+    assert.deepStrictEqual(result.severities, { Critical: 0, High: 1, Medium: 0, Low: 0 });
+    assert.deepStrictEqual(result.cvesBySeverity, { Critical: [], High: ['CVE-1'], Medium: [], Low: [] });
+}
+
 async function main() {
     const dashboard = loadDashboardHarness(`
 module.exports = {
@@ -1125,6 +1160,7 @@ module.exports = {
     assertAggregateMetadataProjection();
     assertUnsplitImpactNamesDoNotPopulateVersionCache();
     assertDeviceSnapshotReuse();
+    assertDeviceSeverityFirstObservation();
     await assertLazyAggregateParity();
     console.log('Remediation report mode and density helpers passed.');
 }

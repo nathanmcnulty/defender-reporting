@@ -787,9 +787,7 @@ function renderRemediationsByDeviceTable() {
             }
 
             if (!deviceCveDetails[deviceId].has(v.CveId)) {
-                deviceCveDetails[deviceId].set(v.CveId, {
-                    severityLevel: v.VulnerabilitySeverityLevel
-                });
+                deviceCveDetails[deviceId].set(v.CveId, v.VulnerabilitySeverityLevel);
             }
 
             deviceByKey[deviceId].cves.add(v.CveId);
@@ -797,10 +795,10 @@ function renderRemediationsByDeviceTable() {
 
         Object.values(deviceByKey).forEach(device => {
             device.deviceCvesBySeverity = { Critical: [], High: [], Medium: [], Low: [] };
-            deviceCveDetails[device.deviceId].forEach((cveDetail, cveId) => {
-                if (device.deviceSeverities.hasOwnProperty(cveDetail.severityLevel)) {
-                    device.deviceSeverities[cveDetail.severityLevel]++;
-                    device.deviceCvesBySeverity[cveDetail.severityLevel].push(cveId);
+            deviceCveDetails[device.deviceId].forEach((severityLevel, cveId) => {
+                if (device.deviceSeverities.hasOwnProperty(severityLevel)) {
+                    device.deviceSeverities[severityLevel]++;
+                    device.deviceCvesBySeverity[severityLevel].push(cveId);
                 }
             });
 
