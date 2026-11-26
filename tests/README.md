@@ -94,11 +94,7 @@ node .\tests\Measure-DashboardWorkerTransfer.js --privacy
 node .\tests\Assert-DashboardTelemetry.js
 ```
 
-For an actual measurement, set `PLAYWRIGHT_MODULE` to an installed Playwright module and supply the retained Hosted dashboard directory, a private evidence destination, repeats (1-10), and an explicit expected normalized row count:
-
-```powershell
-node .\tests\Measure-DashboardWorkerTransfer.js .\.local\two-row-control .\.local\worker-control.json 1 2 --positive-control
-```
+For an actual measurement, set `PLAYWRIGHT_MODULE` to an installed Playwright module and supply the retained Hosted dashboard directory, a private evidence destination, repeats (1-10), and an explicit expected normalized row count. Use the [Windows outer supervisor](OUTER-BROWSER-SUPERVISOR.md) for a guarded invocation.
 
 Use the committed `fixtures/legacy-migration` dataset through the normal generator for the two-row control; never infer a large normalized count from raw source observations. Run full deterministic preflight first. A smaller PowerShell preflight memory guard does not lower the browser guard. Existing automation Edge sessions must be cleared by their owner before starting a separate measurement; personal browsers must remain untouched.
 
