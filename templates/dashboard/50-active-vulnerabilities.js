@@ -449,7 +449,6 @@ function getImpactAnalysisData() {
     const remediationMap = {};
     const activeRows = getActiveRowsForCurrentSelection();
     const remediationDescriptors = new Array(activeRows.length);
-    const remediationBaseKeys = new Array(activeRows.length);
     const remediationFormattedSoftware = new Array(activeRows.length);
     const remediationRawKeys = new Array(activeRows.length);
     const versionBucketsByBaseKey = new Map();
@@ -463,7 +462,6 @@ function getImpactAnalysisData() {
         const canSplitByOsVersion = shouldSplitRemediationByOsVersion(formattedSoftware, v.OSPlatform);
 
         remediationDescriptors[i] = remediation;
-        remediationBaseKeys[i] = baseKey;
         remediationFormattedSoftware[i] = formattedSoftware;
 
         if (!canSplitByOsVersion) {
@@ -487,7 +485,7 @@ function getImpactAnalysisData() {
     activeRows.forEach((v, index) => {
         const remediation = remediationDescriptors[index];
         const formattedSoftware = remediationFormattedSoftware[index];
-        const baseKey = remediationBaseKeys[index];
+        const baseKey = remediation.key;
         const splitByVersion = (versionBucketsByBaseKey.get(baseKey)?.size || 0) > 1;
         const baseImpactName = getScopedRemediationDisplayTitle(remediation);
         const impactName = getVersionAwareImpactDisplayName(remediation, formattedSoftware, v.OSPlatform, v.OSVersion, splitByVersion);
