@@ -719,6 +719,82 @@ function buildRemediationsByDeviceRowHtml(remediations) {
     }).join('');
 }
 
+function addDeviceRemediationObservation(rem, v, remediation) {
+    observeRemediationDescriptor(rem, remediation);
+    addRemediationUpdateEntry(rem.updateEntryMap, remediation);
+    rem.cves.add(v.CveId);
+
+    if (!rem.cveDetails.has(v.CveId)) {
+        rem.cveDetails.set(v.CveId, {
+            severityLevel: v.VulnerabilitySeverityLevel,
+            publishedDate: v.PublishedDate
+        });
+        if (v.PublishedDate) {
+            rem.publishedDates.push(formatDateYMD(v.PublishedDate));
+        }
+    }
+}
+
+function expandDeviceRemediationSingleton(rem) {
+    if (!rem._singleRow) return rem;
+    const row = rem._singleRow;
+    const remediation = rem.remediationDescriptor;
+    const expanded = {
+        remediationDescriptor: remediation,
+        descriptorObservationMap: new Map(),
+        title: remediation.title,
+        familyTitle: remediation.familyTitle,
+        productLabel: remediation.productLabel,
+        updateName: remediation.updateName,
+        updateId: remediation.updateId,
+        osPlatform: remediation.osPlatform,
+        updateEntryMap: new Map(),
+        cves: new Set(),
+        cveDetails: new Map(),
+        severities: { Critical: 0, High: 0, Medium: 0, Low: 0 },
+        publishedDates: []
+    };
+    addDeviceRemediationObservation(expanded, row, remediation);
+    return expanded;
+}
+
+function mergeDeviceRemediationMapBuckets(bucketMap) {
+    const merged = new Map();
+    bucketMap.forEach((bucket, key) => {
+        const mergeKey = getRemediationAdvisoryFamilyMergeKey(bucket, key);
+        if (!merged.has(mergeKey)) {
+            merged.set(mergeKey, bucket);
+            return;
+        }
+        const target = expandDeviceRemediationSingleton(merged.get(mergeKey));
+        merged.set(mergeKey, target);
+        mergeDeviceRemediationBuckets(target, expandDeviceRemediationSingleton(bucket));
+    });
+    return merged;
+}
+
+function finalizeDeviceRemediation(rem) {
+    rem.cvesBySeverity = { Critical: [], High: [], Medium: [], Low: [] };
+    rem.cveDetails.forEach((cveDetail, cveId) => {
+        if (rem.severities.hasOwnProperty(cveDetail.severityLevel)) {
+            rem.severities[cveDetail.severityLevel]++;
+            rem.cvesBySeverity[cveDetail.severityLevel].push(cveId);
+        }
+    });
+
+    rem.remediationDescriptor = getDominantRemediationDescriptor(rem) || rem.remediationDescriptor;
+    rem.mostRecentDate = getMostRecentYmdDate(rem.publishedDates);
+    rem.updateEntries = finalizeRemediationUpdateEntries(rem.updateEntryMap);
+    rem.patchReference = summarizeRemediationUpdateEntries(rem.updateEntries);
+    rem.updateUrl = getSingleRemediationUpdateUrlFromEntries(rem.updateEntries) || rem.remediationDescriptor.updateUrl;
+    rem.title = getScopedRemediationDisplayTitle(rem.remediationDescriptor);
+    rem.familyTitle = rem.remediationDescriptor.familyTitle;
+    rem.productLabel = rem.remediationDescriptor.productLabel;
+    rem.updateName = rem.remediationDescriptor.updateName;
+    rem.updateId = rem.remediationDescriptor.updateId;
+    rem.score = calculateRemediationScore(rem.severities);
+}
+
 /**
  * Render the remediations by device table
  */
@@ -728,6 +804,7 @@ function renderRemediationsByDeviceTable() {
     if (!cache.remediationsByDeviceData) {
         const deviceByKey = {};
         const deviceCveDetails = {};
+        const singletonRemediations = new WeakMap();
         const activeRows = getRemediationReportRows();
 
         activeRows.forEach(v => {
@@ -755,35 +832,12 @@ function renderRemediationsByDeviceTable() {
             if (!deviceByKey[deviceId].remediations.has(remKey)) {
                 deviceByKey[deviceId].remediations.set(remKey, {
                     remediationDescriptor: remediation,
-                    descriptorObservationMap: new Map(),
-                    title: remediation.title,
-                    familyTitle: remediation.familyTitle,
-                    productLabel: remediation.productLabel,
-                    updateName: remediation.updateName,
-                    updateId: remediation.updateId,
-                    osPlatform: remediation.osPlatform,
-                    updateEntryMap: new Map(),
-                    cves: new Set(),
-                    cveDetails: new Map(),
-                    severities: { Critical: 0, High: 0, Medium: 0, Low: 0 },
-                    publishedDates: []
+                    _singleRow: v
                 });
-            }
-
-            const rem = deviceByKey[deviceId].remediations.get(remKey);
-            observeRemediationDescriptor(rem, remediation);
-            addRemediationUpdateEntry(rem.updateEntryMap, remediation);
-            rem.cves.add(v.CveId);
-
-            if (!rem.cveDetails.has(v.CveId)) {
-                rem.cveDetails.set(v.CveId, {
-                    severityLevel: v.VulnerabilitySeverityLevel,
-                    publishedDate: v.PublishedDate
-                });
-
-                if (v.PublishedDate) {
-                    rem.publishedDates.push(formatDateYMD(v.PublishedDate));
-                }
+            } else {
+                const rem = expandDeviceRemediationSingleton(deviceByKey[deviceId].remediations.get(remKey));
+                deviceByKey[deviceId].remediations.set(remKey, rem);
+                addDeviceRemediationObservation(rem, v, remediation);
             }
 
             if (!deviceCveDetails[deviceId].has(v.CveId)) {
@@ -802,28 +856,36 @@ function renderRemediationsByDeviceTable() {
                 }
             });
 
-            device.remediations = mergeRemediationMapBuckets(device.remediations, mergeDeviceRemediationBuckets);
+            device.remediations = mergeDeviceRemediationMapBuckets(device.remediations);
 
-            device.remediations.forEach(rem => {
-                rem.cvesBySeverity = { Critical: [], High: [], Medium: [], Low: [] };
-                rem.cveDetails.forEach((cveDetail, cveId) => {
-                    if (rem.severities.hasOwnProperty(cveDetail.severityLevel)) {
-                        rem.severities[cveDetail.severityLevel]++;
-                        rem.cvesBySeverity[cveDetail.severityLevel].push(cveId);
-                    }
-                });
-
-                rem.remediationDescriptor = getDominantRemediationDescriptor(rem) || rem.remediationDescriptor;
-                rem.mostRecentDate = getMostRecentYmdDate(rem.publishedDates);
-                rem.updateEntries = finalizeRemediationUpdateEntries(rem.updateEntryMap);
-                rem.patchReference = summarizeRemediationUpdateEntries(rem.updateEntries);
-                rem.updateUrl = getSingleRemediationUpdateUrlFromEntries(rem.updateEntries) || rem.remediationDescriptor.updateUrl;
-                rem.title = getScopedRemediationDisplayTitle(rem.remediationDescriptor);
-                rem.familyTitle = rem.remediationDescriptor.familyTitle;
-                rem.productLabel = rem.remediationDescriptor.productLabel;
-                rem.updateName = rem.remediationDescriptor.updateName;
-                rem.updateId = rem.remediationDescriptor.updateId;
-                rem.score = calculateRemediationScore(rem.severities);
+            device.remediations.forEach((rem, key) => {
+                if (!rem._singleRow) {
+                    finalizeDeviceRemediation(rem);
+                    return;
+                }
+                const row = rem._singleRow;
+                const descriptor = rem.remediationDescriptor;
+                const previous = singletonRemediations.get(descriptor);
+                // Completed buckets are only read after merging; share them only when their inputs match.
+                if (previous && previous.cveId === row.CveId && previous.severity === row.VulnerabilitySeverityLevel
+                    && previous.publishedDate === row.PublishedDate) {
+                    device.remediations.set(key, previous.remediation);
+                    return;
+                }
+                const expanded = expandDeviceRemediationSingleton(rem);
+                finalizeDeviceRemediation(expanded);
+                device.remediations.set(key, expanded);
+                if (previous) {
+                    previous.cveId = row.CveId;
+                    previous.severity = row.VulnerabilitySeverityLevel;
+                    previous.publishedDate = row.PublishedDate;
+                    previous.remediation = expanded;
+                } else {
+                    singletonRemediations.set(descriptor, {
+                        cveId: row.CveId, severity: row.VulnerabilitySeverityLevel,
+                        publishedDate: row.PublishedDate, remediation: expanded
+                    });
+                }
             });
         });
 

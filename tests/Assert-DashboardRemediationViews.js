@@ -305,6 +305,79 @@ module.exports = { checkDeviceSeverity };
     assert.deepStrictEqual(result.cvesBySeverity, { Critical: [], High: ['CVE-1'], Medium: [], Low: [] });
 }
 
+function assertDeviceRemediationSingletons() {
+    const dashboard = loadDashboardHarness(`
+function checkDeviceRemediations() {
+    const common = {
+        _mat: true, DeviceName: 'Device', SoftwareVendor: 'Vendor', SoftwareName: 'Product',
+        OSPlatform: 'Windows11', CveId: 'CVE-2026-0001', VulnerabilitySeverityLevel: 'High',
+        PublishedDate: '2026-03-01', RecommendedSecurityUpdate: 'Update A',
+        FirstSeenTimestamp: '2026-03-01', LastSeenTimestamp: '2026-03-26'
+    };
+    const rows = [
+        { DeviceId: 'a' }, { DeviceId: 'b' },
+        { DeviceId: 'c', VulnerabilitySeverityLevel: 'Low' },
+        { DeviceId: 'd', PublishedDate: '2026-03-02' },
+        { DeviceId: 'e', CveId: 'CVE-2026-0002' },
+        { DeviceId: 'h', RecommendedSecurityUpdateUrl: 'https://example.com/update' },
+        { DeviceId: 'f' },
+        { DeviceId: 'f', CveId: 'CVE-2026-0002', VulnerabilitySeverityLevel: 'Critical', PublishedDate: '2026-03-03' },
+        { DeviceId: 'g', CveBatchTitle: 'March Advisory', RecommendationReference: 'vendor_product',
+            RecommendedSecurityUpdate: 'CVE-2026-0001' },
+        { DeviceId: 'g', CveBatchTitle: 'March Advisory', RecommendationReference: 'vendor_product',
+            CveId: 'CVE-2026-0002', VulnerabilitySeverityLevel: 'Critical', PublishedDate: '2026-03-03',
+            RecommendedSecurityUpdate: 'CVE-2026-0002' }
+    ].map(row => ({ ...common, ...row }));
+    applyDerivedVulnerabilityFields(rows);
+    rawVulns = null;
+    filterState = createEmptyFilterState();
+    filterState.startDate = '2026-03-01';
+    filterState.endDate = '2026-03-26';
+    vulnerabilityData = rows;
+    filteredData = rows;
+    remediationReportMode = REMEDIATION_REPORT_MODE_RANGE;
+    invalidateAggregateCache();
+    renderRemediationsByDeviceTablePage = () => {};
+    renderRemediationsByDeviceTable();
+    const devices = Object.fromEntries(getAggregateCache().remediationsByDeviceData.map(device => [device.deviceId, device]));
+    const getOnly = device => [...device.remediations.values()][0];
+    const a = getOnly(devices.a), b = getOnly(devices.b), c = getOnly(devices.c);
+    const d = getOnly(devices.d), e = getOnly(devices.e), f = getOnly(devices.f);
+    const g = getOnly(devices.g), h = getOnly(devices.h);
+    return JSON.stringify({
+        shared: a === b,
+        differentSeverity: c.severities.Low,
+        differentDate: d.mostRecentDate,
+        differentCve: [...e.cves],
+        differentUrl: h.updateUrl,
+        duplicate: { cves: [...f.cves], severities: f.severities, date: f.mostRecentDate,
+            observations: [...f.descriptorObservationMap.values()].map(item => item.count),
+            updateCounts: [...f.updateEntryMap.values()].map(entry => entry.observationCount) },
+        merged: { count: devices.g.remediationCount, cves: [...g.cves], severities: g.severities,
+            date: g.mostRecentDate, updates: g.updateEntries.map(entry => entry.referenceText) }
+    });
+}
+module.exports = { checkDeviceRemediations };
+`);
+    const result = JSON.parse(dashboard.checkDeviceRemediations());
+    assert.strictEqual(result.shared, true, 'Identical singleton remediations can share their finalized report data.');
+    assert.strictEqual(result.differentSeverity, 1, 'Different severities must not reuse a singleton.');
+    assert.strictEqual(result.differentDate, '2026-03-02', 'Different dates must not reuse a singleton.');
+    assert.deepStrictEqual(result.differentCve, ['CVE-2026-0002'], 'Different CVEs must not reuse a singleton.');
+    assert.strictEqual(result.differentUrl, 'https://example.com/update', 'Different descriptors must not reuse a singleton.');
+    assert.deepStrictEqual(result.duplicate, {
+        cves: ['CVE-2026-0001', 'CVE-2026-0002'],
+        severities: { Critical: 1, High: 1, Medium: 0, Low: 0 },
+        date: '2026-03-03',
+        observations: [2], updateCounts: [2]
+    });
+    assert.deepStrictEqual(result.merged, {
+        count: 1, cves: ['CVE-2026-0001', 'CVE-2026-0002'],
+        severities: { Critical: 1, High: 1, Medium: 0, Low: 0 },
+        date: '2026-03-03', updates: ['CVE-2026-0001', 'CVE-2026-0002']
+    });
+}
+
 async function main() {
     const dashboard = loadDashboardHarness(`
 module.exports = {
@@ -1161,6 +1234,7 @@ module.exports = {
     assertUnsplitImpactNamesDoNotPopulateVersionCache();
     assertDeviceSnapshotReuse();
     assertDeviceSeverityFirstObservation();
+    assertDeviceRemediationSingletons();
     await assertLazyAggregateParity();
     console.log('Remediation report mode and density helpers passed.');
 }
