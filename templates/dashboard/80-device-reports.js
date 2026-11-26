@@ -98,8 +98,9 @@ function renderDevicesByRemediationTable() {
         const activeRows = getRemediationReportRows();
 
         activeRows.forEach(v => {
-            materializeRow(v);
-            const remediation = buildRemediationDescriptor(v);
+            const descriptorInput = getRemediationDescriptorInput(v);
+            if (descriptorInput === v && !v._aggregateMat && !v._mat) materializeRow(v);
+            const remediation = buildRemediationDescriptor(descriptorInput);
             const key = remediation.key;
 
             if (!remediationByKey[key]) {
@@ -140,6 +141,7 @@ function renderDevicesByRemediationTable() {
             remediationByKey[key].cves.add(v.CveId);
 
             if (!remediationByKey[key].cveDetails.has(v.CveId)) {
+                materializeRow(v);
                 remediationByKey[key].cveDetails.set(v.CveId, {
                     cveId: v.CveId,
                     cveBatchUrl: v.CveBatchUrl,
@@ -717,7 +719,8 @@ function renderRemediationsByDeviceTable() {
         const activeRows = getRemediationReportRows();
 
         activeRows.forEach(v => {
-            materializeRow(v);
+            const descriptorInput = getRemediationDescriptorInput(v);
+            if (descriptorInput === v && !v._aggregateMat && !v._mat) materializeRow(v);
             const deviceId = getDeviceIdentityKey(v);
 
             if (!deviceByKey[deviceId]) {
@@ -734,7 +737,7 @@ function renderRemediationsByDeviceTable() {
                 deviceCveDetails[deviceId] = new Map();
             }
 
-            const remediation = buildRemediationDescriptor(v);
+            const remediation = buildRemediationDescriptor(descriptorInput);
             const remKey = remediation.key;
 
             if (!deviceByKey[deviceId].remediations.has(remKey)) {

@@ -498,14 +498,7 @@ function getImpactAnalysisData() {
 
     for (let i = 0, len = activeRows.length; i < len; i++) {
         const v = activeRows[i];
-        const metadata = getAggregateRowMetadata(v);
-        const descriptorInput = metadata ? {
-            SoftwareVendor: v.SoftwareVendor,
-            SoftwareName: v.SoftwareName,
-            RecommendedSecurityUpdate: v.RecommendedSecurityUpdate,
-            OSPlatform: v.OSPlatform,
-            ...metadata
-        } : v;
+        const descriptorInput = getRemediationDescriptorInput(v);
         const remediation = buildRemediationDescriptor(descriptorInput);
         const formattedSoftware = formatSoftwarePart(v.SoftwareName);
         const baseKey = remediation.key;

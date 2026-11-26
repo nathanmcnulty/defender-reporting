@@ -471,6 +471,17 @@ function getRemediationFamilyKey(recommendationReference, advisoryTitle, updateN
     return familyIdentity;
 }
 
+function getRemediationDescriptorInput(v) {
+    const metadata = getAggregateRowMetadata(v);
+    return metadata ? {
+        SoftwareVendor: v.SoftwareVendor,
+        SoftwareName: v.SoftwareName,
+        RecommendedSecurityUpdate: v.RecommendedSecurityUpdate,
+        OSPlatform: v.OSPlatform,
+        ...metadata
+    } : v;
+}
+
 function buildRemediationDescriptor(v) {
     materializeAggregateRow(v);
 

@@ -27,7 +27,7 @@ function createTestRow(overrides = {}) {
 
 async function assertLazyAggregateParity() {
     const dashboard = loadDashboardHarness(`
-async function measureAggregate(eager, columnar) {
+async function measureAggregate(eager, columnar, preAggregate = false, missingLookup = false, cached = false) {
     const rowCount = 6000;
     lookups = {
         devices: [
@@ -46,6 +46,12 @@ async function measureAggregate(eager, columnar) {
         ? Object.fromEntries(['d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp', 'iv'].map((key, index) => [key, rawRows.map(row => row[index])]))
         : rawRows;
     await denormalizeAllVulns();
+    if (missingLookup) lookups.cves[0] = null;
+    if (cached) {
+        vulnerabilityData.forEach(materializeRow);
+        vulnerabilityData.forEach(row => { delete row._mat; delete row._aggregateMat; });
+        rawVulns = null;
+    }
     filterState = createEmptyFilterState();
     filterState.startDate = '2026-03-01';
     filterState.endDate = '2026-03-26';
@@ -54,6 +60,7 @@ async function measureAggregate(eager, columnar) {
     remediationDescriptorCache.clear();
     const started = performance.now();
     if (eager) vulnerabilityData.forEach(materializeRow);
+    else if (preAggregate) vulnerabilityData.forEach(materializeAggregateRow);
     const impact = getImpactAnalysisData();
     const impactMaterialized = vulnerabilityData.filter(row => row._aggregateMat || row._mat).length;
     const impactVersions = impact.top25.map(row => ({ name: row.name, count: row.vulnerabilities.length }));
@@ -61,6 +68,17 @@ async function measureAggregate(eager, columnar) {
         rank: row.rank, name: row.name, devices: row.devices, cveIds: row.cveIds, impact: row.impact, update: row.updateValue
     }));
     const impactChart = getImpactChartData();
+    renderDevicesByRemediationTablePage = () => {};
+    renderRemediationsByDeviceTablePage = () => {};
+    renderDevicesByRemediationTable();
+    renderRemediationsByDeviceTable();
+    const deviceMaterialized = vulnerabilityData.filter(row => row._aggregateMat || row._mat).length;
+    const deviceDetailMaterialized = vulnerabilityData.filter(row => row._mat).length;
+    const deviceReports = JSON.stringify({
+        devicesByRemediation: getAggregateCache().devicesByRemediationData,
+        remediationsByDevice: getAggregateCache().remediationsByDeviceData
+    }, (key, value) => value instanceof Map ? Array.from(value.entries())
+        : value instanceof Set ? Array.from(value) : value);
     const table = getRemediationTableData();
     const elapsed = performance.now() - started;
     const materialized = vulnerabilityData.filter(row => row._mat).length;
@@ -76,7 +94,7 @@ async function measureAggregate(eager, columnar) {
         ? config.rowBuilder(config.items[0]) + config.rowBuilder(config.items[config.items.length - 1]) : '').join('');
     vulnerabilityData.forEach(materializeRow);
     const detail = JSON.stringify(detailFields.map(field => vulnerabilityData[0][field]));
-    return { summary, detail, sections: modalHtml, impactVersions, impactTable, impactChart, impactMaterialized, materialized, evidenceArrays, described, elapsed, groups: table.length };
+    return { summary, detail, sections: modalHtml, impactVersions, impactTable, impactChart, impactMaterialized, deviceReports, deviceMaterialized, deviceDetailMaterialized, materialized, evidenceArrays, described, elapsed, groups: table.length };
 }
 module.exports = { measureAggregate };
 `, { performance: require('perf_hooks').performance });
@@ -95,16 +113,28 @@ module.exports = { measureAggregate };
         assert.deepStrictEqual(lazy.impactChart, eager.impactChart, 'Impact chart series must match fully materialized rows.');
         assert.strictEqual(lazy.impactMaterialized, 0, 'Impact analysis must not expand aggregate fields on every row.');
         assert.strictEqual(eager.impactMaterialized, 6000);
-        assert.strictEqual(lazy.materialized, 0);
-        assert.strictEqual(lazy.evidenceArrays, 0);
-        assert.strictEqual(lazy.described, 0);
+        assert.strictEqual(lazy.deviceReports, eager.deviceReports, 'Device report data must match fully materialized rows.');
+        assert.strictEqual(lazy.deviceMaterialized, 1, 'Device reports should expand only a representative CVE row.');
+        assert.strictEqual(lazy.materialized, 1);
+        assert.strictEqual(lazy.evidenceArrays, 2);
+        assert.strictEqual(lazy.described, 1);
         assert.strictEqual(eager.materialized, 6000);
         assert.strictEqual(eager.evidenceArrays, 12000);
         lazyTimes.push(lazy.elapsed);
         eagerTimes.push(eager.elapsed);
     }
+    const preAggregated = await dashboard.measureAggregate(false, false, true);
+    const eager = await dashboard.measureAggregate(true, false);
+    assert.strictEqual(preAggregated.deviceReports, eager.deviceReports, 'Device report data must match when aggregate rows were already materialized.');
+    assert.strictEqual(preAggregated.deviceDetailMaterialized, 1, 'Pre-materialized aggregate fields must not cause full expansion of device reports.');
+    const missingLookupLazy = await dashboard.measureAggregate(false, false, false, true);
+    const missingLookupEager = await dashboard.measureAggregate(true, false, false, true);
+    assert.strictEqual(missingLookupLazy.deviceReports, missingLookupEager.deviceReports, 'Device reports must preserve missing-lookup fallback behavior.');
+    const cachedLazy = await dashboard.measureAggregate(false, false, false, false, true);
+    const cachedEager = await dashboard.measureAggregate(true, false, false, false, true);
+    assert.strictEqual(cachedLazy.deviceReports, cachedEager.deviceReports, 'Device reports must preserve cached row behavior without raw data.');
     const median = values => values.sort((left, right) => left - right)[1].toFixed(1);
-    console.log('Aggregate probe (6000 rows, 3 runs): detail rows 6000 -> 0; evidence arrays 12000 -> 0; median eager/lazy ms ' + median(eagerTimes) + '/' + median(lazyTimes));
+    console.log('Aggregate probe (6000 rows, 3 runs): detail rows 6000 -> 1; evidence arrays 12000 -> 2; median eager/lazy ms ' + median(eagerTimes) + '/' + median(lazyTimes));
 }
 
 function assertAggregateMetadataProjection() {
