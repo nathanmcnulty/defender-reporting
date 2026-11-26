@@ -211,6 +211,65 @@ module.exports = { checkNames };
     assert.strictEqual(result.splitCacheSize, 2, 'Split version names must still be cached separately.');
 }
 
+function assertDeviceSnapshotReuse() {
+    const dashboard = loadDashboardHarness(`
+function checkDeviceSnapshots() {
+    const sharedTags = ['Prod'];
+    const device = { DeviceId: 'device-1', DeviceName: 'First', MachineInfo: { ip: '10.0.0.1' }, MachineTags: sharedTags, RbacGroupName: 'Servers' };
+    const rows = [
+        { ...device, RecommendedSecurityUpdate: 'Update A' },
+        { ...device, RecommendedSecurityUpdate: 'Update B' },
+        { ...device, DeviceName: 'Different', RecommendedSecurityUpdate: 'Update C' },
+        { ...device, RecommendedSecurityUpdate: 'Update C0' },
+        { ...device, MachineInfo: { ip: '10.0.0.2' }, RecommendedSecurityUpdate: 'Update D' },
+        { ...device, RecommendedSecurityUpdate: 'Update D0' },
+        { ...device, MachineTags: ['Test'], RecommendedSecurityUpdate: 'Update E' },
+        { ...device, RecommendedSecurityUpdate: 'Update E0' },
+        { ...device, RbacGroupName: 'Other', RecommendedSecurityUpdate: 'Update F' },
+        { ...device, MachineTags: null, RecommendedSecurityUpdate: 'Update G' },
+        { ...device, MachineTags: undefined, RecommendedSecurityUpdate: 'Update H' },
+        { ...device, DeviceName: 'Later', RecommendedSecurityUpdate: 'Update A' }
+    ].map(row => ({
+        ...row, _mat: true, CveId: 'CVE-1', SoftwareVendor: 'Vendor', SoftwareName: 'Product',
+        OSPlatform: 'Windows11', VulnerabilitySeverityLevel: 'High',
+        FirstSeenTimestamp: '2026-03-01', LastSeenTimestamp: '2026-03-26'
+    }));
+    applyDerivedVulnerabilityFields(rows);
+    rawVulns = null;
+    filterState = createEmptyFilterState();
+    filterState.startDate = '2026-03-01';
+    filterState.endDate = '2026-03-26';
+    vulnerabilityData = rows;
+    filteredData = rows;
+    remediationReportMode = REMEDIATION_REPORT_MODE_RANGE;
+    invalidateAggregateCache();
+    renderDevicesByRemediationTablePage = () => {};
+    renderDevicesByRemediationTable();
+    const groups = getAggregateCache().devicesByRemediationData;
+    const snapshots = ['Update A', 'Update B', 'Update C', 'Update D', 'Update E', 'Update F', 'Update G', 'Update H'].map(name =>
+        groups.find(group => group.updateName === name).devices.get('device-1'));
+    return {
+        shared: snapshots[0] === snapshots[1],
+        name: snapshots[2].DeviceName,
+        ip: snapshots[3].IpAddress,
+        tags: snapshots[4].MachineTags.join(', '),
+        group: snapshots[5].RbacGroupName,
+        emptyShared: snapshots[6] === snapshots[7],
+        first: snapshots[0].DeviceName
+    };
+}
+module.exports = { checkDeviceSnapshots };
+`);
+    const result = dashboard.checkDeviceSnapshots();
+    assert.strictEqual(result.shared, true, 'Identical device details should share one snapshot across remediation groups.');
+    assert.strictEqual(result.name, 'Different', 'The same identity may have different device names.');
+    assert.strictEqual(result.ip, '10.0.0.2', 'The same identity may have different IP addresses.');
+    assert.strictEqual(result.tags, 'Test', 'The same identity may have different tags.');
+    assert.strictEqual(result.group, 'Other', 'The same identity may have different groups.');
+    assert.strictEqual(result.emptyShared, true, 'Missing tags may use the same empty snapshot.');
+    assert.strictEqual(result.first, 'First', 'Each group must retain its first device observation.');
+}
+
 async function main() {
     const dashboard = loadDashboardHarness(`
 module.exports = {
@@ -1065,6 +1124,7 @@ module.exports = {
 
     assertAggregateMetadataProjection();
     assertUnsplitImpactNamesDoNotPopulateVersionCache();
+    assertDeviceSnapshotReuse();
     await assertLazyAggregateParity();
     console.log('Remediation report mode and density helpers passed.');
 }

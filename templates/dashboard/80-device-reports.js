@@ -95,6 +95,8 @@ function renderDevicesByRemediationTable() {
     const cache = getAggregateCache();
     if (!cache.devicesByRemediationData) {
         const remediationByKey = {};
+        const deviceSnapshots = new Map();
+        const emptyTags = [];
         const activeRows = getRemediationReportRows();
 
         activeRows.forEach(v => {
@@ -129,13 +131,23 @@ function renderDevicesByRemediationTable() {
 
             const deviceKey = getDeviceIdentityKey(v);
             if (!remediationByKey[key].devices.has(deviceKey)) {
-                remediationByKey[key].devices.set(deviceKey, {
-                    DeviceId: deviceKey,
-                    DeviceName: v.DeviceName,
-                    IpAddress: v.MachineInfo?.ip || '',
-                    MachineTags: v.MachineTags || [],
-                    RbacGroupName: normalizeGroupName(v.RbacGroupName)
-                });
+                const deviceName = v.DeviceName;
+                const ipAddress = v.MachineInfo?.ip || '';
+                const machineTags = v.MachineTags || emptyTags;
+                const rbacGroupName = normalizeGroupName(v.RbacGroupName);
+                let snapshot = deviceSnapshots.get(deviceKey);
+                if (!snapshot || snapshot.DeviceName !== deviceName || snapshot.IpAddress !== ipAddress
+                    || snapshot.MachineTags !== machineTags || snapshot.RbacGroupName !== rbacGroupName) {
+                    snapshot = {
+                        DeviceId: deviceKey,
+                        DeviceName: deviceName,
+                        IpAddress: ipAddress,
+                        MachineTags: machineTags,
+                        RbacGroupName: rbacGroupName
+                    };
+                    deviceSnapshots.set(deviceKey, snapshot);
+                }
+                remediationByKey[key].devices.set(deviceKey, snapshot);
             }
 
             remediationByKey[key].cves.add(v.CveId);
