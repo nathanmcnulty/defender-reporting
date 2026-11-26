@@ -101,6 +101,7 @@ module.exports = {
     buildRemediationDescriptor,
     buildRemediationModalUpdateLinksHtml,
     getImpactAnalysisData,
+    getImpactAnalysisTableData,
     getRemediationTableData,
     getScopedRemediationDisplayTitle,
     matchesFilterState,
@@ -278,6 +279,11 @@ module.exports = {
             && impactData.top25[0].updateHtml.includes('CVE-2023-27043'),
         'Expected impact analysis to surface the recommendation reference in an Update Details badge when it differs from the advisory title.'
     );
+    const impactTable = dashboard.getImpactAnalysisTableData();
+    assert.strictEqual(impactTable.length, 1);
+    assert.strictEqual(impactTable[0].devices, 2, 'Impact details must count unique devices.');
+    assert.strictEqual(impactTable[0].cveIds, 1, 'Impact details must deduplicate repeated CVEs.');
+    assert.strictEqual(impactTable[0].impact, 2);
     assert.strictEqual(
         dashboard.getScopedRemediationDisplayTitle(dashboard.buildRemediationDescriptor(duplicateFamilyRows[0])),
         'Python For Mac: March 2023 Vulnerabilities',

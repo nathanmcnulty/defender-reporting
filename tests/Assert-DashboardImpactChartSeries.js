@@ -29,9 +29,37 @@ function main() {
     const dashboard = loadDashboardHarness(`
 module.exports = {
     applyDerivedVulnerabilityFields,
-    buildImpactChartSeries
+    buildImpactChartSeries,
+    createImpactMembership
 };
 `);
+    for (const [indices, shouldCompact] of [
+        [[0, -0, 1, 7, 8, 15, 16, 16], true],
+        [[], false],
+        [[0, 100000], false],
+        [[0, -1], false],
+        [[0, 1.5], false],
+        [[0, '1'], false],
+        [[0, undefined, null, NaN, Infinity], false],
+        [[0, 50000000], false]
+    ]) {
+        const groups = [{ vulnerabilities: indices.map(_index => ({ _index })) }];
+        const actual = dashboard.createImpactMembership(groups);
+        const expected = new Set(indices);
+        assert.strictEqual(Object.prototype.toString.call(actual) !== '[object Set]', shouldCompact);
+        for (const probe of [...indices, 0, -0, 2, 7, 8, 31, 32, -1, 1.5, '1', undefined, null, NaN, Infinity, 50000000]) {
+            assert.strictEqual(actual.has(probe), expected.has(probe), `Membership mismatch for ${String(probe)}.`);
+        }
+    }
+    const denseIndices = Array.from({ length: 2000 }, (_, index) => (index * 37) % 4096);
+    const denseMembership = dashboard.createImpactMembership([
+        { vulnerabilities: denseIndices.slice(0, 1000).map(_index => ({ _index })) },
+        { vulnerabilities: denseIndices.slice(1000).map(_index => ({ _index })) }
+    ]);
+    const denseExpected = new Set(denseIndices);
+    for (let index = 0; index < 4096; index++) {
+        assert.strictEqual(denseMembership.has(index), denseExpected.has(index), `Dense membership mismatch at ${index}.`);
+    }
     const rows = [
         createTestRow({
             _index: 0,
@@ -94,6 +122,13 @@ module.exports = {
         new Set([0]),
         ['2026-01-01', '2026-01-02', '2026-01-03', '2026-01-04']
     );
+    const compactSeries = dashboard.buildImpactChartSeries(
+        rows,
+        dashboard.createImpactMembership([{ vulnerabilities: [rows[0]] }]),
+        ['2026-01-01', '2026-01-02', '2026-01-03', '2026-01-04']
+    );
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(compactSeries)), JSON.parse(JSON.stringify(series)),
+        'Compact membership must preserve every impact chart series.');
 
     const currentTotalCounts = Array.from(series.currentTotalCounts);
     const projectedTotalCounts = Array.from(series.projectedTotalCounts);

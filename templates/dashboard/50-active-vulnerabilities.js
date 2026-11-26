@@ -442,6 +442,47 @@ function getRemediationChartData() {
     return cache.remediationChartData;
 }
 
+function createImpactMembership(top25) {
+    let count = 0;
+    let maxIndex = -1;
+    let compact = true;
+    for (let group = 0; group < top25.length; group++) {
+        const rows = top25[group].vulnerabilities;
+        for (let i = 0; i < rows.length; i++) {
+            const index = rows[i]._index;
+            if (!Number.isSafeInteger(index) || index < 0 || index >= 50000000) {
+                compact = false;
+                break;
+            }
+            count++;
+            if (index > maxIndex) maxIndex = index;
+        }
+        if (!compact) break;
+    }
+
+    // Keep sparse or nonstandard indices in a Set; the dense bitmap is capped at 6.25 MB.
+    if (!compact || count === 0 || maxIndex >= count * 32) {
+        const ids = new Set();
+        top25.forEach(remediation => remediation.vulnerabilities.forEach(row => ids.add(row._index)));
+        return ids;
+    }
+
+    const bits = new Uint8Array((maxIndex >>> 3) + 1);
+    for (let group = 0; group < top25.length; group++) {
+        const rows = top25[group].vulnerabilities;
+        for (let i = 0; i < rows.length; i++) {
+            const index = rows[i]._index;
+            bits[index >>> 3] |= 1 << (index & 7);
+        }
+    }
+    return {
+        has(index) {
+            return Number.isSafeInteger(index) && index >= 0 && index <= maxIndex &&
+                (bits[index >>> 3] & (1 << (index & 7))) !== 0;
+        }
+    };
+}
+
 function getImpactAnalysisData() {
     const cache = getAggregateCache();
     if (cache.impactData) return cache.impactData;
@@ -552,12 +593,7 @@ function getImpactAnalysisData() {
         }
     }
 
-    const top25VulnIds = new Set();
-    top25.forEach(rem => {
-        rem.vulnerabilities.forEach(v => {
-            top25VulnIds.add(v._index);
-        });
-    });
+    const top25VulnIds = createImpactMembership(top25);
 
     cache.impactData = {
         top25,
@@ -573,8 +609,12 @@ function getImpactAnalysisTableData() {
 
     const { top25 } = getImpactAnalysisData();
     cache.impactAnalysisTableData = top25.map((item, index) => {
-        const cveIds = new Set(item.vulnerabilities.map(v => v.CveId));
-        const devices = new Set(item.vulnerabilities.map(v => getDeviceIdentityKey(v)));
+        const cveIds = new Set();
+        const devices = new Set();
+        item.vulnerabilities.forEach(v => {
+            cveIds.add(v.CveId);
+            devices.add(getDeviceIdentityKey(v));
+        });
         return {
             rank: index + 1,
             name: item.name,

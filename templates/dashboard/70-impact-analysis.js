@@ -5,7 +5,7 @@
 /**
  * Build the impact chart time series for current and projected counts.
  * @param {Array} rows
- * @param {Set<number>} top25VulnIds
+ * @param {{has: function(number): boolean}} top25VulnIds
  * @param {Array<string>} sortedDates
  * @returns {{currentSeverityCounts: Object, projectedSeverityCounts: Object, currentTotalCounts: Array<number>, projectedTotalCounts: Array<number>}}
  */
