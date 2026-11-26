@@ -451,7 +451,6 @@ function getImpactAnalysisData() {
     const remediationDescriptors = new Array(activeRows.length);
     const remediationBaseKeys = new Array(activeRows.length);
     const remediationFormattedSoftware = new Array(activeRows.length);
-    const remediationCanSplitByOsVersion = new Array(activeRows.length);
     const remediationRawKeys = new Array(activeRows.length);
     const versionBucketsByBaseKey = new Map();
     const rawKeyToMergedKey = new Map();
@@ -466,7 +465,6 @@ function getImpactAnalysisData() {
         remediationDescriptors[i] = remediation;
         remediationBaseKeys[i] = baseKey;
         remediationFormattedSoftware[i] = formattedSoftware;
-        remediationCanSplitByOsVersion[i] = canSplitByOsVersion;
 
         if (!canSplitByOsVersion) {
             continue;
