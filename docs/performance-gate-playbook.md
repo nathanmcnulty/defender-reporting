@@ -22,7 +22,7 @@ A fresh dashboard blob or execution metric alone is not completion. Validation a
 
 Run correlation assumes exclusive sequential invocation with recurrence disabled and no overlapping producer sharing the target. The first fresh matching run ID is retained and later changes fail validation. This does not establish invocation-ID correlation under concurrency or identify an exact Function App from the host-class field alone.
 
-These are validation correctness checks, not live acceptance. Issue #92 remains unqualified until its separately approved Azure acceptance scope and evidence gates are met.
+These are validation correctness checks, not live acceptance by themselves. Issue #92 was closed after a successful live Function-host export and dashboard generation; a live Automation-host receipt was not obtained.
 
 ## Dataset cadence
 
@@ -47,13 +47,15 @@ Standard large Azure acceptance dataset:
 - Current Function App reference: the 2026-07-13 complete enriched replay published `1,484,239` rows in about `544s` active time, with `816.3 MB` Azure Monitor peak working set and approximately `1,238,425,600` execution units. Track this separately from the Automation ceiling.
 - Compare future hosted Azure acceptance runs against the current bounded-path envelope in `docs/performance-baselines.md`; retain the older Function App envelope as a separate historical comparison until it is refreshed
 
-For a guarded candidate run against the real Automation account, use `tests/Invoke-AzureRunbookValidation.ps1` with an explicit subscription, `-ValidatePublishedSemanticParity`, and `-Execute`. The harness backs up and restores the runbook and storage state. Run both the high-cardinality content-only seed and the checked-in `exports` compatibility lane before accepting normalization or memory changes. Large compiled payloads use exact decompressed-byte equality; enriched compatibility payloads use canonical expanded-row equivalence when lookup ordering changes serialized bytes.
+For a guarded candidate run against an approved Automation account, use `tests/Invoke-AzureRunbookValidation.ps1` with an explicit subscription, `-ValidatePublishedSemanticParity`, and `-Execute`. The harness backs up and restores the runbook and storage state. Smaller direct-payload workloads use the compatibility normalizer unless `-UseExperimentalCompiledSmallPayload` is explicitly supplied; experimental runs bypass normalized-payload cache reads and writes. Run both the high-cardinality content-only seed and the original `exports` compatibility lane before accepting normalization or memory changes. The cleaned `main` branch no longer includes those exports; use an approved matching copy kept locally, or record the lane as blocked. Do not commit tenant exports. Large compiled payloads use exact decompressed-byte equality; enriched compatibility payloads use canonical expanded-row equivalence when lookup ordering changes serialized bytes.
+
+The existing high-cardinality compact contract retains all supplied non-whitespace affected-software references, while the in-process compatibility contract filters them to vendors in the dataset. Treat this as a historical contract distinction when comparing the two paths, not as proof of identical serialized payloads. For #69, compare same-seed Hosted and Dual Automation replays, require a true peak strictly below `400,000,000` bytes and elapsed time no more than `110%` of the controlled Dual baseline, and retain the row, summary, hash, and offline parity evidence.
 
 Supply the verified projected count explicitly, for example `-ExpectedTotalRows 1187395` for the prepared 50K content-only replay described above, or provide authoritative `expectedDashboardRows` in the synthetic manifest. Do not reuse that count for a different dataset or enrichment lane. The old `actualTotalVulnRows`/`actualCurrentRows` fields describe observations and cannot establish the normalized onboarded count. Explicit overrides take priority over manifest metadata; otherwise missing, malformed, fractional, nonpositive, or above-50-million expectations fail before Azure calls. See the complete CLI example in `tests/README.md`.
 
 ## Hosted local runtime checkpoints
 
-Use the local `exports\` lane as a quick browser/runtime checkpoint before escalating to Azure or the large semantic lanes.
+When an approved local `exports\` dataset is available, use it as a quick browser/runtime checkpoint before escalating to Azure or the large semantic lanes.
 
 Current local reference points on the generated hosted dashboard:
 

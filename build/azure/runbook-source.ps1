@@ -32,6 +32,10 @@
     Include Advanced Hunting data for CVE enrichment (PublishedDate, Description, EPSS).
     Requires AdvancedQuery.Read.All permission on the Managed Identity. Default: true
 
+.PARAMETER UseExperimentalCompiledSmallPayload
+    Opt in to the compiled normalizer for smaller direct-payload workloads during
+    controlled validation. Defaults to false; normalized payload caching is bypassed.
+
 .PARAMETER Export
     Export target for the generated dashboard. Default: BlobStorage
     Options: BlobStorage, SharePoint, StaticWebApp
@@ -67,6 +71,9 @@ param(
     [Parameter(Mandatory = $false)]
     [bool]$UseDirectMergeDeviceLookup = $false,
     [bool]$UseBoundedPublicationMetadataReader = $false,
+
+    [Parameter(Mandatory = $false)]
+    [bool]$UseExperimentalCompiledSmallPayload = $false,
 
     [Parameter(Mandatory = $false)]
     [ValidateSet('BlobStorage', 'SharePoint', 'StaticWebApp')]
@@ -1810,7 +1817,8 @@ try {
     $skipObservedWindowMerge = (Test-Path -LiteralPath $syntheticManifestPath -PathType Leaf)
     Set-PipelineExecutionStage -Stage 'CheckDashboardPayloadCache' -Message 'Checking for a reusable normalized payload cache.'
     [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
-    $payloadCacheEntry = Get-NormalizedPayloadCacheEntry -BasePath $tempExports -SkipObservedWindowMerge:$skipObservedWindowMerge
+    $payloadCacheEntry = if ($UseExperimentalCompiledSmallPayload) { $null } else { Get-NormalizedPayloadCacheEntry -BasePath $tempExports -SkipObservedWindowMerge:$skipObservedWindowMerge }
+    if ($UseExperimentalCompiledSmallPayload) { Write-Output '  Experimental compiled normalization enabled; bypassing the normalized payload cache.' }
     $Script:PipelineNormalizedPayloadCacheHit = ($null -ne $payloadCacheEntry)
     Invoke-FullGarbageCollection
     Write-MemoryUsage -Label "Post-PayloadCacheCheck"
@@ -1836,17 +1844,18 @@ try {
         # Step 1: Read machine and Advanced Hunting data
         Set-PipelineExecutionStage -Stage 'ReadNormalizationInputs' -Message 'Loading machine and Advanced Hunting inputs for dashboard normalization.'
         [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running')
-        $normalizationExecutionPlan = Get-NormalizationExecutionPlan -Path $tempExports -DeliveryMode $DashboardDeliveryMode
-        Write-Output ("  Normalization plan: devices={0}; contentTemplates={1}; machineLookup={2}; contentMode={3}; estimatedPrivate={4}MB; estimatedWorkingSet={5}MB" -f $normalizationExecutionPlan.DeviceProfileCount, $normalizationExecutionPlan.ContentTemplateCount, $normalizationExecutionPlan.DeviceLookupMode, $normalizationExecutionPlan.ContentNormalizationMode, $normalizationExecutionPlan.EstimatedPrivateMemoryMb, $normalizationExecutionPlan.EstimatedWorkingSetMb)
-        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties @{ normalizationExecutionPlan = $normalizationExecutionPlan })
-        if (-not $normalizationExecutionPlan.SafeToExecute) {
-            throw [string]$normalizationExecutionPlan.FailureReason
-        }
         $useDirectMergeDeviceLookupForRun = (
             $UseDirectMergeDeviceLookup -and
             (Sync-VulnContentStoreSidecar -BasePath $tempExports) -and
             (Test-VulnContentStoreSupportsDirectMerge -BasePath $tempExports)
         )
+        $normalizationExecutionPlan = Get-NormalizationExecutionPlan -Path $tempExports -DeliveryMode $DashboardDeliveryMode -CompiledPayloadSupported:(-not $useDirectMergeDeviceLookupForRun -and (Sync-VulnContentStoreSidecar -BasePath $tempExports)) -UseExperimentalCompiledSmallPayload:$UseExperimentalCompiledSmallPayload
+        Write-Output ("  Normalization plan: devices={0}; contentTemplates={1}; machineLookup={2}; contentMode={3}; estimatedPrivate={4}MB; estimatedWorkingSet={5}MB" -f $normalizationExecutionPlan.DeviceProfileCount, $normalizationExecutionPlan.ContentTemplateCount, $normalizationExecutionPlan.DeviceLookupMode, $normalizationExecutionPlan.ContentNormalizationMode, $normalizationExecutionPlan.EstimatedPrivateMemoryMb, $normalizationExecutionPlan.EstimatedWorkingSetMb)
+        [void](Write-PipelineExecutionStatus -AccountName $StorageAccountName -StorageToken $storageToken -Status 'running' -AdditionalProperties @{ normalizationExecutionPlan = $normalizationExecutionPlan })
+        if (-not $normalizationExecutionPlan.SafeToExecute) {
+            throw [string]$normalizationExecutionPlan.FailureReason
+        }
+
         if ($useDirectMergeDeviceLookupForRun) {
             Write-Output "  Experimental direct-merge device lookup enabled for Azure runbook; skipping preloaded machine lookup."
             $machines = @{}
@@ -1914,7 +1923,7 @@ try {
                 [bool]$UseDirectMergeDeviceLookupForAttempt
             )
 
-            ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -AdvancedHuntingInventoryData $advancedHuntingInventoryData -NvdCveData $nvdCveData -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DirectMergeDeviceLookup:$UseDirectMergeDeviceLookupForAttempt -NormalizationProgressCallback {
+            ConvertTo-NormalizedData -DataPath $tempExports -VulnOutputPath $tempVulnsPath -PayloadOutputPath $tempPayloadPath -Machines $machines -AdvancedHuntingData $advancedHuntingData -AdvancedHuntingDeviceUsers $advancedHuntingDeviceUsers -AdvancedHuntingInventoryData $advancedHuntingInventoryData -NvdCveData $nvdCveData -SkipObservedWindowMerge:$skipObservedWindowMerge -ConsumeLookupsOnPayloadClose -DirectMergeDeviceLookup:$UseDirectMergeDeviceLookupForAttempt -UseExperimentalCompiledSmallPayload:$UseExperimentalCompiledSmallPayload -NormalizationProgressCallback {
             param($NormalizationEvent)
 
             if ($null -eq $NormalizationEvent) {
@@ -2116,7 +2125,7 @@ try {
         }
         Invoke-FullGarbageCollection
 
-        $cacheEntry = Publish-NormalizedPayloadCache -BasePath $tempExports -PayloadPath $tempPayloadPath -VulnCount $vulnCount -DeviceCount $deviceCount -CveCount $cveCount -Quality $normalizedQuality -SourceMetadata $sourceMetadata -SkipObservedWindowMerge:$skipObservedWindowMerge
+        $cacheEntry = if ($UseExperimentalCompiledSmallPayload) { $null } else { Publish-NormalizedPayloadCache -BasePath $tempExports -PayloadPath $tempPayloadPath -VulnCount $vulnCount -DeviceCount $deviceCount -CveCount $cveCount -Quality $normalizedQuality -SourceMetadata $sourceMetadata -SkipObservedWindowMerge:$skipObservedWindowMerge }
         if ($cacheEntry) {
             Write-Output ("  Cached normalized payload as {0}" -f $cacheEntry.Fingerprint.Substring(0, 12))
             $payloadManifest = $cacheEntry.Manifest

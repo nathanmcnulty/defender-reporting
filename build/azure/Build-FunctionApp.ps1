@@ -88,6 +88,7 @@ $IncludeAdvancedHunting = ($env:INCLUDE_ADVANCED_HUNTING -ne 'false')
 $UseExistingExportsOnly = ($env:USE_EXISTING_EXPORTS_ONLY -eq 'true')
 $UseDirectMergeDeviceLookup = $false
 $UseBoundedPublicationMetadataReader = $false
+$UseExperimentalCompiledSmallPayload = $false
 $Export = if ($env:EXPORT_TARGET) { $env:EXPORT_TARGET } else { 'BlobStorage' }
 
 $script:PipelineFileTraceEnabled = ($env:PIPELINE_FILE_TRACE_ENABLED -eq 'true')

@@ -467,22 +467,372 @@ function Test-RunbookBenchmarkPublicationReaderOptIn {
     $script:AutomationAccountName = 'fixture'
     $script:AutomationResourceGroup = 'fixture'
     $script:RunbookName = 'fixture'
+    $script:StorageAccountName = 'fixturestorage'
     $script:DashboardDeliveryMode = 'Dual'
     $script:UseExistingExportsOnly = $true
     $script:UseDirectMergeDeviceLookup = $true
     foreach ($enabled in @($false, $true)) {
         $script:UseBoundedPublicationMetadataReader = $enabled
+        $script:UseExperimentalCompiledSmallPayload = $enabled
         $null = Start-RunbookBenchmark -Confirm:$false
         Assert-True (($script:ReaderBenchmarkArguments -contains 'UseBoundedPublicationMetadataReader=true') -eq $enabled) 'Benchmark job reader selection differs from requested treatment.'
+        Assert-True (($script:ReaderBenchmarkArguments -contains 'UseExperimentalCompiledSmallPayload=true') -eq $enabled) 'Benchmark job compiled-small-payload selection differs from requested treatment.'
         Assert-True ($script:ReaderBenchmarkArguments -contains 'UseExistingExportsOnly=true' -and $script:ReaderBenchmarkArguments -contains 'UseDirectMergeDeviceLookup=true') 'Benchmark omitted replay/direct-merge trial flags.'
+        Assert-True ($script:ReaderBenchmarkArguments -contains 'StorageAccountName=fixturestorage') 'Benchmark job must use the storage account selected for seeding and evidence.'
     }
     Assert-True ($benchmarkAst.Extent.Text.Contains('use_bounded_publication_metadata_reader = $script:UseBoundedPublicationMetadataReader')) 'Benchmark must record its reader selection.'
+    Assert-True ($benchmarkAst.Extent.Text.Contains('use_experimental_compiled_small_payload = $script:UseExperimentalCompiledSmallPayload')) 'Benchmark must record its compiled-small-payload selection.'
     $validationAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Invoke-AzureRunbookValidation.ps1'), [ref]$null, [ref]$null)
     $validationParameter = $validationAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'UseBoundedPublicationMetadataReader' }
     Assert-True ($validationParameter.DefaultValue.Extent.Text -eq '$false') 'Guarded wrapper must default to legacy reading.'
     Assert-True ($validationAst.Extent.Text.Contains('-UseBoundedPublicationMetadataReader $UseBoundedPublicationMetadataReader -UseDirectMergeDeviceLookup:$UseDirectMergeDeviceLookup')) 'Guarded wrapper must forward trial treatment flags.'
+    Assert-True ($validationAst.Extent.Text.Contains('-UseExperimentalCompiledSmallPayload:$UseExperimentalCompiledSmallPayload')) 'Guarded wrapper must forward the compiled-small-payload trial flag.'
     $functionBuilder = Get-Content (Join-Path $repoRoot 'build/azure/Build-FunctionApp.ps1') -Raw
     Assert-True ($functionBuilder.Contains('$UseBoundedPublicationMetadataReader = $false') -and -not $functionBuilder.Contains('$env:USE_BOUNDED_PUBLICATION_METADATA_READER')) 'Function must stay legacy without a new setting.'
+    Assert-True ($functionBuilder.Contains('$UseExperimentalCompiledSmallPayload = $false') -and -not $functionBuilder.Contains('$env:USE_EXPERIMENTAL_COMPILED_SMALL_PAYLOAD')) 'Function must keep the experimental compiled-small-payload path disabled.'
+}
+
+function Test-BenchmarkComparisonUsesProcessHighWater {
+    [CmdletBinding()]
+    param()
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('benchmark-high-water-' + [guid]::NewGuid().ToString('N'))
+    $resultPath = Join-Path $tempRoot 'result.json'
+    $comparisonPath = Join-Path $tempRoot 'comparison.json'
+    $compareScript = Join-Path $PSScriptRoot 'Compare-BenchmarkEvidence.ps1'
+    [void](New-Item -Path $tempRoot -ItemType Directory -Force)
+    try {
+        $evidence = [ordered]@{
+            evidence_schema_version = 1
+            execution = [ordered]@{
+                summary = @{ peak_working_set_mb = 302.1 }
+                status = @{ memory = @{ processPeakWorkingSetMb = 400.1 } }
+            }
+        }
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try {
+            $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 -RequireProcessWorkingSetPeak -StrictWorkingSetLimit -OutputPath $comparisonPath
+        }
+        catch { $failed = $true }
+        Assert-True $failed 'A sampled peak below the limit must not hide a process high-water above it.'
+        $comparison = Get-Content -LiteralPath $comparisonPath -Raw | ConvertFrom-Json
+        Assert-True (-not $comparison.passed -and $comparison.current.peak_working_set_mb -eq 400.1 -and $comparison.current.process_peak_working_set_mb -eq 400.1) 'Comparison must report and enforce the process high-water.'
+
+        $evidence.execution.status.memory.processPeakWorkingSetMb = 381.4
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 -StrictWorkingSetLimit }
+        catch { $failed = $true }
+        Assert-True $failed 'A strict working-set limit must reject equality.'
+        $comparison = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4
+        Assert-True $comparison.passed 'The existing inclusive maximum must still accept equality by default.'
+
+        $evidence.execution.status.memory.processPeakWorkingSetMb = 381.4001
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 }
+        catch { $failed = $true }
+        Assert-True $failed 'Memory evidence above the maximum must not be rounded down into a pass.'
+
+        $evidence.execution.status = @{}
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 -RequireProcessWorkingSetPeak }
+        catch { $failed = $true }
+        Assert-True $failed 'A required process high-water must not be inferred from a sampled peak.'
+        $comparison = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4
+        Assert-True ($comparison.passed -and $null -eq $comparison.current.process_peak_working_set_mb) 'Legacy sampled evidence must remain usable without the high-water requirement.'
+
+        $evidence.execution.status = @{ memory = @{ processPeakWorkingSetMb = 0 } }
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 -RequireProcessWorkingSetPeak }
+        catch { $failed = $true }
+        Assert-True $failed 'A zero process high-water must not establish memory acceptance.'
+
+        $evidence.execution.status.memory.processPeakWorkingSetMb = 'NaN'
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 }
+        catch { $failed = $true }
+        Assert-True $failed 'A non-finite metric must not pass a memory limit.'
+
+        $evidence.execution.status = @{}
+        $evidence.execution.summary = @{}
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -MaximumWorkingSetMB 381.4 }
+        catch { $failed = $true }
+        Assert-True $failed 'A configured memory limit must fail when its evidence is unavailable.'
+
+        foreach ($parameterName in @('MaximumWorkingSetMB', 'MaximumPrivateMemoryMB', 'MaximumGcHeapMB', 'MaximumElapsedRegressionPercent')) {
+            foreach ($invalidLimit in @([double]::NaN, [double]::PositiveInfinity, [double]::NegativeInfinity, -1)) {
+                $parameters = @{ $parameterName = $invalidLimit }
+                $failed = $false
+                try { $null = & $compareScript -CurrentPath $resultPath @parameters }
+                catch { $failed = $true }
+                Assert-True $failed "$parameterName must reject non-finite and negative limits rather than silently disabling a gate."
+            }
+        }
+
+        $baselinePath = Join-Path $tempRoot 'baseline.json'
+        $baseline = @{ evidence_schema_version = 1; execution = @{ summary = @{ elapsed_seconds = 100 } } }
+        [System.IO.File]::WriteAllText($baselinePath, ($baseline | ConvertTo-Json -Depth 10))
+        $evidence.execution.summary = @{ elapsed_seconds = 110 }
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $comparison = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -MaximumElapsedRegressionPercent 10
+        Assert-True $comparison.passed 'The elapsed limit must accept its inclusive boundary.'
+
+        $evidence.execution.summary.elapsed_seconds = 110.004
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -MaximumElapsedRegressionPercent 10 }
+        catch { $failed = $true }
+        Assert-True $failed 'Elapsed evidence above the limit must not be rounded down into a pass.'
+
+        $evidence.execution.summary.elapsed_seconds = 110.00000000000001
+        [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -MaximumElapsedRegressionPercent 10 }
+        catch { $failed = $true }
+        Assert-True $failed 'Converting elapsed evidence to decimal must preserve a representable value just above the limit.'
+
+        foreach ($boundary in @(@{ baseline = 0.03; current = 0.033 }, @{ baseline = 1.13; current = 1.243 })) {
+            $baseline.execution.summary.elapsed_seconds = $boundary.baseline
+            $evidence.execution.summary.elapsed_seconds = $boundary.current
+            [System.IO.File]::WriteAllText($baselinePath, ($baseline | ConvertTo-Json -Depth 10))
+            [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+            $comparison = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -MaximumElapsedRegressionPercent 10
+            Assert-True $comparison.passed 'Decimal elapsed evidence at the inclusive boundary must not fail due to binary floating-point error.'
+        }
+
+        foreach ($missingSide in @('current', 'baseline')) {
+            $evidence.execution.summary = if ($missingSide -eq 'current') { @{} } else { @{ elapsed_seconds = 100 } }
+            $baseline.execution.summary = if ($missingSide -eq 'baseline') { @{ elapsed_seconds = 0 } } else { @{ elapsed_seconds = 100 } }
+            [System.IO.File]::WriteAllText($resultPath, ($evidence | ConvertTo-Json -Depth 10))
+            [System.IO.File]::WriteAllText($baselinePath, ($baseline | ConvertTo-Json -Depth 10))
+            $failed = $false
+            try { $null = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath }
+            catch { $failed = $true }
+            Assert-True $failed "Missing or zero $missingSide elapsed evidence must not pass a baseline comparison."
+        }
+
+        $runEvidence = @{
+            evidence_schema_version = 1
+            kind = 'azure-runbook-only'
+            execution = @{ summary = @{ status = 'Completed'; elapsed_seconds = 100 }; job = @{ terminal_status = 'Completed' } }
+            validation = @{ terminal_status = 'Completed' }
+        }
+        [System.IO.File]::WriteAllText($resultPath, ($runEvidence | ConvertTo-Json -Depth 10))
+        [System.IO.File]::WriteAllText($baselinePath, ($runEvidence | ConvertTo-Json -Depth 10))
+        $comparison = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -RequireSuccessfulExecution
+        Assert-True $comparison.passed 'Completed Azure jobs with matching completion evidence must pass the execution check.'
+
+        foreach ($statusSource in @('job', 'summary', 'validation')) {
+            $target = switch ($statusSource) {
+                'job' { $runEvidence.execution.job }
+                'summary' { $runEvidence.execution.summary }
+                'validation' { $runEvidence.validation }
+            }
+            $statusKey = if ($statusSource -eq 'summary') { 'status' } else { 'terminal_status' }
+            $target[$statusKey] = 'Failed'
+            [System.IO.File]::WriteAllText($resultPath, ($runEvidence | ConvertTo-Json -Depth 10))
+            $failed = $false
+            try { $null = & $compareScript -CurrentPath $resultPath }
+            catch { $failed = $true }
+            Assert-True $failed "A failed Azure $statusSource must not produce a passing comparison."
+            [void]$target.Remove($statusKey)
+            [System.IO.File]::WriteAllText($resultPath, ($runEvidence | ConvertTo-Json -Depth 10))
+            $failed = $false
+            try { $null = & $compareScript -CurrentPath $resultPath -RequireSuccessfulExecution }
+            catch { $failed = $true }
+            Assert-True $failed "Strict execution checks must reject missing Azure $statusSource status."
+            $target[$statusKey] = 'Completed'
+        }
+
+        $runEvidence.execution.job.terminal_status = 'Stopped'
+        [System.IO.File]::WriteAllText($baselinePath, ($runEvidence | ConvertTo-Json -Depth 10))
+        $runEvidence.execution.job.terminal_status = 'Completed'
+        [System.IO.File]::WriteAllText($resultPath, ($runEvidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -BaselinePath $baselinePath -RequireSuccessfulExecution }
+        catch { $failed = $true }
+        Assert-True $failed 'A stopped baseline job must not establish an elapsed comparison.'
+
+        $localEvidence = @{ evidence_schema_version = 1; kind = 'local-stress-run'; execution = @{ return_code = 0 } }
+        [System.IO.File]::WriteAllText($resultPath, ($localEvidence | ConvertTo-Json -Depth 10))
+        $comparison = & $compareScript -CurrentPath $resultPath -RequireSuccessfulExecution
+        Assert-True $comparison.passed 'A successful local execution must pass the execution check.'
+        foreach ($returnCode in @(1, '0', $null)) {
+            $localEvidence.execution.return_code = $returnCode
+            [System.IO.File]::WriteAllText($resultPath, ($localEvidence | ConvertTo-Json -Depth 10))
+            $failed = $false
+            try { $null = & $compareScript -CurrentPath $resultPath -RequireSuccessfulExecution }
+            catch { $failed = $true }
+            Assert-True $failed 'A failed, invalid, or missing local return code must not pass the execution check.'
+        }
+        $localEvidence.kind = 'unknown-benchmark'
+        [System.IO.File]::WriteAllText($resultPath, ($localEvidence | ConvertTo-Json -Depth 10))
+        $failed = $false
+        try { $null = & $compareScript -CurrentPath $resultPath -RequireSuccessfulExecution }
+        catch { $failed = $true }
+        Assert-True $failed 'Strict execution checks must reject unknown benchmark kinds.'
+    }
+    finally {
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+    }
+}
+
+function Test-RunbookBenchmarkProcessHighWaterSummary {
+    [CmdletBinding()]
+    param()
+
+    $benchmarkAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Measure-RunbookOnlyAzureBenchmark.ps1'), [ref]$null, [ref]$null)
+    $definition = $benchmarkAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-RunbookProcessPeakWorkingSet' }, $true)
+    Assert-True ($null -ne $definition) 'Expected a testable process high-water summary.'
+    . ([scriptblock]::Create($definition.Extent.Text))
+    $status = [PSCustomObject]@{
+        memory = [PSCustomObject]@{ processPeakWorkingSetMb = 400.1 }
+        memoryTimelineTail = @([PSCustomObject]@{ processPeakWorkingSetMb = 380.0 })
+    }
+    $timeline = @([PSCustomObject]@{ memory = [PSCustomObject]@{ processPeakWorkingSetMb = 405.3 } })
+    Assert-True ((Get-RunbookProcessPeakWorkingSet -Status $status -StatusTimeline $timeline) -eq 405.3) 'Expected the largest process high-water from final, embedded, and polling samples.'
+    Assert-True ($null -eq (Get-RunbookProcessPeakWorkingSet -Status ([PSCustomObject]@{ memory = [PSCustomObject]@{ workingSetMb = 302.1 } }))) 'A sampled working set must not stand in for a process high-water.'
+    Assert-True ($null -eq (Get-RunbookProcessPeakWorkingSet -Status $null)) 'Missing status must not produce a success-shaped high-water.'
+    $failed = $false
+    try { $null = Get-RunbookProcessPeakWorkingSet -Status ([PSCustomObject]@{ memory = [PSCustomObject]@{ processPeakWorkingSetMb = -1 } }) }
+    catch { $failed = $true }
+    Assert-True $failed 'Invalid process high-water values must be rejected.'
+}
+
+function Test-BenchmarkPortableMemoryCountersRefresh {
+    [CmdletBinding()]
+    param()
+
+    Initialize-CompiledVulnContentProjector
+    $telemetry = [DefenderReporting.Store.MemoryTelemetrySession]::new(0)
+    $portableReader = $telemetry.GetType().GetMethod('ReadPortableMemory', [System.Reflection.BindingFlags]'Instance,NonPublic')
+    $allocation = [IntPtr]::Zero
+    try {
+        Assert-True ($null -ne $portableReader) 'Expected a testable portable process-memory reader.'
+        $before = [object[]]@(0L, 0L)
+        [void]$portableReader.Invoke($telemetry, $before)
+        $allocation = [System.Runtime.InteropServices.Marshal]::AllocHGlobal(32MB)
+        for ($offset = 0; $offset -lt 32MB; $offset += 4096) {
+            [System.Runtime.InteropServices.Marshal]::WriteByte($allocation, $offset, 1)
+        }
+        $after = [object[]]@(0L, 0L)
+        [void]$portableReader.Invoke($telemetry, $after)
+        Assert-True ([long]$before[0] -gt 0 -and [long]$before[1] -gt 0) 'Portable memory counters must report positive values.'
+        Assert-True (([long]$after[1] - [long]$before[1]) -ge 8MB) 'Portable private memory must refresh after the process commits additional memory.'
+    }
+    finally {
+        if ($allocation -ne [IntPtr]::Zero) { [System.Runtime.InteropServices.Marshal]::FreeHGlobal($allocation) }
+        $telemetry.Dispose()
+    }
+}
+
+function Test-RunbookBenchmarkStatusJobIdentity {
+    [CmdletBinding()]
+    param()
+
+    . (Join-Path $PSScriptRoot 'helpers\TestScriptSupport.ps1')
+    $benchmarkAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Measure-RunbookOnlyAzureBenchmark.ps1'), [ref]$null, [ref]$null)
+    $definition = $benchmarkAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-RunbookStatusMatchesJob' }, $true)
+    Assert-True ($null -ne $definition) 'Expected a testable runbook status identity check.'
+    . ([scriptblock]::Create($definition.Extent.Text))
+    $created = [datetime]::Parse('2026-11-25T18:00:00Z').ToUniversalTime()
+    $matching = [PSCustomObject]@{ startedOnUtc = '2026-11-25T18:00:30Z'; automationJobId = 'job-a' }
+    Assert-True (Test-RunbookStatusMatchesJob -Status $matching -JobId 'JOB-A' -JobCreationUtc $created) 'Expected a matching Automation job status.'
+    Assert-True (-not (Test-RunbookStatusMatchesJob -Status $matching -JobId 'job-b' -JobCreationUtc $created)) 'A concurrent job status must not be attributed to this job.'
+    $old = [PSCustomObject]@{ startedOnUtc = '2026-11-25T17:58:00Z'; automationJobId = 'job-a' }
+    Assert-True (-not (Test-RunbookStatusMatchesJob -Status $old -JobId 'job-a' -JobCreationUtc $created)) 'An old status must not be attributed to a new job.'
+    Assert-True (-not (Test-RunbookStatusMatchesJob -Status $null -JobId 'job-a' -JobCreationUtc $created)) 'Missing status must be rejected.'
+    $legacy = [PSCustomObject]@{ startedOnUtc = '2026-11-25T18:00:30Z' }
+    Assert-True (Test-RunbookStatusMatchesJob -Status $legacy -JobId 'job-a' -JobCreationUtc $created) 'Legacy status without job ID retains timestamp-only compatibility.'
+}
+
+function Test-AzureValidationSeedSelection {
+    [CmdletBinding()]
+    param()
+
+    $validationAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'Invoke-AzureRunbookValidation.ps1'), [ref]$null, [ref]$null)
+    $definition = $validationAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-AzureValidationSeedFile' }, $true)
+    Assert-True ($null -ne $definition) 'Expected a testable Azure replay seed selection function.'
+    . ([scriptblock]::Create($definition.Extent.Text))
+    foreach ($name in @('Machines_Current.json.gz', 'AdvancedHunting_Current.json.gz', 'NvdCve_Current.json.gz', 'synthetic-manifest.json', 'benchmark-dataset.json')) {
+        Assert-True (Test-AzureValidationSeedFile -Name $name -Mode 'ContentReplay') "Expected content replay to include $name."
+        Assert-True (Test-AzureValidationSeedFile -Name $name -Mode 'RawReplay') "Expected raw replay to include $name."
+    }
+    Assert-True (Test-AzureValidationSeedFile -Name 'VulnCurrentRefs.json.gz' -Mode 'ContentReplay') 'Expected content replay refs.'
+    Assert-True (Test-AzureValidationSeedFile -Name 'VulnHistoryRefs_2026Q1.json.gz' -Mode 'ContentReplay') 'Expected content replay history refs.'
+    Assert-True (-not (Test-AzureValidationSeedFile -Name 'VulnCurrentRefs.json.gz' -Mode 'RawReplay')) 'Raw replay must not seed content refs.'
+    Assert-True (Test-AzureValidationSeedFile -Name 'VulnExport_2026-01-01.json.gz' -Mode 'RawReplay') 'Expected raw replay export.'
+    Assert-True (-not (Test-AzureValidationSeedFile -Name 'VulnExport_current.json.gz' -Mode 'RawReplay')) 'Raw replay must not seed the current-store artifact.'
+    Assert-True (-not (Test-AzureValidationSeedFile -Name 'unrelated.txt' -Mode 'ContentReplay')) 'Content replay must exclude unrelated files.'
+    Assert-True (Test-AzureValidationSeedFile -Name 'unrelated.txt' -Mode 'Exact') 'Exact replay must include all root files.'
+}
+
+function Test-RunbookExperimentalNormalizationCacheIsolation {
+    [CmdletBinding()]
+    param()
+
+    $repoRoot = Split-Path $PSScriptRoot -Parent
+    $runbookPath = Join-Path $repoRoot 'build\azure\runbook-source.ps1'
+    $runbookAst = [System.Management.Automation.Language.Parser]::ParseFile($runbookPath, [ref]$null, [ref]$null)
+    $parameter = $runbookAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'UseExperimentalCompiledSmallPayload' }
+    Assert-True ($parameter.DefaultValue.Extent.Text -eq '$false') 'Runbook compiled-small-payload flag must default false.'
+
+    $lookupAssignments = @($runbookAst.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -eq 'payloadCacheEntry'
+            }, $true))
+    $publicationAssignments = @($runbookAst.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $node.Left.VariablePath.UserPath -eq 'cacheEntry'
+            }, $true))
+    Assert-True ($lookupAssignments.Count -eq 1 -and $publicationAssignments.Count -eq 1) 'Expected one runbook cache lookup and one publication decision.'
+
+    function Get-NormalizedPayloadCacheEntry {
+        param($BasePath, [switch]$SkipObservedWindowMerge)
+        if ($BasePath -ne $tempExports -or [bool]$SkipObservedWindowMerge -ne $skipObservedWindowMerge) { throw 'Unexpected cache lookup arguments.' }
+        $script:ExperimentalCacheLookupCalls++
+        return [PSCustomObject]@{ Kind = 'lookup' }
+    }
+    function Publish-NormalizedPayloadCache {
+        param($BasePath, $PayloadPath, $VulnCount, $DeviceCount, $CveCount, $Quality, $SourceMetadata, [switch]$SkipObservedWindowMerge)
+        if ($BasePath -ne $tempExports -or $PayloadPath -ne $tempPayloadPath -or $VulnCount -ne 1 -or $DeviceCount -ne 1 -or $CveCount -ne 1 -or $Quality -ne $normalizedQuality -or $null -ne $SourceMetadata -or [bool]$SkipObservedWindowMerge -ne $skipObservedWindowMerge) { throw 'Unexpected cache publication arguments.' }
+        $script:ExperimentalCachePublishCalls++
+        return [PSCustomObject]@{ Kind = 'publication' }
+    }
+    $tempExports = 'fixture'
+    $tempPayloadPath = 'fixture.json.gz'
+    $skipObservedWindowMerge = $false
+    $vulnCount = 1
+    $deviceCount = 1
+    $cveCount = 1
+    $normalizedQuality = $null
+    $sourceMetadata = $null
+    foreach ($UseExperimentalCompiledSmallPayload in @($false, $true)) {
+        $script:ExperimentalCacheLookupCalls = 0
+        $script:ExperimentalCachePublishCalls = 0
+        . ([scriptblock]::Create($lookupAssignments[0].Extent.Text))
+        . ([scriptblock]::Create($publicationAssignments[0].Extent.Text))
+        if ($UseExperimentalCompiledSmallPayload) {
+            Assert-True ($script:ExperimentalCacheLookupCalls -eq 0 -and $null -eq $payloadCacheEntry) 'Experimental runs must not read the normal payload cache.'
+            Assert-True ($script:ExperimentalCachePublishCalls -eq 0 -and $null -eq $cacheEntry) 'Experimental runs must not publish into the normal payload cache.'
+        }
+        else {
+            Assert-True ($script:ExperimentalCacheLookupCalls -eq 1 -and $payloadCacheEntry.Kind -eq 'lookup') 'Default runs must retain payload cache lookup.'
+            Assert-True ($script:ExperimentalCachePublishCalls -eq 1 -and $cacheEntry.Kind -eq 'publication') 'Default runs must retain payload cache publication.'
+        }
+    }
+    Assert-True ($runbookAst.Extent.Text.Contains('-UseExperimentalCompiledSmallPayload:$UseExperimentalCompiledSmallPayload')) 'Runbook must forward the experimental flag.'
 }
 
 function Test-BenchmarkWorkloadProfilesArePinned {

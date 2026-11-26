@@ -117,6 +117,12 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-ConvertToNormalizedDataCanConsumeLookupsOnPayloadClose'; SuccessMessage = 'Consuming payload-close lookup checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataContentStorePathDoesNotUseLegacyDictionaryReader'; SuccessMessage = 'Content-store streaming normalization checks passed.' }
     @{ Name = 'Test-RunbookBenchmarkPublicationReaderOptIn'; SuccessMessage = 'Runbook benchmark reader opt-in/default and trial flag forwarding checks passed.' }
+    @{ Name = 'Test-BenchmarkComparisonUsesProcessHighWater'; SuccessMessage = 'Benchmark process high-water and limit checks passed.' }
+    @{ Name = 'Test-RunbookBenchmarkProcessHighWaterSummary'; SuccessMessage = 'Runbook sampled and process high-water summary checks passed.' }
+    @{ Name = 'Test-BenchmarkPortableMemoryCountersRefresh'; SuccessMessage = 'Portable process memory refresh checks passed.' }
+    @{ Name = 'Test-RunbookBenchmarkStatusJobIdentity'; SuccessMessage = 'Runbook status job-identity checks passed.' }
+    @{ Name = 'Test-RunbookExperimentalNormalizationCacheIsolation'; SuccessMessage = 'Experimental normalization cache isolation checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationRejectsIncompatibleMode'; SuccessMessage = 'Compiled normalization incompatible-mode guards passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataSupportsDirectMergeDeviceLookup'; SuccessMessage = 'Direct-merge device lookup success-path checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataDirectMergeDeviceLookupRejectsOutOfOrderMachineStream'; SuccessMessage = 'Direct-merge device lookup exact-order guard checks passed.' }
     @{ Name = 'Test-ConvertToNormalizedDataDirectMergeDeviceLookupRejectsBlankDeviceId'; SuccessMessage = 'Direct-merge device lookup blank-device guard checks passed.' }
@@ -188,8 +194,23 @@ $sharedHelperRegressionTests = @(
     @{ Name = 'Test-BenchmarkWorkloadProfilesArePinned'; SuccessMessage = 'Versioned benchmark workload profile checks passed.' }
     @{ Name = 'Test-VulnPartitionStreamingParity'; SuccessMessage = 'Partition streaming interleaving, row/error parity and cleanup checks passed.' }
     @{ Name = 'Test-CompiledContentStringArrayRoundTrip'; SuccessMessage = 'Compiled content scalar and array round-trip checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationDeduplicatesDeviceProfile'; SuccessMessage = 'Compiled bounded duplicate device-profile parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationKeyComparerParity'; SuccessMessage = 'Compiled bounded severity and inventory comparer parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationCveEnrichmentComparerParity'; SuccessMessage = 'Compiled CVE enrichment comparer parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationPipeDelimitedKeyParity'; SuccessMessage = 'Compiled pipe-delimited lookup key parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationRequiresStagedFragment'; SuccessMessage = 'Compiled required staged fragment checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationRawPayloadParity'; SuccessMessage = 'Compiled bounded raw payload parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationNonStringPathParity'; SuccessMessage = 'Compiled bounded non-string path parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationScoreParity'; SuccessMessage = 'Compiled bounded CVSS score parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationMachineInfoParity'; SuccessMessage = 'Compiled bounded machine-info parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationHighCardinalityContract'; SuccessMessage = 'Compiled bounded high-cardinality payload contract checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationDateParity'; SuccessMessage = 'Compiled bounded date normalization parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationInvalidCalendarDateParity'; SuccessMessage = 'Compiled bounded invalid calendar date parity checks passed.' }
+    @{ Name = 'Test-CompiledBoundedContentNormalizationCleansStagingOnFailure'; SuccessMessage = 'Compiled bounded staging cleanup checks passed.' }
+    @{ Name = 'Test-CompiledBoundedStagingCleanupSurfacesDisposalAndProbeFailure'; SuccessMessage = 'Compiled bounded staging disposal and probe hardening checks passed.' }
     @{ Name = 'Test-CompiledBoundedContentNormalizationExpandedParity'; SuccessMessage = 'Compiled bounded content normalization expanded-parity checks passed.' }
     @{ Name = 'Test-SyntheticUploadManifestSelectsRawReplayArtifact'; SuccessMessage = 'Synthetic raw replay upload-manifest checks passed.' }
+    @{ Name = 'Test-AzureValidationSeedSelection'; SuccessMessage = 'Azure replay seed selection checks passed.' }
     @{ Name = 'Test-AtomicDashboardExecutableDiscovery'; SuccessMessage = 'Atomic executable discovery duplicate PATH, caller mock, and non-Windows fallback checks passed.' }
 )
 

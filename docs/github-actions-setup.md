@@ -2,6 +2,8 @@
 
 This revision changes dashboard publication only. The PDF workflow, its trigger and read-only permissions remain unchanged; it has no publishing steps and stays disabled for public use. Local output paths remain ignored.
 
+On November 25, 2026, the owner approved public demo use of the lab-tenant data and confirmed that the GitHub Actions tenant and client settings refer to that lab. The public workflow was re-enabled after a temporary pause. The existing public `demo-data` snapshot and historical copies remain accessible. This approval does not extend to other tenants or public forks, and the workflow setting does not affect the deployed Azure Function or workflows in private repositories.
+
 ## Dashboard admission
 
 The dashboard job checks this condition before checkout, authentication, collection or live logging; the staging helper repeats it using `GITHUB_REF`:
@@ -21,7 +23,7 @@ Public forks and other public repositories owned by Nathan are excluded. Missing
 
 ## Tenant binding before owner activation
 
-**Keep the existing dashboard workflow disabled until the configured tenant is verified as Nathan’s approved demo tenant.** A source check cannot prove which directory is configured in GitHub. Offline tests need no tenant lookup, sign-in, credentials, new permissions or live dry run.
+The owner approved live demo data from the lab tenant and confirmed the configured tenant and client settings refer to that lab. A source check cannot independently prove which directory is configured in GitHub or that its output is safe to publish. Offline tests need no tenant lookup, sign-in, credentials, new permissions or live dry run.
 
 For the owner repository, `build/Invoke-LiveDashboardDryRun.ps1` requires the GitHub OIDC parameter set and an explicit nonempty tenant GUID. It rejects an ambient existing context as an authentication mode. After the existing OIDC connection, it checks that the Az context tenant matches that GUID, requests the Defender token with that explicit tenant, and checks the returned token tenant. Missing/mismatched context or token metadata, failed Az token acquisition, or a missing Az token command stops the run. Owner runs never fall back to the Azure CLI’s ambient account. Other private/local calls retain their existing fallback behavior. The source guard also protects owner-repository runs when that repository is private.
 
@@ -36,7 +38,7 @@ No actual binding values were retrieved or verified by the offline tests. `dry_r
 
 ## Dashboard outputs
 
-The job preserves its daily `02:00 UTC` schedule and manual trigger. It first restores incremental export state from the `demo-data` branch, then runs the existing exporter with Advanced Hunting still included by default; collection is not widened. After validation, the staging helper force-stages only these paths into an empty orphan worktree:
+The workflow definition retains its daily `02:00 UTC` schedule and manual trigger, which do not run while the workflow is disabled. When enabled, it first restores incremental export state from the `demo-data` branch, then runs the existing exporter with Advanced Hunting still included by default; collection is not widened. After validation, the staging helper force-stages only these paths into an empty orphan worktree:
 
 - `VulnerabilityDashboard.html`
 - `exports/VulnExport_current.json.gz`, `VulnContentDictionary.json.gz`, `VulnCurrentRefs.json.gz`
@@ -44,9 +46,9 @@ The job preserves its daily `02:00 UTC` schedule and manual trigger. It first re
 - `exports/Machines_Current.json.gz`, `Machines_History.json.gz`, `Machines_History_YYYYQ[1-4].json.gz`, `Machines_History_YYYYMMDDTHHMMSSZ_abcdefgh.json.gz` (eight lowercase hexadecimal suffix characters)
 - `exports/AdvancedHunting_Current.json.gz`
 
-Only the HTML is uploaded as a 30-day Actions artifact. Audit and manifest files remain under ignored `.local/` and are neither committed nor uploaded. Raw responses, legacy downloads, NVD cache files, credentials/configuration, locks, staging directories, arbitrary files and PDFs are excluded. The helper requires an empty index and rejects nonregular outputs before staging any file. The snapshot is committed and force-pushed to `refs/heads/demo-data`, so that branch always holds exactly one commit and `main` no longer grows with daily data. Validation failure prevents publication; manual `dry_run: true` skips staging, commits and artifacts.
+Only the HTML is uploaded as a 30-day Actions artifact. Audit and manifest files remain under ignored `.local/` and are neither committed nor uploaded. Raw responses, legacy downloads, NVD cache files, credentials/configuration, locks, staging directories, arbitrary files and PDFs are excluded. The source export directory must be a real directory, copies do not dereference links, and the helper requires an empty index and rejects nonregular outputs, including dangling links, before staging any file. The snapshot is committed and force-pushed to `refs/heads/demo-data`, so that branch always holds exactly one commit and `main` no longer grows with daily data. Validation failure prevents publication; manual `dry_run: true` skips staging, commits and artifacts.
 
-This is a filename allowlist, not content redaction. Approved owner demo outputs and logs are public. Private repository status does not make Pages, blob storage, Container Apps or other external destinations private. These workflows do not deploy to those destinations. History cleanup and issue #68 remain separate.
+This is a filename allowlist, not content redaction. Owner demo outputs and logs are public if published. Private repository status does not make Pages, blob storage, Container Apps or other external destinations private. These workflows do not deploy to those destinations. The owner chose to retain the release tags and their historical copies; #68 was closed as not planned under the lab-data policy.
 
 ## Existing private setup
 
@@ -58,6 +60,6 @@ Only the guarded dashboard job receives `contents: write` and `id-token: write`;
 
 Run `node tests/Assert-DashboardWorkflowPrivacy.js` for admission, allowlist and isolated Git staging checks. Run `./tests/Run-SharedHelperRegression.ps1 -TestName Test-LiveDashboardTenantBinding` for extracted-function tests with synthetic Az/CLI mocks; it never executes the live wrapper or signs in. The normal `./build/Invoke-RegressionValidation.ps1` includes these checks and the repository parser/analyzer checks.
 
-After parent review and an authorized push, require successful `Validate Dashboard` CI for the exact proposed head. Verify the nonsecret demo binding above before merging/activation under the approved procedure. Only then re-enable the existing dashboard workflow and its unchanged `02:00 UTC` schedule. Keep the PDF workflow disabled. This source change enables, dispatches and publishes nothing by itself.
+The owner has approved the configured lab tenant for the public demo. Reassess the binding and publication policy before changing tenant, client or destination. The `02:00 UTC` schedule and manual trigger are enabled; this does not remove past snapshots or history. Keep the PDF workflow disabled for public use.
 
 Related: [workflow notes](workflows.md), [Azure setup](azure-setup.md).

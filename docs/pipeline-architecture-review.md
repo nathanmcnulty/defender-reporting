@@ -1,10 +1,10 @@
 # Pipeline Architecture Review
 
-This review captures the post-merge architecture decision after PR #37 and the subsequent bounded-content-store acceptance work. It is based on the tracked source and maintainer docs, with generated outputs and local history treated as non-authoritative.
+This review captures the post-merge architecture decision after PR #37 and the subsequent bounded-content-store acceptance work. Its acceptance results describe that historical configuration, not later changes. The compiled projector also supports machine and enrichment inputs; routing eligible smaller direct-payload workloads through it is an opt-in experiment whose broader acceptance remains separate. See the [roadmap](roadmap.md) for current status.
 
-## Current Validated State
+## Validated State at Review
 
-The current monolithic pipeline now has a bounded high-cardinality content path and is no longer failing its Azure acceptance gate.
+At this review, the monolithic pipeline had a bounded high-cardinality content path and passed the Azure acceptance gate for the tested configuration.
 
 - The disk-partitioned content-store publisher retains one device/content partition's maps and templates at a time and preserves the existing dictionary/ref wire formats.
 - The compiled standard-payload projector releases completed lookup collections before vulnerability assembly and reports true transient memory telemetry.
@@ -18,7 +18,7 @@ That changes the architecture decision. A high-risk sharded rewrite is no longer
 
 ## Decision
 
-Keep the current runtime architecture as the accepted baseline and name it `monolithic-v1`. Its high-cardinality content-only normalization mode is `compiled-bounded-standard-payload`; enriched or machine-backed workloads continue through the compatibility normalizer until a compiled enrichment join is justified and measured.
+Keep the runtime architecture as the accepted baseline and name it `monolithic-v1`. At this review, its accepted high-cardinality content-only normalization mode was `compiled-bounded-standard-payload`, while enriched or machine-backed workloads used the compatibility normalizer.
 
 Treat a staged, shard-oriented rewrite as a contingency path, not the active implementation scope for this branch.
 
@@ -33,7 +33,7 @@ The next work should keep observability, planning metadata, and escalation crite
 2. Normalization
    - [Generate-VulnerabilityDashboard.ps1](../Generate-VulnerabilityDashboard.ps1) reads canonical stores, loads machine and enrichment data, and calls `ConvertTo-NormalizedData` from [DashboardGeneration.ps1](../src/powershell/Shared/Dashboard/DashboardGeneration.ps1).
    - Normalization can run from content-store sidecars or raw current/history rows and can reuse normalized column and payload caches under `.dashboard-cache/`.
-   - Large content-store publication is disk-partitioned. Content-only high-cardinality payloads use the compiled streaming projector; machine and Advanced Hunting/NVD inputs use the compatibility path with full enrichment preservation.
+   - Large content-store publication is disk-partitioned. High-cardinality content stores use the compiled streaming projector with machine and Advanced Hunting/NVD inputs. Smaller workloads use the compatibility normalizer by default; eligible direct-payload workloads may opt into the compiled path for controlled validation.
 
 3. Payload preparation
    - The generator writes a compressed payload with lookup tables plus vulnerability rows or columns.

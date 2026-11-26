@@ -31,6 +31,9 @@ assert.match(yaml, /node "\$GITHUB_WORKSPACE\/\.github\/scripts\/stage-demo-outp
 assert.match(yaml, /git worktree add --quiet --orphan -b demo-publish "\$RUNNER_TEMP\/demo"/);
 assert.match(yaml, /git push --force origin HEAD:refs\/heads\/demo-data/);
 assert.match(yaml, /git archive FETCH_HEAD -- exports VulnerabilityDashboard\.html \| tar -x/);
+assert.match(yaml, /if \[ -L exports \] \|\| \[ ! -d exports \]; then/);
+assert.match(yaml, /cp --no-dereference -- exports\/\*\.json\.gz "\$RUNNER_TEMP\/demo\/exports\/"/);
+assert.match(yaml, /cp --no-dereference -- VulnerabilityDashboard\.html "\$RUNNER_TEMP\/demo\/"/);
 assert.doesNotMatch(yaml, /GITHUB_REF|refs\/heads\/main\b(?!')/);
 assert.doesNotMatch(yaml, /git add|always\(\)|reports\/|Export-Pdf/i);
 assert.equal((yaml.match(/if: \$\{\{ !inputs\.dry_run \}\}/g) || []).length, 3);
@@ -57,10 +60,24 @@ const write = (file, content = 'synthetic') => {
     fs.mkdirSync(path.dirname(path.join(temp, file)), { recursive: true });
     fs.writeFileSync(path.join(temp, file), content);
 };
+let usedJunctionFallback = false;
+const makeSymlink = (link, target, dangling = false) => {
+    try {
+        fs.symlinkSync(target, link, 'file');
+    } catch (error) {
+        if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+        const targetDirectory = fs.mkdtempSync(path.join(temp, 'junction-target-'));
+        fs.symlinkSync(targetDirectory, link, 'junction');
+        if (dangling) fs.rmdirSync(targetDirectory);
+        usedJunctionFallback = true;
+    }
+    assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
+};
 try {
     git('init', '--quiet');
     git('config', 'user.name', 'Offline Test');
     git('config', 'user.email', 'test@example.invalid');
+    git('config', 'core.autocrlf', 'false');
     write('.gitignore', '/exports/\n/VulnerabilityDashboard.html\n/reports/*.pdf\n');
     write('exports/Machines_History_2026Q1.json.gz');
     git('add', '--force', '--', '.gitignore', 'exports/Machines_History_2026Q1.json.gz');
@@ -101,10 +118,31 @@ try {
     assert.throws(() => stageOutputs('dashboard', temp), /regular file/);
     assert.equal(git('diff', '--cached', '--name-only'), '');
     fs.rmdirSync(path.join(temp, 'exports/Machines_Current.json.gz'));
-    fs.symlinkSync('../unrelated.txt', path.join(temp, 'exports/Machines_Current.json.gz'));
+    const outputLink = path.join(temp, 'exports/Machines_Current.json.gz');
+    makeSymlink(outputLink, '../unrelated.txt');
     assert.throws(() => stageOutputs('dashboard', temp), /regular file/);
+    assert.equal(git('diff', '--cached', '--name-only'), '');
+    if (process.platform === 'linux') {
+        const copiedLink = path.join(temp, 'copied-output-link');
+        execFileSync('cp', ['--no-dereference', '--', outputLink, copiedLink]);
+        assert.equal(fs.lstatSync(copiedLink).isSymbolicLink(), true);
+    }
+    fs.rmSync(outputLink, { recursive: true, force: true });
+    const dashboard = path.join(temp, 'VulnerabilityDashboard.html');
+    fs.unlinkSync(dashboard);
+    makeSymlink(dashboard, 'missing-dashboard', true);
+    assert.equal(fs.existsSync(dashboard), false);
+    assert.throws(() => stageOutputs('dashboard', temp), /regular file/);
+    assert.equal(git('diff', '--cached', '--name-only'), '');
+    fs.rmSync(dashboard, { recursive: true, force: true });
+    const exportsDirectory = path.join(temp, 'exports');
+    fs.rmSync(exportsDirectory, { recursive: true, force: true });
+    makeSymlink(exportsDirectory, path.join(temp, 'missing-exports'), true);
+    assert.equal(fs.existsSync(exportsDirectory), false);
+    assert.throws(() => stageOutputs('dashboard', temp), /real directory/);
     assert.equal(git('diff', '--cached', '--name-only'), '');
 } finally {
     fs.rmSync(temp, { recursive: true, force: true });
 }
+if (usedJunctionFallback) console.log('Windows denied file symlinks; junctions exercised the same rejection checks.');
 console.log(`Dashboard admission (${cases} cases), allowlist, isolated staging and PDF nonpublication checks passed.`);

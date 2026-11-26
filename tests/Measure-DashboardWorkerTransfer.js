@@ -138,6 +138,7 @@ function safeFailure(error, phase = 'unknown') {
         ['Owned cleanup failed.', 'cleanup'],
         ['Owned process accounting is incomplete.', 'process-accounting'],
         ['Launch-bound owner state unknown.', 'launch-owner'],
+        ['Edge CDP startup failed.', 'browser-cdp-startup'],
         ['Microsoft Edge is required.', 'edge-unavailable']
     ]);
     return {
@@ -588,7 +589,7 @@ async function cleanupOwned({ guard, browser, page, cdp, launcher, launcherExit,
             assert(authority, 'Launch-bound owner state unknown.');
             const proof = await authority.finish();
             authority.validate(proof, true);
-            result.ownerCompletion = { confirmed: true, activeProcesses: 0, forced: proof.Forced, streamsComplete: true, assignedBeforeResume: proof.Created && proof.Assigned && proof.Resumed && proof.Sealed };
+            result.ownerCompletion = { confirmed: true, activeProcesses: 0, forced: proof.Forced, rootExitCode: proof.ExitCode, streamsComplete: true, assignedBeforeResume: proof.Created && proof.Assigned && proof.Resumed && proof.Sealed };
             result.remainingOwned = 0;
             return;
         }
@@ -1606,6 +1607,7 @@ async function privacyProbes() {
         invoke([root, path.join(html, sentinel), '1', '2']);
         const error = Object.assign(new Error(`C:/${sentinel} https://private.invalid/?key=${sentinel}`), { name: sentinel, code: sentinel });
         assert.deepStrictEqual(safeFailure(error, sentinel), { phase: 'unknown', reason: 'operation-failed', code: 'unclassified' });
+        assert.deepStrictEqual(safeFailure(new Error('Edge CDP startup failed.'), 'browser'), { phase: 'browser', reason: 'browser-cdp-startup', code: 'unclassified' });
         assert.deepStrictEqual(safeInventoryDiagnostic({ step: sentinel, innerExceptionType: sentinel, nativeErrorCode: sentinel }), { category: 'execution', exceptionType: 'unclassified', exitCode: null, phase: 'execute' });
         const callbacks = {};
         let sample;
@@ -2065,6 +2067,12 @@ async function mockProbes() {
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'issue70-mock-'));
     const cleanup = await cleanupOwned({ profile, owned: { terminate: async () => {}, inventory: async () => ({ pids: [] }) } });
     assert.deepStrictEqual(cleanup, { remainingOwned: 0, profileExists: false, errors: [] });
+    const proof = { Forced: false, ExitCode: 1002, Created: true, Assigned: true, Resumed: true, Sealed: true };
+    const authority = { terminate: async () => proof, finish: async () => proof, validate: value => assert.strictEqual(value, proof), setup: null };
+    const profileFinalizers = [];
+    const authoritativeCleanup = await cleanupOwned({ authority, profileFinalizers });
+    assert.strictEqual(authoritativeCleanup.ownerCompletion.rootExitCode, 1002);
+    await profileFinalizers[0](true);
     for (const category of ['timeout', 'aborted', 'OperationStopped']) {
         const sentinel = 'SYNTHETIC_PRIVATE_PATH_TOKEN';
         const termination = Object.assign(new Error(sentinel), { inventoryDiagnostic: { category, exceptionType: 'RuntimeException', phase: 'termination', exitCode: 1 } });

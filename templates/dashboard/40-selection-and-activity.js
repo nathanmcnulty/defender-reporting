@@ -157,6 +157,10 @@ function shouldSplitRemediationByOsVersion(software, osPlatform) {
 }
 
 function getVersionAwareImpactDisplayName(descriptor, software, osPlatform, osVersion, splitByVersion) {
+    if (!splitByVersion) {
+        return getScopedRemediationDisplayTitle(descriptor);
+    }
+
     const cacheKey = buildMemoCacheKey([
         descriptor?.key,
         descriptor?.title,

@@ -94,11 +94,7 @@ node .\tests\Measure-DashboardWorkerTransfer.js --privacy
 node .\tests\Assert-DashboardTelemetry.js
 ```
 
-For an actual measurement, set `PLAYWRIGHT_MODULE` to an installed Playwright module and supply the retained Hosted dashboard directory, a private evidence destination, repeats (1-10), and an explicit expected normalized row count:
-
-```powershell
-node .\tests\Measure-DashboardWorkerTransfer.js .\.local\two-row-control .\.local\worker-control.json 1 2 --positive-control
-```
+For an actual measurement, set `PLAYWRIGHT_MODULE` to an installed Playwright module and supply the retained Hosted dashboard directory, a private evidence destination, repeats (1-10), and an explicit expected normalized row count. Use the [Windows outer supervisor](OUTER-BROWSER-SUPERVISOR.md) for a guarded invocation.
 
 Use the committed `fixtures/legacy-migration` dataset through the normal generator for the two-row control; never infer a large normalized count from raw source observations. Run full deterministic preflight first. A smaller PowerShell preflight memory guard does not lower the browser guard. Existing automation Edge sessions must be cleared by their owner before starting a separate measurement; personal browsers must remain untouched.
 
@@ -481,6 +477,12 @@ Recommended acceptance process for large import changes:
 ## Bounded Azure acceptance
 
 For a final large-data acceptance run, use the guarded validation harness rather than invoking a runbook job manually. It backs up the published runbook and the `exports`/`dashboards` containers, deploys the generated candidate, seeds the selected dataset, downloads the published dashboard, verifies required artifacts and counts, performs source-to-dashboard parity, and restores the previous state in `finally` cleanup. Every Azure CLI operation must target the intended subscription explicitly.
+
+The selected storage account is passed to the Automation job as well as used for seeding and evidence collection. `ContentReplay` includes the machine, Advanced Hunting, and NVD artifacts when present, in addition to the content dictionary and reference files; `RawReplay` includes the same enrichment artifacts alongside raw snapshot exports. Use an isolated account and runbook: restoration verifies file contents, not blob metadata or concurrent writes.
+
+`Compare-BenchmarkEvidence.ps1` includes process working-set high-water values when present. For a memory acceptance gate, use `-RequireProcessWorkingSetPeak` so sampled-only evidence cannot pass, `-StrictWorkingSetLimit` if equality must fail, and `-RequireSuccessfulExecution` to require completed Azure job/summary/validation statuses or a zero local return code for both current and baseline evidence. Explicit failed executions are rejected even without the latter switch; unknown kinds and missing completion evidence require it. Limits must be finite and nonnegative; zero disables a memory limit. Limits are in MiB despite the historical `MB` parameter names. The runbook reports memory rounded to 0.1 MiB, so use a conservative bound when the requirement is expressed in bytes; for a strict 400,000,000-byte limit, `-MaximumWorkingSetMB 381.4` with the memory switches is conservative. A baseline comparison requires positive elapsed-time evidence on both sides and applies its limit without rounding; the runbook summary itself records elapsed time rounded to 0.01 seconds, so allow for that uncertainty near a boundary. This comparison alone does not establish artifact, semantic, offline, or workload parity.
+
+The runbook benchmark distinguishes sampled peaks from the process high-water. Compiled-projector telemetry uses refreshed process counters on the portable fallback; portable samples from versions without that refresh may be stale and should not be used as peak evidence. It rejects status documents identifying a different Automation job. Older status documents without a comparable job ID retain timestamp-only matching and produce a warning; isolate the runbook and storage to avoid concurrent status writers.
 
 Candidate deployment and restoration send the file's raw bytes to the ARM runbook draft-content endpoint (`2023-11-01`, `text/powershell`), then publish. This preserves CRLF/LF, UTF-8 BOMs, and trailing newlines that CLI text ingestion can normalize. Restoration downloads the published content and checks its SHA-256 against the backup, along with every export/dashboard file's bytes and hash. `-FailureInjectionPoint AfterDeploy -ExpectedTotalRows 1 -Execute -Confirm:$false` exercises backup, deployment, and restoration without seeding exports or starting a runbook job; the injected error is expected only when restoration evidence also matches.
 

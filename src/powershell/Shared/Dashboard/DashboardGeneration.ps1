@@ -4330,7 +4330,10 @@ function Get-NormalizationExecutionPlan {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $false)][string]$DeliveryMode = 'SelfContained',
-        [Parameter(Mandatory = $false)][ValidateRange(1000, 1000000)][int]$MaximumInProcessContentTemplates = 10000
+        [Parameter(Mandatory = $false)][ValidateRange(1000, 1000000)][int]$MaximumInProcessContentTemplates = 10000,
+        # Set when the caller writes the payload directly without direct-merge device lookups.
+        [Parameter(Mandatory = $false)][switch]$CompiledPayloadSupported,
+        [Parameter(Mandatory = $false)][switch]$UseExperimentalCompiledSmallPayload
     )
 
     $manifestPath = Join-Path $Path 'synthetic-manifest.json'
@@ -4356,7 +4359,7 @@ function Get-NormalizationExecutionPlan {
     $machineInputFile = @(Get-ChildItem -LiteralPath $Path -Filter 'Machines_Current.json*' -File -ErrorAction SilentlyContinue | Select-Object -First 1)
     $hasMachineInput = if ($machineInputFile.Count -eq 0) { $false } else { $null -ne (Read-VulnNdjsonLinesFromPath -Path $machineInputFile[0].FullName | Select-Object -First 1) }
     $hasEnrichmentInput = @(Get-ChildItem -LiteralPath $Path -Filter 'AdvancedHunting_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0 -or @(Get-ChildItem -LiteralPath $Path -Filter 'NvdCve_Current.json*' -File -ErrorAction SilentlyContinue).Count -gt 0
-    $compiledContentEligible = $requiresPartitionedContent
+    $compiledContentEligible = $requiresPartitionedContent -or ($CompiledPayloadSupported -and $UseExperimentalCompiledSmallPayload -and (Test-Path -LiteralPath $dictionaryPath -PathType Leaf))
     $estimatedPrivateMemoryMb = if ($compiledContentEligible) {
         [math]::Round((160 + ($deviceProfileCount * 0.001) + ($contentTemplateCount * 0.0012)), 1)
     }
@@ -4375,10 +4378,15 @@ function Get-NormalizationExecutionPlan {
         ContentTemplateCount = $contentTemplateCount
         DeviceLookupMode = if ($deviceProfileCount -ge 5000) { 'compiled-file-backed' } else { 'compact-file-backed' }
         ContentNormalizationMode = if ($compiledContentEligible) { 'compiled-bounded-standard-payload' } elseif ($requiresPartitionedContent) { 'partitioned-required' } else { 'in-process-streaming' }
+        # Stores above the in-process limit keep the accepted high-cardinality compiled payload shape; smaller stores
+        # routed to the compiled normalizer must reproduce the in-process payload shape they previously received.
+        CompiledPayloadContract = if (-not $compiledContentEligible) { $null } elseif ($requiresPartitionedContent) { 'high-cardinality-compact' } else { 'in-process-compatible' }
         DeliveryMode = $DeliveryMode
         EstimatedPrivateMemoryMb = $estimatedPrivateMemoryMb
         EstimatedWorkingSetMb = $estimatedWorkingSetMb
         MaximumInProcessContentTemplates = $MaximumInProcessContentTemplates
+        CompiledPayloadSupported = [bool]$CompiledPayloadSupported
+        UseExperimentalCompiledSmallPayload = [bool]$UseExperimentalCompiledSmallPayload
         HasMachineInput = $hasMachineInput
         HasEnrichmentInput = $hasEnrichmentInput
         SafeToExecute = (-not $requiresPartitionedContent -or $compiledContentEligible)
@@ -4394,7 +4402,9 @@ function Write-BoundedNormalizationEnrichmentFragment {
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingData = @{},
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingDeviceUsers = @{},
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingInventoryData = @{},
-        [Parameter(Mandatory = $false)][hashtable]$NvdCveData = @{}
+        [Parameter(Mandatory = $false)][hashtable]$NvdCveData = @{},
+        [Parameter(Mandatory = $false)][AllowNull()][System.Collections.Generic.IEnumerable[string]]$TemplateCveIds,
+        [Parameter(Mandatory = $true)][ValidateSet('in-process-compatible', 'high-cardinality-compact')][string]$PayloadContract
     )
 
     $utf8 = [System.Text.UTF8Encoding]::new($false)
@@ -4417,12 +4427,38 @@ function Write-BoundedNormalizationEnrichmentFragment {
             $projection = Get-MachineProjection -Machine $machine
             $users = @($AdvancedHuntingDeviceUsers[$machineId] | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
             if ($null -eq $projection -and $users.Count -eq 0) { continue }
+            $machineTags = @()
+            if ($null -ne $projection) {
+                if ($PayloadContract -eq 'in-process-compatible' -and $machine -is [array] -and $machine.Length -ge 10) {
+                    if ($machine.Length -ge 15) { $machineTags = @($machine[14]) }
+                }
+                elseif ($PayloadContract -eq 'in-process-compatible') {
+                    $machineTags = @(Get-NormalizedMachineTag -Tags $machine.PSObject.Properties['machineTags']?.Value)
+                }
+                else { $machineTags = @($projection.MachineTags) }
+            }
             $machineInfo = if ($null -ne $projection) { $projection.MachineInfo } else { [PSCustomObject]@{} }
-            if ($users.Count -gt 0) { Add-Member -InputObject $machineInfo -NotePropertyName u -NotePropertyValue $users -Force }
+            if ($PayloadContract -eq 'in-process-compatible') {
+                $users = [string[]]$users
+                $machineInfo = [ordered]@{
+                    ip = $machineInfo.PSObject.Properties['ip']?.Value
+                    eip = $machineInfo.PSObject.Properties['eip']?.Value
+                    u = if ($users.Count -gt 0) { $users } else { $null }
+                    hs = $machineInfo.PSObject.Properties['hs']?.Value
+                    rs = $machineInfo.PSObject.Properties['rs']?.Value
+                    el = $machineInfo.PSObject.Properties['el']?.Value
+                    dv = $machineInfo.PSObject.Properties['dv']?.Value
+                    mb = $machineInfo.PSObject.Properties['mb']?.Value
+                    aad = $machineInfo.PSObject.Properties['aad']?.Value
+                    ls = $machineInfo.PSObject.Properties['ls']?.Value
+                    fs = $machineInfo.PSObject.Properties['fs']?.Value
+                }
+            }
+            elseif ($users.Count -gt 0) { Add-Member -InputObject $machineInfo -NotePropertyName u -NotePropertyValue $users -Force }
             $machineWriter.WriteLine((ConvertTo-Json -InputObject ([ordered]@{
                 id = $machineId; n = if ($projection) { $projection.ComputerDnsName } else { $null }; g = if ($projection) { $projection.RbacGroupName } else { $null }
                 o = if ($projection) { $projection.OSPlatform } else { $null }; ov = if ($projection) { $projection.OSVersion } else { $null }
-                t = if ($projection) { @($projection.MachineTags) } else { @() }; m = $machineInfo
+                t = $machineTags; m = $machineInfo
             }) -Compress -Depth 10))
         }
     }
@@ -4430,13 +4466,22 @@ function Write-BoundedNormalizationEnrichmentFragment {
 
     $cveWriter = [System.IO.StreamWriter]::new((Join-Path $StagePath 'cveEnrichment.ndjson'), $false, $utf8, 65536)
     try {
-        $cveIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-        foreach ($cveId in @($AdvancedHuntingData.Keys) + @($NvdCveData.Keys)) { if (-not [string]::IsNullOrWhiteSpace([string]$cveId)) { [void]$cveIds.Add([string]$cveId) } }
+        # Records are keyed by the exact template CVE ID and resolved through each caller table's own comparer, mirroring Add-NormalizedCve.
+        $cveIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        $candidateIds = if ($null -ne $TemplateCveIds) { $TemplateCveIds } else { @($AdvancedHuntingData.Keys) + @($NvdCveData.Keys) }
+        foreach ($cveId in $candidateIds) { if (-not [string]::IsNullOrWhiteSpace([string]$cveId)) { [void]$cveIds.Add([string]$cveId) } }
         foreach ($cveId in $cveIds) {
             $ah = $AdvancedHuntingData[$cveId]; $nvd = $NvdCveData[$cveId]
+            if (-not $ah -and -not $nvd) { continue }
+            $publishedDate = if ($ah) { $ah.PublishedDate } else { $null }
+            $description = if ($ah) { $ah.VulnerabilityDescription } else { $null }
+            if ($nvd) {
+                if ([string]::IsNullOrWhiteSpace([string]$publishedDate)) { $publishedDate = $nvd.PublishedDate }
+                if ([string]::IsNullOrWhiteSpace([string]$description)) { $description = $nvd.VulnerabilityDescription }
+            }
             $cveWriter.WriteLine((ConvertTo-Json -InputObject ([ordered]@{
-                id = $cveId; pd = if ($ah -and $ah.PublishedDate) { $ah.PublishedDate } elseif ($nvd) { $nvd.PublishedDate } else { $null }
-                desc = if ($ah -and $ah.VulnerabilityDescription) { $ah.VulnerabilityDescription } elseif ($nvd) { $nvd.VulnerabilityDescription } else { $null }
+                id = $cveId; pd = $publishedDate
+                desc = $description
                 ep = if ($ah) { $ah.EpssScore } else { $null }; as = if ($ah -and $ah.AffectedSoftware) { @($ah.AffectedSoftware) } else { $null }
                 ea = if ($ah -and $ah.ContainsKey('IsExploitAvailable')) { $ah.IsExploitAvailable } else { $null }
                 nlm = if ($nvd) { $nvd.LastModifiedDate } else { $null }; nbs = if ($nvd) { $nvd.BaseScore } else { $null }; nsv = if ($nvd) { $nvd.BaseSeverity } else { $null }
@@ -4457,6 +4502,97 @@ function Write-BoundedNormalizationEnrichmentFragment {
     finally { $inventoryWriter.Dispose() }
 }
 
+function Get-NormalizationSeverityIndexMap {
+    # Single source for severity indexes; the compiled normalizer receives these entries and this map's key comparer.
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param()
+
+    return @{
+        Critical = 0
+        High = 1
+        Medium = 2
+        Low = 3
+        None = 4
+    }
+}
+
+function Get-NormalizationKeyComparerDescriptor {
+    # Describes a hashtable's key comparer so the compiled normalizer can reproduce in-process lookup semantics.
+    # Throws for comparers it cannot reproduce instead of silently assuming a default.
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable]$Table,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $comparerProperty = [hashtable].GetProperty('EqualityComparer', [System.Reflection.BindingFlags]'NonPublic,Instance')
+    $comparer = $comparerProperty.GetValue($Table)
+    if ($null -eq $comparer) { return 'Ordinal' }
+    foreach ($candidate in @(
+            @{ Descriptor = 'OrdinalIgnoreCase'; Comparer = [System.StringComparer]::OrdinalIgnoreCase }
+            @{ Descriptor = 'Ordinal'; Comparer = [System.StringComparer]::Ordinal }
+            @{ Descriptor = 'InvariantCultureIgnoreCase'; Comparer = [System.StringComparer]::InvariantCultureIgnoreCase }
+            @{ Descriptor = 'InvariantCulture'; Comparer = [System.StringComparer]::InvariantCulture }
+            @{ Descriptor = ('CultureIgnoreCase:' + [System.Globalization.CultureInfo]::CurrentCulture.Name); Comparer = [System.StringComparer]::CurrentCultureIgnoreCase }
+            @{ Descriptor = ('Culture:' + [System.Globalization.CultureInfo]::CurrentCulture.Name); Comparer = [System.StringComparer]::CurrentCulture }
+        )) {
+        if ($candidate.Comparer.Equals($comparer)) { return [string]$candidate.Descriptor }
+    }
+    throw [System.NotSupportedException]::new(("Compiled bounded normalization cannot reproduce the {0} key comparer '{1}'." -f $Name, $comparer.GetType().FullName))
+}
+
+function Test-CompiledNormalizationKeyComparerSupport {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable]$AdvancedHuntingInventoryData)
+
+    try { [void](Get-NormalizationKeyComparerDescriptor -Table $AdvancedHuntingInventoryData -Name 'inventory'); return $true }
+    catch [System.NotSupportedException] { return $false }
+}
+
+function Write-BoundedNormalizationConfiguration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$StagePath,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][hashtable]$AdvancedHuntingInventoryData,
+        [Parameter(Mandatory = $true)][ValidateSet('in-process-compatible', 'high-cardinality-compact')][string]$PayloadContract
+    )
+
+    $severityIndexByName = Get-NormalizationSeverityIndexMap
+    $severityIndexes = [ordered]@{}
+    foreach ($severityName in @($severityIndexByName.Keys | Sort-Object { [int]$severityIndexByName[$_] })) { $severityIndexes[[string]$severityName] = [int]$severityIndexByName[$severityName] }
+    $options = [ordered]@{
+        inventoryKeyComparer = Get-NormalizationKeyComparerDescriptor -Table $AdvancedHuntingInventoryData -Name 'inventory'
+        severityKeyComparer = Get-NormalizationKeyComparerDescriptor -Table $severityIndexByName -Name 'severity'
+        severityIndexes = $severityIndexes
+        payloadContract = $PayloadContract
+    }
+    [System.IO.File]::WriteAllText((Join-Path $StagePath 'normalizationOptions.json'), (ConvertTo-Json -InputObject $options -Compress -Depth 5), [System.Text.UTF8Encoding]::new($false))
+}
+
+function Complete-BoundedProjectionStaging {
+    # Disposes bounded-projection telemetry and removes the plaintext staging directory, always attempting both.
+    # Returns the failures (never throws) so callers can surface them alongside any original projection error.
+    [CmdletBinding()]
+    [OutputType([System.Exception])]
+    param(
+        [Parameter(Mandatory = $true)][string]$StagePath,
+        [Parameter(Mandatory = $false)]$Telemetry
+    )
+    $errors = [System.Collections.Generic.List[System.Exception]]::new()
+    if ($null -ne $Telemetry) {
+        try { $Telemetry.Dispose() }
+        catch { $errors.Add([System.InvalidOperationException]::new(("Bounded normalization telemetry disposal failed: {0}" -f $_.Exception.Message), $_.Exception)) }
+    }
+    $cleanupError = [DefenderReporting.Store.BoundedContentNormalizer]::TryDeleteStagingDirectory($StagePath)
+    if ($null -ne $cleanupError) {
+        $errors.Add([System.IO.IOException]::new(("Plaintext staging directory '{0}' could not be removed: {1}" -f $StagePath, $cleanupError.Message), $cleanupError))
+    }
+    foreach ($errorItem in $errors) { $errorItem }
+}
+
 function Invoke-BoundedContentStorePayloadProjection {
     [CmdletBinding()]
     param(
@@ -4467,7 +4603,10 @@ function Invoke-BoundedContentStorePayloadProjection {
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingDeviceUsers = @{},
         [Parameter(Mandatory = $false)][hashtable]$AdvancedHuntingInventoryData = @{},
         [Parameter(Mandatory = $false)][hashtable]$NvdCveData = @{},
-        [Parameter(Mandatory = $false)][string[]]$RefPaths
+        [Parameter(Mandatory = $false)][string[]]$RefPaths,
+        [Parameter(Mandatory = $false)][string]$StagingParent,
+        # in-process-compatible reproduces the in-process payload shape; high-cardinality-compact keeps the accepted compiled shape.
+        [Parameter(Mandatory = $true)][ValidateSet('in-process-compatible', 'high-cardinality-compact')][string]$PayloadContract
     )
     Initialize-CompiledVulnContentProjector
     $dictionaryPath = Get-VulnContentDictionaryPath -BasePath $DataPath
@@ -4475,24 +4614,58 @@ function Invoke-BoundedContentStorePayloadProjection {
     if ($effectiveRefPaths.Count -eq 0) {
         $effectiveRefPaths = [string[]](@((Get-VulnCurrentRefsPath -BasePath $DataPath)) + @(Get-ChildItem -LiteralPath $DataPath -Filter 'VulnHistoryRefs_*.json.gz' -File | Sort-Object Name | ForEach-Object FullName))
     }
-    $stagePath = Join-Path ([System.IO.Path]::GetTempPath()) ('compiled-dictionary-' + [guid]::NewGuid().ToString('N'))
+    if ([string]::IsNullOrWhiteSpace($StagingParent)) { $StagingParent = [System.IO.Path]::GetTempPath() }
+    $stagePath = Join-Path $StagingParent ('compiled-dictionary-' + [guid]::NewGuid().ToString('N'))
     $projectionResult = $null
     $telemetry = [DefenderReporting.Store.MemoryTelemetrySession]::new(0)
     try {
         $telemetry.SetStage('dictionary-staging')
         [void](New-Item -Path $stagePath -ItemType Directory -Force)
+        $templateCveIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
         foreach ($propertyName in @('deviceProfiles', 'contentTemplates')) {
             $writer = [System.IO.StreamWriter]::new((Join-Path $stagePath ($propertyName + '.ndjson')), $false, [System.Text.UTF8Encoding]::new($false), 65536)
-            try { Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName $propertyName | ForEach-Object { $writer.WriteLine($_.ToString([Newtonsoft.Json.Formatting]::None)) } }
+            try {
+                Read-VulnContentDictionaryArrayEntries -Path $dictionaryPath -PropertyName $propertyName | ForEach-Object {
+                    if ($propertyName -eq 'contentTemplates') { $templateCveId = [string]$_['c']; if (-not [string]::IsNullOrWhiteSpace($templateCveId)) { [void]$templateCveIds.Add($templateCveId) } }
+                    # Preserve PowerShell's string conversion for legacy non-string path entries.
+                    if ($propertyName -eq 'contentTemplates' -and $PayloadContract -eq 'in-process-compatible') {
+                        foreach ($pathProperty in @('dp', 'rp')) {
+                            $pathToken = $_[$pathProperty]
+                            if ($null -eq $pathToken) { continue }
+                            $requiresConversion = if ($pathToken -is [Newtonsoft.Json.Linq.JArray]) {
+                                foreach ($pathItem in $pathToken) {
+                                    if ($pathItem.Type -notin @([Newtonsoft.Json.Linq.JTokenType]::String, [Newtonsoft.Json.Linq.JTokenType]::Null)) { $true; break }
+                                }
+                            }
+                            else { $pathToken.Type -notin @([Newtonsoft.Json.Linq.JTokenType]::String, [Newtonsoft.Json.Linq.JTokenType]::Null) }
+                            if ($requiresConversion) {
+                                $pathValues = [string[]]@(Get-StringArray -Value (Get-VulnPropertyValue -InputObject $_ -Name $pathProperty))
+                                $_[$pathProperty] = [Newtonsoft.Json.Linq.JArray]::FromObject($pathValues)
+                            }
+                        }
+                    }
+                    $writer.WriteLine($_.ToString([Newtonsoft.Json.Formatting]::None))
+                }
+            }
             finally { $writer.Dispose() }
         }
-        Write-BoundedNormalizationEnrichmentFragment -StagePath $stagePath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData
+        Write-BoundedNormalizationConfiguration -StagePath $stagePath -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -PayloadContract $PayloadContract
+        Write-BoundedNormalizationEnrichmentFragment -StagePath $stagePath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -TemplateCveIds $templateCveIds -PayloadContract $PayloadContract
         if ($null -eq $effectiveRefPaths -or $effectiveRefPaths.Count -eq 0) { throw 'Bounded normalization did not resolve any vulnerability reference inputs.' }
-        $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $effectiveRefPaths, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry)
+        $projectionResult = [DefenderReporting.Store.BoundedContentNormalizer]::Project($stagePath, $effectiveRefPaths, [System.IO.Path]::GetFullPath($PayloadOutputPath), $telemetry, $StagingParent)
     }
-    finally {
-        $telemetry.Dispose()
-        if (Test-Path -LiteralPath $stagePath) { Remove-Item -LiteralPath $stagePath -Recurse -Force -ErrorAction SilentlyContinue }
+    catch {
+        # Staged dictionary/enrichment fragments are plaintext tenant data; always clean up without masking the original error.
+        $projectionRecord = $_
+        $completionErrors = [System.Exception[]]@(Complete-BoundedProjectionStaging -StagePath $stagePath -Telemetry $telemetry)
+        if ($completionErrors.Count -gt 0) {
+            throw [System.AggregateException]::new(("Bounded normalization failed ({0}) and post-projection cleanup also failed: {1}" -f $projectionRecord.Exception.Message, (@($completionErrors | ForEach-Object Message) -join ' | ')), [System.Exception[]](@($projectionRecord.Exception) + $completionErrors))
+        }
+        throw $projectionRecord
+    }
+    $completionErrors = [System.Exception[]]@(Complete-BoundedProjectionStaging -StagePath $stagePath -Telemetry $telemetry)
+    if ($completionErrors.Count -gt 0) {
+        throw [System.AggregateException]::new(("Bounded normalization completed but post-projection cleanup failed: {0}" -f (@($completionErrors | ForEach-Object Message) -join ' | ')), $completionErrors)
     }
     Invoke-FullGarbageCollection
     [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
@@ -5442,7 +5615,7 @@ function Get-DashboardPayloadCacheVersion {
     [OutputType([string])]
     param()
 
-    return 'dashboard-payload-cache-v8'
+    return 'dashboard-payload-cache-v9'
 }
 
 function Get-DashboardPayloadCacheFingerprint {
@@ -6076,13 +6249,7 @@ function Get-NormalizationContext {
     [OutputType([pscustomobject])]
     param()
 
-    $severityIndexByName = @{
-        Critical = 0
-        High = 1
-        Medium = 2
-        Low = 3
-        None = 4
-    }
+    $severityIndexByName = Get-NormalizationSeverityIndexMap
 
     return [PSCustomObject]@{
         Lookups = @{
@@ -9557,26 +9724,56 @@ function ConvertTo-NormalizedData {
         [scriptblock]$NormalizationProgressCallback,
 
         [Parameter(Mandatory = $false)]
-        [switch]$DirectMergeDeviceLookup
+        [switch]$DirectMergeDeviceLookup,
+
+        # Forces the in-process streaming normalizer when the content cardinality allows it (compatibility/diagnostics).
+        [Parameter(Mandatory = $false)]
+        [switch]$DisableCompiledContentNormalization,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$UseExperimentalCompiledSmallPayload
     )
 
     Write-Information '  Normalizing data structure...' -InformationAction Continue
     Write-Information ("  Normalization inputs: {0} machine(s), {1} Advanced Hunting CVE(s), {2} device user row(s), {3} inventory tuple(s), {4} NVD CVE(s)" -f (Get-NormalizationMachineLookupCount -Machines $Machines), $AdvancedHuntingData.Count, $AdvancedHuntingDeviceUsers.Count, $AdvancedHuntingInventoryData.Count, $NvdCveData.Count) -InformationAction Continue
-    $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath
+    $compiledPayloadSupported = (-not [string]::IsNullOrWhiteSpace($PayloadOutputPath) -and $ConsumeLookupsOnPayloadClose -and -not $DirectMergeDeviceLookup -and -not $DisableCompiledContentNormalization)
+    $preSyncedContentStoreExists = $null
+    if ($compiledPayloadSupported) {
+        $preSyncedContentStoreExists = [bool](Sync-VulnContentStoreSidecar -BasePath $DataPath)
+        $compiledPayloadSupported = $preSyncedContentStoreExists
+    }
+    $unsupportedCompiledInventoryComparer = ($compiledPayloadSupported -and -not (Test-CompiledNormalizationKeyComparerSupport -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData))
+    if ($unsupportedCompiledInventoryComparer) {
+        $compiledPayloadSupported = $false
+    }
+    $executionPlan = Get-NormalizationExecutionPlan -Path $DataPath -CompiledPayloadSupported:$compiledPayloadSupported -UseExperimentalCompiledSmallPayload:$UseExperimentalCompiledSmallPayload
     if ($executionPlan.ContentNormalizationMode -eq 'compiled-bounded-standard-payload') {
         if ([string]::IsNullOrWhiteSpace($PayloadOutputPath) -or -not $ConsumeLookupsOnPayloadClose) { throw 'Compiled bounded content normalization requires direct payload output and lookup consumption.' }
+        if ($DirectMergeDeviceLookup) { throw 'Experimental direct-merge device lookup requires in-process normalization; high-cardinality content requires a preloaded machine lookup.' }
+        if ($DisableCompiledContentNormalization) { throw 'Compiled content normalization cannot be disabled for high-cardinality content.' }
+        if ($unsupportedCompiledInventoryComparer) { throw [System.NotSupportedException]::new('High-cardinality content requires compiled normalization, which cannot reproduce the inventory key comparer.') }
         $compiledRefPaths = $null
         if (-not $SkipObservedWindowMerge -and -not (Test-IsSyntheticDataset -BasePath $DataPath)) {
             Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{ Kind = 'phase'; Phase = 'CompiledObservedWindowMerge'; Message = 'Building the merged observation-window stream for bounded normalization.' })
             $mergedRefPath = Publish-VulnObservedWindowCache -BasePath $DataPath -AllowedGapDays 1
             if (-not [string]::IsNullOrWhiteSpace($mergedRefPath) -and (Test-Path -LiteralPath $mergedRefPath -PathType Leaf)) { $compiledRefPaths = @($mergedRefPath) }
         }
-        Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{ Kind = 'phase'; Phase = 'CompiledBoundedContentNormalization'; Message = 'Streaming high-cardinality content and enrichment inputs through the compiled bounded projector.' })
-        $compiledResult = Invoke-BoundedContentStorePayloadProjection -DataPath $DataPath -PayloadOutputPath $PayloadOutputPath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -RefPaths $compiledRefPaths
-        if (Test-FileBackedNormalizationMachineLookup -Machines $Machines) { Remove-FileBackedNormalizationMachineLookup -Machines $Machines } else { $Machines.Clear() }
-        $AdvancedHuntingData.Clear(); $AdvancedHuntingDeviceUsers.Clear(); $AdvancedHuntingInventoryData.Clear(); $NvdCveData.Clear()
+        Invoke-NormalizationCallbackEvent -Callback $NormalizationProgressCallback -EventData ([PSCustomObject]@{ Kind = 'phase'; Phase = 'CompiledBoundedContentNormalization'; Message = 'Streaming content and enrichment inputs through the compiled bounded projector.' })
+        $compiledResult = Invoke-BoundedContentStorePayloadProjection -DataPath $DataPath -PayloadOutputPath $PayloadOutputPath -Machines $Machines -AdvancedHuntingData $AdvancedHuntingData -AdvancedHuntingDeviceUsers $AdvancedHuntingDeviceUsers -AdvancedHuntingInventoryData $AdvancedHuntingInventoryData -NvdCveData $NvdCveData -RefPaths $compiledRefPaths -PayloadContract $executionPlan.CompiledPayloadContract
+        if (Test-FileBackedNormalizationMachineLookup -Machines $Machines) { Remove-FileBackedNormalizationMachineLookup -Machines $Machines }
+        elseif ($executionPlan.CompiledPayloadContract -eq 'high-cardinality-compact') { $Machines.Clear() }
+        $AdvancedHuntingData.Clear(); $AdvancedHuntingDeviceUsers.Clear(); $NvdCveData.Clear()
+        if ($executionPlan.CompiledPayloadContract -eq 'high-cardinality-compact') { $AdvancedHuntingInventoryData.Clear() }
         Invoke-FullGarbageCollection
         [DefenderReporting.Store.BoundedContentNormalizer]::TrimCurrentProcessWorkingSet()
+        if ([long]$compiledResult.ProcessedCount -eq 0) {
+            throw (Get-NoOnboardedVulnerabilityMessage -DataPath $DataPath -SourceKind 'export files')
+        }
+        Write-Information ("  Loaded {0} onboarded vulnerability records" -f [long]$compiledResult.ProcessedCount) -InformationAction Continue
+        Write-Information ("  Normalized: {0} devices, {1} CVEs, {2} software, {3} vendors" -f [int]$compiledResult.DeviceCount, [int]$compiledResult.CveCount, [int]$compiledResult.SoftwareCount, [int]$compiledResult.VendorCount) -InformationAction Continue
+        if ([long]$compiledResult.FirstLastSwappedCount -gt 0) {
+            Write-Warning ("  Corrected {0} record(s) with FirstSeenTimestamp > LastSeenTimestamp" -f [long]$compiledResult.FirstLastSwappedCount)
+        }
         $compiledTelemetry = if ($null -eq $compiledResult.MemoryTelemetry) { $null } else {
             [ordered]@{
                 peakWorkingSetMb = [math]::Round([double]$compiledResult.MemoryTelemetry.PeakWorkingSetBytes / 1MB, 1)
@@ -9597,8 +9794,11 @@ function ConvertTo-NormalizedData {
         }
         return @{
             Lookups = $null; LookupsConsumed = $true; DeviceCount = [int]$compiledResult.DeviceCount; CveCount = [int]$compiledResult.CveCount; SoftwareCount = [int]$compiledResult.SoftwareCount; VendorCount = [int]$compiledResult.VendorCount
-            Quality = [PSCustomObject]@{ FirstLastSwappedCount = 0 }; VulnCount = [long]$compiledResult.ProcessedCount; VulnsPath = $null; VulnColumnPaths = $null; PayloadPath = $PayloadOutputPath; CompiledMemoryTelemetry = $compiledTelemetry
+            Quality = [PSCustomObject]@{ FirstLastSwappedCount = [int]$compiledResult.FirstLastSwappedCount }; VulnCount = [long]$compiledResult.ProcessedCount; VulnsPath = $null; VulnColumnPaths = $null; PayloadPath = $PayloadOutputPath; CompiledMemoryTelemetry = $compiledTelemetry
         }
+    }
+    if ($unsupportedCompiledInventoryComparer) {
+        Write-Information '  Compiled content normalization skipped: the inventory lookup uses a key comparer it cannot reproduce.' -InformationAction Continue
     }
     Compress-NormalizationMachineLookup -Machines $Machines | Out-Null
     $consumeLookups = ($ConsumeLookupsOnPayloadClose -and -not [string]::IsNullOrWhiteSpace($PayloadOutputPath))
@@ -9633,7 +9833,7 @@ function ConvertTo-NormalizedData {
     }
 
     $effectiveSkipObservedWindowMerge = ($SkipObservedWindowMerge -or (Test-IsSyntheticDataset -BasePath $DataPath))
-    $contentStoreExists = Sync-VulnContentStoreSidecar -BasePath $DataPath
+    $contentStoreExists = if ($null -ne $preSyncedContentStoreExists) { $preSyncedContentStoreExists } else { Sync-VulnContentStoreSidecar -BasePath $DataPath }
     $storeExists = ((Test-VulnStoreExistence -BasePath $DataPath) -or $contentStoreExists)
 
     if ($contentStoreExists) {

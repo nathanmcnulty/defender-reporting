@@ -18,6 +18,12 @@ function isOutput(mode, file) {
     throw new Error('Unknown output mode');
 }
 
+function lstatIfExists(file) {
+    try { return fs.lstatSync(file); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    return null;
+}
+
 function stageOutputs(mode, cwd = process.cwd()) {
     if (mode !== 'dashboard') throw new Error('Unknown output mode');
     const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -25,22 +31,21 @@ function stageOutputs(mode, cwd = process.cwd()) {
     const files = new Set(git('ls-files', '-z').split('\0').filter(Boolean));
     for (const directory of ['exports']) {
         const fullPath = path.join(cwd, directory);
-        if (!fs.existsSync(fullPath)) continue;
-        if (!fs.lstatSync(fullPath).isDirectory() || fs.lstatSync(fullPath).isSymbolicLink()) {
+        const stat = lstatIfExists(fullPath);
+        if (!stat) continue;
+        if (!stat.isDirectory() || stat.isSymbolicLink()) {
             throw new Error('Output directory must be a real directory');
         }
         for (const entry of fs.readdirSync(fullPath)) files.add(`${directory}/${entry}`);
     }
-    if (fs.existsSync(path.join(cwd, 'VulnerabilityDashboard.html'))) {
+    if (lstatIfExists(path.join(cwd, 'VulnerabilityDashboard.html'))) {
         files.add('VulnerabilityDashboard.html');
     }
     const outputs = [...files].filter(file => isOutput(mode, file)).sort();
     // Validate the entire set before staging any of it. Never follow output symlinks.
     for (const file of outputs) {
         const fullPath = path.join(cwd, file);
-        let stat;
-        try { stat = fs.lstatSync(fullPath); }
-        catch (error) { if (error.code !== 'ENOENT') throw error; }
+        const stat = lstatIfExists(fullPath);
         if (stat && !stat.isFile()) throw new Error('Output must be a regular file');
     }
     for (const file of outputs) git('add', '--force', '--all', '--', file);

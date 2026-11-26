@@ -31,6 +31,9 @@ param(
     [switch]$UseDirectMergeDeviceLookup,
 
     [Parameter(Mandatory = $false)]
+    [switch]$UseExperimentalCompiledSmallPayload,
+
+    [Parameter(Mandatory = $false)]
     [bool]$UseBoundedPublicationMetadataReader = $false,
 
     [Parameter(Mandatory = $false)]
@@ -69,6 +72,7 @@ $script:StorageAccountName = $StorageAccountName
 $script:DashboardDeliveryMode = $DashboardDeliveryMode
 $script:UseExistingExportsOnly = if ($PSBoundParameters.ContainsKey('UseExistingExportsOnly')) { [bool]$UseExistingExportsOnly } else { $true }
 $script:UseDirectMergeDeviceLookup = if ($PSBoundParameters.ContainsKey('UseDirectMergeDeviceLookup')) { [bool]$UseDirectMergeDeviceLookup } else { $false }
+$script:UseExperimentalCompiledSmallPayload = [bool]$UseExperimentalCompiledSmallPayload
 $script:UseBoundedPublicationMetadataReader = $UseBoundedPublicationMetadataReader
 $script:ExpectedTotalRows = $ExpectedTotalRows
 $script:PollIntervalSeconds = $PollIntervalSeconds
@@ -168,6 +172,54 @@ function Get-RunbookExecutionStatus {
     }
 }
 
+function Test-RunbookStatusMatchesJob {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [AllowNull()]$Status,
+        [AllowEmptyString()][string]$JobId,
+        [datetime]$JobCreationUtc
+    )
+
+    if ($null -eq $Status -or -not $Status.PSObject.Properties['startedOnUtc']) { return $false }
+    $startedUtc = ConvertTo-UtcDateTime -Value $Status.startedOnUtc
+    if ($null -eq $startedUtc -or $startedUtc -lt $JobCreationUtc.AddMinutes(-1)) { return $false }
+    if (-not [string]::IsNullOrWhiteSpace($JobId) -and $Status.PSObject.Properties['automationJobId']) {
+        $statusJobId = [string]$Status.automationJobId
+        if (-not [string]::IsNullOrWhiteSpace($statusJobId) -and $statusJobId -ne $JobId) { return $false }
+    }
+    return $true
+}
+
+function Get-RunbookProcessPeakWorkingSet {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]$Status,
+        [AllowEmptyCollection()][object[]]$StatusTimeline = @()
+    )
+
+    $samples = [System.Collections.Generic.List[object]]::new()
+    if ($null -ne $Status) {
+        if ($Status.PSObject.Properties['memory'] -and $null -ne $Status.memory) { $samples.Add($Status.memory) }
+        if ($Status.PSObject.Properties['memoryTimelineTail']) {
+            foreach ($sample in @($Status.memoryTimelineTail)) { if ($null -ne $sample) { $samples.Add($sample) } }
+        }
+    }
+    foreach ($statusSample in $StatusTimeline) {
+        if ($null -ne $statusSample -and $statusSample.PSObject.Properties['memory'] -and $null -ne $statusSample.memory) { $samples.Add($statusSample.memory) }
+    }
+
+    $peak = $null
+    foreach ($sample in $samples) {
+        $property = $sample.PSObject.Properties['processPeakWorkingSetMb']
+        if ($null -eq $property -or $null -eq $property.Value) { continue }
+        $value = [double]$property.Value
+        if (-not [double]::IsFinite($value) -or $value -lt 0) { throw 'Runbook status contains an invalid process working-set high-water value.' }
+        if ($null -eq $peak -or $value -gt $peak) { $peak = $value }
+    }
+    return $peak
+}
+
 function Invoke-RepoScript {
     [CmdletBinding()]
     param(
@@ -242,12 +294,15 @@ function Start-RunbookBenchmark {
         return $null
     }
 
-    $parameterPairs = @("DashboardDeliveryMode=$script:DashboardDeliveryMode")
+    $parameterPairs = @("DashboardDeliveryMode=$script:DashboardDeliveryMode", "StorageAccountName=$script:StorageAccountName")
     if ($script:UseExistingExportsOnly) {
         $parameterPairs += 'UseExistingExportsOnly=true'
     }
     if ($script:UseDirectMergeDeviceLookup) {
         $parameterPairs += 'UseDirectMergeDeviceLookup=true'
+    }
+    if ($script:UseExperimentalCompiledSmallPayload) {
+        $parameterPairs += 'UseExperimentalCompiledSmallPayload=true'
     }
     if ($script:UseBoundedPublicationMetadataReader) {
         $parameterPairs += 'UseBoundedPublicationMetadataReader=true'
@@ -478,14 +533,15 @@ $runbookStatusTimeline = [System.Collections.Generic.List[object]]::new()
 $lastStatusUpdatedOnUtc = ''
 $lastProgressUtc = $runbookState.creationTimeUtc
 $stallWarningIssued = $false
+$lastTrustedStatus = $null
 do {
     Start-Sleep -Seconds $script:PollIntervalSeconds
     $runbookJob = Get-RunbookJobStatus -JobName $runbookState.name
     $statusSample = Get-RunbookExecutionStatus -StorageAccountName $script:StorageAccountName
-    if ($null -ne $statusSample) {
-        $statusStartedUtc = ConvertTo-UtcDateTime -Value $statusSample.startedOnUtc
+    if (Test-RunbookStatusMatchesJob -Status $statusSample -JobId $runbookState.jobId -JobCreationUtc $runbookState.creationTimeUtc) {
+        $lastTrustedStatus = $statusSample
         $statusUpdatedText = [string]$statusSample.updatedOnUtc
-        if ($null -ne $statusStartedUtc -and $statusStartedUtc -ge $runbookState.creationTimeUtc.AddMinutes(-1) -and $statusUpdatedText -ne $lastStatusUpdatedOnUtc) {
+        if ($statusUpdatedText -ne $lastStatusUpdatedOnUtc) {
             $runbookStatusTimeline.Add($statusSample)
             $lastStatusUpdatedOnUtc = $statusUpdatedText
             $statusUpdatedUtc = ConvertTo-UtcDateTime -Value $statusSample.updatedOnUtc
@@ -494,13 +550,16 @@ do {
         }
     }
     $stall = Get-ProgressStallAssessment -LastProgressUtc $lastProgressUtc -WarningSeconds $StallWarningSeconds -FailureSeconds $StallFailureSeconds
+    $stallStage = if ($null -ne $lastTrustedStatus) { [string]$lastTrustedStatus.stage } else { '<unavailable>' }
+    $stallMessage = if ($null -ne $lastTrustedStatus) { [string]$lastTrustedStatus.message } else { '<unavailable>' }
     if ($stall.State -eq 'Warning' -and -not $stallWarningIssued) {
-        Write-Warning ("Runbook has not published progress for {0:N1}s (stage={1}; message={2})." -f $stall.AgeSeconds, [string]$statusSample.stage, [string]$statusSample.message)
+        Write-Warning ("Runbook has not published progress for {0:N1}s (stage={1}; message={2})." -f $stall.AgeSeconds, $stallStage, $stallMessage)
         $stallWarningIssued = $true
     }
     elseif ($stall.State -eq 'Failed') {
         Invoke-AzCli -Arguments @('automation', 'job', 'stop', '--automation-account-name', $script:AutomationAccountName, '--resource-group', $script:AutomationResourceGroup, '--name', $runbookState.name, '--subscription', [string]$subscription.id, '-o', 'none') -AllowEmpty | Out-Null
-        throw ("Runbook made no progress for {0:N1}s and was stopped (stage={1}; message={2}; memory={3})." -f $stall.AgeSeconds, [string]$statusSample.stage, [string]$statusSample.message, ($statusSample.memory | ConvertTo-Json -Compress -Depth 10))
+        $stallMemory = if ($null -ne $lastTrustedStatus -and $lastTrustedStatus.PSObject.Properties['memory']) { $lastTrustedStatus.memory | ConvertTo-Json -Compress -Depth 10 } else { '<unavailable>' }
+        throw ("Runbook made no progress for {0:N1}s and was stopped (stage={1}; message={2}; memory={3})." -f $stall.AgeSeconds, $stallStage, $stallMessage, $stallMemory)
     }
     Write-Host ("Runbook status: {0}" -f [string]$runbookJob.status) -ForegroundColor DarkGray
 }
@@ -521,10 +580,19 @@ if ($null -eq $runbookCompletedUtc) {
 $elapsedSeconds = [math]::Round((New-TimeSpan -Start $runbookState.creationTimeUtc -End $runbookCompletedUtc).TotalSeconds, 2)
 $runbookSummary = Get-PipelineEventSummary -Events $runbookEvents -TotalElapsedSeconds $elapsedSeconds -TotalRows $script:ExpectedTotalRows -TerminalStatus ([string]$runbookJob.status)
 $runbookStatus = Get-RunbookExecutionStatus -StorageAccountName $script:StorageAccountName
+if (-not (Test-RunbookStatusMatchesJob -Status $runbookStatus -JobId $runbookState.jobId -JobCreationUtc $runbookState.creationTimeUtc)) {
+    Write-Warning 'The final runbook status is missing or belongs to a different job; it will not be used as evidence.'
+    $runbookStatus = $null
+}
+elseif (-not $runbookStatus.PSObject.Properties['automationJobId'] -or [string]::IsNullOrWhiteSpace([string]$runbookStatus.automationJobId) -or [string]::IsNullOrWhiteSpace($runbookState.jobId)) {
+    Write-Warning 'Runbook status has no comparable Automation job ID; the timestamp-only association cannot exclude another concurrent job.'
+}
+$processPeakWorkingSetMb = Get-RunbookProcessPeakWorkingSet -Status $runbookStatus -StatusTimeline @($runbookStatusTimeline)
 $runbookStatusSummary = $null
 if ($null -ne $runbookStatus -and $runbookStatus.PSObject.Properties['memoryPeaks'] -and $null -ne $runbookStatus.memoryPeaks) {
     $runbookStatusSummary = [ordered]@{
         peak_working_set_mb = [math]::Round([double]$runbookStatus.memoryPeaks.peakWorkingSetMb, 1)
+        process_peak_working_set_mb = $processPeakWorkingSetMb
         peak_working_set_stage = [string]$runbookStatus.memoryPeaks.peakWorkingSetStage
         peak_private_memory_mb = [math]::Round([double]$runbookStatus.memoryPeaks.peakPrivateMemoryMb, 1)
         peak_private_memory_stage = [string]$runbookStatus.memoryPeaks.peakPrivateMemoryStage
@@ -568,6 +636,7 @@ $result = [ordered]@{
         dashboard_delivery_mode = $script:DashboardDeliveryMode
         use_existing_exports_only = $script:UseExistingExportsOnly
         use_direct_merge_device_lookup = $script:UseDirectMergeDeviceLookup
+        use_experimental_compiled_small_payload = $script:UseExperimentalCompiledSmallPayload
         use_bounded_publication_metadata_reader = $script:UseBoundedPublicationMetadataReader
         expected_total_rows = $script:ExpectedTotalRows
     }
@@ -589,14 +658,16 @@ Write-BenchmarkEvidenceEnvelope -Path $resultsFullPath -Evidence $result
 
 Write-Host ''
 if ($null -ne $runbookStatusSummary) {
-    Write-Host ("Runbook status-blob peak working set: {0}MB ({1})" -f $runbookStatusSummary.peak_working_set_mb, $runbookStatusSummary.peak_working_set_stage) -ForegroundColor Green
-    Write-Host ("Runbook status-blob peak private memory: {0}MB ({1})" -f $runbookStatusSummary.peak_private_memory_mb, $runbookStatusSummary.peak_private_memory_stage) -ForegroundColor Green
-    Write-Host ("Runbook status-blob peak GC heap: {0}MB ({1})" -f $runbookStatusSummary.peak_gc_heap_mb, $runbookStatusSummary.peak_gc_heap_stage) -ForegroundColor Green
+    Write-Host ("Runbook status-blob sampled peak working set: {0} MiB ({1})" -f $runbookStatusSummary.peak_working_set_mb, $runbookStatusSummary.peak_working_set_stage) -ForegroundColor Green
+    Write-Host ("Runbook status-blob sampled peak private memory: {0} MiB ({1})" -f $runbookStatusSummary.peak_private_memory_mb, $runbookStatusSummary.peak_private_memory_stage) -ForegroundColor Green
+    Write-Host ("Runbook status-blob sampled peak GC heap: {0} MiB ({1})" -f $runbookStatusSummary.peak_gc_heap_mb, $runbookStatusSummary.peak_gc_heap_stage) -ForegroundColor Green
 }
 else {
-    Write-Host ("Runbook peak working set: {0}MB" -f $runbookSummary.peak_working_set_mb) -ForegroundColor Green
-    Write-Host ("Runbook peak GC heap: {0}MB" -f $runbookSummary.peak_gc_heap_mb) -ForegroundColor Green
+    Write-Host ("Runbook event-sampled peak working set: {0} MiB" -f $runbookSummary.peak_working_set_mb) -ForegroundColor Green
+    Write-Host ("Runbook event-sampled peak GC heap: {0} MiB" -f $runbookSummary.peak_gc_heap_mb) -ForegroundColor Green
 }
+if ($null -ne $processPeakWorkingSetMb) { Write-Host ("Runbook process working-set high-water: {0} MiB" -f $processPeakWorkingSetMb) -ForegroundColor Green }
+else { Write-Warning 'Runbook process working-set high-water evidence is unavailable; sampled peaks cannot establish the process maximum.' }
 Write-Host ("Runbook elapsed: {0}s" -f $runbookSummary.elapsed_seconds) -ForegroundColor Green
 Write-Host ("Results written to {0}" -f $resultsFullPath) -ForegroundColor Green
 

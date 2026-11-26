@@ -15,7 +15,7 @@ self.onmessage = async function(e) {
     var decompressOnly = !!e.data.decompressOnly;
     var inflateStart = performance.now();
 
-    // If compressed data was transferred, decompress it first
+    // If compressed data was supplied, decompress it first
     if (e.data.compressedBytes) {
         var jsonUtf8;
         if (typeof DecompressionStream !== 'undefined') {
@@ -294,7 +294,7 @@ async function denormalizeInWorker(compressedBytes) {
             if (compressedBytes) {
                 // For compressed data, use decompress-only mode to avoid
                 // structured-clone memory limits on postMessage with 1M+ records.
-                // Main thread will denormalize after receiving lookups + rawVulns.
+                // The main thread parses transferred bytes after the worker terminates.
                 worker.postMessage({ compressedBytes, decompressOnly: true });
             } else {
                 worker.postMessage({ lookups, rawVulns });

@@ -9,7 +9,7 @@ This is a priority order, not a release schedule. Finish the current work and it
 - Self-contained HTML, hosted split assets, and Dual packaging remain supported. The hosted app should not become a requirement for opening an offline report.
 - Filtering and flexible reporting are core features. PDF export should use the selected report and page filters, including the date window.
 - Keep the optimized pipeline and existing data contracts unless evidence supports a focused change. A working pipeline does not need a new architecture to improve the dashboard.
-- The owner's public lab data and CI-generated demo PDFs are intentional demonstrations. That does not make another admin's tenant data public by default.
+- The public demo and CI-generated demo PDFs are intentional demonstrations. Demo data needs explicit approval for public release; another admin's tenant data is not public by default.
 - Keep deployment, routine operation, and troubleshooting understandable without requiring admins to learn the repository's internal test machinery.
 
 ## 1. Finish current work and review the baseline
@@ -19,10 +19,10 @@ This is a priority order, not a release schedule. Finish the current work and it
 - Finish and reconcile in-flight work before adding features. Review the exact resulting revision rather than treating an older report or an unmerged branch as current behavior.
 - Complete separate pipeline and dashboard reviews. Open issues for reproducible defects with the affected revision, expected and actual behavior, and a bounded reproduction. Review topics remain questions until verified.
 - Reconcile the existing performance issues [#67](https://github.com/nathanmcnulty/defender-reporting/issues/67), [#69](https://github.com/nathanmcnulty/defender-reporting/issues/69), and [#70](https://github.com/nathanmcnulty/defender-reporting/issues/70) against the latest evidence. Keep fresh import, completed-store replay, packaging, and browser work separate.
-- Finish the remaining hosted runtime acceptance tracked in [#92](https://github.com/nathanmcnulty/defender-reporting/issues/92). Offline checks and package validation do not establish live Azure behavior.
-- Resolve the owner-demo publication work in [PR #98](https://github.com/nathanmcnulty/defender-reporting/pull/98), then align the current setup and workflow documentation with the accepted behavior. Do not treat the intentional demo as an accidental disclosure or extend its publishing exception to other public forks.
+- Keep the successful live Function-host acceptance for [#92](https://github.com/nathanmcnulty/defender-reporting/issues/92) separate from the unverified Automation-host path. Offline checks and package validation do not establish live Azure behavior.
+- Build on the merged owner-demo work in [PR #98](https://github.com/nathanmcnulty/defender-reporting/pull/98) and the owner decision in [#68](https://github.com/nathanmcnulty/defender-reporting/issues/68). Do not extend the owner's demo exception to other public forks.
 
-**Completion check:** Each current item has a verified result or an explicit remaining gate. Merging, deploying, and running live acceptance remain separate decisions. New review findings are pending at the time of this roadmap; none are asserted here.
+**Completion check:** Each current item has a verified result or an explicit remaining gate. Merging, deploying, and running live acceptance remain separate decisions.
 
 ## 2. Make the hosted dashboard feel fast
 
@@ -72,62 +72,57 @@ These are options to evaluate after the work above, not selected implementations
 - **Dashboard framework:** React is an option if a small, measured comparison shows a worthwhile improvement in maintainability or interaction design. It is not a prerequisite for performance work. Any migration must preserve filtering, PDF behavior, offline HTML, hosted packaging, and the existing data contract.
 - **Larger pipeline changes:** Keep the [current pipeline architecture decision](pipeline-architecture-review.md). Consider sharding or new resumability machinery only when measured limits or a concrete operational requirement justify it.
 - **Richer remediation guidance:** Add patch lineage or minimum/latest-fix claims only with a reliable supporting data source.
-- **Azure deployment wrapper:** Review the separate wrapper after the standalone pipeline and dashboard work is settled. Keep wrapper changes out of this roadmap's initial implementation work.
+- **Azure deployment wrapper:** Keep the separate wrapper aligned with standalone releases and verify any changes to its pinned upstream provenance.
 
-## Triage snapshot, November 24, 2026
+## Triage snapshot, November 25, 2026
 
-Based on main `535eafb`. Recommendations only; each merge, close or live run remains an owner decision.
+Status after #116 and the approved `main` history rewrite. Open performance
+issues retain their own acceptance criteria.
 
 | Item | State | Recommendation |
 | --- | --- | --- |
-| PR #115 | Based on main, merges cleanly, CI green. Fixes a non-idempotent POST retry and early success in Function validation. | Mark ready and merge with a non-closing reference to #92. The live #92 gate does not need to block a source-only fix. |
-| PR #109 | Diagnostics only, merges cleanly, CI green. Base of #110/#111. | Merge, or fold into #110. |
-| PR #110 | Mixed results: median family peak lower, warm init about 2% slower, full scale still exceeds 2 GiB. PDF header-clone isolation is an independent robustness win. | Split out the PDF header isolation plus parity tests and merge those. Accept or drop the worker byte transfer on its measurements. Avoid committing the 3,094-line fixture if it can be generated. |
-| PR #111 | Default-off experiment with no measured benefit. Has a content conflict with `main` in `azure/Invoke-DashboardPipeline.ps1` (the only conflicted file; it is the generated runbook built by `build/azure/Build-Runbook.ps1`, so regenerating it after rebasing resolves the conflict). | Close and keep `docs/streamed-scratch-candidate.md` as the record. Reopen only with a measured candidate. |
-| #92 | .NET 8 support ended November 10, 2026. Source already targets PowerShell 7.6. | Highest priority: hosts deployed on 7.4 are now unsupported. Schedule the live gate. |
-| #68 | Workflow containment is done. The historical-retention decision is pending. | Decide together with the repository-size item below, then close. |
-| #67 / #69 / #70 | Many measurement rounds; still blocked by fixed 400 MB (Automation) and 2 GiB (browser) ceilings. | Record a supported-scale envelope and the architecture options below before more campaigns. |
+| PRs #109, #110 and #115 | Merged. #110 retained the measured worker-transfer and PDF changes. | Keep their measurement limits with the evidence; full-scale browser acceptance is still open. |
+| PR #111 | Closed; the default-off experiment had no measured benefit. | The [design record](https://github.com/nathanmcnulty/defender-reporting/blob/dc6afaf9c2427ea257f36a546f9885d57a022ff3/docs/streamed-scratch-candidate.md) remains on the retained experiment branch; revisit only with a measured candidate. |
+| #92 | Closed after a successful live Function-host export and dashboard generation on PowerShell 7.6. | Automation-host validation remains separate; no live Automation receipt was obtained. |
+| #68 | Closed as not planned: the owner approved the lab data for the public demo, confirmed the Actions tenant/client binding, and chose to keep the eight release tags unchanged. The public workflow is enabled; existing `demo-data` and release-tag history remain public. | Retain synthetic test fixtures and limit the public owner exception to the approved lab tenant. Historical copies and ordinary-clone size remain unchanged. |
+| #67 / #69 / #70 | #67 is closed; #69 and #70 remain open. | Preserve their separate Automation and full-scale browser acceptance gates. |
 
 ### Recommendations
 
 **Reliability**
 
-- *Done on this branch:* generated-artifact fingerprints used `StringBuilder.AppendLine`, whose newline is platform-specific, and the repository had no `.gitattributes`. Windows builds therefore disagreed with the CI sync job. Fingerprints now use explicit LF and checkouts pin LF. Linux values are unchanged.
-- Pin `PSScriptAnalyzer` and `Az.Accounts` versions in workflows, and cache them, instead of installing the latest on every run. `jq` is already on `ubuntu-latest`, so the `apt-get` step can go.
-- Stop committing the generated 1 MB runbook (`azure/Invoke-DashboardPipeline.ps1`) from a bot push. It causes conflicts in every stacked branch (for example #111). Build it in the release package and have setup consume the package, or at least check for drift in CI instead of auto-committing.
-- *Done:* versions pinned and cached, `apt-get` removed, the runbook bot workflow retired, and CI now fails on generated-artifact drift.
+- *Done:* generated-artifact fingerprints use explicit LF and checkouts pin LF, so Windows builds agree with the CI sync job.
+- *Done:* workflow dependencies are pinned and cached, the unnecessary `apt-get` step and runbook bot workflow were removed, and CI now fails on generated-artifact drift.
 
 **Code and repository reduction**
 
-- About 320 of the repository's 364 MiB of history is the daily demo commit (`exports/*.gz` and `VulnerabilityDashboard.html`). Publish the demo to GitHub Pages or a force-pushed orphan branch instead of `main`. Purging history (part of the #68 decision) would shrink clones by roughly 90%.
-- *Done:* the daily demo now force-pushes a single orphan commit to the `demo-data` branch and outputs are untracked on `main`. The history purge still needs owner sign-off.
-- Move dated evidence (`docs/handoffs/`, `docs/performance-baselines.md` at 142 KB, dated reviews) to `docs/archive/` or release assets. Also move the root chat-replay JSON. Current guidance should stay short.
+- The demo workflow is enabled and configured to force-push one orphan snapshot to `demo-data`; outputs are untracked on `main`. With owner approval, `main` and all retained non-demo branches were moved onto cleaned histories, and merged or superseded branches were deleted. A fresh `main`-only clone without tags is 9.69 MiB versus about 364 MiB before the rewrite.
+- The eight existing release tags were not rewritten and still retain old history, so ordinary clones that fetch tags may remain large. GitHub pull-request references and forks can also retain copies. The public demo snapshot is not sanitized; #68 was closed as not planned under the owner's lab-data policy.
 - *Done:* dated evidence moved to `docs/archive/` and the chat replay removed. `docs/performance-baselines.md` stays because the PR template links it.
-- Split `tests/Run-SharedHelperRegression.ps1` (495 KB) by area. Retire one-off campaign scripts such as `Measure-BranchVsMainBenchmark.ps1` and `Measure-RunbookInputLoadExperiment.ps1` once their issues close.
-- *Done:* the runner now dot-sources seven `tests/SharedHelperRegression.<Area>.ps1` fragments. Both `Measure-*` scripts stay for now: `Invoke-BenchmarkSeries.ps1` and the performance playbook still use the branch benchmark, and #67 is open.
+- *Done:* the runner now dot-sources seven `tests/SharedHelperRegression.<Area>.ps1` fragments. Both `Measure-*` scripts stay for now: `Invoke-BenchmarkSeries.ps1` and the performance playbook still use the branch benchmark, and #69/#70 remain open.
 
 **Performance (structural options for #67/#69/#70)**
 
-- *Browser:* the full-scale failure comes from materializing about 1.2M rows client-side. Precompute per-report aggregates during generation and lazy-load row partitions (by device or CVE) for detail and PDF views. This addresses the 2 GiB ceiling directly instead of trimming allocations.
-- *Normalization:* the 19,677-row replay allocates about 4.1 GB cumulatively, which points to PowerShell object churn. Extending the existing compiled projector (`CompiledVulnContentProjector.ps1`) to cover the enrichment join is the most promising lever for #69.
-- *Runtime:* the 400 MB Automation sandbox limit drives much of the import/replay effort. A Container Apps job or Flex Function with configurable memory would remove that constraint. Evaluate cost and operations before investing further under the 400 MB cap.
+- *Browser:* a 1.2M-row report tour exceeded the 2 GiB whole-process-family guard; client-side row materialization is a plausible contributor, but the measurements do not establish it as the sole cause. Evaluate precomputed report aggregates and on-demand detail partitions against filtering, PDF, offline behavior, load time and the same family-memory limit.
+- *Normalization:* the 19,677-row replay allocates about 4.1 GB cumulatively, which points to PowerShell object churn. The existing compiled projector already includes the enrichment join; routing smaller eligible inputs through it is a default-off, cache-isolated experiment under parity and performance evaluation for #69.
+- *Runtime:* the deployed Flex Consumption Function has 2 GiB configured, with a supported maximum of 4 GiB. The 400 MB sandbox constraint applies to the optional Automation host, not that Function. Keep the two hosts' operational and acceptance evidence separate.
 
 ## Keeping this useful
 
 The [November 6 reliability reconciliation](archive/reliability-review-2026-11-06.md)
 starts from main after #105, records the distinct #99–#104 correctness gaps,
 preserves #98's demo/fork-protection ownership, and separates accepted full-scale
-PackageOnly evidence from the remaining #67/#69 import/replay and #92 live gates.
-Its source checks do not close those acceptance gates.
+PackageOnly evidence from the import/replay and live gates that were open at
+the time. See the current triage snapshot above for later results.
 
 The [subsequent browser/admin validation](archive/browser-admin-validation-2026-11-06.md)
 records corrected Hosted/self-contained PDF checks, the 19,677-row scoped admin
 experience and the measured cached-row refresh improvement. It retains mixed
 switch timings and full-scale memory failures. The next performance work must
 address admitted full-scale loading/unfiltered rendering; a framework rewrite
-is not established by these measurements. Import/replay, live blob interruption
-and #92 runtime acceptance remain separate work with their existing gates.
+is not established by these measurements. Import/replay and live blob
+interruption remain separate from browser acceptance.
 
 Use issues for concrete work and this document for order and product direction. Link verified review findings as they arrive; do not turn every idea into a promised feature. Update the roadmap when a decision or accepted result changes the next useful step.
 
-Planning snapshot: current main `69e5cfd53e5f1e6c8b762c86cb5b3967b3359e98`, open issues #67/#68/#69/#70/#92, and draft PR #98. The [October import/Dual measurements](archive/import-dual-measurements-2026-10-28.md), [dashboard review](dashboard-performance-review.md), and [test guide](../tests/README.md) provide context with their own evidence limits. Older observations are not current performance guarantees, and this roadmap does not close any issue.
+Planning snapshot: #69 and #70 remain open; #68 was closed as not planned after the owner approved the lab-data demo. The [October import/Dual measurements](archive/import-dual-measurements-2026-10-28.md), [dashboard review](dashboard-performance-review.md), and [test guide](../tests/README.md) provide context with their own evidence limits. Older observations are not current performance guarantees.

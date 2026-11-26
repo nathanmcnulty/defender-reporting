@@ -27,7 +27,7 @@ function createTestRow(overrides = {}) {
 
 async function assertLazyAggregateParity() {
     const dashboard = loadDashboardHarness(`
-async function measureAggregate(eager) {
+async function measureAggregate(eager, columnar, preAggregate = false, missingLookup = false, cached = false) {
     const rowCount = 6000;
     lookups = {
         devices: [
@@ -41,8 +41,17 @@ async function measureAggregate(eager) {
         vendors: ['microsoft'], severities: ['High'], exploitLevels: [], batchTitles: ['Microsoft March 2026 Updates'],
         affSoftware: ['microsoft:windows_11'], inventory: [], diskPaths: ['C:/Windows/file'], regPaths: ['HKLM/Software/Test']
     };
-    rawVulns = Array.from({ length: rowCount }, (_, index) => [index % 2, 0, 0, 0, 0, 1, 1, 0, [0], [0], -1]);
+    const rawRows = Array.from({ length: rowCount }, (_, index) => [index % 2, 0, 0, 0, 0, 1, 1, 0, [0], [0], -1]);
+    rawVulns = columnar
+        ? Object.fromEntries(['d', 'c', 's', 'v', 'f', 'l', 'ua', 'u', 'dp', 'rp', 'iv'].map((key, index) => [key, rawRows.map(row => row[index])]))
+        : rawRows;
     await denormalizeAllVulns();
+    if (missingLookup) lookups.cves[0] = null;
+    if (cached) {
+        vulnerabilityData.forEach(materializeRow);
+        vulnerabilityData.forEach(row => { delete row._mat; delete row._aggregateMat; });
+        rawVulns = null;
+    }
     filterState = createEmptyFilterState();
     filterState.startDate = '2026-03-01';
     filterState.endDate = '2026-03-26';
@@ -51,8 +60,26 @@ async function measureAggregate(eager) {
     remediationDescriptorCache.clear();
     const started = performance.now();
     if (eager) vulnerabilityData.forEach(materializeRow);
-    const table = getRemediationTableData();
+    else if (preAggregate) vulnerabilityData.forEach(materializeAggregateRow);
     const impact = getImpactAnalysisData();
+    const impactMaterialized = vulnerabilityData.filter(row => row._aggregateMat || row._mat).length;
+    const impactVersions = impact.top25.map(row => ({ name: row.name, count: row.vulnerabilities.length }));
+    const impactTable = getImpactAnalysisTableData().map(row => ({
+        rank: row.rank, name: row.name, devices: row.devices, cveIds: row.cveIds, impact: row.impact, update: row.updateValue
+    }));
+    const impactChart = getImpactChartData();
+    renderDevicesByRemediationTablePage = () => {};
+    renderRemediationsByDeviceTablePage = () => {};
+    renderDevicesByRemediationTable();
+    renderRemediationsByDeviceTable();
+    const deviceMaterialized = vulnerabilityData.filter(row => row._aggregateMat || row._mat).length;
+    const deviceDetailMaterialized = vulnerabilityData.filter(row => row._mat).length;
+    const deviceReports = JSON.stringify({
+        devicesByRemediation: getAggregateCache().devicesByRemediationData,
+        remediationsByDevice: getAggregateCache().remediationsByDeviceData
+    }, (key, value) => value instanceof Map ? Array.from(value.entries())
+        : value instanceof Set ? Array.from(value) : value);
+    const table = getRemediationTableData();
     const elapsed = performance.now() - started;
     const materialized = vulnerabilityData.filter(row => row._mat).length;
     const evidenceArrays = vulnerabilityData.reduce((count, row) => count + Number(Array.isArray(row.DiskPaths)) + Number(Array.isArray(row.RegistryPaths)), 0);
@@ -67,30 +94,288 @@ async function measureAggregate(eager) {
         ? config.rowBuilder(config.items[0]) + config.rowBuilder(config.items[config.items.length - 1]) : '').join('');
     vulnerabilityData.forEach(materializeRow);
     const detail = JSON.stringify(detailFields.map(field => vulnerabilityData[0][field]));
-    return { summary, detail, sections: modalHtml, materialized, evidenceArrays, described, elapsed, groups: table.length };
+    return { summary, detail, sections: modalHtml, impactVersions, impactTable, impactChart, impactMaterialized, deviceReports, deviceMaterialized, deviceDetailMaterialized, materialized, evidenceArrays, described, elapsed, groups: table.length };
 }
 module.exports = { measureAggregate };
 `, { performance: require('perf_hooks').performance });
     const lazyTimes = [];
     const eagerTimes = [];
     for (let iteration = 0; iteration < 3; iteration++) {
-        const lazy = await dashboard.measureAggregate(false);
-        const eager = await dashboard.measureAggregate(true);
+        const lazy = await dashboard.measureAggregate(false, iteration === 2);
+        const eager = await dashboard.measureAggregate(true, iteration === 2);
         assert.strictEqual(lazy.summary, eager.summary, 'Lazy aggregates must preserve titles, URLs, grouping, and counts.');
         assert.strictEqual(lazy.detail, eager.detail, 'Eventual detail/PDF properties must match expanded rows.');
         const normalizeTooltipIds = html => html.replace(/data-tooltip-id="modal-cve-\d+"/g, 'data-tooltip-id="modal-cve"');
         assert.strictEqual(normalizeTooltipIds(lazy.sections), normalizeTooltipIds(eager.sections), 'Modal content must match expanded rows.');
         assert.strictEqual(lazy.groups, 2, 'Lazy metadata must preserve OS-version grouping.');
-        assert.strictEqual(lazy.materialized, 0);
-        assert.strictEqual(lazy.evidenceArrays, 0);
-        assert.strictEqual(lazy.described, 0);
+        assert.deepStrictEqual(lazy.impactVersions, eager.impactVersions, 'Impact groups must preserve OS versions and membership.');
+        assert.deepStrictEqual(lazy.impactTable, eager.impactTable, 'Impact table values must match fully materialized rows.');
+        assert.deepStrictEqual(lazy.impactChart, eager.impactChart, 'Impact chart series must match fully materialized rows.');
+        assert.strictEqual(lazy.impactMaterialized, 0, 'Impact analysis must not expand aggregate fields on every row.');
+        assert.strictEqual(eager.impactMaterialized, 6000);
+        assert.strictEqual(lazy.deviceReports, eager.deviceReports, 'Device report data must match fully materialized rows.');
+        assert.strictEqual(lazy.deviceMaterialized, 1, 'Device reports should expand only a representative CVE row.');
+        assert.strictEqual(lazy.materialized, 1);
+        assert.strictEqual(lazy.evidenceArrays, 2);
+        assert.strictEqual(lazy.described, 1);
         assert.strictEqual(eager.materialized, 6000);
         assert.strictEqual(eager.evidenceArrays, 12000);
         lazyTimes.push(lazy.elapsed);
         eagerTimes.push(eager.elapsed);
     }
+    const preAggregated = await dashboard.measureAggregate(false, false, true);
+    const eager = await dashboard.measureAggregate(true, false);
+    assert.strictEqual(preAggregated.deviceReports, eager.deviceReports, 'Device report data must match when aggregate rows were already materialized.');
+    assert.strictEqual(preAggregated.deviceDetailMaterialized, 1, 'Pre-materialized aggregate fields must not cause full expansion of device reports.');
+    const missingLookupLazy = await dashboard.measureAggregate(false, false, false, true);
+    const missingLookupEager = await dashboard.measureAggregate(true, false, false, true);
+    assert.strictEqual(missingLookupLazy.deviceReports, missingLookupEager.deviceReports, 'Device reports must preserve missing-lookup fallback behavior.');
+    const cachedLazy = await dashboard.measureAggregate(false, false, false, false, true);
+    const cachedEager = await dashboard.measureAggregate(true, false, false, false, true);
+    assert.strictEqual(cachedLazy.deviceReports, cachedEager.deviceReports, 'Device reports must preserve cached row behavior without raw data.');
     const median = values => values.sort((left, right) => left - right)[1].toFixed(1);
-    console.log('Aggregate probe (6000 rows, 3 runs): detail rows 6000 -> 0; evidence arrays 12000 -> 0; median eager/lazy ms ' + median(eagerTimes) + '/' + median(lazyTimes));
+    console.log('Aggregate probe (6000 rows, 3 runs): detail rows 6000 -> 1; evidence arrays 12000 -> 2; median eager/lazy ms ' + median(eagerTimes) + '/' + median(lazyTimes));
+}
+
+function assertAggregateMetadataProjection() {
+    const dashboard = loadDashboardHarness(`
+function checkProjection() {
+    lookups = {
+        devices: [{ ov: '10.0.26100.1' }],
+        cves: [{ u: 'https://example.com/cve', bt: 0 }],
+        software: [{ r: 'recommendation' }],
+        updates: [{ id: '123', url: 'https://example.com/update' }],
+        batchTitles: ['Advisory']
+    };
+    rawVulns = [
+        [0, 0, 0, 0, 0, 0, 1, 0],
+        [0, 0, 0, 0, 0, 0, 0, -1],
+        [0, 99, 0, 0, 0, 0, 1, 0]
+    ];
+    const keys = ['CveBatchUrl', 'CveBatchTitle', 'RecommendedSecurityUpdateId', 'RecommendedSecurityUpdateUrl', 'OSVersion', 'SecurityUpdateAvailable', 'RecommendationReference'];
+    const result = [];
+    for (let index = 0; index < rawVulns.length; index++) {
+        const row = { _index: index, CveBatchTitle: 'original' };
+        const original = JSON.stringify(row);
+        const projected = getAggregateRowMetadata(row);
+        const copy = { ...row };
+        materializeAggregateRow(copy);
+        result.push({
+            unchanged: JSON.stringify(row) === original,
+            projected: projected && keys.map(key => projected[key]),
+            materialized: projected && keys.map(key => copy[key]),
+            marked: !!copy._aggregateMat
+        });
+    }
+    const ready = { _index: 0, _mat: true, OSVersion: 'existing' };
+    result.push({ readyUnchanged: getAggregateRowMetadata(ready) === null && materializeAggregateRow(ready) === ready && ready.OSVersion === 'existing' });
+    rawVulns = null;
+    const cached = { _index: 0, OSVersion: 'cached' };
+    result.push({ cachedUnchanged: getAggregateRowMetadata(cached) === null && materializeAggregateRow(cached) === cached && cached.OSVersion === 'cached' });
+    return JSON.stringify(result);
+}
+module.exports = { checkProjection };
+`);
+    const result = JSON.parse(dashboard.checkProjection());
+    for (const entry of result.slice(0, 2)) {
+        assert.strictEqual(entry.unchanged, true, 'Reading aggregate metadata must not mutate the source row.');
+        assert.deepStrictEqual(entry.projected, entry.materialized, 'Projected metadata must match normal aggregate materialization.');
+        assert.strictEqual(entry.marked, true);
+    }
+    assert.strictEqual(result[2].unchanged, true);
+    assert.strictEqual(result[2].projected, null, 'Missing lookup records must retain the existing fallback.');
+    assert.strictEqual(result[2].marked, false);
+    assert.strictEqual(result[3].readyUnchanged, true);
+    assert.strictEqual(result[4].cachedUnchanged, true);
+}
+
+function assertUnsplitImpactNamesDoNotPopulateVersionCache() {
+    const dashboard = loadDashboardHarness(`
+function checkNames() {
+    versionAwareImpactDisplayNameCache.clear();
+    const descriptor = { key: 'example', title: 'Windows 11: Security update', softwareLabel: 'Windows 11', scopeLabel: 'Windows 11' };
+    const expected = getScopedRemediationDisplayTitle(descriptor);
+    const names = Array.from({ length: 100 }, (_, i) =>
+        getVersionAwareImpactDisplayName(descriptor, 'Windows 11', 'Windows11', '10.0.' + i, false));
+    const unsplitCacheSize = versionAwareImpactDisplayNameCache.size;
+    const splitNames = ['10.0.22631', '10.0.26100'].map(version =>
+        getVersionAwareImpactDisplayName(descriptor, 'Windows 11', 'Windows11', version, true));
+    return JSON.stringify({ expected, names, unsplitCacheSize, splitNames, splitCacheSize: versionAwareImpactDisplayNameCache.size });
+}
+module.exports = { checkNames };
+`);
+    const result = JSON.parse(dashboard.checkNames());
+    assert.ok(result.names.every(name => name === result.expected), 'Unsplit versions must retain the original impact name.');
+    assert.strictEqual(result.unsplitCacheSize, 0, 'Unsplit versions must not populate the version-specific cache.');
+    assert.notStrictEqual(result.splitNames[0], result.splitNames[1], 'Distinct split versions must retain distinct impact names.');
+    assert.strictEqual(result.splitCacheSize, 2, 'Split version names must still be cached separately.');
+}
+
+function assertDeviceSnapshotReuse() {
+    const dashboard = loadDashboardHarness(`
+function checkDeviceSnapshots() {
+    const sharedTags = ['Prod'];
+    const device = { DeviceId: 'device-1', DeviceName: 'First', MachineInfo: { ip: '10.0.0.1' }, MachineTags: sharedTags, RbacGroupName: 'Servers' };
+    const rows = [
+        { ...device, RecommendedSecurityUpdate: 'Update A' },
+        { ...device, RecommendedSecurityUpdate: 'Update B' },
+        { ...device, DeviceName: 'Different', RecommendedSecurityUpdate: 'Update C' },
+        { ...device, RecommendedSecurityUpdate: 'Update C0' },
+        { ...device, MachineInfo: { ip: '10.0.0.2' }, RecommendedSecurityUpdate: 'Update D' },
+        { ...device, RecommendedSecurityUpdate: 'Update D0' },
+        { ...device, MachineTags: ['Test'], RecommendedSecurityUpdate: 'Update E' },
+        { ...device, RecommendedSecurityUpdate: 'Update E0' },
+        { ...device, RbacGroupName: 'Other', RecommendedSecurityUpdate: 'Update F' },
+        { ...device, MachineTags: null, RecommendedSecurityUpdate: 'Update G' },
+        { ...device, MachineTags: undefined, RecommendedSecurityUpdate: 'Update H' },
+        { ...device, DeviceName: 'Later', RecommendedSecurityUpdate: 'Update A' }
+    ].map(row => ({
+        ...row, _mat: true, CveId: 'CVE-1', SoftwareVendor: 'Vendor', SoftwareName: 'Product',
+        OSPlatform: 'Windows11', VulnerabilitySeverityLevel: 'High',
+        FirstSeenTimestamp: '2026-03-01', LastSeenTimestamp: '2026-03-26'
+    }));
+    applyDerivedVulnerabilityFields(rows);
+    rawVulns = null;
+    filterState = createEmptyFilterState();
+    filterState.startDate = '2026-03-01';
+    filterState.endDate = '2026-03-26';
+    vulnerabilityData = rows;
+    filteredData = rows;
+    remediationReportMode = REMEDIATION_REPORT_MODE_RANGE;
+    invalidateAggregateCache();
+    renderDevicesByRemediationTablePage = () => {};
+    renderDevicesByRemediationTable();
+    const groups = getAggregateCache().devicesByRemediationData;
+    const snapshots = ['Update A', 'Update B', 'Update C', 'Update D', 'Update E', 'Update F', 'Update G', 'Update H'].map(name =>
+        groups.find(group => group.updateName === name).devices.get('device-1'));
+    return {
+        shared: snapshots[0] === snapshots[1],
+        name: snapshots[2].DeviceName,
+        ip: snapshots[3].IpAddress,
+        tags: snapshots[4].MachineTags.join(', '),
+        group: snapshots[5].RbacGroupName,
+        emptyShared: snapshots[6] === snapshots[7],
+        first: snapshots[0].DeviceName
+    };
+}
+module.exports = { checkDeviceSnapshots };
+`);
+    const result = dashboard.checkDeviceSnapshots();
+    assert.strictEqual(result.shared, true, 'Identical device details should share one snapshot across remediation groups.');
+    assert.strictEqual(result.name, 'Different', 'The same identity may have different device names.');
+    assert.strictEqual(result.ip, '10.0.0.2', 'The same identity may have different IP addresses.');
+    assert.strictEqual(result.tags, 'Test', 'The same identity may have different tags.');
+    assert.strictEqual(result.group, 'Other', 'The same identity may have different groups.');
+    assert.strictEqual(result.emptyShared, true, 'Missing tags may use the same empty snapshot.');
+    assert.strictEqual(result.first, 'First', 'Each group must retain its first device observation.');
+}
+
+function assertDeviceSeverityFirstObservation() {
+    const dashboard = loadDashboardHarness(`
+function checkDeviceSeverity() {
+    const rows = [
+        { CveId: 'CVE-1', VulnerabilitySeverityLevel: 'High', RecommendedSecurityUpdate: 'Update A' },
+        { CveId: 'CVE-1', VulnerabilitySeverityLevel: 'Critical', RecommendedSecurityUpdate: 'Update B' },
+        { CveId: 'CVE-2', VulnerabilitySeverityLevel: undefined, RecommendedSecurityUpdate: 'Update A' },
+        { CveId: 'CVE-2', VulnerabilitySeverityLevel: 'Low', RecommendedSecurityUpdate: 'Update B' }
+    ].map(row => ({
+        ...row, _mat: true, DeviceId: 'device-1', DeviceName: 'First',
+        SoftwareVendor: 'Vendor', SoftwareName: 'Product', OSPlatform: 'Windows11',
+        FirstSeenTimestamp: '2026-03-01', LastSeenTimestamp: '2026-03-26'
+    }));
+    applyDerivedVulnerabilityFields(rows);
+    rawVulns = null;
+    filterState = createEmptyFilterState();
+    filterState.startDate = '2026-03-01';
+    filterState.endDate = '2026-03-26';
+    vulnerabilityData = rows;
+    filteredData = rows;
+    remediationReportMode = REMEDIATION_REPORT_MODE_RANGE;
+    invalidateAggregateCache();
+    renderRemediationsByDeviceTablePage = () => {};
+    renderRemediationsByDeviceTable();
+    const device = getAggregateCache().remediationsByDeviceData[0];
+    return JSON.stringify({ cveCount: device.cveCount, severities: device.deviceSeverities, cvesBySeverity: device.deviceCvesBySeverity });
+}
+module.exports = { checkDeviceSeverity };
+`);
+    const result = JSON.parse(dashboard.checkDeviceSeverity());
+    assert.strictEqual(result.cveCount, 2);
+    assert.deepStrictEqual(result.severities, { Critical: 0, High: 1, Medium: 0, Low: 0 });
+    assert.deepStrictEqual(result.cvesBySeverity, { Critical: [], High: ['CVE-1'], Medium: [], Low: [] });
+}
+
+function assertDeviceRemediationSingletons() {
+    const dashboard = loadDashboardHarness(`
+function checkDeviceRemediations() {
+    const common = {
+        _mat: true, DeviceName: 'Device', SoftwareVendor: 'Vendor', SoftwareName: 'Product',
+        OSPlatform: 'Windows11', CveId: 'CVE-2026-0001', VulnerabilitySeverityLevel: 'High',
+        PublishedDate: '2026-03-01', RecommendedSecurityUpdate: 'Update A',
+        FirstSeenTimestamp: '2026-03-01', LastSeenTimestamp: '2026-03-26'
+    };
+    const rows = [
+        { DeviceId: 'a' }, { DeviceId: 'b' },
+        { DeviceId: 'c', VulnerabilitySeverityLevel: 'Low' },
+        { DeviceId: 'd', PublishedDate: '2026-03-02' },
+        { DeviceId: 'e', CveId: 'CVE-2026-0002' },
+        { DeviceId: 'h', RecommendedSecurityUpdateUrl: 'https://example.com/update' },
+        { DeviceId: 'f' },
+        { DeviceId: 'f', CveId: 'CVE-2026-0002', VulnerabilitySeverityLevel: 'Critical', PublishedDate: '2026-03-03' },
+        { DeviceId: 'g', CveBatchTitle: 'March Advisory', RecommendationReference: 'vendor_product',
+            RecommendedSecurityUpdate: 'CVE-2026-0001' },
+        { DeviceId: 'g', CveBatchTitle: 'March Advisory', RecommendationReference: 'vendor_product',
+            CveId: 'CVE-2026-0002', VulnerabilitySeverityLevel: 'Critical', PublishedDate: '2026-03-03',
+            RecommendedSecurityUpdate: 'CVE-2026-0002' }
+    ].map(row => ({ ...common, ...row }));
+    applyDerivedVulnerabilityFields(rows);
+    rawVulns = null;
+    filterState = createEmptyFilterState();
+    filterState.startDate = '2026-03-01';
+    filterState.endDate = '2026-03-26';
+    vulnerabilityData = rows;
+    filteredData = rows;
+    remediationReportMode = REMEDIATION_REPORT_MODE_RANGE;
+    invalidateAggregateCache();
+    renderRemediationsByDeviceTablePage = () => {};
+    renderRemediationsByDeviceTable();
+    const devices = Object.fromEntries(getAggregateCache().remediationsByDeviceData.map(device => [device.deviceId, device]));
+    const getOnly = device => [...device.remediations.values()][0];
+    const a = getOnly(devices.a), b = getOnly(devices.b), c = getOnly(devices.c);
+    const d = getOnly(devices.d), e = getOnly(devices.e), f = getOnly(devices.f);
+    const g = getOnly(devices.g), h = getOnly(devices.h);
+    return JSON.stringify({
+        shared: a === b,
+        differentSeverity: c.severities.Low,
+        differentDate: d.mostRecentDate,
+        differentCve: [...e.cves],
+        differentUrl: h.updateUrl,
+        duplicate: { cves: [...f.cves], severities: f.severities, date: f.mostRecentDate,
+            observations: [...f.descriptorObservationMap.values()].map(item => item.count),
+            updateCounts: [...f.updateEntryMap.values()].map(entry => entry.observationCount) },
+        merged: { count: devices.g.remediationCount, cves: [...g.cves], severities: g.severities,
+            date: g.mostRecentDate, updates: g.updateEntries.map(entry => entry.referenceText) }
+    });
+}
+module.exports = { checkDeviceRemediations };
+`);
+    const result = JSON.parse(dashboard.checkDeviceRemediations());
+    assert.strictEqual(result.shared, true, 'Identical singleton remediations can share their finalized report data.');
+    assert.strictEqual(result.differentSeverity, 1, 'Different severities must not reuse a singleton.');
+    assert.strictEqual(result.differentDate, '2026-03-02', 'Different dates must not reuse a singleton.');
+    assert.deepStrictEqual(result.differentCve, ['CVE-2026-0002'], 'Different CVEs must not reuse a singleton.');
+    assert.strictEqual(result.differentUrl, 'https://example.com/update', 'Different descriptors must not reuse a singleton.');
+    assert.deepStrictEqual(result.duplicate, {
+        cves: ['CVE-2026-0001', 'CVE-2026-0002'],
+        severities: { Critical: 1, High: 1, Medium: 0, Low: 0 },
+        date: '2026-03-03',
+        observations: [2], updateCounts: [2]
+    });
+    assert.deepStrictEqual(result.merged, {
+        count: 1, cves: ['CVE-2026-0001', 'CVE-2026-0002'],
+        severities: { Critical: 1, High: 1, Medium: 0, Low: 0 },
+        date: '2026-03-03', updates: ['CVE-2026-0001', 'CVE-2026-0002']
+    });
 }
 
 async function main() {
@@ -101,6 +386,7 @@ module.exports = {
     buildRemediationDescriptor,
     buildRemediationModalUpdateLinksHtml,
     getImpactAnalysisData,
+    getImpactAnalysisTableData,
     getRemediationTableData,
     getScopedRemediationDisplayTitle,
     matchesFilterState,
@@ -278,6 +564,11 @@ module.exports = {
             && impactData.top25[0].updateHtml.includes('CVE-2023-27043'),
         'Expected impact analysis to surface the recommendation reference in an Update Details badge when it differs from the advisory title.'
     );
+    const impactTable = dashboard.getImpactAnalysisTableData();
+    assert.strictEqual(impactTable.length, 1);
+    assert.strictEqual(impactTable[0].devices, 2, 'Impact details must count unique devices.');
+    assert.strictEqual(impactTable[0].cveIds, 1, 'Impact details must deduplicate repeated CVEs.');
+    assert.strictEqual(impactTable[0].impact, 2);
     assert.strictEqual(
         dashboard.getScopedRemediationDisplayTitle(dashboard.buildRemediationDescriptor(duplicateFamilyRows[0])),
         'Python For Mac: March 2023 Vulnerabilities',
@@ -939,6 +1230,11 @@ module.exports = {
         'Expected scoped numeric remediation labels to render as product patch references.'
     );
 
+    assertAggregateMetadataProjection();
+    assertUnsplitImpactNamesDoNotPopulateVersionCache();
+    assertDeviceSnapshotReuse();
+    assertDeviceSeverityFirstObservation();
+    assertDeviceRemediationSingletons();
     await assertLazyAggregateParity();
     console.log('Remediation report mode and density helpers passed.');
 }
